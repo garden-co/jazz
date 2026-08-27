@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
     ScanDirection, ScanRequest, StorageCursor, StorageFactory, StorageFuture, StorageScan, Value,
+    validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -115,6 +116,7 @@ impl SqliteStorage {
         column_families: &[&str],
         durability: Durability,
     ) -> Result<Self, Error> {
+        validate_physical_storage_names(column_families)?;
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path
             .parent()
@@ -273,6 +275,7 @@ impl SqliteStorage {
     }
 
     fn intern_column_families(&self, names: &[&str]) -> Result<(), Error> {
+        self.validate_discovered_column_families()?;
         self.with_connection(|connection| {
             let transaction = connection.unchecked_transaction().map_err(backend)?;
             for name in names {
@@ -286,7 +289,19 @@ impl SqliteStorage {
             transaction.commit().map_err(backend)?;
             Ok(())
         })?;
-        let discovered = self.with_connection(|connection| {
+        let discovered = self.discover_column_families()?;
+        validate_physical_storage_names(discovered.iter().map(|(name, _)| name))?;
+        *self.column_families.borrow_mut() = discovered.into_iter().collect();
+        Ok(())
+    }
+
+    fn validate_discovered_column_families(&self) -> Result<(), Error> {
+        let discovered = self.discover_column_families()?;
+        validate_physical_storage_names(discovered.iter().map(|(name, _)| name))
+    }
+
+    fn discover_column_families(&self) -> Result<Vec<(String, i64)>, Error> {
+        self.with_connection(|connection| {
             let mut statement = connection
                 .prepare("SELECT name, id FROM column_families")
                 .map_err(backend)?;
@@ -297,9 +312,7 @@ impl SqliteStorage {
                 .map_err(backend)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(backend)
-        })?;
-        *self.column_families.borrow_mut() = discovered.into_iter().collect();
-        Ok(())
+        })
     }
 
     fn scan_rows(
@@ -388,6 +401,7 @@ fn validate_table_columns(
 impl ReopenableStorage for SqliteStorage {
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
+            validate_physical_storage_names(&column_families)?;
             if column_families
                 .iter()
                 .all(|name| self.column_families.borrow().contains_key(name))
@@ -736,6 +750,7 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use futures::executor::block_on;
+    use groove::storage::ReopenableStorage;
     use std::sync::{Arc, Barrier};
 
     #[test]
@@ -755,5 +770,56 @@ mod tests {
         });
         let outcomes = handles.map(|handle| handle.join().unwrap());
         assert_ne!(outcomes[0].is_none(), outcomes[1].is_none());
+    }
+
+    #[test]
+    fn reopen_fast_path_rejects_invalid_existing_family_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fast-path.sqlite");
+        let invalid = "records\0evil";
+        let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+        // Simulate a legacy/injected in-memory family catalogue: this used to
+        // take the all-existing early return before physical-name validation.
+        storage
+            .column_families
+            .borrow_mut()
+            .insert(invalid.to_owned(), 99);
+        assert!(block_on(storage.reopen(vec![invalid.to_owned()])).is_err());
+        let connection = Connection::open(path).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM column_families WHERE name = ?1",
+                [invalid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "reopen must reject before inserting the family");
+    }
+
+    #[test]
+    fn open_rejects_invalid_persisted_family_before_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid-existing.sqlite");
+        drop(SqliteStorage::open(&path, &["records"]).unwrap());
+        let invalid = "records\0evil";
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute("INSERT INTO column_families (name) VALUES (?1)", [invalid])
+            .unwrap();
+        drop(connection);
+
+        assert!(SqliteStorage::open(&path, &["must-not-be-admitted"]).is_err());
+        let connection = Connection::open(&path).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM column_families WHERE name = ?1",
+                ["must-not-be-admitted"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "open must reject before admitting requested families"
+        );
     }
 }

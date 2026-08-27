@@ -26,7 +26,7 @@ fn todo_schema() -> JazzSchema {
     let owner = PolicyExpr::Cmp {
         column: "owner".to_owned(),
         op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+        value: PolicyValue::SessionRef(vec!["user".to_owned()]),
     };
     let policies = TablePolicies::new()
         .with_select(owner.clone())
@@ -206,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&column_family_refs);
+    let storage = MemoryStorage::new(&column_family_refs).expect("valid memory storage families");
     let owner = author(0xa1);
     let other = author(0xb2);
 

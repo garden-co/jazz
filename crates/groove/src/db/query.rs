@@ -1,6 +1,16 @@
 use super::*;
 
 impl Database {
+    /// Whether a suspended IVM evaluation still needs a future owner turn.
+    ///
+    /// An external chunk completion can wake an evaluation which then starts a
+    /// second asynchronous operation (for example, durable install metadata).
+    /// Once the chunk request itself is complete, callers must still keep
+    /// polling this work until the runtime reaches a terminal state.
+    pub fn has_pending_progress(&self) -> bool {
+        self.ivm_runtime.has_pending_incremental()
+    }
+
     /// Drive every suspended incremental evaluation until the runtime is
     /// either quiescent or waiting for storage.
     ///
@@ -36,12 +46,34 @@ impl Database {
     /// the runtime is either complete or waiting for storage.
     ///
     /// Unlike [`Self::drive_progress`], this does not hold an unrelated owner
-    /// loop open while cold inputs are being acquired. The storage futures are
-    /// still polled with the caller's waker, so their completion schedules the
-    /// next owner-loop turn.
+    /// loop open while cold inputs are being acquired. Hosts that need a wake
+    /// after this short turn can use [`Self::drive_ready_progress_with_waker`].
     pub async fn drive_ready_progress(&mut self) -> Result<(), Error> {
-        let progress =
-            std::future::poll_fn(|cx| std::task::Poll::Ready(self.poll_progress(cx))).await;
+        self.drive_ready_progress_with_waker(None).await
+    }
+
+    /// Drive currently runnable work without waiting for cold storage, using
+    /// `progress_waker` for any storage request that remains pending.
+    ///
+    /// A non-blocking owner turn returns immediately after it discovers cold
+    /// work. Its executor waker is therefore no longer a useful continuation
+    /// target. Runtime shells that can arrange another owner turn supply their
+    /// own durable wake bridge here; callers without one retain the historical
+    /// externally-driven polling behaviour.
+    pub async fn drive_ready_progress_with_waker(
+        &mut self,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<(), Error> {
+        let progress = match progress_waker {
+            Some(progress_waker) => {
+                std::future::poll_fn(|_| {
+                    let mut progress_cx = std::task::Context::from_waker(progress_waker);
+                    std::task::Poll::Ready(self.poll_progress(&mut progress_cx))
+                })
+                .await
+            }
+            None => std::future::poll_fn(|cx| std::task::Poll::Ready(self.poll_progress(cx))).await,
+        };
         match progress {
             std::task::Poll::Ready(result) => result,
             std::task::Poll::Pending => Ok(()),
@@ -191,7 +223,7 @@ impl Database {
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await
     /// # }
     /// # let mut database = db().await?;
     /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums")).await?;
@@ -269,7 +301,7 @@ impl Database {
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await
     /// # }
     /// # let mut database = db().await?;
     /// # let mut batch = database.open_batch();
@@ -317,7 +349,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::Wildcard])
     ///         .from([TableRef::named("albums")])
@@ -372,7 +404,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # let applied = database.apply_batch(batch).await?;
@@ -539,7 +571,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.clone())]);
     /// let shape = database.prepare_one_sink(
     ///     GraphBuilder::join(
@@ -644,7 +676,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
@@ -688,7 +720,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # let applied = database.apply_batch(batch).await?;

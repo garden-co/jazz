@@ -25,6 +25,149 @@ impl crate::chunks::MissingChunkResolver for FixtureChunkResolver {
     }
 }
 
+/// The byte plane is deliberately separate from Groove metadata. This receipt
+/// fails the metadata observer after the immutable byte has been staged, then
+/// rebuilds the provider over the same metadata store. The pending marker must
+/// cause exactly one retry; a regular byte-store hit alone is not evidence that
+/// child/reference metadata exists.
+#[futures_test::test]
+async fn pending_remote_chunk_install_retries_after_provider_rebuild() {
+    struct FailOnceObserver {
+        attempts: Rc<Cell<usize>>,
+    }
+
+    impl crate::chunks::ChunkInstallObserver for FailOnceObserver {
+        fn installed(
+            &self,
+            _node_ref: crate::large_values::NodeRef,
+            _encoded: Bytes,
+        ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkError>> {
+            let attempts = Rc::clone(&self.attempts);
+            Box::pin(async move {
+                let attempt = attempts.get().saturating_add(1);
+                attempts.set(attempt);
+                if attempt == 1 {
+                    Err(crate::chunks::ChunkError::Backend(
+                        "injected post-staging metadata failure".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    let backing =
+        MemoryStorage::new(&[LARGE_VALUE_METADATA_CF]).expect("valid memory storage families");
+    let metadata = Rc::new(
+        LayoutStorage::new(backing, StorageLayout::Identity)
+            .await
+            .unwrap(),
+    );
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+    )
+    .unwrap();
+    let root = prepared.value_ref.root.clone();
+    let bytes = Bytes::from(
+        prepared
+            .staged_chunks
+            .iter()
+            .find(|chunk| chunk.node_ref == root)
+            .expect("prepared root is staged")
+            .encoded
+            .clone(),
+    );
+    let request = crate::chunks::ChunkRequest {
+        object_hash: root.object_hash.0,
+        locator: root.locator,
+    };
+    let resolver = Rc::new(FixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            request.clone(),
+            bytes.clone(),
+        )])),
+    });
+    let attempts = Rc::new(Cell::new(0));
+    let provider = crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
+        chunks.clone(),
+        resolver.clone(),
+        Rc::new(FailOnceObserver {
+            attempts: Rc::clone(&attempts),
+        }),
+        Rc::new(MetadataChunkInstallJournal {
+            storage: Rc::downgrade(&metadata),
+        }),
+    );
+
+    assert!(matches!(
+        crate::chunks::ChunkProvider::get(&provider, request.clone()).await,
+        Err(crate::chunks::ChunkError::Backend(message))
+            if message.contains("post-staging metadata failure")
+    ));
+    assert_eq!(
+        crate::chunks::ChunkStorage::get(
+            chunks.as_ref(),
+            request.locator,
+            crate::large_values::ContentHash(request.object_hash),
+        )
+        .await
+        .unwrap(),
+        bytes,
+        "the immutable blob is resident before metadata installation succeeds"
+    );
+
+    let lifecycle = Arc::new(AsyncMutex::new(()));
+    let reopened = crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
+        chunks,
+        resolver,
+        Rc::new(MetadataChunkInstallObserver {
+            storage: Rc::downgrade(&metadata),
+            lifecycle: Arc::downgrade(&lifecycle),
+            resident_install: None,
+        }),
+        Rc::new(MetadataChunkInstallJournal {
+            storage: Rc::downgrade(&metadata),
+        }),
+    );
+    assert_eq!(
+        crate::chunks::ChunkProvider::get(&reopened, request.clone()).await,
+        Ok(bytes)
+    );
+    assert_eq!(
+        attempts.get(),
+        1,
+        "the first post-staging observer failed once"
+    );
+    assert!(
+        metadata
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&root).unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "the reopened retry installs the actual Groove node metadata"
+    );
+    assert!(
+        !crate::chunks::ChunkInstallJournal::is_pending(
+            &MetadataChunkInstallJournal {
+                storage: Rc::downgrade(&metadata),
+            },
+            crate::large_values::NodeRef {
+                object_hash: crate::large_values::ContentHash(request.object_hash),
+                locator: request.locator,
+            },
+        )
+        .await
+        .unwrap(),
+        "a successful observer completion clears its durable recovery marker"
+    );
+}
+
 #[derive(Clone)]
 struct CountingFixtureChunkResolver {
     chunks: Rc<std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>>,
@@ -241,7 +384,8 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     database.set_chunk_storage(chunks.clone());
@@ -312,7 +456,8 @@ async fn direct_consolidation_stages_a_derived_descriptor_with_reused_base_nodes
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks);
@@ -357,7 +502,8 @@ async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let database = Database::new(schema, storage).await.unwrap();
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
@@ -389,7 +535,8 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema.clone(), storage.clone())
         .await
@@ -451,7 +598,8 @@ async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survive
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema.clone(), storage.clone())
         .await
@@ -556,7 +704,8 @@ async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail(
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks);
@@ -645,7 +794,8 @@ async fn upload_intent_reclaims_crash_window_chunks_and_promotes_completed_uploa
     .unwrap();
 
     for (fail_after_successes, expected_chunks) in [(0, 0), (1, 1)] {
-        let storage = MemoryStorage::new(&schema.column_families());
+        let storage =
+            MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
         let backend = Rc::new(CrashAfterChunkPut::new(Some(fail_after_successes)));
         let mut database = Database::new(schema.clone(), storage.clone())
             .await
@@ -692,7 +842,8 @@ async fn upload_intent_reclaims_crash_window_chunks_and_promotes_completed_uploa
         assert_eq!(backend.len(), 0);
     }
 
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let backend = Rc::new(CrashAfterChunkPut::new(None));
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
@@ -756,7 +907,7 @@ fn eviction_and_reclamation_wait_for_an_inflight_blob_stage() {
     let mut opened = pool
         .run_until(Database::new(
             schema.clone(),
-            MemoryStorage::new(&schema.column_families()),
+            MemoryStorage::new(&schema.column_families()).expect("valid memory storage families"),
         ))
         .unwrap();
     opened.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
@@ -836,7 +987,8 @@ async fn orphan_reclamation_defers_for_active_chunk_requests_and_leases() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -922,7 +1074,8 @@ async fn shared_durable_root_is_reclaimed_only_after_its_last_physical_record() 
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -987,7 +1140,8 @@ async fn repeated_child_dag_finalizes_once_per_node_and_reclaims_without_leaks()
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -1059,7 +1213,8 @@ async fn shared_child_dag_counts_distinct_parent_edges_and_reclaims_once() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -1112,7 +1267,8 @@ async fn resolver_installed_shared_dag_recursively_activates_and_reclaims_descen
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -1210,7 +1366,8 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks);
@@ -1325,7 +1482,8 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks);
@@ -1396,7 +1554,8 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -1509,7 +1668,8 @@ async fn corrupt_large_value_root_does_not_leave_a_publication_hole() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
     let staged = database
@@ -1570,7 +1730,8 @@ async fn cancelled_lifecycle_wait_does_not_leave_a_publication_hole() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
     let staged = database
@@ -1625,7 +1786,8 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -1742,7 +1904,8 @@ async fn missing_chunk_observer_completes_during_tick_before_lifecycle_lock() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -1812,7 +1975,8 @@ async fn sequential_cold_large_value_publications_do_not_deadlock_observer() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -1917,7 +2081,8 @@ async fn first_cold_publication_persists_before_resolver_without_deadlock() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -2010,7 +2175,8 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -2209,9 +2375,28 @@ async fn late_publication_metadata_write_failure_is_fatal_and_observable() {
     assert!(subscription.try_recv().is_err());
     database.finish_persistence(second.persist().await).unwrap();
 
-    control.fail_next(TestStorageOperation::WriteMany);
+    // A cold install now journals before it stages bytes. Pause that first
+    // write so this receipt can inject the failure at the *later* metadata
+    // durability boundary it is intended to exercise, rather than turning a
+    // pre-staging journal write into an unrelated query-local failure.
+    control.take_observed();
+    control.pause_on(TestStorageOperation::WriteMany);
     resolver_ready.set(true);
-    let error = database.flush().await.unwrap_err();
+    let mut flush = Box::pin(database.flush());
+    assert!(futures::poll!(flush.as_mut()).is_pending());
+    assert_eq!(
+        control.take_observed(),
+        vec![TestStorageOperation::WriteMany]
+    );
+    control.release_one();
+    assert!(futures::poll!(flush.as_mut()).is_pending());
+    assert_eq!(
+        control.take_observed(),
+        vec![TestStorageOperation::WriteMany]
+    );
+    control.fail_next(TestStorageOperation::WriteMany);
+    control.release_one();
+    let error = flush.await.unwrap_err();
     assert!(matches!(
         error,
         Error::IvmRuntime(IvmRuntimeError::Chunk(
@@ -2249,7 +2434,8 @@ async fn external_chunk_backend_error_cannot_forge_publication_durability_failur
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
     let staged = database
@@ -2311,7 +2497,8 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
     let prepared = crate::large_values::prepare(
@@ -2508,7 +2695,8 @@ async fn bounded_upload_start_caps_new_pending_metadata_and_allows_resume() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let database = Database::new(schema, storage).await.unwrap();
     let value_refs = (0_u8..3)
         .map(|seed| {
@@ -2553,7 +2741,8 @@ async fn malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -2621,7 +2810,8 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let backend = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let managed = Rc::new(crate::chunks::ManagedChunkStorage::new(backend.clone()));
     let mut database = Database::new(schema.clone(), storage.clone())
@@ -2742,7 +2932,8 @@ async fn utf8_boundary_tail_upload_is_rejected_and_reclaimed_before_staging() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
@@ -2806,7 +2997,8 @@ async fn root_first_upload_resumes_from_the_persisted_authenticated_frontier() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema.clone(), storage.clone())
         .await
@@ -2934,7 +3126,7 @@ async fn failed_persistence_releases_later_publications_with_an_error() {
 
 #[futures_test::test]
 async fn commits_insert_update_and_delete_batches() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -3003,9 +3195,12 @@ async fn commits_insert_update_and_delete_batches() {
 
 #[futures_test::test]
 async fn staged_batch_reads_observe_uncommitted_writes() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
 
     let mut staged = database.open_staged_batch();
     staged.insert(
@@ -3101,9 +3296,12 @@ async fn vec_derived_primary_key_scan_raw(
 
 #[futures_test::test]
 async fn staged_batch_storage_txn_handles_large_accumulated_batches() {
-    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let mut batch = database.open_batch();
     for id in 0..10_000 {
         batch.insert(
@@ -3181,9 +3379,12 @@ async fn staged_batch_storage_txn_handles_large_accumulated_batches() {
 
 #[futures_test::test]
 async fn primary_key_get_raw_observes_staged_overlay() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let mut seed = database.open_batch();
     seed.insert(
         "albums",
@@ -3236,9 +3437,12 @@ async fn primary_key_get_raw_observes_staged_overlay() {
 
 #[futures_test::test]
 async fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let mut seed = database.open_batch();
     seed.insert(
         "albums",
@@ -3289,9 +3493,12 @@ async fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
 
 #[futures_test::test]
 async fn staged_batch_storage_txn_advances_only_new_operations() {
-    let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let mut batch = database.open_batch();
     for id in 0..10_000 {
         batch.insert(
@@ -3332,9 +3539,12 @@ async fn staged_batch_storage_txn_advances_only_new_operations() {
 
 #[futures_test::test]
 async fn staged_batch_commit_ticks_once_for_multiple_writes() {
-    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
@@ -3385,12 +3595,18 @@ async fn staged_batch_commit_ticks_once_for_multiple_writes() {
 
 #[futures_test::test]
 async fn staged_batch_commit_matches_one_shot_wrapper() {
-    let mut staged_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
-    let mut wrapper_db = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let mut staged_db = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
+    let mut wrapper_db = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
 
     let mut staged = staged_db.open_staged_batch();
     staged.insert(
@@ -3463,7 +3679,7 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
         RecordDescriptor::new([("bytes", ColumnType::Bytes.clone())]),
     ));
     let column_families = schema.column_families();
-    let storage = MemoryStorage::new(&column_families);
+    let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
     let mut database = Database::new(schema.clone(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -3688,7 +3904,8 @@ async fn assert_direct_record_store_round_trips_array_of_record_values() {
             ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
         )]),
     ));
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let database = Database::new(schema, storage).await.unwrap();
     let first = crate::records::OwnedRecord::new(
         child
@@ -3732,7 +3949,8 @@ async fn assert_direct_record_store_rejects_noncanonical_record_value_bytes_at_a
             ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
         )]),
     ));
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let database = Database::new(schema, storage).await.unwrap();
     let store = database.direct_record_store("rendered_results").unwrap();
     // A fixed-width null reserves a zero payload byte; this child has a
@@ -3776,7 +3994,8 @@ async fn direct_record_store_rejects_record_containing_durable_keys_at_schema_ad
                 RecordDescriptor::new([("key", key_type)]),
                 RecordDescriptor::new([("payload", ValueType::Bytes)]),
             ));
-        let storage = MemoryStorage::new(&schema.column_families());
+        let storage =
+            MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
 
         assert!(matches!(
             Database::new(schema, storage).await,
@@ -3790,7 +4009,8 @@ async fn direct_record_store_rejects_record_containing_durable_keys_at_schema_ad
             RecordDescriptor::new([("id", ValueType::U64)]),
             RecordDescriptor::new([("payload", ValueType::Bytes)]),
         ));
-    let scalar_storage = MemoryStorage::new(&scalar_schema.column_families());
+    let scalar_storage = MemoryStorage::new(&scalar_schema.column_families())
+        .expect("valid memory storage families");
     let scalar_database = Database::new(scalar_schema, scalar_storage).await.unwrap();
     let scalar_store = scalar_database.direct_record_store("scalar_key").unwrap();
 
@@ -3812,7 +4032,7 @@ async fn direct_record_store_rejects_record_containing_durable_keys_at_schema_ad
 
 #[futures_test::test]
 async fn commit_metrics_split_storage_and_tick_work() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     database.set_tick_runtime_stats_enabled(true);
     let subscription = database
@@ -3916,7 +4136,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let storage = MemoryStorage::new(&refs);
+        let storage = MemoryStorage::new(&refs).expect("valid memory storage families");
         let mut database = Database::new_with_storage_layout(schema, storage, layout)
             .await
             .unwrap();
@@ -3984,7 +4204,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
 
 #[futures_test::test]
 async fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -4028,7 +4248,8 @@ async fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes()
 
 #[futures_test::test]
 async fn inserts_over_existing_primary_keys_are_rejected() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -4076,7 +4297,8 @@ async fn inserts_over_existing_primary_keys_are_rejected() {
 
 #[futures_test::test]
 async fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejected() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -4105,7 +4327,7 @@ async fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejecte
 
 #[futures_test::test]
 async fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -4135,12 +4357,18 @@ async fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta()
 
 #[futures_test::test]
 async fn persistence_receipts_cannot_settle_another_database() {
-    let mut first = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
-    let mut second = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap();
+    let mut first = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
+    let mut second = Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
 
     let mut first_batch = first.open_batch();
     first_batch.insert(

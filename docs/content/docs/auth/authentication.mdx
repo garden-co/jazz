@@ -69,10 +69,11 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
   client.
 </Callout>
 
-Jazz requires both JWT `iss` and `sub`. It exposes their admitted values as `session.issuer` and
-`session.user_id` (and keeps raw provider claims available), then derives a separate logical
-`session.author` from their canonical pair for every write. Two providers may issue the same
+Jazz requires both JWT `iss` and `sub`. It keeps their admitted values available as
+`session.claims.iss` and `session.claims.sub`, then derives the separate logical `session.user`
+from their canonical pair for every write. Two providers may issue the same
 `sub` without becoming the same Jazz author; `$createdBy` distinguishes them by `iss`.
+Treat `session.user` as opaque: it is not a user-row reference, display name, or raw `sub`.
 
 - In most cases, use your provider's internal user ID, as this is generally fixed for the lifetime
   of the user account
@@ -83,8 +84,8 @@ If your provider doesn't provide a stable ID in `sub` by default, either configu
 or remint the token through your own JWT layer that rewrites `sub`.
 
 <Callout type="info">
-  Policies use `session.author` when comparing `$createdBy` or `$updatedBy`; `session.user_id` and
-  provider claims retain their raw admitted values. Authorship identity is the exact `[iss, sub]`
+  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`; provider claims retain
+  their raw admitted values under `session.claims`. Authorship identity is the exact `[iss, sub]`
   pair. Changing either component creates a different author.
 </Callout>
 
@@ -176,7 +177,7 @@ the current token as expired, serialized so concurrent failed writes trigger a s
 Read auth state from any component with `useAuthState()`:
 
 ```ts
-const { authMode, userId, claims, error } = useAuthState();
+const { authMode, user, claims, error } = useAuthState();
 ```
 
 #### TypeScript: `db.onAuthChanged`

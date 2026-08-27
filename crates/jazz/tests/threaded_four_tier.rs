@@ -101,7 +101,7 @@ fn schema() -> JazzSchema {
     // Make every fixture mutation explicit now that one declared policy closes
     // omitted operations.
     let policies = TablePolicies::new()
-        .with_select(session_eq("owner", &["claims", "sub"]))
+        .with_select(session_eq("owner", &["user"]))
         .with_insert(jazz::tools::PolicyExpr::True)
         .with_update(
             Some(jazz::tools::PolicyExpr::True),
@@ -113,7 +113,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new(TABLE)
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(policies),
             )
             .build(),
@@ -135,16 +135,16 @@ fn open_node(
 fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
-fn install_uuid_sub_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+fn install_session_claims(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
     if identity != AuthorSubject::SYSTEM {
-        node.admit_test_session_claims(
-            identity,
-            BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
-        );
+        node.admit_test_session_claims(identity, BTreeMap::new());
     }
 }
 
@@ -177,7 +177,7 @@ fn commit_unit(
 }
 
 fn send_view(node: &mut NodeState<RocksDbStorage>, peer: &mut PeerState, tx: &Sender<Wire>) {
-    install_uuid_sub_claim(node, peer.identity());
+    install_session_claims(node, peer.identity());
     let update = block_on(peer.current_rows_update(node, TABLE)).unwrap();
     send_sync(tx, update);
 }
@@ -187,7 +187,7 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
         panic!("expected commit unit");
     };
     if let Some(identity) = tx.permission_subject {
-        install_uuid_sub_claim(node, identity);
+        install_session_claims(node, identity);
     }
     block_on(node.ingest_relay_commit_unit(tx.clone(), versions.clone())).unwrap();
 }
@@ -255,7 +255,7 @@ fn core_thread(
                 };
                 tx_ids.push(tx.tx_id);
                 if let Some(identity) = tx.permission_subject {
-                    install_uuid_sub_claim(&mut core, identity);
+                    install_session_claims(&mut core, identity);
                 }
                 let updates = block_on(async {
                     let outcome = core
@@ -550,11 +550,9 @@ fn threaded_four_tier_converges_with_fifo_links() {
 
     let ui_policy_rows = &ui_result.receipt.subscription_rows;
     assert!(!ui_policy_rows.is_empty());
-    assert!(
-        ui_policy_rows
-            .values()
-            .all(|cells| { cells.get("owner") == Some(&Value::Uuid(ui_author.test_uuid())) })
-    );
+    assert!(ui_policy_rows.values().all(|cells| {
+        cells.get("owner") == Some(&Value::String(ui_author.canonical().to_owned()))
+    }));
 
     for tx_id in ui_result.tx_ids {
         let core_fact = core_result.transaction_states.get(&tx_id).unwrap();

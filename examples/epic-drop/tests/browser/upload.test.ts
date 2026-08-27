@@ -30,8 +30,8 @@ async function openRemoteDb(label: string, secret: string): Promise<Db> {
   return db;
 }
 
-function userId(db: Db): string {
-  const id = db.getAuthState().session?.user_id;
+function sessionUser(db: Db): string {
+  const id = db.getAuthState().session?.user;
   if (!id) throw new Error("expected local-first user session");
   return id;
 }
@@ -110,8 +110,8 @@ describe("EpicDrop streamed upload foundation", () => {
   it("requires both file ownership and folder authority for attach and moves", async () => {
     const alice = await openRemoteDb("alice", generateAuthSecret());
     const bob = await openRemoteDb("bob", generateAuthSecret());
-    const aliceId = userId(alice);
-    const bobId = userId(bob);
+    const aliceId = sessionUser(alice);
+    const bobId = sessionUser(bob);
     const aliceFolder = alice.insert(app.folders, { name: "Alice", owner_id: aliceId });
     await aliceFolder.wait({ tier: "edge" });
     const bobFolder = bob.insert(app.folders, { name: "Bob", owner_id: bobId });

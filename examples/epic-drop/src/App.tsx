@@ -14,7 +14,7 @@ function config(secret: string): DbConfig {
 function FileBrowser() {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user_id;
+  const userId = session?.user;
   const { data: folders = [] } = useAll(app.folders);
   const [folderId, setFolderId] = React.useState<string | undefined>();
   const [isUploading, setIsUploading] = React.useState(false);

@@ -163,7 +163,7 @@ pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<Str
         .iter()
         .map(|name| {
             let value = match *name {
-                "author" => Value::String(writer.canonical().to_owned()),
+                "user" => Value::String(writer.canonical().to_owned()),
                 "isAdmin" => Value::Bool(false),
                 _ => unreachable!("unknown built-in policy claim"),
             };
@@ -172,7 +172,7 @@ pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<Str
         .collect()
 }
 
-const BUILTIN_POLICY_CLAIMS: &[&str] = &["author", "isAdmin"];
+const BUILTIN_POLICY_CLAIMS: &[&str] = &["user", "isAdmin"];
 
 fn is_builtin_policy_claim(name: &str) -> bool {
     BUILTIN_POLICY_CLAIMS.contains(&name)
@@ -285,10 +285,11 @@ fn bind_scope_claim_operand(
     let Operand::Claim(name) = operand else {
         return;
     };
-    let Some(value) = claim_values.get(name).cloned() else {
+    let storage_name = crate::query::operand_claim_storage_key(name);
+    let Some(value) = claim_values.get(&storage_name).cloned() else {
         return;
     };
-    let param = claim_param_field(&ClaimPath(vec![name.clone()]));
+    let param = claim_param_field(&ClaimPath(crate::query::operand_claim_path(name)));
     binding_values.insert(param.clone(), value);
     *operand = Operand::Param(param);
 }
@@ -488,7 +489,10 @@ fn operand_contains_unbound_claim(
     operand: &Operand,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
-    matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| claims.contains_key(name)))
+    matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| {
+        let storage = crate::query::operand_claim_storage_key(name);
+        claims.contains_key(&storage)
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -839,7 +843,7 @@ pub(super) fn collect_reachable_seed_claim_params(
             .ok_or(Error::InvalidStoredValue(
                 "reachable seed column is missing from schema",
             ))?;
-        let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+        let path = ClaimPath(crate::query::operand_claim_path(user_claim));
         params.insert(
             claim_param_field(&path),
             ProgramClaimParam {

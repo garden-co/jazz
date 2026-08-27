@@ -36,7 +36,8 @@ fn schema() -> DatabaseSchema {
 }
 
 async fn open_db() -> Database {
-    let storage = MemoryStorage::new(&["albums", "blockers"]);
+    let storage =
+        MemoryStorage::new(&["albums", "blockers"]).expect("valid memory storage families");
     let db = Database::new(schema(), storage).await.unwrap();
     db
 }

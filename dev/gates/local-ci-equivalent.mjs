@@ -86,6 +86,9 @@ export const ciPartitions = Object.freeze({
   lint: Object.freeze([
     command("format check", "pnpm", ["format:check"]),
     command("lint", "pnpm", ["lint"]),
+    command("crate publication selector contract", "bash", [
+      "dev/scripts/publish-crates-alpha.test.sh",
+    ]),
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),

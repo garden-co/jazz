@@ -15,7 +15,7 @@ use super::*;
 ///     RecordDescriptor::new([("bytes", ValueType::Bytes)]),
 /// ));
 /// let column_families = schema.column_families();
-/// let storage = MemoryStorage::new(&column_families);
+/// let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
 /// let database = Database::new(schema, storage).await?;
 /// let art = database.direct_record_store("album_art")?;
 ///

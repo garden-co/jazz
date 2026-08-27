@@ -8,7 +8,7 @@ export function Operations({ onSignOut }: { onSignOut: () => void }) {
   const db = useDb();
   const { data: memberships = [] } = useAll(
     app.memberships
-      .where({ userId: session?.user_id ?? "__none__" })
+      .where({ userId: session?.user ?? "__none__" })
       .include({ organization: true })
       .limit(50),
   );
@@ -48,7 +48,7 @@ export function Operations({ onSignOut }: { onSignOut: () => void }) {
           <p>Artists, releases, teams, and tenant-safe workflows.</p>
         </div>
         <div>
-          <span className="pill">{session?.user_id ? "connected" : "connecting"}</span>
+          <span className="pill">{session?.user ? "connected" : "connecting"}</span>
           <button onClick={onSignOut}>Sign out</button>
         </div>
       </header>

@@ -361,7 +361,7 @@ fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
         "user_id".to_owned(),
         Value::String(alice.test_uuid().to_string()),
     )]);
-    client.set_identity_claims(alice, claims.clone());
+    client.set_test_provider_claims(alice, claims.clone());
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
@@ -449,7 +449,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["user_id"],
+        &["claims", "sub"],
         "id",
     );
     let access_policy = public_recursive_access_policy(
@@ -465,7 +465,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["user_id"],
+        &["claims", "sub"],
         "id",
     );
     build_public_db_test_schema(
@@ -615,7 +615,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
     db.node
         .node
         .borrow_mut()
-        .set_session_claims(member, test_provider_claims(member));
+        .set_test_provider_claims(member, test_provider_claims(member));
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
     let one_shot = block_on(db.all_for_identity(
         &prepared,
@@ -721,7 +721,7 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         db.node
             .node
             .borrow_mut()
-            .set_session_claims(identity, test_provider_claims(identity));
+            .set_test_provider_claims(identity, test_provider_claims(identity));
     }
     db.insert(
         "org",
@@ -866,7 +866,7 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
     db.node
         .node
         .borrow_mut()
-        .set_session_claims(member, test_provider_claims(member));
+        .set_test_provider_claims(member, test_provider_claims(member));
     db.insert(
         "org",
         BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
@@ -1900,18 +1900,18 @@ fn served_subscription_rows_for_author_with_claims(
         .node
         .node
         .borrow_mut()
-        .set_session_claims(author, claims.clone());
+        .set_test_provider_claims(author, claims.clone());
     server
         .node()
         .borrow_mut()
-        .set_session_claims(author, claims.clone());
+        .set_test_provider_claims(author, claims.clone());
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     server
         .node()
         .borrow_mut()
-        .set_session_claims(author, claims);
+        .set_test_provider_claims(author, claims);
     let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -1960,11 +1960,11 @@ fn served_many_subscription_rows_for_author(
         .node
         .node
         .borrow_mut()
-        .set_session_claims(author, test_provider_claims(author));
+        .set_test_provider_claims(author, test_provider_claims(author));
     server
         .node()
         .borrow_mut()
-        .set_session_claims(author, test_provider_claims(author));
+        .set_test_provider_claims(author, test_provider_claims(author));
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);

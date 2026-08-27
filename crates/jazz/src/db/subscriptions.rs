@@ -336,6 +336,16 @@ where
         )
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Internal receipt-lifetime coverage needs to inspect state that has no
+    /// public equivalent: detached Local overlays are intentionally best-effort.
+    pub fn settled_authoritative_receipt_counts_for_test(&self) -> (usize, usize) {
+        self.node
+            .node
+            .borrow()
+            .settled_authoritative_receipt_counts_for_test()
+    }
+
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
         let mut removed_subscriptions = Vec::new();

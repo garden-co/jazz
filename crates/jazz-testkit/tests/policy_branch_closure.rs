@@ -8,12 +8,21 @@ use jazz::tools::public_schema::{
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, PolicyExpr, Schema, SchemaBuilder, Session,
+    TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
 
 const MEMBER_ID: &str = "00000000-0000-4000-8000-0000000000b0";
+
+fn member_identity() -> String {
+    Session::new("urn:jazz:test", MEMBER_ID)
+        .author_subject()
+        .expect("member identity")
+        .canonical()
+        .to_owned()
+}
 
 #[derive(Clone, Copy)]
 enum BranchOrder {
@@ -23,7 +32,7 @@ enum BranchOrder {
 }
 
 fn policy_branch_closure_schema(order: BranchOrder) -> Schema {
-    let plain_branch = PolicyExpr::eq_session("direct_user_id", vec!["user_id".to_owned()]);
+    let plain_branch = PolicyExpr::eq_session("direct_user_id", vec!["user".to_owned()]);
     let gather_branch = gathered_resource_access_policy();
     let third_branch = PolicyExpr::eq_literal("route_key", Value::Text("third".to_owned()));
     let branches = match order {
@@ -81,7 +90,7 @@ fn gathered_resource_access_policy() -> PolicyExpr {
                                 column: "identity_key".to_owned(),
                             },
                             op: RelPredicateCmpOp::Eq,
-                            right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                            right: RelValueRef::SessionRef(vec!["user".to_owned()]),
                         },
                     }),
                     step: Box::new(RelExpr::Project {
@@ -162,7 +171,7 @@ fn gathered_resource_access_policy() -> PolicyExpr {
 
 async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
     let (seed_team, _, seed_tx) = admin
-        .insert("teams", row_input!("identity_key" => MEMBER_ID))
+        .insert("teams", row_input!("identity_key" => member_identity()))
         .expect("insert member seed team");
     let (parent_team, _, parent_tx) = admin
         .insert("teams", row_input!("identity_key" => "unrelated-parent"))
@@ -179,7 +188,7 @@ async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
             "resources",
             row_input!(
                 "label" => "plain",
-                "direct_user_id" => MEMBER_ID,
+                "direct_user_id" => member_identity(),
                 "route_key" => "plain"
             ),
         )

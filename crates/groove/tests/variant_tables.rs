@@ -74,7 +74,8 @@ fn enum_projection_schema() -> DatabaseSchema {
 async fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = enum_projection_schema();
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema.clone(), storage).await?;
     let event = EnumSchema::new(
         "event",
@@ -228,7 +229,8 @@ async fn case_local_same_name_may_have_different_types_when_not_shared()
             ],
         );
     let schema = DatabaseSchema::new([table]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema.clone(), storage).await?;
     let v1 = schema
         .table("events")
@@ -283,7 +285,8 @@ fn variant_row(tag: u32, values: &[Value]) -> VariantRecord {
 async fn user_enum_nested_in_layout_enum_normalizes_immediately()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = enum_schema();
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await?;
     let normalized = RecordDescriptor::new([
         ("id", ColumnType::U64),
@@ -426,7 +429,8 @@ async fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn
                 .unwrap()
         })
         .collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await?;
     let normalized = RecordDescriptor::new([
         ("id", ColumnType::U64),

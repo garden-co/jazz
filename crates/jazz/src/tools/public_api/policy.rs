@@ -516,14 +516,14 @@ mod tests {
 
     #[test]
     fn test_policy_expr_builders() {
-        let expr = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+        let expr = PolicyExpr::eq_session("owner_id", vec!["claims".into(), "user_id".into()]);
         assert!(matches!(
             expr,
             PolicyExpr::Cmp {
                 column,
                 op: CmpOp::Eq,
                 value: PolicyValue::SessionRef(path)
-            } if column == "owner_id" && path == vec!["user_id"]
+            } if column == "owner_id" && path == vec!["claims", "user_id"]
         ));
 
         let expr = PolicyExpr::eq_literal("status", Value::Text("active".into()));
@@ -592,7 +592,7 @@ mod tests {
                 predicate: PredicateExpr::Cmp {
                     left: ColumnRef::unscoped("todo_id"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    right: ValueRef::SessionRef(vec!["claims".into(), "user_id".into()]),
                 },
             },
         };

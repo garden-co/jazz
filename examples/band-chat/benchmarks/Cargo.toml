@@ -13,3 +13,7 @@ divan = { workspace = true }
 [[bench]]
 name = "loads"
 harness = false
+
+[[bench]]
+name = "fast_resume"
+harness = false

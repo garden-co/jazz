@@ -98,14 +98,14 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         member,
         BTreeMap::from([(
             "user_id".to_owned(),
             Value::String(member.test_uuid().to_string()),
         )]),
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         other,
         BTreeMap::from([(
             "user_id".to_owned(),
@@ -483,7 +483,7 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for identity in [member, other, bob] {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
             BTreeMap::from([(
                 "user_id".to_owned(),
@@ -621,7 +621,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for identity in [alice, bob] {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
             BTreeMap::from([(
                 "user_id".to_owned(),
@@ -727,7 +727,7 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     for identity in [alice, bob] {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
             BTreeMap::from([(
                 "user_id".to_owned(),
@@ -1174,7 +1174,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
     let bob_id = user(0xb2);
     let alice_user_id = alice_id.test_uuid().to_string();
     let bob_user_id = bob_id.test_uuid().to_string();
-    core.set_session_claims(
+    core.set_test_provider_claims(
         bob_id,
         BTreeMap::from([("user_id".to_owned(), v(bob_user_id.clone()))]),
     );
@@ -1473,7 +1473,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
         .unwrap();
     core.apply_fate_update(tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
         .unwrap();
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([("join_code".to_owned(), v(join_code))]),
     );
