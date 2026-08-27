@@ -106,7 +106,11 @@ fn contribution_provenance_persists_column_components_as_physical_ids() {
         .contribution_merge_storage_value(Some(&provenance))
         .unwrap();
     // Both the target and its source coordinate carry the same physical slot.
-    assert_eq!(stored_contribution_column_ids(stored), vec![title_id.0, title_id.0]);
+    let table_id = core.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id;
+    assert_eq!(
+        stored_contribution_coordinate_ids(stored),
+        vec![(table_id.0, title_id.0), (table_id.0, title_id.0)]
+    );
 }
 
 #[test]
@@ -162,6 +166,14 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorSubject::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
     assert_eq!(
         core.catalogue.physical_mappings[&renamed.id].tables["tasks"].columns["name"],
         title_id
@@ -175,7 +187,7 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
     );
 }
 
-fn stored_contribution_column_ids(value: Value) -> Vec<u64> {
+fn stored_contribution_coordinate_ids(value: Value) -> Vec<(u64, u64)> {
     let Value::Nullable(Some(record)) = value else {
         panic!("fixture stores contribution provenance")
     };
@@ -192,7 +204,7 @@ fn stored_contribution_column_ids(value: Value) -> Vec<u64> {
                 panic!("fixture substitution is a record")
             };
             let substitution = ContributionSubstitutionStorageRecord::new(substitution);
-            let target = contribution_coordinate_column_id(substitution.target().unwrap());
+            let target = contribution_coordinate_ids(substitution.target().unwrap());
             let sources = substitution
                 .sources()
                 .unwrap()
@@ -202,25 +214,40 @@ fn stored_contribution_column_ids(value: Value) -> Vec<u64> {
                         panic!("fixture source is a record")
                     };
                     let source = ContributionDotStorageRecord::new(source);
-                    contribution_coordinate_column_id(source.coordinate().unwrap())
+                    contribution_coordinate_ids(source.coordinate().unwrap())
                 });
             std::iter::once(target).chain(sources)
         })
         .collect()
 }
 
-fn contribution_coordinate_column_id(record: OwnedRecord) -> u64 {
+fn contribution_coordinate_ids(record: OwnedRecord) -> (u64, u64) {
     let coordinate = ContributionCoordinateStorageRecord::new(record);
     let component = coordinate.component().unwrap();
-    ContributionColumnStorageRecord::new(component.into_record())
-        .physical_column_id()
-        .unwrap()
+    (
+        coordinate.physical_table_id().unwrap(),
+        ContributionColumnStorageRecord::new(component.into_record())
+            .physical_column_id()
+            .unwrap(),
+    )
 }
 
 /// Rewrite the otherwise valid internal system-table payload to exercise
 /// recovery's fail-closed physical-identity checks. Public APIs only admit
 /// logical column names, so they cannot construct this corruption.
 fn with_stored_contribution_column_id(value: Value, physical_column_id: u64) -> Value {
+    with_stored_contribution_coordinate_ids(value, None, physical_column_id)
+}
+
+fn with_stored_contribution_table_id(value: Value, physical_table_id: u64) -> Value {
+    with_stored_contribution_coordinate_ids(value, Some(physical_table_id), 1)
+}
+
+fn with_stored_contribution_coordinate_ids(
+    value: Value,
+    physical_table_id: Option<u64>,
+    physical_column_id: u64,
+) -> Value {
     let Value::Nullable(Some(record)) = value else {
         panic!("fixture stores contribution provenance")
     };
@@ -239,6 +266,7 @@ fn with_stored_contribution_column_id(value: Value, physical_column_id: u64) -> 
             };
             Value::Record(rewrite_contribution_substitution_column_id(
                 substitution,
+                physical_table_id,
                 physical_column_id,
             ))
         })
@@ -257,6 +285,7 @@ fn with_stored_contribution_column_id(value: Value, physical_column_id: u64) -> 
 
 fn rewrite_contribution_substitution_column_id(
     record: OwnedRecord,
+    physical_table_id: Option<u64>,
     physical_column_id: u64,
 ) -> OwnedRecord {
     let descriptor = record.descriptor().clone();
@@ -278,6 +307,7 @@ fn rewrite_contribution_substitution_column_id(
                     source.tx_node().unwrap(),
                     rewrite_contribution_coordinate_column_id(
                         source.coordinate().unwrap(),
+                        physical_table_id,
                         physical_column_id,
                     ),
                 )
@@ -289,7 +319,11 @@ fn rewrite_contribution_substitution_column_id(
         .collect();
     ContributionSubstitutionStorageRecord::encode(
         &descriptor,
-        rewrite_contribution_coordinate_column_id(record.target().unwrap(), physical_column_id),
+        rewrite_contribution_coordinate_column_id(
+            record.target().unwrap(),
+            physical_table_id,
+            physical_column_id,
+        ),
         sources,
     )
     .unwrap()
@@ -299,6 +333,7 @@ fn rewrite_contribution_substitution_column_id(
 
 fn rewrite_contribution_coordinate_column_id(
     record: OwnedRecord,
+    physical_table_id: Option<u64>,
     physical_column_id: u64,
 ) -> OwnedRecord {
     let descriptor = record.descriptor().clone();
@@ -319,7 +354,7 @@ fn rewrite_contribution_coordinate_column_id(
     ContributionCoordinateStorageRecord::encode(
         &descriptor,
         record.branch_key().unwrap(),
-        record.table().unwrap(),
+        physical_table_id.unwrap_or_else(|| record.physical_table_id().unwrap()),
         record.row_uuid().unwrap(),
         record.layer().unwrap(),
         component,
@@ -416,7 +451,9 @@ fn reopen_with_noncanonical_contribution_provenance(
     }
 }
 
-fn reopen_with_invalid_contribution_column_id(physical_column_id: u64) -> Error {
+fn reopen_with_corrupt_contribution_coordinate(
+    mutate: impl FnOnce(Value) -> Value,
+) -> Error {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
@@ -442,10 +479,9 @@ fn reopen_with_invalid_contribution_column_id(physical_column_id: u64) -> Error 
         .unwrap();
 
         let stored = core.query_transaction(tx_id).unwrap().unwrap();
-        let contribution_merge = with_stored_contribution_column_id(
+        let contribution_merge = mutate(
             core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                 .unwrap(),
-            physical_column_id,
         );
         let mut batch = core.database.open_batch();
         batch.update(
@@ -468,9 +504,21 @@ fn reopen_with_invalid_contribution_column_id(physical_column_id: u64) -> Error 
     let references = column_families.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &references).unwrap();
     match NodeState::new(node(1), schema, storage).resolve() {
-        Ok(_) => panic!("opening corrupt contribution column storage must fail"),
+        Ok(_) => panic!("opening corrupt contribution coordinate storage must fail"),
         Err(error) => error,
     }
+}
+
+fn reopen_with_invalid_contribution_column_id(physical_column_id: u64) -> Error {
+    reopen_with_corrupt_contribution_coordinate(|value| {
+        with_stored_contribution_column_id(value, physical_column_id)
+    })
+}
+
+fn reopen_with_invalid_contribution_table_id(physical_table_id: u64) -> Error {
+    reopen_with_corrupt_contribution_coordinate(|value| {
+        with_stored_contribution_table_id(value, physical_table_id)
+    })
 }
 
 #[test]
@@ -489,6 +537,26 @@ fn reopen_rejects_unknown_contribution_physical_column_id_before_residency() {
         error,
         Error::InvalidStoredValue(
             "stored contribution physical column id is absent from its table mapping"
+        )
+    ));
+}
+
+#[test]
+fn reopen_rejects_zero_contribution_physical_table_id_before_residency() {
+    let error = reopen_with_invalid_contribution_table_id(0);
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("stored contribution physical table id must be nonzero")
+    ));
+}
+
+#[test]
+fn reopen_rejects_unknown_contribution_physical_table_id_before_residency() {
+    let error = reopen_with_invalid_contribution_table_id(u64::MAX);
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue(
+            "stored contribution physical table id is absent from the catalogue"
         )
     ));
 }

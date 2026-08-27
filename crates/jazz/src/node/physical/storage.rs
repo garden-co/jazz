@@ -70,6 +70,83 @@ where
             .map(Some)
     }
 
+    /// Translate a logical contribution table at the local storage boundary.
+    /// Physical ids are deliberately node-local and never cross the
+    /// transaction/wire boundary.
+    pub(super) fn contribution_table_id_for_storage(
+        &self,
+        table: &str,
+    ) -> Result<PhysicalTableId, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| mapping.tables.get(table))
+            .map(|mapping| mapping.table_id);
+        if let Some(id) = current {
+            return Ok(id);
+        }
+
+        let ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table).map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        match ids.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "contribution physical table mapping missing",
+            )),
+            1 => Ok(*ids.first().expect("one physical table id")),
+            _ => Err(Error::InvalidStoredValue(
+                "contribution logical table maps to multiple physical ids",
+            )),
+        }
+    }
+
+    /// Resolve an on-disk contribution table id to the active logical name,
+    /// falling back to an unambiguous retained spelling during recovery.
+    pub(super) fn contribution_table_name_for_storage(
+        &self,
+        table: PhysicalTableId,
+    ) -> Result<String, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| {
+                mapping
+                    .tables
+                    .iter()
+                    .find_map(|(name, candidate)| (candidate.table_id == table).then(|| name.clone()))
+            });
+        if let Some(name) = current {
+            return Ok(name);
+        }
+
+        let names = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| {
+                mapping
+                    .tables
+                    .iter()
+                    .filter(|(_, candidate)| candidate.table_id == table)
+                    .map(|(name, _)| name.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        match names.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "stored contribution physical table id is absent from the catalogue",
+            )),
+            1 => Ok(names.into_iter().next().expect("one logical table name")),
+            _ => Err(Error::InvalidStoredValue(
+                "stored contribution physical table id maps to multiple logical names",
+            )),
+        }
+    }
+
     /// Translate a logical contribution coordinate at the local storage
     /// boundary. Physical column ids are deliberately node-local and must
     /// never leak into the transaction wire representation.
@@ -160,18 +237,22 @@ where
         &self,
         provenance: Option<&ContributionMergeProvenance>,
     ) -> Result<Value, Error> {
-        super::codec::contribution_merge_storage_value(provenance, |table, column| {
-            self.contribution_column_id_for_storage(table, column)
-        })
+        super::codec::contribution_merge_storage_value(
+            provenance,
+            |table| self.contribution_table_id_for_storage(table),
+            |table, column| self.contribution_column_id_for_storage(table, column),
+        )
     }
 
     pub(super) fn contribution_merge_from_storage_record(
         &self,
         record: OwnedRecord,
     ) -> Result<ContributionMergeProvenance, Error> {
-        super::codec::contribution_merge_from_storage_record(record, |table, column| {
-            self.contribution_column_name_for_storage(table, column)
-        })
+        super::codec::contribution_merge_from_storage_record(
+            record,
+            |table| self.contribution_table_name_for_storage(table),
+            |table, column| self.contribution_column_name_for_storage(table, column),
+        )
     }
 
     pub(super) fn authored_columns_for_version(

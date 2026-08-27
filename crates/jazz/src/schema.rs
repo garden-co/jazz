@@ -1624,7 +1624,7 @@ fn contribution_component_column() -> GrooveColumnType {
 fn contribution_coordinate_column() -> GrooveColumnType {
     GrooveColumnType::Record(Box::new(RecordDescriptor::new([
         ("branch_key", ValueType::Bytes),
-        ("table", ValueType::String),
+        ("physical_table_id", ValueType::U64),
         ("row_uuid", ValueType::Uuid),
         (
             "layer",
