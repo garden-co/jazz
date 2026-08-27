@@ -4509,6 +4509,8 @@ struct JazzServerStartOptions {
     data_dir: Option<String>,
     in_memory: Option<bool>,
     jwks_url: Option<String>,
+    jwt_issuer: Option<String>,
+    jwt_audience: Option<String>,
     backend_secret: String,
     admin_secret: String,
     upstream_url: Option<String>,
@@ -4634,7 +4636,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
+            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -4652,6 +4654,8 @@ impl JazzServer {
 
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
+            jwt_issuer: opts.jwt_issuer,
+            jwt_audience: opts.jwt_audience,
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: Some(opts.backend_secret.clone()),
             admin_secret: Some(opts.admin_secret.clone()),

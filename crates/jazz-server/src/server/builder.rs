@@ -764,33 +764,50 @@ fn validate_server_config(
     auth_config: &AuthConfig,
     topology: ServerTopology,
 ) -> Result<(), String> {
-    let has_external_jwt_key =
-        auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
-    if has_external_jwt_key {
-        if auth_config
-            .jwt_issuer
-            .as_deref()
-            .is_none_or(|value| value.trim().is_empty())
-        {
+    let has_jwt_key = auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
+    if auth_config
+        .jwt_issuer
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("external JWT issuer cannot be empty".to_owned());
+    }
+    if auth_config
+        .jwt_audience
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("external JWT audience cannot be empty".to_owned());
+    }
+
+    match (
+        auth_config.jwt_issuer.as_ref(),
+        auth_config.jwt_audience.as_ref(),
+    ) {
+        (Some(_), Some(_)) if !has_jwt_key => {
             return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
+                "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
+                    .to_owned(),
             );
         }
-        if auth_config
-            .jwt_audience
-            .as_deref()
-            .is_none_or(|value| value.trim().is_empty())
-        {
+        (Some(_), None) => {
             return Err(
                 "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE"
                     .to_owned(),
             );
         }
-    } else if auth_config.jwt_issuer.is_some() || auth_config.jwt_audience.is_some() {
-        return Err(
-            "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
-                .to_owned(),
-        );
+        (None, Some(_)) => {
+            return Err(
+                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
+            );
+        }
+        (None, None) if has_jwt_key && !auth_config.allow_local_first_auth => {
+            return Err(
+                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER and --jwt-audience / JAZZ_JWT_AUDIENCE"
+                    .to_owned(),
+            );
+        }
+        _ => {}
     }
 
     if topology.is_edge() && auth_config.admin_secret.is_none() {
@@ -1585,6 +1602,26 @@ mod tests {
 
         assert!(upstream_http_url("https://core.example.com?token=abc", app_id).is_err());
         assert!(upstream_http_url("https://core.example.com#cluster-a", app_id).is_err());
+    }
+
+    #[test]
+    fn local_first_server_may_start_with_unbound_jwks_but_external_only_may_not() {
+        let local_first = AuthConfig {
+            jwks_url: Some("http://127.0.0.1:9/jwks".to_owned()),
+            allow_local_first_auth: true,
+            ..Default::default()
+        };
+        validate_server_config(&local_first, ServerTopology::Core)
+            .expect("local-first admission does not require external JWT bindings");
+
+        let external_only = AuthConfig {
+            allow_local_first_auth: false,
+            ..local_first
+        };
+        let error = validate_server_config(&external_only, ServerTopology::Core)
+            .expect_err("an external-only verifier must be explicitly bound");
+        assert!(error.contains("--jwt-issuer"), "{error}");
+        assert!(error.contains("--jwt-audience"), "{error}");
     }
 
     #[tokio::test]
