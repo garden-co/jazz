@@ -124,7 +124,7 @@ where
 /// seam. `PeerConnection::tick` otherwise contains the complete futures for
 /// every message variant inline, and authority policy evaluation can exhaust a
 /// normal test-thread stack before doing any recursive work.
-fn dispatch_admitted_subscriber_message<'a, S>(
+pub(super) fn dispatch_admitted_subscriber_message<'a, S>(
     node: &'a SharedNodeState<S>,
     peer: &'a mut PeerState,
     local_receiver: bool,
@@ -171,71 +171,94 @@ where
                 }
 
                 let tx_id = tx.tx_id;
-                let route_registered =
-                    if let Some(authority) = *admitted_upstream_authority.borrow() {
-                        let mut routes = edge_fate_routes.borrow_mut();
-                        prune_edge_fate_routes(&mut routes, Some(authority));
-                        let route_count = routes.values().map(Vec::len).sum::<usize>();
-                        let pending = routes.get(&tx_id);
-                        let already_routed = pending.is_some_and(|pending| {
-                            pending.iter().any(|route| {
-                                route
-                                    .authority
-                                    .is_some_and(|route| route.same_admitted_link(authority))
-                                    && route
-                                        .queue
-                                        .upgrade()
-                                        .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
-                            })
-                        });
-                        if already_routed {
+                let identity = EdgeFateCommitIdentity::new(&tx, &versions);
+                let route_registered = if let Some(authority) =
+                    *admitted_upstream_authority.borrow()
+                {
+                    let mut routes = edge_fate_routes.borrow_mut();
+                    prune_edge_fate_routes(&mut routes, Some(authority));
+                    let route_count = routes
+                        .values()
+                        .map(|obligation| obligation.routes.len())
+                        .sum::<usize>();
+                    let existing = routes.get(&tx_id);
+                    if existing.is_some_and(|obligation| !obligation.identity.matches(&identity)) {
+                        return Err(crate::node::Error::ConflictingCommitUnit(tx_id).into());
+                    }
+                    let already_routed = existing.is_some_and(|obligation| {
+                        obligation.routes.iter().any(|route| {
+                            route
+                                .authority
+                                .is_some_and(|route| route.same_admitted_link(authority))
+                                && route
+                                    .queue
+                                    .upgrade()
+                                    .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
+                        })
+                    });
+                    if already_routed {
+                        true
+                    } else if route_count < MAX_EDGE_FATE_ROUTES {
+                        let obligation =
+                            routes.entry(tx_id).or_insert_with(|| EdgeFateObligation {
+                                identity: identity.clone(),
+                                routes: Vec::new(),
+                            });
+                        if obligation.routes.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
+                            obligation.routes.push(EdgeFateRoute {
+                                authority: Some(authority),
+                                queue: Rc::downgrade(downstream_fates),
+                                edge_acknowledged: false,
+                            });
                             true
-                        } else if route_count < MAX_EDGE_FATE_ROUTES {
-                            let pending = routes.entry(tx_id).or_default();
-                            if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
-                                pending.push(EdgeFateRoute {
-                                    authority: Some(authority),
-                                    queue: Rc::downgrade(downstream_fates),
-                                    edge_acknowledged: false,
-                                });
-                                true
-                            } else {
-                                false
-                            }
                         } else {
                             false
                         }
                     } else {
-                        let mut routes = edge_fate_routes.borrow_mut();
-                        prune_edge_fate_routes(&mut routes, None);
-                        let already_routed = routes.get(&tx_id).is_some_and(|pending| {
-                            pending.iter().any(|route| {
-                                route.authority.is_none()
-                                    && route
-                                        .queue
-                                        .upgrade()
-                                        .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
-                            })
-                        });
-                        let route_count = routes.values().map(Vec::len).sum::<usize>();
-                        if already_routed {
-                            true
-                        } else if route_count >= MAX_EDGE_FATE_ROUTES {
+                        false
+                    }
+                } else {
+                    let mut routes = edge_fate_routes.borrow_mut();
+                    prune_edge_fate_routes(&mut routes, None);
+                    let existing = routes.get(&tx_id);
+                    if existing.is_some_and(|obligation| !obligation.identity.matches(&identity)) {
+                        return Err(crate::node::Error::ConflictingCommitUnit(tx_id).into());
+                    }
+                    let already_routed = existing.is_some_and(|obligation| {
+                        obligation.routes.iter().any(|route| {
+                            route.authority.is_none()
+                                && route
+                                    .queue
+                                    .upgrade()
+                                    .is_some_and(|queue| Rc::ptr_eq(&queue, downstream_fates))
+                        })
+                    });
+                    let route_count = routes
+                        .values()
+                        .map(|obligation| obligation.routes.len())
+                        .sum::<usize>();
+                    if already_routed {
+                        true
+                    } else if route_count >= MAX_EDGE_FATE_ROUTES {
+                        false
+                    } else {
+                        let obligation =
+                            routes.entry(tx_id).or_insert_with(|| EdgeFateObligation {
+                                identity: identity.clone(),
+                                routes: Vec::new(),
+                            });
+                        if obligation.routes.len() >= MAX_EDGE_FATE_ROUTES_PER_TX {
                             false
                         } else {
-                            let pending = routes.entry(tx_id).or_default();
-                            if pending.len() >= MAX_EDGE_FATE_ROUTES_PER_TX {
-                                false
-                            } else {
-                                pending.push(EdgeFateRoute {
-                                    authority: None,
-                                    queue: Rc::downgrade(downstream_fates),
-                                    edge_acknowledged: false,
-                                });
-                                true
-                            }
+                            obligation.routes.push(EdgeFateRoute {
+                                authority: None,
+                                queue: Rc::downgrade(downstream_fates),
+                                edge_acknowledged: false,
+                            });
+                            true
                         }
-                    };
+                    }
+                };
 
                 if !route_registered {
                     return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
@@ -2211,9 +2234,9 @@ where
                                 if let Some((tx_id, fate)) = routed_fate {
                                     let authority = *expected_scope_authority;
                                     let mut routes = self.edge_fate_routes.borrow_mut();
-                                    if let Some(pending) = routes.get_mut(&tx_id) {
+                                    if let Some(obligation) = routes.get_mut(&tx_id) {
                                         let mut remaining = Vec::new();
-                                        for route in std::mem::take(pending) {
+                                        for route in std::mem::take(&mut obligation.routes) {
                                             let authority_matches = matches!(
                                                 (route.authority, authority),
                                                 (Some(route), Some(authority))
@@ -2231,9 +2254,10 @@ where
                                         if remaining.is_empty() {
                                             routes.remove(&tx_id);
                                         } else {
-                                            *routes
+                                            let obligation = routes
                                                 .get_mut(&tx_id)
-                                                .expect("route remains present") = remaining;
+                                                .expect("route remains present");
+                                            obligation.routes = remaining;
                                         }
                                     }
                                     drop(routes);

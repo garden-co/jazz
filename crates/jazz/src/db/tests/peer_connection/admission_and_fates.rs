@@ -1,7 +1,9 @@
 //! Link admission, authority selection, permission advice, and routed fates.
 
 use super::*;
-use crate::db::peer_connection::{ConnectionLink, PendingSubscriberControlResponse};
+use crate::db::peer_connection::{
+    dispatch_admitted_subscriber_message, ConnectionLink, PendingSubscriberControlResponse,
+};
 use crate::node::SKEW_TOLERANCE_MS;
 
 #[test]
@@ -1052,6 +1054,141 @@ fn edge_client_ingress_proves_actions_before_one_routed_edge_fate() {
     );
 }
 
+/// An edge route is server-owned rather than connection-owned: a reconnecting
+/// client may retransmit its exact unit and receive the already-known edge
+/// acceptance, but another connection cannot replace a still-live obligation
+/// with different bytes for the same transaction id.
+///
+/// This stays at the served-peer seam because two authenticated subscriber
+/// connections and their in-memory downstream queues are the boundary where
+/// the otherwise durable transaction identity is deliberately absent while an
+/// edge fate route is live.
+#[test]
+fn edge_fate_route_identity_is_shared_across_client_connections() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client = open_db(0xa1, alice, &schema);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("identity".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit { tx, versions } = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap()
+    else {
+        panic!("client mergeable write must retain its commit unit");
+    };
+
+    let node = edge.node();
+    let mut first = PeerState::edge_client(alice);
+    let mut reconnect = PeerState::edge_client(alice);
+    let authority: Rc<RefCell<Option<AuthorityContext>>> = Rc::new(RefCell::new(None));
+    let local_routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let first_fates = Rc::new(RefCell::new(Vec::new()));
+    let reconnect_fates = Rc::new(RefCell::new(Vec::new()));
+    let context = CommitUnitIngestContext {
+        identity: alice,
+        trust: CommitUnitTrust::Session,
+        edge_authority: true,
+    };
+
+    let first_outcome = crate::db::block_on(dispatch_admitted_subscriber_message(
+        &node,
+        &mut first,
+        false,
+        context,
+        &authority,
+        &edge.server.edge_fate_routes,
+        &local_routes,
+        &first_fates,
+        1,
+        SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: versions.clone(),
+        },
+    ))
+    .expect("first client-link upload is admitted");
+    assert!(first_outcome.value.is_empty());
+    assert!(matches!(
+        first_fates.borrow().as_slice(),
+        [SyncMessage::FateUpdate {
+            tx_id: candidate,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Edge),
+            ..
+        }] if *candidate == tx_id
+    ));
+
+    let mut conflicting = tx.clone();
+    conflicting.n_total_writes = conflicting.n_total_writes.saturating_add(1);
+    assert!(
+        crate::db::block_on(dispatch_admitted_subscriber_message(
+            &node,
+            &mut reconnect,
+            false,
+            context,
+            &authority,
+            &edge.server.edge_fate_routes,
+            &local_routes,
+            &reconnect_fates,
+            1,
+            SyncMessage::CommitUnit {
+                tx: conflicting,
+                versions: versions.clone(),
+            },
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id].routes.len(),
+        1,
+        "a conflicting second connection is rejected before it gains a fate route"
+    );
+    assert!(reconnect_fates.borrow().is_empty());
+
+    let retry_outcome = crate::db::block_on(dispatch_admitted_subscriber_message(
+        &node,
+        &mut reconnect,
+        false,
+        context,
+        &authority,
+        &edge.server.edge_fate_routes,
+        &local_routes,
+        &reconnect_fates,
+        2,
+        SyncMessage::CommitUnit { tx, versions },
+    ))
+    .expect("an exact reconnect retransmit reuses the route obligation");
+    assert!(retry_outcome.value.is_empty());
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id].routes.len(),
+        2,
+        "the reconnect gets one route without replacing the original obligation"
+    );
+    assert_eq!(
+        first_fates.borrow().len(),
+        1,
+        "an exact reconnect retransmit must not duplicate the old session's edge fate"
+    );
+    assert!(matches!(
+        reconnect_fates.borrow().as_slice(),
+        [SyncMessage::FateUpdate {
+            tx_id: candidate,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Edge),
+            ..
+        }] if *candidate == tx_id
+    ));
+}
+
 #[test]
 fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let schema = schema();
@@ -1088,14 +1225,22 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
             MergeableCommit::new("todos", row(0x91), 1).cells(cells("handoff", false, identity)),
         )
         .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } =
+        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+    else {
+        panic!("settled mergeable write must retain its commit unit");
+    };
     let queue = Rc::new(RefCell::new(Vec::new()));
     edge.server.edge_fate_routes.borrow_mut().insert(
         tx_id,
-        vec![EdgeFateRoute {
-            authority: Some(first.unwrap()),
-            queue: Rc::downgrade(&queue),
-            edge_acknowledged: false,
-        }],
+        EdgeFateObligation {
+            identity: EdgeFateCommitIdentity::new(&tx, &versions),
+            routes: vec![EdgeFateRoute {
+                authority: Some(first.unwrap()),
+                queue: Rc::downgrade(&queue),
+                edge_acknowledged: false,
+            }],
+        },
     );
     assert!(edge.server.detach_connection(&a));
     assert_ne!(
@@ -1105,7 +1250,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     );
     let handoff = edge.server.admitted_upstream_authority.borrow().unwrap();
     assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id][0].authority,
+        edge.server.edge_fate_routes.borrow()[&tx_id].routes[0].authority,
         Some(handoff),
         "an Edge-Accepted caller route must follow the selected handoff rather than vanish"
     );
@@ -1151,16 +1296,28 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
             Default::default(),
         )
         .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .unwrap()
+    else {
+        panic!("client mergeable write must retain its commit unit");
+    };
     let queue = Rc::new(RefCell::new(Vec::new()));
     edge.server.edge_fate_routes.borrow_mut().insert(
         write.mergeable_tx_id(),
-        (0..MAX_EDGE_FATE_ROUTES_PER_TX)
-            .map(|_| EdgeFateRoute {
-                authority: Some(selected),
-                queue: Rc::downgrade(&queue),
-                edge_acknowledged: false,
-            })
-            .collect(),
+        EdgeFateObligation {
+            identity: EdgeFateCommitIdentity::new(&tx, &versions),
+            routes: (0..MAX_EDGE_FATE_ROUTES_PER_TX)
+                .map(|_| EdgeFateRoute {
+                    authority: Some(selected),
+                    queue: Rc::downgrade(&queue),
+                    edge_acknowledged: false,
+                })
+                .collect(),
+        },
     );
     client.tick().unwrap();
     edge.server.tick().unwrap();
@@ -1238,8 +1395,8 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     };
     let routes = edge.server.edge_fate_routes.borrow();
     let routes_for_tx = routes.get(&tx_id).expect("edge must park the upload route");
-    assert_eq!(routes_for_tx.len(), 1);
-    assert_eq!(routes_for_tx[0].authority, Some(expected_authority));
+    assert_eq!(routes_for_tx.routes.len(), 1);
+    assert_eq!(routes_for_tx.routes[0].authority, Some(expected_authority));
     drop(routes);
 
     // Scope receipts advance authorization metadata on the same physical
@@ -1407,14 +1564,22 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
             MergeableCommit::new("todos", row(0x44), 1).cells(cells("pending", false, identity)),
         )
         .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } =
+        edge.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+    else {
+        panic!("settled mergeable write must retain its commit unit");
+    };
     let downstream = Rc::new(RefCell::new(Vec::new()));
     edge.server.edge_fate_routes.borrow_mut().insert(
         tx_id,
-        vec![EdgeFateRoute {
-            authority: Some(selected),
-            queue: Rc::downgrade(&downstream),
-            edge_acknowledged: false,
-        }],
+        EdgeFateObligation {
+            identity: EdgeFateCommitIdentity::new(&tx, &versions),
+            routes: vec![EdgeFateRoute {
+                authority: Some(selected),
+                queue: Rc::downgrade(&downstream),
+                edge_acknowledged: false,
+            }],
+        },
     );
     b_peer
         .send(SyncMessage::FateUpdate {
@@ -1661,7 +1826,7 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
     assert!(edge.server.detach_connection(&edge_a));
     assert_eq!(edge.server.edge_fate_routes.borrow().len(), 1);
     assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&write.mergeable_tx_id()][0].authority,
+        edge.server.edge_fate_routes.borrow()[&write.mergeable_tx_id()].routes[0].authority,
         None,
         "a route whose authority disconnected remains parked without stale authority claims"
     );
@@ -1737,7 +1902,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         DurabilityTier::Edge
     );
     assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id][0].authority,
+        edge.server.edge_fate_routes.borrow()[&tx_id].routes[0].authority,
         None,
         "an offline-ready edge retains the downstream obligation without inventing authority"
     );
@@ -1755,7 +1920,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         .unwrap();
     edge.tick().unwrap();
     assert_eq!(
-        edge.server.edge_fate_routes.borrow()[&tx_id].len(),
+        edge.server.edge_fate_routes.borrow()[&tx_id].routes.len(),
         1,
         "a retransmitted pre-admission unit must reuse the same downstream route"
     );
@@ -1764,7 +1929,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_node, 41, core_node, 97);
     let _edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
     assert!(
-        edge.server.edge_fate_routes.borrow()[&tx_id][0]
+        edge.server.edge_fate_routes.borrow()[&tx_id].routes[0]
             .authority
             .is_some(),
         "the first authenticated authority binds the parked route"
@@ -1858,7 +2023,8 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         .edge_fate_routes
         .borrow_mut()
         .get_mut(&write.mergeable_tx_id())
-        .expect("routed edge write")[0]
+        .expect("routed edge write")
+        .routes[0]
         .authority = Some(current_context);
     old.borrow_mut()
         .transport

@@ -54,7 +54,7 @@ use crate::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
     ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
-    SubscriptionKey, SyncMessage, TableLens,
+    SubscriptionKey, SyncMessage, TableLens, VersionRecord,
 };
 use crate::protocol_limits::{
     validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
@@ -73,7 +73,7 @@ use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalTime;
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
 mod wire_transport;
@@ -1513,7 +1513,40 @@ struct EdgeFateRoute {
     /// routable through the same retained obligation.
     edge_acknowledged: bool,
 }
-type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
+
+/// The immutable identity of a client commit while its edge fate obligation is
+/// live.  An edge intentionally keeps a pre-proof upload out of durable
+/// transaction history, but it must still enforce history's one-payload-per-id
+/// rule across all client connections.  Normalize version order here because
+/// transport ordering is not semantically meaningful.
+#[derive(Clone, Debug)]
+struct EdgeFateCommitIdentity {
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+}
+
+impl EdgeFateCommitIdentity {
+    fn new(tx: &Transaction, versions: &[VersionRecord]) -> Self {
+        let mut versions = versions.to_vec();
+        versions.sort();
+        Self {
+            tx: tx.clone(),
+            versions,
+        }
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.tx == other.tx && self.versions == other.versions
+    }
+}
+
+/// The shared edge obligation for one transaction.
+struct EdgeFateObligation {
+    identity: EdgeFateCommitIdentity,
+    routes: Vec<EdgeFateRoute>,
+}
+
+type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, EdgeFateObligation>>>;
 
 struct LocalFateRoute {
     queue: Weak<RefCell<Vec<SyncMessage>>>,
@@ -1627,10 +1660,10 @@ fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMe
         }
     );
     let mut routes = routes.borrow_mut();
-    let Some(pending) = routes.get_mut(&tx_id) else {
+    let Some(obligation) = routes.get_mut(&tx_id) else {
         return;
     };
-    pending.retain_mut(|route| {
+    obligation.routes.retain_mut(|route| {
         let Some(queue) = route.queue.upgrade() else {
             return false;
         };
@@ -1640,7 +1673,7 @@ fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMe
         }
         !terminal
     });
-    if pending.is_empty() {
+    if obligation.routes.is_empty() {
         routes.remove(&tx_id);
     }
 }
@@ -1680,11 +1713,11 @@ where
 /// dead subscriber queues) eagerly: retaining a weak queue alone would let
 /// arbitrary uploads grow this registry forever.
 fn prune_edge_fate_routes(
-    routes: &mut BTreeMap<TxId, Vec<EdgeFateRoute>>,
+    routes: &mut BTreeMap<TxId, EdgeFateObligation>,
     admitted: Option<AuthorityContext>,
 ) {
-    routes.retain(|_, pending| {
-        pending.retain(|route| {
+    routes.retain(|_, obligation| {
+        obligation.routes.retain(|route| {
             route.queue.upgrade().is_some()
                 && match (route.authority, admitted) {
                     (None, _) => true,
@@ -1692,7 +1725,7 @@ fn prune_edge_fate_routes(
                     (Some(_), None) => false,
                 }
         });
-        !pending.is_empty()
+        !obligation.routes.is_empty()
     });
 }
 type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
