@@ -42,6 +42,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       client,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       onAuthRestored: () => this.host.clearAuthError(),
+      onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
       onFailure: (error) => {
         if (this.connection !== connection) return;
         this.connectionError = asError(error);
@@ -213,6 +214,17 @@ export class BrowserConnectionManager extends ConnectionManager {
     const waiters = [...this.reconnectWaiters];
     this.reconnectWaiters.clear();
     for (const resolve of waiters) resolve();
+  }
+
+  /**
+   * A persistent browser namespace has one worker-owned upstream connection.
+   * The initiating tab receives the RPC result too, but every attached tab
+   * must make the same explicit-offline choice for RemoteIfPossible reads.
+   */
+  private setExplicitOffline(connection: BrowserWorkerConnection, offline: boolean): void {
+    if (this.connection !== connection) return;
+    this.disconnected = offline;
+    if (!offline) this.resolveReconnectWaiters();
   }
 
   private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {

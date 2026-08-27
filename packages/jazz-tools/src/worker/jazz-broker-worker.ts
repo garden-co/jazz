@@ -65,6 +65,7 @@ type RuntimeContext = {
   serverUrl: string | null;
   serverAuthJson: string;
   serverConnectionStarted: boolean;
+  explicitlyDisconnected: boolean;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
@@ -142,6 +143,7 @@ function createContext(
     serverUrl: options.serverUrl ?? null,
     serverAuthJson: options.authJson,
     serverConnectionStarted: false,
+    explicitlyDisconnected: false,
     initialize: Promise.resolve(),
     closing: null,
     idleReleaseTimer: null,
@@ -327,7 +329,7 @@ async function configureServer(
 
 function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
-  if (!requestedUrl) return;
+  if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
   requireRuntime(context).connect(requestedUrl, context.serverAuthJson);
   context.serverConnectionStarted = true;
@@ -433,7 +435,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         const pending = peer.pendingFrames.splice(0);
         pump.receive(pending);
       }
-      ensureServerConnection(peer.context);
+      if (peer.context.explicitlyDisconnected) {
+        post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
+      } else {
+        ensureServerConnection(peer.context);
+      }
       result(peer, message.id);
       return;
     }
@@ -446,8 +452,22 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "disconnect") {
-      await activeRuntime.disconnect({ rejectWaiters: false });
+      const wasExplicitlyDisconnected = peer.context.explicitlyDisconnected;
+      peer.context.explicitlyDisconnected = true;
       peer.context.serverConnectionStarted = false;
+      try {
+        await activeRuntime.disconnect({ rejectWaiters: false });
+      } catch (error) {
+        // Match the public Db contract: a failed explicit disconnect must not
+        // silently change RemoteIfPossible behavior for any tab. The adapter
+        // may already have detached the old carrier before reporting a
+        // retirement error, so restore the normal owner-wide connection when
+        // this context was previously online.
+        peer.context.explicitlyDisconnected = wasExplicitlyDisconnected;
+        if (!wasExplicitlyDisconnected) ensureServerConnection(peer.context);
+        throw error;
+      }
+      broadcast(peer.context, { type: "transport-state", explicitlyDisconnected: true });
       result(peer, message.id);
       return;
     }
@@ -474,7 +494,9 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       peer.context.serverAuthJson = message.authJson;
       activeRuntime.connect(serverUrl, message.authJson);
+      peer.context.explicitlyDisconnected = false;
       peer.context.serverConnectionStarted = true;
+      broadcast(peer.context, { type: "transport-state", explicitlyDisconnected: false });
       result(peer, message.id);
       return;
     }
