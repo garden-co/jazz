@@ -247,6 +247,111 @@ fn rejects_wrong_format_and_closed_store() {
 }
 
 #[test]
+fn physical_header_ddl_and_jazz_blobs_are_pinned_across_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("jazz.sqlite");
+    let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+    drop(storage);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .unwrap();
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(application_id, 0x4a41_5a5a, "SQLite header identifies Jazz");
+    assert_eq!(user_version, 1, "SQLite header pins the v1 DDL");
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM meta WHERE key = 'ddl_id'", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .unwrap(),
+        b"jazz-groove-ordered-kv-ddl-v1"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM meta WHERE key = 'format'", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .unwrap(),
+        b"jazz-groove-ordered-kv"
+    );
+    let ddl = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'kv'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert!(ddl.contains("PRIMARY KEY (cf, k)"));
+    assert!(ddl.contains("WITHOUT ROWID"));
+    drop(connection);
+
+    SqliteStorage::open(&path, &["records"]).expect("exact physical v1 store reopens");
+}
+
+#[test]
+fn rejects_wrong_sqlite_header_before_changing_foreign_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("foreign.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE foreign_data (value BLOB)")
+        .unwrap();
+    let before: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let after: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(after, before, "foreign store was rejected before WAL setup");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM foreign_data", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn rejects_wrong_sqlite_user_version_and_ddl_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("jazz.sqlite");
+    let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+    drop(storage);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.pragma_update(None, "user_version", 2).unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    connection
+        .execute("UPDATE meta SET value = x'00' WHERE key = 'ddl_id'", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+}
+
+#[test]
 fn rejects_foreign_table_shape_before_adopting_data() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("jazz.sqlite");
