@@ -467,6 +467,30 @@ impl ValueType {
     pub(crate) fn stored_scalar(kind: crate::large_values::LargeValueKind) -> Self {
         Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind)))
     }
+
+    /// Whether a value of this type can contain an indirect stored scalar.
+    ///
+    /// The IVM evaluator uses this schema-only proof to avoid decoding and
+    /// rebuilding records when an operator inspects fields that cannot block
+    /// on large-value hydration.
+    pub(crate) fn may_contain_stored_scalar(&self) -> bool {
+        match self {
+            Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => true,
+            Self::Tuple(members) => members.iter().any(Self::may_contain_stored_scalar),
+            Self::Array(inner) | Self::Nullable(inner) => inner.may_contain_stored_scalar(),
+            Self::Record(descriptor) => descriptor
+                .fields()
+                .iter()
+                .any(|field| field.value_type.may_contain_stored_scalar()),
+            Self::Enum(schema) => schema.cases.iter().any(|case| {
+                case.payload
+                    .fields()
+                    .iter()
+                    .any(|field| field.value_type.may_contain_stored_scalar())
+            }),
+            _ => false,
+        }
+    }
 }
 
 impl ValueType {

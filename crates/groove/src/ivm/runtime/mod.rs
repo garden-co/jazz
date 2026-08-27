@@ -379,6 +379,8 @@ pub enum IvmRuntimeError {
     IndexNotFound(String),
     #[error("invalid persisted index entry: {0}")]
     InvalidPersistedIndex(String),
+    #[error("intersected index sources currently require prefix scans")]
+    UnsupportedIndexIntersectionScan,
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]

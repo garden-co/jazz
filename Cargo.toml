@@ -31,6 +31,7 @@ members = [
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
   "examples/benchmarks/smoke",
+  "examples/benchmarks/w1",
   "dev/benchmarks/storage/bench-core",
 ]
 exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]

@@ -2601,6 +2601,19 @@ impl TickEvaluator<'_> {
         let Some(evaluation_inputs) = self.evaluation_inputs.as_deref_mut() else {
             return Ok(Arc::clone(input));
         };
+        let fields = input.descriptor.fields();
+        let requires_materialization = indices.iter().try_fold(false, |required, index| {
+            let field = fields
+                .get(*index)
+                .ok_or(crate::records::Error::FieldIndexOutOfBounds {
+                    index: *index,
+                    len: fields.len(),
+                })?;
+            Ok::<_, crate::records::Error>(required || field.value_type.may_contain_stored_scalar())
+        })?;
+        if !requires_materialization {
+            return Ok(Arc::clone(input));
+        }
         let mut deltas = Vec::with_capacity(input.deltas.len());
         let mut changed = false;
         for delta in &input.deltas {
