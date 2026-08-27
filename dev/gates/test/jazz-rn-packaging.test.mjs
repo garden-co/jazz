@@ -265,13 +265,14 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     "ios-arm64_x86_64-simulator/libjazz_native_relay.a",
   ];
   const info = (includeDevice) => `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>AvailableLibraries</key><array>
 ${
   includeDevice
-    ? "<dict><key>LibraryIdentifier</key><string>ios-arm64</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedPlatform</key><string>ios</string></dict>"
+    ? "<dict><key>LibraryIdentifier</key><string>ios-arm64</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedArchitectures</key><array><string>arm64</string></array><key>SupportedPlatform</key><string>ios</string></dict>"
     : ""
 }
-<dict><key>LibraryIdentifier</key><string>ios-arm64_x86_64-simulator</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedPlatform</key><string>ios</string><key>SupportedPlatformVariant</key><string>simulator</string></dict>
+<dict><key>LibraryIdentifier</key><string>ios-arm64_x86_64-simulator</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedArchitectures</key><array><string>arm64</string><string>x86_64</string></array><key>SupportedPlatform</key><string>ios</string><key>SupportedPlatformVariant</key><string>simulator</string></dict>
 </array></dict></plist>`;
   const writeArtifactFiles = async (root, files) => {
     for (const file of files) {
@@ -470,8 +471,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
 
   const previewMode = (labels, sameRepository) => ({
     runs:
-      sameRepository &&
-      (labels.includes("preview-build") || labels.includes("rn-preview-release")),
+      sameRepository && (labels.includes("preview-build") || labels.includes("rn-preview-release")),
     includesRn: labels.includes("rn-preview-release") && sameRepository,
   });
   assert.deepEqual(previewMode([], true), { runs: false, includesRn: false });

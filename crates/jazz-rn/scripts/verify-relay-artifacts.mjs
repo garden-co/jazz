@@ -50,34 +50,123 @@ const targets = {
   },
 };
 
-function plistString(dictionary, key) {
-  const match = new RegExp(`<key>${key}</key>\\s*<string>([^<]+)</string>`).exec(dictionary);
-  return match?.[1];
+function decodeXmlText(text) {
+  return text.replace(/&(?:amp|apos|gt|lt|quot|#x[0-9a-fA-F]+|#[0-9]+);/g, (entity) => {
+    if (entity === "&amp;") return "&";
+    if (entity === "&apos;") return "'";
+    if (entity === "&gt;") return ">";
+    if (entity === "&lt;") return "<";
+    if (entity === "&quot;") return '"';
+    const numeric = entity.slice(2, -1);
+    const codePoint = numeric.startsWith("x")
+      ? Number.parseInt(numeric.slice(1), 16)
+      : Number.parseInt(numeric, 10);
+    if (!Number.isSafeInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff)
+      throw new Error(`invalid XML character reference ${entity}`);
+    return String.fromCodePoint(codePoint);
+  });
+}
+
+function parseXmlPlist(xml) {
+  let cursor = 0;
+  const skipWhitespace = () => {
+    while (/\s/.test(xml[cursor] ?? "")) cursor += 1;
+  };
+  const readTag = () => {
+    if (xml[cursor] !== "<") throw new Error("expected XML tag in iOS XCFramework Info.plist");
+    const end = xml.indexOf(">", cursor + 1);
+    if (end === -1) throw new Error("unterminated XML tag in iOS XCFramework Info.plist");
+    const raw = xml.slice(cursor + 1, end).trim();
+    cursor = end + 1;
+    return raw;
+  };
+  const expectClosing = (name) => {
+    skipWhitespace();
+    const tag = readTag();
+    if (tag !== `/${name}`) throw new Error(`expected </${name}> in iOS XCFramework Info.plist`);
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    const tag = readTag();
+    if (tag === "dict") {
+      const dictionary = Object.create(null);
+      while (true) {
+        skipWhitespace();
+        if (xml.startsWith("</dict>", cursor)) {
+          expectClosing("dict");
+          return dictionary;
+        }
+        const key = parseValue();
+        if (typeof key !== "string")
+          throw new Error("iOS XCFramework Info.plist dictionary has a non-string key");
+        if (Object.hasOwn(dictionary, key))
+          throw new Error(`iOS XCFramework Info.plist repeats key ${key}`);
+        dictionary[key] = parseValue();
+      }
+    }
+    if (tag === "array") {
+      const array = [];
+      while (true) {
+        skipWhitespace();
+        if (xml.startsWith("</array>", cursor)) {
+          expectClosing("array");
+          return array;
+        }
+        array.push(parseValue());
+      }
+    }
+    if (tag === "string" || tag === "key") {
+      const end = xml.indexOf("<", cursor);
+      if (end === -1) throw new Error(`unterminated <${tag}> in iOS XCFramework Info.plist`);
+      const text = decodeXmlText(xml.slice(cursor, end));
+      cursor = end;
+      expectClosing(tag);
+      return text;
+    }
+    throw new Error(`unsupported <${tag}> in iOS XCFramework Info.plist`);
+  };
+
+  skipWhitespace();
+  while (xml.startsWith("<?", cursor) || xml.startsWith("<!", cursor)) {
+    const end = xml.indexOf(">", cursor + 2);
+    if (end === -1) throw new Error("unterminated XML preamble in iOS XCFramework Info.plist");
+    cursor = end + 1;
+    skipWhitespace();
+  }
+  if (!xml.startsWith("<plist", cursor))
+    throw new Error("iOS XCFramework Info.plist has no plist root");
+  const plistOpeningEnd = xml.indexOf(">", cursor + 6);
+  if (plistOpeningEnd === -1)
+    throw new Error("unterminated plist root in iOS XCFramework Info.plist");
+  cursor = plistOpeningEnd + 1;
+  const plist = parseValue();
+  expectClosing("plist");
+  skipWhitespace();
+  if (cursor !== xml.length) throw new Error("trailing data in iOS XCFramework Info.plist");
+  if (typeof plist !== "object" || plist === null || Array.isArray(plist))
+    throw new Error("iOS XCFramework Info.plist root is not a dictionary");
+  return plist;
 }
 
 function verifyIosSlices(expected) {
-  const info = readFileSync(join(targets.ios.root, "Info.plist"), "utf8");
-  const availableLibraries = /<key>AvailableLibraries<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(
-    info,
-  )?.[1];
-  if (!availableLibraries)
+  const plist = parseXmlPlist(readFileSync(join(targets.ios.root, "Info.plist"), "utf8"));
+  const slices = plist.AvailableLibraries;
+  if (!Array.isArray(slices))
     throw new Error("iOS XCFramework Info.plist has no AvailableLibraries array");
-
-  const slices = [...availableLibraries.matchAll(/<dict>([\s\S]*?)<\/dict>/g)].map(
-    (match) => match[1],
-  );
   const requiredRoles = new Map([
     ["device", false],
     ["simulator", false],
   ]);
   for (const slice of slices) {
-    if (plistString(slice, "SupportedPlatform") !== "ios") continue;
-    const variant = plistString(slice, "SupportedPlatformVariant");
+    if (typeof slice !== "object" || slice === null || Array.isArray(slice))
+      throw new Error("iOS XCFramework AvailableLibraries contains a non-dictionary slice");
+    if (slice.SupportedPlatform !== "ios") continue;
+    const variant = slice.SupportedPlatformVariant;
     const role =
       variant === undefined ? "device" : variant === "simulator" ? "simulator" : undefined;
     if (!role) continue;
-    const identifier = plistString(slice, "LibraryIdentifier");
-    const library = plistString(slice, "LibraryPath");
+    const identifier = slice.LibraryIdentifier;
+    const library = slice.LibraryPath;
     if (!identifier || !library || !library.endsWith(".a"))
       throw new Error(`iOS ${role} XCFramework slice is missing its static library path`);
     const path = `${identifier}/${library}`;
