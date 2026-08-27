@@ -89,7 +89,10 @@ jobs:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
     name: W1 read wall time (memory + RocksDB)
     runs-on: codspeed-macro
-    timeout-minutes: 20
+    # A cold ARM64 build plus both retained memory/RocksDB receipts can exceed
+    # the normal macro-job limit; keep the complete pair rather than dropping
+    # either backend from the regression signal.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
