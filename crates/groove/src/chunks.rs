@@ -727,13 +727,23 @@ where
                     Ok(bytes)
                 }
                 Err(ChunkStorageError::Unavailable) => {
+                    let bytes = self.resolver.resolve(request.clone()).await?;
+                    // Resolver failure has no byte-store side effect, so do
+                    // not create a durable recovery obligation until it has
+                    // supplied mechanically valid bytes. This keeps a
+                    // disconnected/cancelled fetch from leaking journal
+                    // entries for chunks that were never staged.
+                    if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
+                        || object_hash(&bytes) != node_ref.object_hash
+                    {
+                        return Err(ChunkError::Integrity);
+                    }
                     // This durable marker is deliberately written before the
                     // independent byte store.  If either staging or metadata
                     // installation is interrupted, a later exact read knows
                     // that it must finish the install rather than treating
                     // resident bytes as a complete mapping.
                     self.journal.mark_pending(node_ref.clone()).await?;
-                    let bytes = self.resolver.resolve(request.clone()).await?;
                     self.storage
                         .stage(vec![StagedChunk {
                             node_ref: node_ref.clone(),
@@ -2384,6 +2394,35 @@ mod tests {
         assert_eq!(block_on(provider.get(request.clone())), Ok(bytes.clone()));
         assert_eq!(block_on(provider.get(request)), Ok(bytes));
         assert_eq!(observer.calls.get(), 2);
+    }
+
+    #[test]
+    fn failed_remote_resolution_does_not_leave_a_pending_install_marker() {
+        let bytes = Bytes::from_static(b"the resolver will not provide this chunk");
+        let request = ChunkRequest {
+            object_hash: object_hash(&bytes).0,
+            locator: Locator::from_seed(b"failed-resolution-has-no-staged-bytes"),
+        };
+        let journal = Rc::new(MemoryInstallJournal::default());
+        let provider = StorageChunkProvider::with_resolver_observer_and_journal(
+            Rc::new(MemoryChunkStorage::new()),
+            Rc::new(UnavailableChunkResolver),
+            Rc::new(CountingInstallObserver::default()),
+            journal.clone(),
+        );
+
+        assert_eq!(
+            block_on(provider.get(request.clone())),
+            Err(ChunkError::Unavailable)
+        );
+        assert!(
+            !block_on(journal.is_pending(crate::large_values::NodeRef {
+                object_hash: ContentHash(request.object_hash),
+                locator: request.locator,
+            }))
+            .unwrap(),
+            "only a byte-store staging attempt creates a durable recovery obligation"
+        );
     }
 
     #[test]
