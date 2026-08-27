@@ -244,6 +244,10 @@ type UpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOption
   applyDiffs?: TDiffs | object;
 };
 
+type TypedUpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
+  applyDiffs?: TDiffs & { [TColumn in keyof TReplacements]?: never };
+};
+
 type LargeValueUpdateForTable<TTable> = TTable extends {
   readonly _largeValueUpdateType: infer TDiffs;
 }
@@ -1994,13 +1998,31 @@ export class Db {
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
   update<
-    TTable extends TableProxy<any, any, any, any, any>,
-    TReplacements extends Partial<TTable["_initType"]>,
+    T,
+    Init,
+    StreamingInit,
+    StreamingUpdate,
+    LargeValueUpdate,
+    TReplacements extends Partial<Init>,
   >(
-    table: TTable,
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate> & {
+      readonly _largeValueUpdateType: LargeValueUpdate;
+    },
     id: string,
     data: TReplacements,
-    options?: UpdateOptionsWithDiffs<TReplacements, LargeValueUpdateForTable<TTable>>,
+    options?: TypedUpdateOptionsWithDiffs<TReplacements, LargeValueUpdate>,
+  ): WriteHandle;
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle;
+  update(
+    table: TableProxy<any, any, any, any, any>,
+    id: string,
+    data: Record<string, unknown>,
+    options?: UpdateOptions & { applyDiffs?: object },
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const diffs = options?.applyDiffs;

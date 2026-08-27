@@ -540,6 +540,17 @@ describe("typed app prototype", () => {
       );
       // @ts-expect-error Db no longer exposes a separate applyDiffs method
       db.applyDiffs(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {});
+      // @ts-expect-error a column cannot be both replaced and diffed
+      db.update(
+        largeValueUpdateApp.documents,
+        "00000000-0000-0000-0000-000000000001",
+        { title: "replacement" },
+        {
+          applyDiffs: {
+            title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+          },
+        },
+      );
       db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
         // @ts-expect-error partial descriptors belong exclusively to update's applyDiffs option
         title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
