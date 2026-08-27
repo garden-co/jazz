@@ -199,10 +199,11 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let (shape, binding) = node.whole_table_shape_binding(table)?;
+        let opts = RegisterShapeOptions::default();
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
-            read_view: RegisterShapeOptions::default().read_view_key(),
+            read_view: opts.read_view_key(),
         };
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, &shape, &binding)?;
@@ -210,20 +211,25 @@ impl PeerState {
             .publication_states
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .is_none();
+            .is_none_or(|prepared| !prepared.has_runtime_plan());
         if needs_prepare {
-            let plan = node.mark_peer_maintained_query_shape_cache(
-                &shape,
-                &binding,
-                DurabilityTier::Global,
-            );
-            let cached = CachedPeerQueryPlan::with_plan(DurabilityTier::Global, plan);
+            let plan =
+                node.mark_peer_maintained_query_shape_cache(&shape, &binding, opts.tier);
+            let cached = CachedPeerQueryPlan::with_plan(&opts, plan);
             let state = self.publication_states.entry(subscription).or_default();
             state.prepared_query = Some(cached);
             state.groove_runtime_token = Some(node.groove_runtime_token());
         } else {
             self.publication_states.entry(subscription).or_default();
         }
+        let (tier, read_view): (DurabilityTier, std::sync::Arc<ReadViewSpec>) = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.prepared_query.as_ref())
+            .map(CachedPeerQueryPlan::context)
+            .ok_or(Error::InvalidStoredValue(
+                "maintained subscription view is missing prepared state",
+            ))?;
         let previous_member_result_set = self
             .publication_states
             .get(&subscription)
@@ -244,8 +250,8 @@ impl PeerState {
                     previous_member_result_set: &previous_member_result_set,
                     reset_result_set: false,
                     result_table_filter: Some(table),
-                    tier: DurabilityTier::Global,
-                    read_view: &ReadViewSpec::default(),
+                    tier,
+                    read_view: &read_view,
                     purpose: RehydratePurpose::Query,
                 },
             )
@@ -440,15 +446,28 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        if self
+        let cached_context = self
             .publication_states
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .is_none()
-        {
-            let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, opts.tier);
+            .map(|prepared| (prepared.context(), prepared.has_runtime_plan()));
+        let ((tier, read_view), has_runtime_plan) = if let Some(context) = cached_context {
+            context
+        } else {
+            ((opts.tier, std::sync::Arc::new(opts.read_view.clone())), false)
+        };
+        if !has_runtime_plan {
+            let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, tier);
             let state = self.publication_states.entry(subscription).or_default();
-            state.prepared_query = Some(CachedPeerQueryPlan::with_plan(opts.tier, plan));
+            if let Some(prepared) = &mut state.prepared_query {
+                prepared.replace_runtime_plan(plan);
+            } else {
+                state.prepared_query = Some(CachedPeerQueryPlan::with_context(
+                    tier,
+                    read_view.clone(),
+                    plan,
+                ));
+            }
             state.groove_runtime_token = Some(node.groove_runtime_token());
         }
         self.rehydrate_query_maintained_subscription_view(
@@ -460,8 +479,8 @@ impl PeerState {
                 previous_member_result_set: &previous_member_result_set,
                 reset_result_set: false,
                 result_table_filter: None,
-                tier: opts.tier,
-                read_view: &opts.read_view,
+                tier,
+                read_view: &read_view,
                 purpose: RehydratePurpose::Query,
             },
         )
@@ -532,11 +551,11 @@ impl PeerState {
                 && program_fact_adds.is_empty()
                 && program_fact_removes.is_empty())
         {
-            let tier = self
+            let (tier, read_view) = self
                 .publication_states
                 .get(&subscription)
                 .and_then(|state| state.prepared_query.as_ref())
-                .map(CachedPeerQueryPlan::tier)
+                .map(CachedPeerQueryPlan::context)
                 .ok_or(Error::InvalidStoredValue(
                     "maintained subscription view is missing prepared state",
                 ))?;
@@ -550,7 +569,7 @@ impl PeerState {
                     reset_result_set: false,
                     result_table_filter,
                     tier,
-                    read_view: &ReadViewSpec::default(),
+                    read_view: &read_view,
                     purpose: RehydratePurpose::Query,
                 },
             )
@@ -1279,7 +1298,8 @@ impl PeerState {
                 .insert(subscription, known_state);
         }
         let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, opts.tier);
-        let cached = CachedPeerQueryPlan::with_plan(opts.tier, plan);
+        let cached = CachedPeerQueryPlan::with_plan(&opts, plan);
+        let (tier, read_view) = cached.context();
         let state = self.publication_states.entry(subscription).or_default();
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
@@ -1299,8 +1319,8 @@ impl PeerState {
                 previous_member_result_set: &previous_member_result_set,
                 reset_result_set: true,
                 result_table_filter: None,
-                tier: opts.tier,
-                read_view: &opts.read_view,
+                tier,
+                read_view: &read_view,
                 purpose,
             },
         )

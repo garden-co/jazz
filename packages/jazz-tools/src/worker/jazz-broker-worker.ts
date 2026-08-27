@@ -43,6 +43,7 @@ type TabPeer = {
   flushRequestId: number | null;
   flushPumpComplete: boolean;
   flushObserved: boolean;
+  transportWaitAbort: AbortController;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -65,6 +66,10 @@ type RuntimeContext = {
   serverUrl: string | null;
   serverAuthJson: string;
   serverConnectionStarted: boolean;
+  explicitlyDisconnected: boolean;
+  transportTransition: Promise<void>;
+  transportStateEpoch: number;
+  transportStateWaiters: Set<() => void>;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
@@ -113,7 +118,7 @@ async function connectTab(
       contexts.set(key, context);
     }
     await context.initialize;
-    await configureServer(context, message.options);
+    await enqueueTransportTransition(context, () => configureServer(context, message.options));
     attachTab(context, message.tabId, port);
     post(port, { type: "runtime-ready" });
   } catch (error) {
@@ -142,6 +147,10 @@ function createContext(
     serverUrl: options.serverUrl ?? null,
     serverAuthJson: options.authJson,
     serverConnectionStarted: false,
+    explicitlyDisconnected: false,
+    transportTransition: Promise.resolve(),
+    transportStateEpoch: 0,
+    transportStateWaiters: new Set(),
     initialize: Promise.resolve(),
     closing: null,
     idleReleaseTimer: null,
@@ -327,10 +336,74 @@ async function configureServer(
 
 function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
-  if (!requestedUrl) return;
+  if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
   requireRuntime(context).connect(requestedUrl, context.serverAuthJson);
   context.serverConnectionStarted = true;
+}
+
+/**
+ * The durable worker has one upstream transport, while every MessagePort is
+ * serviced independently. Serialize mutations and observations of that shared
+ * transport so an older disconnect cannot complete after a newer reconnect.
+ */
+function enqueueTransportTransition(
+  context: RuntimeContext,
+  transition: () => void | Promise<void>,
+): Promise<void> {
+  const queued = context.transportTransition.then(transition, transition);
+  context.transportTransition = queued.catch(() => undefined);
+  return queued;
+}
+
+function publishExplicitOffline(context: RuntimeContext): void {
+  context.transportStateEpoch += 1;
+  broadcast(context, {
+    type: "transport-state",
+    explicitlyDisconnected: context.explicitlyDisconnected,
+  });
+  const waiters = [...context.transportStateWaiters];
+  context.transportStateWaiters.clear();
+  for (const wake of waiters) wake();
+}
+
+function waitForTransportStateChange(
+  context: RuntimeContext,
+  observedEpoch: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (context.transportStateEpoch !== observedEpoch || signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      context.transportStateWaiters.delete(finish);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    signal?.addEventListener("abort", finish, { once: true });
+    context.transportStateWaiters.add(finish);
+  });
+}
+
+async function waitForServerConnection(
+  context: RuntimeContext,
+  runtime: NativeRuntimeAdapter,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (;;) {
+    if (signal?.aborted) return;
+    await context.transportTransition;
+    if (signal?.aborted) return;
+    if (context.explicitlyDisconnected) {
+      const epoch = context.transportStateEpoch;
+      await waitForTransportStateChange(context, epoch, signal);
+      continue;
+    }
+    await runtime.waitForUpstreamServerConnection();
+    // A disconnect can be queued while carrier negotiation is pending. Do not
+    // tell a caller that remote readiness succeeded until it observes the
+    // resulting namespace state.
+    if (!context.explicitlyDisconnected) return;
+  }
 }
 
 function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): void {
@@ -351,6 +424,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     flushRequestId: null,
     flushPumpComplete: false,
     flushObserved: false,
+    transportWaitAbort: new AbortController(),
     onMessage,
     onMessageError,
   };
@@ -433,21 +507,46 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         const pending = peer.pendingFrames.splice(0);
         pump.receive(pending);
       }
-      ensureServerConnection(peer.context);
+      await enqueueTransportTransition(peer.context, () => {
+        if (peer.context.explicitlyDisconnected) {
+          post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
+        } else {
+          ensureServerConnection(peer.context);
+        }
+      });
       result(peer, message.id);
       return;
     }
     if (message.type === "update-auth") {
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
-      await peer.subscriber.updateAuthenticatedClaims?.(message.sessionClaims);
-      peer.context.serverAuthJson = message.authJson;
-      await activeRuntime.updateAuth(message.authJson);
+      await enqueueTransportTransition(peer.context, async () => {
+        await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
+        peer.context.serverAuthJson = message.authJson;
+        if (!peer.context.explicitlyDisconnected) {
+          await activeRuntime.updateAuth(message.authJson);
+        }
+      });
       broadcast(peer.context, { type: "auth-restored" });
       return;
     }
     if (message.type === "disconnect") {
-      await activeRuntime.disconnect({ rejectWaiters: false });
-      peer.context.serverConnectionStarted = false;
+      await enqueueTransportTransition(peer.context, async () => {
+        const wasExplicitlyDisconnected = peer.context.explicitlyDisconnected;
+        peer.context.explicitlyDisconnected = true;
+        peer.context.serverConnectionStarted = false;
+        try {
+          await activeRuntime.disconnect({ rejectWaiters: false });
+        } catch (error) {
+          // Match the public Db contract: a failed explicit disconnect must
+          // not silently change RemoteIfPossible behavior for any tab. The
+          // adapter may already have detached the old carrier before reporting
+          // a retirement error, so restore normal connection ownership.
+          peer.context.explicitlyDisconnected = wasExplicitlyDisconnected;
+          if (!wasExplicitlyDisconnected) ensureServerConnection(peer.context);
+          throw error;
+        }
+        publishExplicitOffline(peer.context);
+      });
       result(peer, message.id);
       return;
     }
@@ -471,14 +570,19 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     if (message.type === "reconnect") {
       const serverUrl = peer.context.serverUrl;
       if (!serverUrl) throw new Error("Browser runtime reconnect requires a serverUrl");
-      await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
-      peer.context.serverAuthJson = message.authJson;
-      activeRuntime.connect(serverUrl, message.authJson);
-      peer.context.serverConnectionStarted = true;
+      await enqueueTransportTransition(peer.context, async () => {
+        await peer.subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
+        peer.context.serverAuthJson = message.authJson;
+        activeRuntime.connect(serverUrl, message.authJson);
+        peer.context.explicitlyDisconnected = false;
+        peer.context.serverConnectionStarted = true;
+        publishExplicitOffline(peer.context);
+      });
       result(peer, message.id);
       return;
     }
-    await activeRuntime.waitForUpstreamServerConnection();
+    await waitForServerConnection(peer.context, activeRuntime, peer.transportWaitAbort.signal);
+    if (peer.transportWaitAbort.signal.aborted) return;
     result(peer, message.id);
   } catch (error) {
     if ("id" in message) result(peer, message.id, asError(error));
@@ -562,6 +666,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
 }
 
 function result(peer: TabPeer, id: number, error?: Error): void {
+  if (peer.context.peers.get(peer.tabId) !== peer) return;
   post(peer.port, { type: "result", id, ...(error ? { error: errorDetails(error) } : {}) });
 }
 
@@ -580,6 +685,7 @@ function closeTab(context: RuntimeContext, tabId: string, closePort = true): voi
   const peer = context.peers.get(tabId);
   if (!peer) return;
   context.peers.delete(tabId);
+  peer.transportWaitAbort.abort();
   acknowledgeReset(context, tabId);
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
