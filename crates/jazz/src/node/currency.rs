@@ -1069,14 +1069,12 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            contribution_merge: record
-                .get_nullable_bytes(TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX)?
-                .map(|bytes| {
-                    postcard::from_bytes(bytes).map_err(|_| {
-                        Error::InvalidStoredValue("transaction contribution provenance must decode")
-                    })
-                })
-                .transpose()?,
+            contribution_merge: <Option<OwnedRecord> as records::RecordField>::read(
+                &record,
+                TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
+            )?
+            .map(contribution_merge_from_storage_record)
+            .transpose()?,
         };
         let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
