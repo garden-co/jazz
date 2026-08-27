@@ -219,7 +219,17 @@ describe("translateQuery", () => {
     ]);
   });
 
-  it("rejects partial large-value selections in include builders", () => {
+  it("rejects partial large-value selections in include builders without rejecting named columns", () => {
+    const namedColumnInclude = JSON.parse(
+      translateQuery(
+        app.projects.include({ todosViaProject: app.todos.select("body") })._build(),
+        app.wasmSchema,
+      ),
+    );
+    expect(namedColumnInclude.array_subqueries).toMatchObject([
+      { column_name: "todosViaProject", select_columns: ["body"] },
+    ]);
+
     expect(() =>
       translateQuery(
         app.projects
@@ -231,6 +241,21 @@ describe("translateQuery", () => {
       ),
     ).toThrow(
       'Include builder for relation "todosViaProject" does not support partial large-value selections.',
+    );
+
+    expect(() =>
+      translateQuery(
+        app.projects
+          .include({
+            todosViaProject: app.todos.include({
+              project: app.projects.select({ name: { from: 0, to: 1 } }),
+            }),
+          })
+          ._build(),
+        app.wasmSchema,
+      ),
+    ).toThrow(
+      'Include builder for relation "project" does not support partial large-value selections.',
     );
   });
   it("keeps native relation IR for relation traversal queries", () => {
