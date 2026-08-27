@@ -621,7 +621,24 @@ where
                 .get(request.locator, ContentHash(request.object_hash))
                 .await
             {
-                Ok(bytes) => Ok(bytes),
+                // A previous remote resolution may have made the immutable
+                // bytes durable just before its metadata observer failed. Do
+                // not let a subsequent local hit turn that failed install
+                // into a permanently invisible accounting hole: the observer
+                // is deliberately idempotent and reconciles this mapping on
+                // every provider load that reaches storage.
+                Ok(bytes) => {
+                    observer
+                        .installed(
+                            crate::large_values::NodeRef {
+                                object_hash: ContentHash(request.object_hash),
+                                locator: request.locator,
+                            },
+                            bytes.clone(),
+                        )
+                        .await?;
+                    Ok(bytes)
+                }
                 Err(ChunkStorageError::Unavailable) => {
                     let bytes = self.resolver.resolve(request.clone()).await?;
                     self.storage
@@ -1427,6 +1444,30 @@ mod tests {
         }
     }
 
+    struct FailOnceInstallObserver {
+        attempts: Cell<usize>,
+        installed: Cell<usize>,
+    }
+
+    impl ChunkInstallObserver for FailOnceInstallObserver {
+        fn installed(
+            &self,
+            _node_ref: crate::large_values::NodeRef,
+            _encoded: Bytes,
+        ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+            self.attempts.set(self.attempts.get().saturating_add(1));
+            if self.attempts.get() == 1 {
+                return Box::pin(async {
+                    Err(ChunkError::Backend(
+                        "injected metadata WriteMany failure".to_owned(),
+                    ))
+                });
+            }
+            self.installed.set(self.installed.get().saturating_add(1));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     struct CountingProvider {
         calls: Cell<usize>,
         bytes: Bytes,
@@ -2018,6 +2059,47 @@ mod tests {
             block_on(managed.get(locator, ContentHash([7; 32]))),
             Err(ChunkStorageError::Integrity)
         );
+    }
+
+    #[test]
+    fn resident_remote_chunk_retries_its_failed_metadata_install_after_reopen() {
+        let storage = Rc::new(MemoryChunkStorage::new());
+        let bytes = Bytes::from_static(b"authenticated remote branch bytes");
+        let request = ChunkRequest {
+            object_hash: object_hash(&bytes).0,
+            locator: Locator::from_seed(b"retry-resident-install"),
+        };
+        let observer = Rc::new(FailOnceInstallObserver {
+            attempts: Cell::new(0),
+            installed: Cell::new(0),
+        });
+        let provider = StorageChunkProvider::with_resolver_and_observer(
+            storage.clone(),
+            Rc::new(StaticResolver(bytes.clone())),
+            observer.clone(),
+        );
+
+        // The bytes are already resident when metadata durability fails.
+        assert!(matches!(
+            block_on(provider.get(request.clone())),
+            Err(ChunkError::Backend(message)) if message.contains("WriteMany")
+        ));
+        assert_eq!(
+            block_on(storage.get(request.locator, ContentHash(request.object_hash))).unwrap(),
+            bytes
+        );
+
+        // A reconstructed provider models reopen: its first load is now a
+        // local hit, but it must still reconcile the missing install exactly
+        // once instead of silently returning the resident bytes.
+        let reopened = StorageChunkProvider::with_resolver_and_observer(
+            storage,
+            Rc::new(StaticResolver(bytes.clone())),
+            observer.clone(),
+        );
+        assert_eq!(block_on(reopened.get(request)), Ok(bytes));
+        assert_eq!(observer.attempts.get(), 2);
+        assert_eq!(observer.installed.get(), 1);
     }
 
     #[test]
