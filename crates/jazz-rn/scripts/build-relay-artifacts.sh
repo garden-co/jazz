@@ -98,15 +98,17 @@ case "$platform" in
     done
     staging=$(mktemp -d)
     trap 'rm -rf "$staging"' EXIT
+    simulator_stage="$staging/simulator"
+    mkdir -p "$simulator_stage"
     lipo -create \
       "$root/target/aarch64-apple-ios-sim/release/libjazz_native_relay.a" \
       "$root/target/x86_64-apple-ios/release/libjazz_native_relay.a" \
-      -output "$staging/libjazz_native_relay_simulator.a"
+      -output "$simulator_stage/libjazz_native_relay.a"
     framework="$package/JazzNativeRelay.xcframework"
     rm -rf "$framework"
     xcodebuild -create-xcframework \
       -library "$root/target/$device_target/release/libjazz_native_relay.a" -headers "$root/crates/jazz-native-relay/include" \
-      -library "$staging/libjazz_native_relay_simulator.a" -headers "$root/crates/jazz-native-relay/include" \
+      -library "$simulator_stage/libjazz_native_relay.a" -headers "$root/crates/jazz-native-relay/include" \
       -output "$framework"
     write_manifest "$package/ios/jazz-native-relay.manifest.json" "$framework"
     ;;

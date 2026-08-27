@@ -157,6 +157,7 @@ function verifyIosSlices(expected) {
     ["device", false],
     ["simulator", false],
   ]);
+  let libraryBasename;
   for (const slice of slices) {
     if (typeof slice !== "object" || slice === null || Array.isArray(slice))
       throw new Error("iOS XCFramework AvailableLibraries contains a non-dictionary slice");
@@ -175,6 +176,11 @@ function verifyIosSlices(expected) {
         `iOS ${role} XCFramework slice ${path} is absent from its manifest inventory`,
       );
     requiredRoles.set(role, true);
+    if (libraryBasename === undefined) libraryBasename = library;
+    else if (library !== libraryBasename)
+      throw new Error(
+        `iOS XCFramework slices use inconsistent static-library names: ${libraryBasename} and ${library}`,
+      );
   }
   for (const [role, present] of requiredRoles)
     if (!present) throw new Error(`iOS XCFramework is missing its ${role} static-library slice`);
