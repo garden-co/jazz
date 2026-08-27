@@ -406,6 +406,118 @@ fn row_version_repair_reply_retries_with_sync_context_after_backpressure() {
     assert!(outbound.borrow().is_empty());
 }
 
+/// An authorization-scope intent remains owned by the requesting client until
+/// its upstream wire admission succeeds, so a one-shot backpressure refusal
+/// cannot strand Alice's permission preflight forever.
+///
+/// ```text
+/// alice ──scope intent──► bounded upstream ──✗──► authority
+/// alice ──retry─────────► bounded upstream ─────► authority
+/// ```
+#[test]
+fn upstream_authorization_scope_intent_retries_after_bounded_transport_backpressure() {
+    struct BackpressureOnceAdmittedTransport {
+        outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+        failed: bool,
+        session_context: ConnectionSessionContext,
+    }
+
+    impl Transport for BackpressureOnceAdmittedTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if !self.failed {
+                self.failed = true;
+                return Err(TransportError::Backpressure);
+            }
+            self.outbound.borrow_mut().push_back(message);
+            Ok(())
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            None
+        }
+
+        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+            Some(self.session_context)
+        }
+    }
+
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let schema = schema();
+    let client = open_db(0xc4, author, &schema);
+    let (transport, _authority_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xc4; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = crate::db::block_on(client.connect_upstream(transport));
+    let session_context = upstream
+        .borrow()
+        .transport
+        .connection_session_context()
+        .expect("the real admitted transport supplies an authority context");
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    upstream.borrow_mut().transport = Box::new(BackpressureOnceAdmittedTransport {
+        outbound: Rc::clone(&outbound),
+        failed: false,
+        session_context,
+    });
+
+    let advice = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(4),
+    });
+
+    upstream
+        .borrow_mut()
+        .tick()
+        .expect("backpressure keeps the authority intent pending");
+    assert!(outbound.borrow().is_empty());
+    {
+        let connection = upstream.borrow();
+        let ConnectionLink::Upstream(state) = &connection.link else {
+            panic!("client connection must be upstream");
+        };
+        assert!(state.pending.iter().any(|command| matches!(
+            command,
+            PendingUpstreamCommand::AuthorizationScopeIntent { .. }
+        )));
+        assert!(
+            state
+                .scope_lease_manager
+                .requests
+                .values()
+                .all(|request| !request.intent_sent)
+        );
+    }
+
+    upstream
+        .borrow_mut()
+        .tick()
+        .expect("later capacity retries the retained authority intent");
+    assert!(matches!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::AuthorizationScopeIntent { .. })
+    ));
+    assert!(outbound.borrow().is_empty());
+    {
+        let connection = upstream.borrow();
+        let ConnectionLink::Upstream(state) = &connection.link else {
+            panic!("client connection must be upstream");
+        };
+        assert!(state.pending.is_empty());
+        assert!(
+            state
+                .scope_lease_manager
+                .requests
+                .values()
+                .all(|request| request.intent_sent)
+        );
+    }
+    drop(advice);
+}
+
 /// An authority-scope intent may expand to a multi-frame proof sequence. Its
 /// semantic producer queues that sequence before returning to inbound work, so
 /// bounded wire admission must preserve both order and exact multiplicity.
