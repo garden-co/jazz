@@ -330,6 +330,35 @@ describe("broker worker context initialization", () => {
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
   });
 
+  it("carries a verified local-first proof from worker open to follower admission", async () => {
+    const selfSignedClientProof = {
+      token: "verified-token",
+      appId: "worker-initialization-test",
+      claimedAuthor: '["urn:jazz:local-first","alice"]',
+    };
+    const initOptions = { ...options("self-signed-worker"), selfSignedClientProof };
+
+    expect((await connect(initOptions, "proof-tab")).outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.openBrowser).not.toHaveBeenCalled();
+    expect(mocks.openBrowserWithSelfSignedProof).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Uint8Array),
+      expect.any(Uint8Array),
+      selfSignedClientProof.token,
+      selfSignedClientProof.appId,
+      selfSignedClientProof.claimedAuthor,
+    );
+    expect(mocks.fromDb).toHaveBeenCalledWith(
+      expect.anything(),
+      initOptions.schema,
+      initOptions.node,
+      initOptions.author,
+      1,
+      false,
+      { selfSignedClientProof },
+    );
+  });
+
   it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
     const rawDb = { close: vi.fn(async () => true) };
     mocks.openBrowser.mockResolvedValueOnce(rawDb);

@@ -12,7 +12,7 @@ import { app } from "../../schema.js";
  */
 export function useChatDisplayName(chatId: string, chatName?: string): string {
   const session = useSession();
-  const userId = session?.user_id ?? null;
+  const userId = session?.user ?? null;
 
   const { data: members = [] } = useAll(app.chatMembers.where({ chatId }));
   const { data: allProfiles = [] } = useAll(app.profiles);

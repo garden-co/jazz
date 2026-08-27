@@ -19,6 +19,7 @@ import {
   resolveClientSessionStateSync,
   trustedReservedSessionToken,
 } from "./client-session.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import {
   resolveRuntimeConfigSyncInitInput,
@@ -28,13 +29,19 @@ import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
 import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
 
-type RuntimeSerializedSession = Session & {
+type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
   [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
 };
 
 function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
   const token = trustedReservedSessionToken(session);
-  return token ? { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } : session;
+  return {
+    issuer: session.issuer,
+    user_id: session.user_id,
+    claims: session.claims,
+    authMode: session.authMode,
+    ...(token ? { [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } : {}),
+  };
 }
 
 function encodeBranchColumnValue(value: Value): Uint8Array {
@@ -151,6 +158,14 @@ export interface Runtime {
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
+  ): MutationResult;
+  /** Internal binding entrypoint for the typed page-edit update DSL. */
+  updateLargeValues?(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    writeContextJson?: string | null,
   ): MutationResult;
   upsert(
     table: string,
@@ -801,8 +816,8 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
-      trustedReservedSession: this.context.trustedReservedSession,
-    }).session;
+      trustedReservedSession: getTrustedReservedSession(this.context),
+    }).internalSession;
   }
 
   private buildTransportAuthPayload(): {
@@ -884,71 +899,6 @@ export class JazzClient {
     this.runtime.onMutationError(listener);
   }
 
-  async readValueRange(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<Uint8Array> {
-    if (!this.runtime.readValueRange) throw new Error("Runtime does not support value ranges");
-    return await this.runtime.readValueRange(table, objectId, column, start, end);
-  }
-
-  async readTextUtf16Range(
-    table: string,
-    objectId: string,
-    column: string,
-    start: number,
-    end: number,
-  ): Promise<string> {
-    if (!this.runtime.readTextUtf16Range) {
-      throw new Error("Runtime does not support UTF-16 value ranges");
-    }
-    return await this.runtime.readTextUtf16Range(table, objectId, column, start, end);
-  }
-
-  async readJsonPointer(
-    table: string,
-    objectId: string,
-    column: string,
-    pointer: string,
-  ): Promise<unknown> {
-    if (!this.runtime.readJsonPointer) throw new Error("Runtime does not support JSON pointers");
-    return await this.runtime.readJsonPointer(table, objectId, column, pointer);
-  }
-
-  async appendValue(
-    table: string,
-    objectId: string,
-    column: string,
-    bytes: Uint8Array,
-  ): Promise<WriteHandle<{ id: string }>> {
-    if (!this.runtime.appendValue) throw new Error("Runtime does not support value append");
-    const result = await this.runtime.appendValue(table, objectId, column, bytes);
-    return new WriteHandle(committedBatchId(result), this);
-  }
-
-  async spliceValue(
-    table: string,
-    objectId: string,
-    column: string,
-    offset: number,
-    deleteLength: number,
-    insert: Uint8Array,
-  ): Promise<WriteHandle<{ id: string }>> {
-    if (!this.runtime.spliceValue) throw new Error("Runtime does not support value splice");
-    const result = await this.runtime.spliceValue(
-      table,
-      objectId,
-      column,
-      offset,
-      deleteLength,
-      insert,
-    );
-    return new WriteHandle(committedBatchId(result), this);
-  }
-
   commitTransaction(id: OpenBatchId): WriteHandle {
     const batchId = requireTransactionalRuntime(this.runtime).commitTransaction(id);
     return new WriteHandle(batchId, this);
@@ -976,7 +926,7 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
-    this.context.trustedReservedSession = undefined;
+    setTrustedReservedSession(this.context, undefined);
     this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport.
     // Carry forward admin/backend secrets from context — omitting them here
@@ -988,7 +938,7 @@ export class JazzClient {
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
   updateTrustedAuthToken(jwtToken: string, session: Session): void {
     this.context.jwtToken = jwtToken;
-    this.context.trustedReservedSession = session;
+    setTrustedReservedSession(this.context, session);
     this.resolvedSession = this.resolveSessionFromContext();
     this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
@@ -1356,6 +1306,60 @@ export class JazzClient {
       options?.branch,
     );
     return new WriteHandle(committedBatchId(result), this);
+  }
+
+  /** @internal Typed `Db.applyDiffs` lowering; not exposed as an imperative API. */
+  updateLargeValues(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): WriteHandle {
+    const result = this.updateLargeValuesInternal(
+      table,
+      objectId,
+      updates,
+      descriptors,
+      options?.updatedAt,
+      session,
+      attribution,
+      undefined,
+      options?.branch,
+    );
+    return new WriteHandle(committedBatchId(result), this);
+  }
+
+  /** @internal */
+  updateLargeValuesInternal(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    updatedAt?: number,
+    session?: Session,
+    attribution?: string,
+    openBatchId?: OpenBatchId,
+    branch?: BranchView,
+  ): MutationResult {
+    if (openBatchId || branch) {
+      throw new Error(
+        "Partial-value updates are not yet supported inside transactions or branch views.",
+      );
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      undefined,
+      updatedAt,
+    );
+    if (!this.runtime.updateLargeValues) {
+      throw new Error("Native runtime does not support typed partial-value updates.");
+    }
+    return this.runtime.updateLargeValues(table, objectId, updates, descriptors, writeContext);
   }
 
   /**

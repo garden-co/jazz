@@ -68,7 +68,7 @@ fn some(value: Value) -> Value {
 
 #[futures_test::test]
 async fn non_count_aggregate_outputs_are_always_nullable() {
-    let storage = MemoryStorage::new(&["metrics"]);
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
     let mut database = Database::new(metric_schema(ColumnType::U64), storage)
         .await
         .unwrap();
@@ -96,7 +96,7 @@ async fn non_count_aggregate_outputs_are_always_nullable() {
 
 #[futures_test::test]
 async fn grouped_aggregate_over_zero_rows_returns_no_rows() {
-    let storage = MemoryStorage::new(&["metrics"]);
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
     let mut database = Database::new(metric_schema(ColumnType::U64), storage)
         .await
         .unwrap();
@@ -112,7 +112,7 @@ async fn grouped_aggregate_over_zero_rows_returns_no_rows() {
 
 #[futures_test::test]
 async fn ungrouped_aggregate_over_zero_rows_returns_one_row() {
-    let storage = MemoryStorage::new(&["metrics"]);
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
     let mut database = Database::new(metric_schema(ColumnType::U64), storage)
         .await
         .unwrap();
@@ -133,7 +133,7 @@ async fn ungrouped_aggregate_over_zero_rows_returns_one_row() {
 
 #[futures_test::test]
 async fn all_null_inputs_return_null_except_for_counts() {
-    let storage = MemoryStorage::new(&["metrics"]);
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
     let mut database = Database::new(metric_schema(ColumnType::U64.nullable()), storage)
         .await
         .unwrap();
@@ -167,7 +167,7 @@ async fn all_null_inputs_return_null_except_for_counts() {
 
 #[futures_test::test]
 async fn nullable_aggregate_outputs_wrap_non_null_results() {
-    let storage = MemoryStorage::new(&["metrics"]);
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
     let mut database = Database::new(metric_schema(ColumnType::U64.nullable()), storage)
         .await
         .unwrap();
@@ -204,7 +204,7 @@ async fn nullable_aggregate_outputs_wrap_non_null_results() {
 
 #[futures_test::test]
 async fn signed_i64_inputs_are_supported() {
-    let storage = MemoryStorage::new(&["metrics"]);
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
     let mut database = Database::new(metric_schema(ColumnType::I64), storage)
         .await
         .unwrap();
@@ -245,7 +245,7 @@ async fn signed_i64_inputs_are_supported() {
 
 #[futures_test::test]
 async fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
-    let storage = MemoryStorage::new(&["metrics"]);
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
     let mut database = Database::new(metric_schema(ColumnType::U8), storage)
         .await
         .unwrap();

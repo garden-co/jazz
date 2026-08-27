@@ -8,7 +8,7 @@ export function TodoList() {
   const session = useSession();
   const [title, setTitle] = createSignal("");
 
-  const sessionUserId = createMemo(() => session()?.user_id ?? null);
+  const sessionUserId = createMemo(() => session()?.user ?? null);
   const todos = useAll(() => ({ query: app.todos }));
 
   const handleSubmit: JSX.EventHandler<HTMLFormElement, SubmitEvent> = (e) => {

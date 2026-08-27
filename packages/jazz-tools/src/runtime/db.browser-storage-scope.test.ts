@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import { ANONYMOUS_JWT_ISSUER } from "./client-session.js";
-import { LOCAL_FIRST_JWT_ISSUER, sessionFromVerifiedReservedJwtPayload } from "./client-session.js";
+import {
+  internalSessionFromVerifiedReservedJwtPayload,
+  LOCAL_FIRST_JWT_ISSUER,
+} from "./client-session.js";
 import { createBrowserAuthSessionKey } from "./browser-worker-config.js";
+import { setTrustedReservedSession } from "./db-internal-session.js";
 
 function toBase64Url(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8")
@@ -18,14 +22,20 @@ function makeJwt(payload: Record<string, unknown>): string {
 
 describe("resolveDefaultPersistentDbName", () => {
   it("keeps verified local-first principals distinct in browser worker auth metadata", () => {
-    const configFor = (subject: string): DbConfig => ({
-      appId: "chat-app",
-      jwtToken: makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: subject }),
-      trustedReservedSession: sessionFromVerifiedReservedJwtPayload(
-        { iss: LOCAL_FIRST_JWT_ISSUER, sub: subject },
-        "local-first",
-      )!,
-    });
+    const configFor = (subject: string): DbConfig => {
+      const config: DbConfig = {
+        appId: "chat-app",
+        jwtToken: makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: subject }),
+      };
+      setTrustedReservedSession(
+        config,
+        internalSessionFromVerifiedReservedJwtPayload(
+          { iss: LOCAL_FIRST_JWT_ISSUER, sub: subject },
+          "local-first",
+        ),
+      );
+      return config;
+    };
 
     expect(createBrowserAuthSessionKey(configFor("alice"))).not.toBe(
       createBrowserAuthSessionKey(configFor("bob")),

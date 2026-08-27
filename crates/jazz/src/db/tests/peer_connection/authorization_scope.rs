@@ -244,7 +244,7 @@ fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
 /* Retired with the caller-authored scope protocol.  Authority-owned intent
  * coverage lives with the permission advice tests above.
 fn legacy_authorization_scope_subscribe_refreshes_claims() {
-    server.node().borrow_mut().set_session_claims(
+    server.node().borrow_mut().set_test_provider_claims(
         identity,
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
@@ -1048,7 +1048,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
     // This is an unverified wire message from an already admitted session,
     // not an authenticated host refresh. It must not replace the admission
     // claim map even though it carries the connection's real identity.
-    client.set_identity_claims(reader, self_asserted_invite);
+    client.set_test_provider_claims(reader, self_asserted_invite);
     client.tick().unwrap();
     server.tick().unwrap();
     assert_eq!(

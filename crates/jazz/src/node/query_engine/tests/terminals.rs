@@ -76,8 +76,11 @@ fn scalar_inner_include_preserves_nullable_root_carrier_descriptor() {
     let OutputTerminalSchema::AppRows(app_rows) = &terminal.output else {
         panic!("app-row terminal must carry its prepared descriptor");
     };
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .expect("inline descriptor database");
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .expect("inline descriptor database");
     let runtime_rows = database
         .query_graph(terminal.graph.clone())
         .expect("infer scalar include terminal output");

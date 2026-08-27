@@ -4,7 +4,9 @@ import {
   type ConnectRuntimeOptions,
   type WasmModule,
 } from "./client.js";
+import type { AppContext } from "./context.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import {
   RuntimeSource,
   type BrowserWorkerConnection,
@@ -24,8 +26,7 @@ import { installWasmTelemetry } from "./sync-telemetry.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
-  isReservedJazzIssuer,
-  resolveClientSessionSync,
+  resolveClientInternalSessionSync,
 } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
@@ -66,17 +67,28 @@ function randomBytes(): Uint8Array {
 }
 
 function sessionFromConfig(config: DbConfig) {
-  return resolveClientSessionSync(config);
+  return resolveClientInternalSessionSync({
+    ...config,
+    trustedReservedSession: getTrustedReservedSession(config),
+  });
 }
 
 function runtimeAuthorFromConfig(config: DbConfig) {
   const session = sessionFromConfig(config);
-  return session && !isReservedJazzIssuer(session.issuer)
-    ? session
-    : {
-        issuer: "urn:jazz:runtime-host",
-        user_id: `${config.appId}:${config.env ?? "dev"}:${session?.user_id ?? "unauthenticated"}`,
-      };
+  if (session) return session;
+
+  // A sessionless default runtime is an explicitly trusted backend open. Its
+  // raw config still needs a syntactically valid, untrusted author because the
+  // native constructor validates that input before its separate backend ABI
+  // derives SYSTEM. This placeholder never becomes the runtime's author.
+  if (config.backendSecret || config.adminSecret) {
+    return { issuer: "https://jazz.invalid", user_id: "backend-open" };
+  }
+  throw new Error("Default runtime requires a verified session or backend credential");
+}
+
+function isBackendRuntime(config: DbConfig): boolean {
+  return !sessionFromConfig(config) && Boolean(config.backendSecret || config.adminSecret);
 }
 
 export function selfSignedClientProofFromConfig(
@@ -158,6 +170,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
     const session = sessionFromConfig(config);
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
+    const backendMode = isBackendRuntime(config);
     const identitySeed = persistentIdentitySeed(config, session);
     // A persistent worker may replay a main-thread-authored transaction after
     // the page has reopened. Keep that logical client's node identity stable
@@ -176,28 +189,26 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       flushEvery,
       !browserMode,
       selfSignedClientProof,
+      backendMode,
     );
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
     }
 
-    return JazzClient.connectWithRuntime(
-      mainThreadPeerRuntime,
-      {
-        appId: config.appId,
-        schema,
-        driver: config.driver,
-        serverUrl: config.serverUrl,
-        env: config.env,
-        jwtToken: config.jwtToken,
-        cookieSession: config.cookieSession,
-        trustedReservedSession: config.trustedReservedSession,
-        backendSecret: config.backendSecret,
-        adminSecret: config.adminSecret,
-        tier: "local",
-      },
-      runtimeOptions,
-    );
+    const context: AppContext = {
+      appId: config.appId,
+      schema,
+      driver: config.driver,
+      serverUrl: config.serverUrl,
+      env: config.env,
+      jwtToken: config.jwtToken,
+      cookieSession: config.cookieSession,
+      backendSecret: config.backendSecret,
+      adminSecret: config.adminSecret,
+      tier: "local",
+    };
+    setTrustedReservedSession(context, getTrustedReservedSession(config));
+    return JazzClient.connectWithRuntime(mainThreadPeerRuntime, context, runtimeOptions);
   }
 
   override createBrowserWorkerConnection({
@@ -216,6 +227,12 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     }
     const session = sessionFromConfig(config);
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
+    const backendMode = isBackendRuntime(config);
+    if (backendMode) {
+      throw new Error(
+        "Persistent browser workers require a verified client session, not backend credentials",
+      );
+    }
     const identitySeed = persistentIdentitySeed(config, session);
     const dbName = resolveDefaultPersistentDbName(config);
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
@@ -223,7 +240,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       return new AttachedBrowserWorkerConnection(
         runtime,
         config.runtimeSources.browserWorkerPort,
-        resolveClientSessionSync(config)?.claims ?? {},
+        sessionFromConfig(config)?.claims ?? {},
         dbName,
         { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
       );
@@ -242,7 +259,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),
-        sessionClaims: resolveClientSessionSync(config)?.claims ?? {},
+        sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
@@ -263,7 +280,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
-    const sessionClaims = resolveClientSessionSync(config)?.claims ?? {};
+    const sessionClaims = sessionFromConfig(config)?.claims ?? {};
     const connection = new MessagePortBrowserFollowerConnection(
       runtime,
       port,
@@ -286,6 +303,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     flushEvery: number,
     historyComplete: boolean,
     selfSignedClientProof?: NativeSelfSignedClientProof,
+    backendMode = false,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -295,7 +313,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery, selfSignedClientProof },
+        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode },
       );
       return this.ownerRuntime;
     }

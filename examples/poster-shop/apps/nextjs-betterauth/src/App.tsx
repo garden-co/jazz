@@ -8,7 +8,7 @@ import { CanvasSurface } from "@/src/components/CanvasSurface";
 import { CheckpointShelf } from "@/src/components/CheckpointShelf";
 import { CollaboratorCursors } from "@/src/components/CollaboratorCursors";
 import { LayerPanel } from "@/src/components/LayerPanel";
-import { authorForSession, roleForActiveCanvas } from "@/src/lib/identity";
+import { roleForActiveCanvas } from "@/src/lib/identity";
 
 export function PosterShopApp() {
   return <PosterStudio />;
@@ -21,7 +21,7 @@ export function PosterStudio() {
   const { data: canvases = [] } = useAll(app.canvases);
   const [activeId, setActiveId] = useState<string | null>(null);
   const active = canvases.find((canvas) => canvas.id === activeId) ?? canvases[0];
-  const author = session ? authorForSession(session.issuer, session.user_id) : null;
+  const author = session?.user ?? null;
   const { data: memberships = [] } = useAll(app.canvasMembers);
   const role = roleForActiveCanvas(memberships, active?.id, author);
   const canEdit = role === "editor" || role === "admin";

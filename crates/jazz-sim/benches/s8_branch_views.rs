@@ -31,7 +31,8 @@ pub(crate) fn run(row_count: usize) {
     let db = block_on(Db::open_history_complete(
         DbConfig::new(
             schema.clone(),
-            MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
+            MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+                .expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x58; 16]),
                 author: AuthorSubject::SYSTEM,

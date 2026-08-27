@@ -373,7 +373,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
                         PublicTablePolicies::new()
                             .with_select(PublicPolicyExpr::eq_session(
                                 "userID",
-                                vec!["user_id".to_owned()],
+                                vec!["claims".to_owned(), "user_id".to_owned()],
                             )),
                     ),
             ),
@@ -381,7 +381,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xa1);
     let other = user(0xb2);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
     );
@@ -831,7 +831,7 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]));
+    core.set_test_provider_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]));
     accept_global(
         &mut core,
         MergeableCommit::new("docs", row(0xd1), 10).cells(BTreeMap::from([
@@ -905,7 +905,7 @@ fn session_sub_claim_remains_an_application_owned_value() {
             ("owner".to_owned(), Value::Uuid(other.test_uuid())),
         ])),
     );
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.test_uuid()))]));
+    core.set_test_provider_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.test_uuid()))]));
 
     let shape = Query::from("docs")
         .validate(&core.catalogue.schema)

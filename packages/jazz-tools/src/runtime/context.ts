@@ -66,6 +66,26 @@ export interface Session {
 }
 
 /**
+ * A session that Jazz has admitted for use by a client binding.
+ *
+ * `user` is the opaque, canonical JSON encoding of the admitted JWT's exact
+ * `[iss, sub]` pair. Policies see it as `session.user`, and Jazz records the
+ * same identity in `$createdBy` and
+ * `$updatedBy`. It is deliberately distinct from `user_id`: the latter is the
+ * provider-controlled raw JWT `sub`.
+ *
+ * This is not a user-row reference, display name, or raw `sub`. Applications
+ * must obtain it from an admitted session rather than constructing it
+ * themselves. Local interning is an implementation detail and is never
+ * exposed here.
+ */
+export interface PublicSession {
+  readonly user: string;
+  readonly claims: Readonly<Record<string, unknown>>;
+  readonly authMode: AuthMode;
+}
+
+/**
  * Configuration for connecting to Jazz.
  */
 export interface AppContext {
@@ -103,9 +123,6 @@ export interface AppContext {
    * an HttpOnly cookie instead of a JS-readable bearer token.
    */
   cookieSession?: Session;
-
-  /** @internal Session produced by a first-party reserved-issuer auth flow. */
-  trustedReservedSession?: Session;
 
   /**
    * Backend secret for session impersonation.

@@ -2,9 +2,96 @@
 
 use super::*;
 
+/// A non-blocking owner turn must leave a real wake route behind for cold
+/// hydration. Merely noticing pending work on a later manually-driven tick is
+/// insufficient for event-driven hosts: no unrelated transport activity is
+/// required to resume this subscription.
+#[futures_test::test]
+async fn cold_hydration_wakes_the_supplied_owner_once_without_polling() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("wake bridge".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert_eq!(wakes.0.load(Ordering::Acquire), 0);
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        1,
+        "storage readiness schedules exactly one following owner turn"
+    );
+    let mut observed_wakes = wakes.0.load(Ordering::Acquire);
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+        let next_wakes = wakes.0.load(Ordering::Acquire);
+        assert!(
+            next_wakes > observed_wakes,
+            "each further cold operation requests its own owner turn instead of polling hot"
+        );
+        observed_wakes = next_wakes;
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        vec![(
+            vec![Value::U64(1), Value::String("wake bridge".to_owned())],
+            1
+        )]
+    );
+    let idle_wakes = wakes.0.load(Ordering::Acquire);
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        idle_wakes,
+        "quiescent runtimes retain no storage wake and do not schedule a hot follow-up"
+    );
+}
+
 #[futures_test::test]
 async fn subscribe_sends_empty_hydration_snapshot_without_writes() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -30,7 +117,7 @@ async fn history_rows_remain_plain_across_hydration_post_write_and_reopen() {
     let column_families = schema.column_families();
 
     let storage = {
-        let storage = MemoryStorage::new(&column_families);
+        let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
         let mut database = Database::new(schema.clone(), storage).await.unwrap();
         seed_jazz_docs_history(&mut database, 0, 12).await;
 
@@ -124,7 +211,7 @@ async fn seed_jazz_docs_history(database: &mut Database, start_idx: u64, row_cou
 
 #[futures_test::test]
 async fn rejects_unknown_tables() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("missing", vec![Value::U64(1)]);
@@ -137,7 +224,7 @@ async fn rejects_unknown_tables() {
 
 #[futures_test::test]
 async fn invalid_batches_do_not_partially_write_valid_earlier_operations() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(
@@ -162,7 +249,7 @@ async fn invalid_batches_do_not_partially_write_valid_earlier_operations() {
 
 #[futures_test::test]
 async fn final_atomic_commit_failure_leaves_base_rows_unwritten_and_poisons_database() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -196,7 +283,8 @@ async fn final_atomic_commit_failure_leaves_base_rows_unwritten_and_poisons_data
 
 #[futures_test::test]
 async fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
-    let indexed_storage = MemoryStorage::new(&["albums", "indices"]);
+    let indexed_storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut indexed = Database::new(indexed_albums_schema(), indexed_storage)
         .await
         .unwrap();
@@ -220,7 +308,8 @@ async fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
         [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
     );
 
-    let join_storage = MemoryStorage::new(&["albums", "artists"]);
+    let join_storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut joined = Database::new(albums_artists_schema(), join_storage)
         .await
         .unwrap();
@@ -249,7 +338,7 @@ async fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
     joined.commit_batch(batch).await.unwrap();
     assert_eq!(expect_recv_vals(&subscription).len(), 1);
 
-    let recursive_storage = MemoryStorage::new(&["edges"]);
+    let recursive_storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut recursive = Database::new(edges_schema(), recursive_storage)
         .await
         .unwrap();
@@ -273,7 +362,7 @@ async fn atomic_commit_path_supports_indexed_join_and_recursive_workloads() {
 
 #[futures_test::test]
 async fn subscriptions_reject_unknown_tables_and_indices() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     assert!(matches!(
@@ -296,7 +385,7 @@ async fn rejects_primary_key_type_mismatches_before_writing() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(
@@ -324,7 +413,7 @@ async fn rejects_primary_key_type_mismatches_before_writing() {
 
 #[futures_test::test]
 async fn inserts_accept_values_in_table_declaration_order_even_when_storage_order_differs() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let schema = DatabaseSchema::new([TableSchema::new(
         "albums",
         [
@@ -383,7 +472,8 @@ async fn record_valued_columns_round_trip_through_table_storage() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     let metadata = crate::records::OwnedRecord::new(
         child
@@ -409,7 +499,8 @@ async fn record_valued_columns_round_trip_through_table_storage() {
 
 #[futures_test::test]
 async fn integer_primary_keys_are_stored_with_tagged_order_preserving_keys() {
-    let storage = MemoryStorage::new(&["u8_keys", "u16_keys", "u32_keys", "u64_keys"]);
+    let storage = MemoryStorage::new(&["u8_keys", "u16_keys", "u32_keys", "u64_keys"])
+        .expect("valid memory storage families");
     let mut database = Database::new(integer_key_widths_schema(), storage)
         .await
         .unwrap();
@@ -463,7 +554,7 @@ async fn integer_primary_keys_are_stored_with_tagged_order_preserving_keys() {
 
 #[futures_test::test]
 async fn composite_primary_keys_are_encoded_from_multiple_columns() {
-    let storage = MemoryStorage::new(&["history"]);
+    let storage = MemoryStorage::new(&["history"]).expect("valid memory storage families");
     let mut database = Database::new(composite_key_schema(), storage)
         .await
         .unwrap();
@@ -529,7 +620,7 @@ async fn composite_primary_keys_are_encoded_from_multiple_columns() {
 
 #[futures_test::test]
 async fn rejects_tables_without_primary_keys() {
-    let storage = MemoryStorage::new(&["logs"]);
+    let storage = MemoryStorage::new(&["logs"]).expect("valid memory storage families");
     let mut database = Database::new(
         DatabaseSchema::new([TableSchema::new(
             "logs",
@@ -550,7 +641,7 @@ async fn rejects_tables_without_primary_keys() {
 
 #[futures_test::test]
 async fn table_subscriptions_receive_insert_update_and_delete_messages() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -593,7 +684,7 @@ async fn table_subscriptions_receive_insert_update_and_delete_messages() {
 
 #[futures_test::test]
 async fn dropping_subscription_receiver_unsubscribes_on_next_message() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -614,7 +705,7 @@ async fn dropping_subscription_receiver_unsubscribes_on_next_message() {
 
 #[futures_test::test]
 async fn dropped_subscription_receiver_can_be_pruned_without_a_later_message() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -631,7 +722,7 @@ async fn dropped_subscription_receiver_can_be_pruned_without_a_later_message() {
 
 #[futures_test::test]
 async fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -666,7 +757,7 @@ async fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() 
 
 #[futures_test::test]
 async fn subscription_owns_initial_snapshot_separately_from_incremental_receiver() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -705,7 +796,7 @@ async fn subscription_owns_initial_snapshot_separately_from_incremental_receiver
 
 #[futures_test::test]
 async fn subscribe_query_filters_current_rows_in_initial_message() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -741,7 +832,7 @@ async fn subscribe_query_filters_current_rows_in_initial_message() {
 
 #[futures_test::test]
 async fn subscription_reports_incremental_query_deltas_through_database_facade() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_query(select_query(
@@ -814,7 +905,7 @@ async fn subscription_reports_incremental_query_deltas_through_database_facade()
 
 #[futures_test::test]
 async fn subscription_reports_incremental_contains_filter_deltas() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(
@@ -871,7 +962,7 @@ async fn subscription_reports_incremental_contains_filter_deltas() {
 // incremental behavior rather than a client-facing API concern.
 #[futures_test::test]
 async fn payload_enum_filter_matches_selected_case_and_emits_cross_case_deltas() {
-    let storage = MemoryStorage::new(&["payload_tasks"]);
+    let storage = MemoryStorage::new(&["payload_tasks"]).expect("valid memory storage families");
     let mut database = Database::new(payload_enum_tasks_schema(), storage)
         .await
         .unwrap();

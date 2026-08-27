@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { createAuthStateStore, type AuthState } from "./auth-state.js";
 
 function toBase64Url(value: unknown): string {
@@ -30,9 +31,8 @@ describe("auth-state", () => {
       authMode: "external",
       error: "expired",
       session: {
-        issuer: "https://issuer.example",
-        user_id: "alice",
-        claims: { role: "reader" },
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
+        claims: { iss: "https://issuer.example", sub: "alice", role: "reader" },
         authMode: "external",
       },
     });

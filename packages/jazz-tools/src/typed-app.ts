@@ -653,12 +653,15 @@ export interface TableMeta<
   TRelations extends TableRelationMap = {},
   TStreamingInit = never,
   TStreamingUpdate = never,
+  TLargeValueSelection = never,
 > {
   readonly name: TName;
   readonly row: TRow;
   readonly init: TInit;
   readonly streamingInit: TStreamingInit;
   readonly streamingUpdate: TStreamingUpdate;
+  /** Typed object-form large-value projection descriptors. */
+  readonly largeValueSelection: TLargeValueSelection;
   readonly where: TWhere;
   readonly relations: TRelations;
 }
@@ -670,7 +673,8 @@ export type AnyTableMeta = TableMeta<
   Record<string, unknown>,
   TableRelationMap,
   unknown,
-  unknown
+  unknown,
+  Record<string, LargeValuePage | undefined>
 >;
 
 type TableNameFromMeta<TMeta extends AnyTableMeta> = TMeta["name"];
@@ -678,6 +682,7 @@ type TableRowFromMeta<TMeta extends AnyTableMeta> = TMeta["row"];
 type TableInitFromMeta<TMeta extends AnyTableMeta> = TMeta["init"];
 type TableStreamingInitFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingInit"];
 type TableStreamingUpdateFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingUpdate"];
+type TableLargeValueSelectionFromMeta<TMeta extends AnyTableMeta> = TMeta["largeValueSelection"];
 type TableWhereFromMeta<TMeta extends AnyTableMeta> = TMeta["where"];
 type TableRelationsFromMeta<TMeta extends AnyTableMeta> = TMeta["relations"];
 type RelationNameFromMeta<TMeta extends AnyTableMeta> = Extract<
@@ -708,6 +713,113 @@ type TableSelectableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
   | ProvenanceMagicColumn
   | "*";
+
+/** A half-open byte range `[from, to)` for a bytes column. */
+export interface BytePage {
+  from: number;
+  to: number;
+}
+
+/** A half-open UTF-16 code-unit range `[from, to)` for a text column. */
+export interface TextPage {
+  from: number;
+  to: number;
+}
+
+/** A half-open UTF-8 byte range `[fromUtf8, toUtf8)` for a text column. */
+export interface Utf8TextPage {
+  fromUtf8: number;
+  toUtf8: number;
+}
+
+/** An RFC 6901 pointer selecting a JSON subtree. */
+export interface JsonPointer {
+  at: string;
+}
+
+export type LargeValuePage = BytePage | TextPage | Utf8TextPage | JsonPointer;
+
+/** A sequential, page-relative byte splice for a BYTEA field. */
+export interface ByteValueSplice {
+  at: number;
+  delete: number;
+  insert: Uint8Array;
+}
+
+/** A sequential, page-relative UTF-16 splice for a TEXT field. */
+export interface TextValueSplice {
+  at: number;
+  delete: number;
+  insert: string;
+}
+
+/** A sequential, page-relative UTF-8 splice for a TEXT field. */
+export interface Utf8TextValueSplice {
+  atUtf8: number;
+  deleteUtf8: number;
+  insert: string;
+}
+
+export interface ByteValueUpdate {
+  within: BytePage;
+  splices: readonly ByteValueSplice[];
+}
+
+export interface TextValueUpdate {
+  within: TextPage;
+  splices: readonly TextValueSplice[];
+}
+
+export interface Utf8TextValueUpdate {
+  within: Utf8TextPage;
+  splices: readonly Utf8TextValueSplice[];
+}
+
+export interface JsonSetValueUpdate {
+  edits: readonly { op: "set"; at: string; value: unknown }[];
+}
+
+type LargeValueUpdateForBuilder<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderSqlType<TBuilder> extends "BYTEA"
+    ? ByteValueUpdate
+    : ColumnBuilderSqlType<TBuilder> extends "TEXT"
+      ? TextValueUpdate | Utf8TextValueUpdate
+      : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+        ? JsonSetValueUpdate
+        : never;
+
+/** Typed partial-value input accepted by `Db.applyDiffs`. */
+export type TableLargeValueUpdate<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = Simplify<{
+  [TColumn in ColumnName<TSchema, TTable>]?: LargeValueUpdateForBuilder<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  >;
+}>;
+
+type PageForBuilder<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderSqlType<TBuilder> extends "BYTEA"
+    ? BytePage
+    : ColumnBuilderSqlType<TBuilder> extends "TEXT"
+      ? TextPage | Utf8TextPage
+      : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+        ? JsonPointer
+        : never;
+
+type TableLargeValueSelection<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = Simplify<{
+  [TColumn in ColumnName<TSchema, TTable>]?: PageForBuilder<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  >;
+}>;
+
+/** Object-form partial projection accepted by `select`. */
+export type LargeValueSelection<TMeta extends AnyTableMeta> =
+  TableLargeValueSelectionFromMeta<TMeta>;
+
 type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
   | ProvenanceMagicColumn;
@@ -733,7 +845,8 @@ export type SchemaTable<TTable extends string, TSchema extends SchemaLike> =
         TableWhereInput<TSchema, TTable>,
         SchemaRelations<TTable, TSchema>,
         TableStreamingInit<TSchema, TTable>,
-        TableStreamingUpdate<TSchema, TTable>
+        TableStreamingUpdate<TSchema, TTable>,
+        TableLargeValueSelection<TSchema, TTable>
       >
     : never;
 
@@ -755,13 +868,19 @@ type BuilderInclude<TMeta extends AnyTableMeta> = {
 
 type SelectedFromMeta<
   TMeta extends AnyTableMeta,
-  TSelection extends TableSelectableFromMeta<TMeta> = DefaultTableSelection<TMeta>,
+  TSelection = DefaultTableSelection<TMeta>,
 > = Simplify<
-  ("*" extends TSelection
+  ("*" extends SelectedColumnNames<TSelection>
     ? TableRowFromMeta<TMeta>
-    : Pick<TableRowFromMeta<TMeta>, Extract<TSelection | "id", keyof TableRowFromMeta<TMeta>>>) &
-    Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
+    : Pick<
+        TableRowFromMeta<TMeta>,
+        Extract<SelectedColumnNames<TSelection> | "id", keyof TableRowFromMeta<TMeta>>
+      >) &
+    Pick<ProvenanceMagicColumns, Extract<SelectedColumnNames<TSelection>, ProvenanceMagicColumn>>
 >;
+
+type SelectedColumnNames<TSelection> =
+  TSelection extends Record<string, LargeValuePage> ? keyof TSelection : TSelection;
 
 type IncludedRelationValueFromMeta<
   TMeta extends AnyTableMeta,
@@ -812,7 +931,7 @@ type IncludedRelationsFromMeta<
 type SelectedWithIncludesFromMeta<
   TMeta extends AnyTableMeta,
   TInclude extends BuilderInclude<TMeta> = {},
-  TSelection extends TableSelectableFromMeta<TMeta> = DefaultTableSelection<TMeta>,
+  TSelection = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
 > = Simplify<
   Omit<
@@ -879,7 +998,7 @@ function cloneBuiltGather(gather: BuiltGather): BuiltGather {
 export class TypedTableQueryBuilder<
   TMeta extends AnyTableMeta,
   TInclude extends BuilderInclude<TMeta> = {},
-  TSelection extends TableSelectableFromMeta<TMeta> = DefaultTableSelection<TMeta>,
+  TSelection = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
 > implements QueryBuilder<SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>> {
   readonly _table: TableNameFromMeta<TMeta>;
@@ -891,7 +1010,7 @@ export class TypedTableQueryBuilder<
   private _conditions: BuiltCondition[] = [];
   private _includes: Partial<BuilderInclude<TMeta>> = {};
   private _requireIncludes = false;
-  private _selectColumns?: string[];
+  private _select?: string[] | Record<string, LargeValuePage>;
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -922,11 +1041,22 @@ export class TypedTableQueryBuilder<
     return clone;
   }
 
-  select<NewSelection extends TableSelectableFromMeta<TMeta>>(
-    ...columns: [NewSelection, ...NewSelection[]]
+  select<
+    FirstSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>,
+    RestSelection extends readonly TableSelectableFromMeta<TMeta>[] = [],
+  >(
+    first: FirstSelection,
+    ...rest: FirstSelection extends LargeValueSelection<TMeta> ? [] : RestSelection
+  ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired>;
+  select<NewSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>>(
+    ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
   ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
     const clone = this._clone<TInclude, NewSelection, TRequired>();
-    clone._selectColumns = [...columns] as string[];
+    const first = selection[0];
+    clone._select =
+      typeof first === "object" && first !== null
+        ? ({ ...first } as Record<string, LargeValuePage>)
+        : (selection as TableSelectableFromMeta<TMeta>[]).map((column) => String(column));
     return clone;
   }
 
@@ -1089,7 +1219,7 @@ export class TypedTableQueryBuilder<
         conditions: this._conditions,
         includes: this._includes,
         __jazz_requireIncludes: this._requireIncludes || undefined,
-        select: this._selectColumns,
+        select: this._select,
         orderBy: this._orderBys,
         limit: this._limitVal,
         offset: this._offsetVal,
@@ -1108,7 +1238,7 @@ export class TypedTableQueryBuilder<
 
   private _clone<
     TNewInclude extends BuilderInclude<TMeta>,
-    TNewSelection extends TableSelectableFromMeta<TMeta>,
+    TNewSelection,
     TNewRequired extends boolean,
   >(): TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired> {
     const clone = new TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired>(
@@ -1119,7 +1249,11 @@ export class TypedTableQueryBuilder<
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes } as Partial<BuilderInclude<TMeta>>;
     clone._requireIncludes = this._requireIncludes;
-    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._select = Array.isArray(this._select)
+      ? [...this._select]
+      : this._select
+        ? { ...this._select }
+        : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -1163,23 +1297,31 @@ export class TypedTableQueryBuilder<
 interface MetaQueryHandle<
   TMeta extends AnyTableMeta,
   TInclude extends BuilderInclude<TMeta> = {},
-  TSelection extends TableSelectableFromMeta<TMeta> = DefaultTableSelection<TMeta>,
+  TSelection = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
 > extends TypedTableQueryBuilder<TMeta, TInclude, TSelection, TRequired> {}
 
 export interface Query<
   TTable extends string,
   TInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>> = {},
-  TSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> = any,
+  TSelection = any,
   TSchema extends SchemaLike = SchemaLike,
   TRequired extends boolean = false,
 > extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, TRequired> {
   where(
     conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
   ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
-  select<NewSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>>(
-    ...columns: [NewSelection, ...NewSelection[]]
-  ): Query<TTable, TInclude, NewSelection, TSchema, TRequired>;
+  select<
+    FirstSelection extends
+      | TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>
+      | LargeValueSelection<SchemaMeta<TTable, TSchema>>,
+    RestSelection extends readonly TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>[] = [],
+  >(
+    first: FirstSelection,
+    ...rest: FirstSelection extends LargeValueSelection<SchemaMeta<TTable, TSchema>>
+      ? []
+      : RestSelection
+  ): Query<TTable, TInclude, FirstSelection | RestSelection[number], TSchema, TRequired>;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,
   ): Query<TTable, TInclude & NewInclude, TSelection, TSchema, TRequired>;
@@ -1212,15 +1354,19 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   {},
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
-> {}
+> {
+  /** @internal Phantom used by `Db.applyDiffs` to retain column-specific edit shapes. */
+  readonly _largeValueUpdateType: TableLargeValueUpdate<
+    TSchema,
+    Extract<TTable, TableName<TSchema>>
+  >;
+}
 
 export type QueryHandle<
   TTable extends string,
   TSchema extends SchemaLike,
   TInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>> = {},
-  TSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> = DefaultTableSelection<
-    SchemaMeta<TTable, TSchema>
-  >,
+  TSelection = DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
 > = Query<TTable, TInclude, TSelection, TSchema>;
 
 export type TableHandle<TTable extends string, TSchema extends SchemaLike> = Table<TTable, TSchema>;
@@ -1254,6 +1400,11 @@ export interface SliceableApp<TSchema extends SchemaLike> {
 
 export type RowOf<TTable> = TTable extends { readonly _rowType: infer TRow } ? TRow : never;
 export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit } ? TInit : never;
+export type LargeValueUpdateOf<TTable> = TTable extends {
+  readonly _largeValueUpdateType: infer TUpdate;
+}
+  ? TUpdate
+  : never;
 export type StreamingInsertOf<TTable> = TTable extends {
   readonly _streamingInitType: infer TStreamingInit;
 }

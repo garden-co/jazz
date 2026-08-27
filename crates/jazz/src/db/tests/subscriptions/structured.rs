@@ -257,29 +257,37 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert!(terminal_operations.is_empty());
 }
 
+/// A normal reader rehydrates a structured message subscription after a
+/// separately invite-scoped connection writes its membership.
+///
+/// Alice's invite-scoped connection ──membership──► server ──coverage──►
+/// Alice's normal connection ──structured subscribe──► message + sender.
+///
+/// This also exercises the bounded-stack peer admission path: the server must
+/// process the membership commit without carrying inactive Subscribe-arm state.
 #[test]
 fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_shot() {
     let schema = membership_scoped_relation_schema();
     let reader = AuthorSubject::for_test_bytes([0xb2; 16]);
     let normal_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String(reader.test_uuid().to_string()),
     )]);
     let invite_claims = BTreeMap::from([
         (
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(reader.test_uuid().to_string()),
         ),
         (
-            "join_code".to_owned(),
+            crate::query::provider_claim_key("join_code"),
             Value::String("invite-code".to_owned()),
         ),
     ]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc4, reader, &schema);
     let invite_client = open_db(0xc5, reader, &schema);
-    client.set_identity_claims(reader, normal_claims.clone());
-    invite_client.set_identity_claims(reader, invite_claims.clone());
+    client.set_test_provider_claims(reader, normal_claims.clone());
+    invite_client.set_test_provider_claims(reader, invite_claims.clone());
     // The normal connection remains live while a separately scoped invite
     // connection writes its membership. This is the production handoff.
     let (client_transport, server_transport) = duplex();
@@ -860,6 +868,83 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
     assert!(terminal_operations.is_empty());
 }
 
+/// Alice removes two adjacent visible rows in one transaction while Bob keeps
+/// an ordered, offset subscription. Both removals retain their positions in
+/// the complete result before that transaction's frame is applied.
+///
+/// alice ──delete b,c──► maintained view ──one delta──► bob
+#[test]
+fn flat_subscription_batch_removals_keep_pre_frame_indices() {
+    let schema = relation_schema();
+    let db = open_db(0xda, AuthorSubject::for_test_bytes([0xda; 16]), &schema);
+    for (id, name) in [(0xa1, "a"), (0xb1, "b"), (0xc1, "c"), (0xd1, "d")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let prepared_query = prepared(
+        &db,
+        &Query::from("users").order_by("name", OrderDirection::Asc),
+    );
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&initial.rows),
+        vec![row(0xa1), row(0xb1), row(0xc1), row(0xd1)]
+    );
+
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    block_on(tx.delete("users", row(0xb1), Default::default())).unwrap();
+    block_on(tx.delete("users", row(0xc1), Default::default())).unwrap();
+    block_on(tx.commit()).unwrap();
+    db.tick().unwrap();
+
+    let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected one indexed batch-removal delta");
+    };
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(terminal_operations.is_empty());
+    assert_eq!(
+        removed
+            .iter()
+            .map(|removed| (removed.row_uuid, removed.index))
+            .collect::<Vec<_>>(),
+        vec![(row(0xb1), 1), (row(0xc1), 2)],
+        "removed indices address the snapshot before this delta"
+    );
+
+    db.update(
+        "users",
+        row(0xd1),
+        BTreeMap::from([("name".to_owned(), Value::String("z".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { updated, .. } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("the retained root must remain indexed after a batch removal");
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xd1));
+    assert_eq!(updated[0].previous_index, Some(1));
+    assert_eq!(updated[0].index, 1);
+}
+
 #[test]
 fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let schema = relation_schema();
@@ -1106,9 +1191,12 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     let spy = AuthorSubject::for_test_bytes([0xc1; 16]);
     let db = open_db(0xc4, AuthorSubject::SYSTEM, &schema);
     for identity in [member, other, spy] {
-        db.set_identity_claims(
+        db.set_test_provider_claims(
             identity,
-            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("sub"),
+                Value::Uuid(identity.test_uuid()),
+            )]),
         );
     }
     db.insert(

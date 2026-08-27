@@ -44,7 +44,7 @@ fn folder_grant_schema() -> Schema {
                 .policies(permissions(|p| {
                     p.allow_insert().always();
                     p.allow_read()
-                        .where_(pe::eq("owner_id", pe::session("user_id")));
+                        .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
                 })),
         )
         .table(
@@ -55,7 +55,7 @@ fn folder_grant_schema() -> Schema {
                 .policies(permissions(|p| {
                     p.allow_insert().always();
                     p.allow_read().where_(pe::any_of([
-                        pe::eq("author_id", pe::session("user_id")),
+                        pe::eq("author_id", pe::session(vec!["claims", "sub"])),
                         pe::all_of([
                             pe::is_not_null("folder_id"),
                             pe::allowed_to_read("folder_id"),
@@ -70,7 +70,7 @@ fn folder_grant_schema() -> Schema {
 /// membership row links the session to that exact folder.
 fn membership_chain_schema() -> Schema {
     let member_of_this_folder = pe::exists(pe::table("memberships").where_(rel::all_of([
-        rel::eq_session("user_id", "user_id"),
+        rel::eq_session("user_id", vec!["claims", "sub"]),
         rel::cmp(
             "folder_id",
             RelPredicateCmpOp::Eq,
@@ -87,7 +87,7 @@ fn membership_chain_schema() -> Schema {
                     p.allow_insert().always();
                     p.allow_delete().always();
                     p.allow_read()
-                        .where_(pe::eq("user_id", pe::session("user_id")));
+                        .where_(pe::eq("user_id", pe::session(vec!["claims", "sub"])));
                 })),
         )
         .table(
