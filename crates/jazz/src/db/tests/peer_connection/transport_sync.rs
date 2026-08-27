@@ -406,6 +406,12 @@ fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
     );
 }
 
+/// A default/current subscription emits a non-reset removal for a deletion witness.
+///
+/// alice deletes a row on the server; bob's default/current subscription receives
+/// a delta removal and remains equivalent to alice's fresh current read.
+///
+/// alice (server) ──delete witness──► bob (default/current delta removal)
 #[test]
 fn default_current_subscription_reconciles_deletion_witness_without_reset() {
     let schema = schema();
