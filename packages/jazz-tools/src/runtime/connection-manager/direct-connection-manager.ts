@@ -35,7 +35,6 @@ export class DirectConnectionManager extends ConnectionManager {
     client.connectTransport(config.serverUrl, {
       jwt_token: config.jwtToken,
       admin_secret: config.adminSecret,
-      backend_secret: config.backendSecret,
       backend_session: config.cookieSession,
     });
   }

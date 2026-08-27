@@ -78,7 +78,7 @@ describe("JazzProvider client acquisition lifecycle", () => {
     const initialConfig: DbConfig = {
       appId: "app-1",
       serverUrl: "https://jazz.example.com",
-      secret: "anonymous",
+      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     };
     const replacementConfig: DbConfig = {
       appId: "app-1",
@@ -150,7 +150,7 @@ describe("JazzProvider client acquisition lifecycle", () => {
     const initialConfig: DbConfig = {
       appId: "app-1",
       serverUrl: "https://jazz.example.com",
-      secret: "anonymous",
+      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     };
     const replacementConfig: DbConfig = {
       appId: "app-1",

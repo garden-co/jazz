@@ -249,11 +249,11 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     const first = await createJazzClient({
       appId: "web-client-dedup-multi",
-      secret: "principal-A",
+      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     } satisfies JazzClientConfig);
     const second = await createJazzClient({
       appId: "web-client-dedup-multi",
-      secret: "principal-B",
+      secret: "jazz-auth-v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
     } satisfies JazzClientConfig);
 
     expect(mocks.createDb).toHaveBeenCalledTimes(2);

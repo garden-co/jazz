@@ -50,6 +50,169 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
 }
 
 #[test]
+fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
+    // This must plant impossible persisted metadata directly: public APIs never
+    // create duplicate aliases, while recovery is the fail-closed boundary.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut reopened_node = open_node_at(&temp_dir, schema.clone());
+        let mut batch = reopened_node.database.open_batch();
+        batch.insert(
+            "jazz_nodes",
+            vec![Value::U64(999), Value::Uuid(node(1).0)],
+        );
+        let applied = crate::db::block_on(reopened_node.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        reopened_node.database.finish_persistence(persisted).unwrap();
+        crate::db::block_on(reopened_node.database.close()).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        Err(Error::InvalidStoredValue("node UUID has conflicting durable aliases"))
+    ));
+}
+
+#[test]
+fn failed_node_alias_persistence_leaves_no_resident_alias_or_dependent_history_for_reopen() {
+    // This is intentionally an internal storage-boundary receipt. A public
+    // write can only report the failed commit; inspecting the reopened node is
+    // the only way to prove that its compact alias was not left as an
+    // in-memory-only prerequisite for later physical history rows.
+    let (mut writer, _) = fail_write_many_node();
+    let (foreign_tx, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(9), 10).cells(title_cells("must not become durable")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit");
+    };
+
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailWriteManyMemoryStorage::new(&refs);
+    let mut failed_node = NodeState::new(node(0xd2), node_schema.clone(), storage.clone()).unwrap();
+    storage.fail_nth_following_write_many(1);
+
+    assert!(failed_node
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .is_err());
+    assert!(
+        !failed_node.node_aliases.contains_key(&foreign_tx.node),
+        "a failed alias prerequisite must not become a resident alias"
+    );
+
+    let mut reopened = crate::db::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
+    let aliases = crate::db::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[]))
+        .unwrap();
+    assert_eq!(aliases.len(), 1, "only the core's own durable alias may remain");
+    assert_eq!(
+        aliases[0]
+            .record()
+            .get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)
+            .unwrap(),
+        node(0xd2).0
+    );
+    assert!(reopened.query_table_versions("todos").unwrap().is_empty());
+
+    reopened
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(9), title_cells("must not become durable"))])
+    );
+}
+
+#[test]
+fn reopening_rejects_a_schema_version_with_two_durable_aliases() {
+    // This plants impossible metadata directly because the normal catalogue
+    // writer has one primary record per alias. Recovery is nevertheless the
+    // fail-closed boundary for corrupt durable stores.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut opened = open_node_at(&temp_dir, schema.clone());
+        let schema_version = opened.catalogue.current_schema_version_id;
+        let mapping = opened.catalogue.physical_mappings[&schema_version].clone();
+        let mut batch = opened.database.open_batch();
+        batch.insert(
+            "jazz_schema_versions",
+            vec![
+                Value::U64(999),
+                Value::Uuid(schema_version.0),
+                Value::Bytes(serde_json::to_vec(&mapping).unwrap()),
+            ],
+        );
+        let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        opened.database.finish_persistence(persisted).unwrap();
+        crate::db::block_on(opened.database.close()).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        Err(Error::InvalidStoredValue(
+            "schema version has conflicting durable aliases"
+        ))
+    ));
+}
+
+#[test]
+fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
+    // This is likewise a direct corrupt-store fixture: a physical alias is a
+    // u64 catalogue field but must remain representable by Groove's u32 case
+    // tag before any catalogue payload is trusted.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut opened = open_node_at(&temp_dir, schema.clone());
+        let schema_version = SchemaVersionId::from_bytes([0x9d; 16]);
+        let mapping = opened.catalogue.physical_mappings
+            [&opened.catalogue.current_schema_version_id]
+            .clone();
+        let mut batch = opened.database.open_batch();
+        batch.insert(
+            "jazz_schema_versions",
+            vec![
+                Value::U64(u64::from(u32::MAX) + 1),
+                Value::Uuid(schema_version.0),
+                Value::Bytes(serde_json::to_vec(&mapping).unwrap()),
+            ],
+        );
+        let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        opened.database.finish_persistence(persisted).unwrap();
+        crate::db::block_on(opened.database.close()).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        Err(Error::InvalidStoredValue("physical table variant tag exhausted"))
+    ));
+}
+
+#[test]
 fn contribution_merge_provenance_survives_reopen() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -221,6 +384,47 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
     );
 }
 
+#[test]
+fn unknown_durable_contribution_component_tag_is_rejected_by_the_storage_decoder() {
+    let schema = schema();
+    let (_dir, core) = open_node_with_schema(node(1), schema);
+    let stored = core
+        .contribution_merge_storage_value(Some(&canonical_contribution_provenance(TxId::new(
+            TxTime::from(10),
+            node(1),
+        ))))
+        .unwrap();
+    let Value::Nullable(Some(record)) = stored else {
+        panic!("fixture stores contribution provenance")
+    };
+    let Value::Record(record) = *record else {
+        panic!("fixture contribution provenance is a record")
+    };
+    let merge = ContributionMergeStorageRecord::new(record);
+    let Value::Record(substitution) = merge.substitutions().unwrap().remove(0) else {
+        panic!("fixture substitution is a record")
+    };
+    let substitution = ContributionSubstitutionStorageRecord::new(substitution);
+    let coordinate = substitution.target().unwrap();
+    let descriptor = coordinate.descriptor().clone();
+    let records::ValueType::Enum(component_schema) = record_field_type(&descriptor, 4) else {
+        panic!("fixture contribution component is an enum")
+    };
+    let coordinate = ContributionCoordinateStorageRecord::new(coordinate);
+    let payload = coordinate.component().unwrap().into_record();
+    let error = crate::node::codec::contribution_component_from_storage(
+        records::EnumValue::new(127, payload),
+        component_schema,
+        "todos",
+        &mut |_table, _physical_column| Ok("title".to_owned()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("transaction contribution component tag is invalid")
+    ));
+}
+
 fn contribution_operation_schema() -> JazzSchema {
     JazzSchema::new_with_branch_columns([TableSchema::new(
         "sets",
@@ -364,6 +568,118 @@ fn ingress_rejects_noncanonical_and_wrong_strategy_operation_identities_before_p
             "invalid operation identity must be rejected before it reaches durable transaction state"
         );
     }
+}
+
+#[test]
+fn local_rejected_and_bulk_view_ingress_share_operation_admission_before_mutation() {
+    let schema = schema();
+    let invalid_tx_id = TxId::new(TxTime::from(40), node(0x31));
+    let invalid_provenance = || {
+        let coordinate = ContributionCoordinate {
+            branch_key: BranchKey::default(),
+            table: "todos".to_owned(),
+            row_uuid: row(0x61),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Operation {
+                column: "title".to_owned(),
+                identity: vec![0],
+            },
+        };
+        ContributionMergeProvenance::canonical(
+            BranchKey::default(),
+            BranchKey::default(),
+            vec![ContributionSubstitution {
+                target: coordinate.clone(),
+                sources: vec![ContributionDot {
+                    tx_id: invalid_tx_id,
+                    coordinate,
+                }],
+            }],
+        )
+        .unwrap()
+    };
+    let invalid_transaction = || operation_transaction(invalid_tx_id, invalid_provenance());
+
+    let (_local_dir, mut local) = open_node_with_schema(node(0x31), schema.clone());
+    let local_result = local
+        .commit_mergeable_many_at_with_schema_versions_and_provenance(
+            vec![((schema.version_id()), MergeableCommit::new("todos", row(0x61), 40)
+                .cells(title_cells("local")))],
+            invalid_tx_id.time,
+            Some(invalid_provenance()),
+        )
+        .resolve();
+    let error = match local_result {
+        Err(error) => error,
+        Ok(_) => panic!("invalid local provenance must not publish a transaction"),
+    };
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(local.query_transaction(invalid_tx_id).unwrap().is_none());
+
+    let (_rejected_dir, mut rejected) = open_node_with_schema(node(0x31), schema.clone());
+    let error = rejected
+        .ingest_rejected_transaction(
+            invalid_transaction(),
+            Fate::Rejected(RejectionReason::MalformedCommit("fixture".to_owned())),
+        )
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(rejected.query_transaction(invalid_tx_id).unwrap().is_none());
+
+    let (_view_dir, mut view) = open_node_with_schema(node(0x31), schema);
+    let bundle = VersionBundle {
+        tx: invalid_transaction(),
+        versions: vec![version_record(row(0x61), Vec::new(), title_cells("view"), None)],
+        scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(40)),
+        durability: DurabilityTier::Local,
+    };
+    let error = view
+        .ingest_reset_view_bundle_refs_in_bulk(&[bundle.as_ref()], None)
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(view.query_transaction(invalid_tx_id).unwrap().is_none());
+}
+
+#[test]
+fn ingress_rejects_operation_coordinates_outside_the_content_layer() {
+    let schema = contribution_operation_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0x31), schema.clone());
+    let tx_id = TxId::new(TxTime::from(45), node(0x31));
+    let mut provenance = operation_provenance(tx_id, "count", Vec::new());
+    let substitution = &mut provenance.substitutions[0];
+    for coordinate in std::iter::once(&mut substitution.target).chain(
+        substitution
+            .sources
+            .iter_mut()
+            .map(|source| &mut source.coordinate),
+    ) {
+        coordinate.layer = MergeAspect::Deletion;
+    }
+    let error = core
+        .ingest_commit_unit_settled(
+            operation_transaction(tx_id, provenance),
+            vec![operation_version(&schema, "count", Value::U64(1))],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("contribution operation must belong to the content layer")
+    ));
+    assert!(core.query_transaction(tx_id).unwrap().is_none());
 }
 
 #[test]

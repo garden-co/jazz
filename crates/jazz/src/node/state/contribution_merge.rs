@@ -45,6 +45,17 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// The one durable admission boundary for contribution provenance. Every
+    /// path that can persist a transaction must pass through this before it
+    /// can allocate aliases, stage large values, or mutate a batch.
+    pub(super) fn admit_contribution_merge_for_storage(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Value, Error> {
+        self.validate_contribution_merge_operation_identities(tx)?;
+        self.contribution_merge_storage_value(tx.contribution_merge.as_ref())
+    }
+
     /// Validate strategy-defined operation coordinates before a transaction can
     /// become durable.  Operation identity is not opaque provenance: its
     /// canonical spelling is part of merge deduplication, so a received or

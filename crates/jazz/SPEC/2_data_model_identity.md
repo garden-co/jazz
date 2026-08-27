@@ -13,10 +13,10 @@ names defined here, but their behavior is specified in those chapters.
 Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
-- `INV-DATA-1`: Stable UUID wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`) in wire byte order; `AuthorSubject` MUST use its canonical `[iss,sub]` JSON string; node-local alias and intern types MUST NOT be part of wire identity.
+- `INV-DATA-1`: Stable UUID wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`) as exactly 16 canonical bytes, whose lexicographic byte order is their ordering; `AuthorSubject` MUST use its canonical `[iss,sub]` JSON string; node-local alias and intern types MUST NOT be part of wire identity.
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: `AuthorSubject::SYSTEM` MUST have the exact portable value `["urn:jazz:system","system"]`, and no authenticated user may claim the reserved system issuer.
-- `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
+- `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
@@ -75,7 +75,13 @@ Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
 node-local, never appear on the wire, and every value leaving stored rows for
 the wire resolves its alias back to the corresponding `NodeUuid` or
 `SchemaVersionId` (`INV-DATA-1`, `INV-DATA-2`). Aliases are rebuilt on recovery.
-The exact `TxTime` bit-packing and the `SYSTEM` literal are in §2.7.
+The exact `TxTime` bit-packing and the `SYSTEM` literal are in §2.7. Alias
+mappings are durable prerequisites: the mapping is atomically persisted before
+any dependent row bytes, retained while any durable reference can reach it, and
+is never guessed, reassigned, hashed, compared semantically, included in public
+provenance, or sent across a node boundary. Missing, malformed, or colliding
+mappings fail closed before decode or mutation. Different replicas may assign
+different local aliases to the same global identity.
 
 ### 2.3 Application schema
 
@@ -177,11 +183,14 @@ layout. It is useful for implementers and debugging, but exact table names,
 primary keys, and indexes are not the portable data-model contract. The layout
 is covered by `schema::storage_lowering_declares_system_columns_by_shape`.
 
-**Identity encoding.** `TxTime` packs physical milliseconds in the high 46 bits
+**Identity encoding.** Every UUID identity is exactly its 16 canonical bytes;
+lexicographic byte order is the physical and semantic order. `TxTime` and the
+authority-assigned `GlobalTime` use the same packed HLC representation: physical milliseconds in the high 46 bits
 and a logical counter in the low 18. It can represent Unix milliseconds through
 approximately year 4200 and 262,144 ordered positions per millisecond. On
 logical exhaustion it advances physical time by one millisecond; only the final
-packed position returns a typed clock-overflow (`INV-DATA-4`). `TxTime` remains
+packed position returns a typed clock-overflow (`INV-DATA-4`). Their unsigned
+packed order is the canonical storage order. `TxTime` remains
 an opaque ordering/version field: public row provenance exposes only physical
 Unix milliseconds. UUID object identities retain their newtype encodings;
 `AuthorSubject::SYSTEM` is the canonical JSON string

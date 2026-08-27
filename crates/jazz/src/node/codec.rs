@@ -1256,7 +1256,7 @@ pub(super) fn contribution_merge_storage_value(
     Ok(records::RecordField::to_value(&record))
 }
 
-fn contribution_component_from_storage(
+pub(super) fn contribution_component_from_storage(
     value: records::EnumValue,
     schema: &records::EnumSchema,
     table: &str,

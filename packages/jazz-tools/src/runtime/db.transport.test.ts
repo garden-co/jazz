@@ -8,6 +8,7 @@ import {
   type Runtime,
 } from "./client.js";
 import { createDbWithRuntimeSource, Db, type DbConfig } from "./db.js";
+import { formatAuthSecret } from "./auth-secret-codec.js";
 import {
   RuntimeSource,
   type RuntimeClientContext,
@@ -368,7 +369,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     const db = await createDbWithRuntimeSource(
       {
         appId: "facade-app",
-        secret: "alice-secret",
+        secret: formatAuthSecret(new Uint8Array(32).fill(1)),
         serverUrl: "https://example.test",
       },
       runtimeSource,
@@ -386,7 +387,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     expect(runtimeSource.loadRuntimeMock).toHaveBeenCalledTimes(1);
     expect(runtimeSource.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
-        secret: "alice-secret",
+        secret: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
         audience: "facade-app",
         ttlSeconds: 3600,
       }),
@@ -396,7 +397,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
         schema,
         config: expect.objectContaining({
           appId: "facade-app",
-          jwtToken: "jwt:alice-secret:facade-app:3600",
+          jwtToken: "jwt:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE:facade-app:3600",
           serverUrl: "https://example.test",
         }),
         onAuthFailure: expect.any(Function),
@@ -406,7 +407,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     expect(createClientContext).toBeDefined();
     expect("loadedRuntime" in createClientContext!).toBe(false);
     expect(client.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
-    expect(proof).toBe("jwt:alice-secret:proof-audience:7");
+    expect(proof).toBe("jwt:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE:proof-audience:7");
     expect(client.shutdown).toHaveBeenCalledTimes(1);
   });
 
