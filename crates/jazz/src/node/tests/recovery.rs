@@ -114,6 +114,69 @@ fn contribution_provenance_persists_column_components_as_physical_ids() {
 }
 
 #[test]
+fn contribution_provenance_record_has_frozen_complete_groove_bytes() {
+    // Freeze the complete nested record, not individual leaves: a field order,
+    // enum-tag, nullable wrapper, or nested-record layout change must be an
+    // intentional storage-format decision.
+    let schema = schema();
+    let (_dir, core) = open_node_with_schema(node(1), schema);
+    let stored = core
+        .contribution_merge_storage_value(Some(&complete_contribution_provenance()))
+        .unwrap();
+    let Value::Nullable(Some(record)) = stored else {
+        panic!("fixture stores contribution provenance")
+    };
+    let Value::Record(record) = *record else {
+        panic!("fixture contribution provenance is a record")
+    };
+    assert_eq!(hex::encode(record.raw()), "0e000000140000000201000000000201000000000300000084000000fa0000003000000001000000000000001010101010101010101010101010101000230000000201000000000001000000000000000100000000002800000000000101010101010101010101010101010101000000000000001010101010101010101010101010101000230000000201000000000001000000000000002f00000001000000000000001111111111111111111111111111111100230000000201000000000102617070656e640100000000002c00000000000101010101010101010101010101010101000000000000001111111111111111111111111111111100230000000201000000000102617070656e642800000001000000000000001212121212121212121212121212121200230000000201000000000201000000000030000000000001010101010101010101010101010101010000000000000012121212121212121212121212121212002300000002010000000002");
+}
+
+fn complete_contribution_provenance() -> ContributionMergeProvenance {
+    let coordinate = |row_uuid, component| ContributionCoordinate {
+        branch_key: BranchKey::default(),
+        table: "todos".to_owned(),
+        row_uuid,
+        layer: MergeAspect::Content,
+        component,
+    };
+    ContributionMergeProvenance::canonical(
+        BranchKey::default(),
+        BranchKey::default(),
+        vec![
+            ContributionSubstitution {
+                target: coordinate(row(0x10), ContributionComponent::Column("title".to_owned())),
+                sources: vec![ContributionDot {
+                    tx_id: TxId::new(TxTime::from(10), node(1)),
+                    coordinate: coordinate(
+                        row(0x10),
+                        ContributionComponent::Column("title".to_owned()),
+                    ),
+                }],
+            },
+            ContributionSubstitution {
+                target: coordinate(row(0x11), ContributionComponent::Operation(b"append".to_vec())),
+                sources: vec![ContributionDot {
+                    tx_id: TxId::new(TxTime::from(11), node(1)),
+                    coordinate: coordinate(
+                        row(0x11),
+                        ContributionComponent::Operation(b"append".to_vec()),
+                    ),
+                }],
+            },
+            ContributionSubstitution {
+                target: coordinate(row(0x12), ContributionComponent::Register),
+                sources: vec![ContributionDot {
+                    tx_id: TxId::new(TxTime::from(12), node(1)),
+                    coordinate: coordinate(row(0x12), ContributionComponent::Register),
+                }],
+            },
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
 fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
     let base = schema();
     let renamed_schema = renamed_tasks_schema();
