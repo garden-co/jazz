@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Turbo's dry graph exposes both the resolved input set and its task hash. Keep
- * this test deliberately build-free: it proves the cache key changes for a
- * shared Rust dependency, but not for a crate outside these artifact closures.
+ * this test deliberately build-free: it proves the cache key changes for direct
+ * and transitive Rust dependencies without invalidating unrelated artifacts.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -78,9 +78,21 @@ function containsInput(graph, task, suffix) {
   return Object.keys(graph.get(task).inputs).some((path) => path.endsWith(suffix));
 }
 
+const allTasks = new Set(tasks);
+const nativeTasks = new Set(["@jazz/rust#build:crates", "jazz-napi#build"]);
 const closures = [
-  { name: "jazz", file: resolve(root, "crates/jazz/src/lib.rs") },
-  { name: "groove", file: resolve(root, "crates/groove/src/lib.rs") },
+  { name: "jazz", file: resolve(root, "crates/jazz/src/lib.rs"), affected: allTasks },
+  { name: "groove", file: resolve(root, "crates/groove/src/lib.rs"), affected: allTasks },
+  {
+    name: "jazz-native-transport",
+    file: resolve(root, "crates/jazz-native-transport/src/lib.rs"),
+    affected: nativeTasks,
+  },
+  {
+    name: "benchmark-guard",
+    file: resolve(root, "crates/benchmark-guard/src/lib.rs"),
+    affected: nativeTasks,
+  },
 ];
 const unrelated = resolve(root, "crates/jazz-sim/src/lib.rs");
 const originals = new Map(closures.map(({ file }) => [file, readFileSync(file, "utf8")]));
@@ -100,11 +112,12 @@ try {
   const baseline = dryGraph();
   for (const task of uncachedCorrectnessArtifactTasks)
     assertUncachedCorrectnessArtifactTask(baseline.get(task));
-  for (const { name } of closures)
+  for (const { name, affected } of closures)
     for (const task of tasks)
-      assert(
+      assert.equal(
         containsInput(baseline, task, `${name}/src/lib.rs`),
-        `${task} omits its ${name} dependency`,
+        affected.has(task),
+        `${task} has the wrong ${name} dependency coverage`,
       );
   for (const task of tasks)
     assert(
@@ -113,18 +126,26 @@ try {
     );
 
   const baselineHashes = hashes(baseline);
-  for (const { name, file } of closures) {
+  for (const { name, file, affected } of closures) {
     const original = originals.get(file);
     writeFileSync(file, `${original}\n// turbo cache-input ${name} edit probe\n`);
     const afterEdit = hashes(dryGraph());
     for (const task of tasks)
-      assert.notEqual(afterEdit[task], baselineHashes[task], `${task} missed a ${name} edit`);
+      assert[affected.has(task) ? "notEqual" : "equal"](
+        afterEdit[task],
+        baselineHashes[task],
+        `${task} has the wrong response to a ${name} edit`,
+      );
 
     writeFileSync(file, original);
     rmSync(file);
     const afterRemoval = hashes(dryGraph());
     for (const task of tasks)
-      assert.notEqual(afterRemoval[task], baselineHashes[task], `${task} missed a ${name} removal`);
+      assert[affected.has(task) ? "notEqual" : "equal"](
+        afterRemoval[task],
+        baselineHashes[task],
+        `${task} has the wrong response to a ${name} removal`,
+      );
     writeFileSync(file, original);
   }
 
