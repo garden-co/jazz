@@ -175,6 +175,24 @@ memory backend. The wasm-only IndexedDB adapter compiles against an in-memory B-
 fixture; coverage of persistence across closing and reopening a real IndexedDB
 namespace remains a browser-harness gap.
 
+### IndexedDB B-tree page encoding
+
+The IndexedDB B-tree page body is an adapter-private but durable format. A page
+is exactly `"IDBTREE\\0" | version:u8(2) | xxh3_64(payload):u64le | payload`.
+The first payload byte is a fixed page tag: leaf `0`, internal `1`, or overflow
+`2`. All collection and byte lengths are `u32le`; page ids and logical overflow
+lengths are `u64le`. The logical overflow length stays `u64` in memory until a
+host actually materializes bytes, so the same canonical page accepts on native
+and wasm32. No `usize`, serde/postcard layout, omitted option field, or trailing
+payload byte is durable.
+
+Leaf entries are strictly key-ordered. Internal keys are strictly ordered and
+there are exactly one more child ids than keys; a repeated child id is corrupt
+rather than a deduplicated subgraph. Overflow next tags are exactly `0` (none)
+or `1 | page_id:u64le`. Unknown tags, malformed lengths, checksum failures,
+and noncanonical trailing bytes fail closed. Exact byte fixtures include a
+logical overflow length above `u32` to pin this cross-architecture contract.
+
 ### 2.2 Records: logical fields, physical bytes
 
 A **record** is the stored byte representation of a typed tuple. Its schema is

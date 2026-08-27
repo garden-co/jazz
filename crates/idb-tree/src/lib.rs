@@ -753,7 +753,8 @@ impl<S: PageStore> TreeCore<S> {
             return Ok(ValueCell::Inline(value));
         }
 
-        let len = value.len();
+        let len = u64::try_from(value.len())
+            .map_err(|_| Error::InvalidPage("overflow value length exceeds u64".to_owned()))?;
         let mut next = None;
         let chunk_size = self.options.page_size.saturating_sub(64);
         for chunk in value.rchunks(chunk_size) {
@@ -797,7 +798,11 @@ impl<S: PageStore> TreeCore<S> {
         match value {
             ValueCell::Inline(value) => Ok(Attempt::Ready(value.clone())),
             ValueCell::Overflow { head, len } => {
-                let mut output = Vec::with_capacity(*len);
+                // The persisted logical length is u64 so page decoding stays
+                // architecture-independent. Do not turn an untrusted durable
+                // length into a host-sized allocation: grow only for actual
+                // overflow page bytes as they are validated and materialized.
+                let mut output = Vec::new();
                 let mut current = Some(*head);
                 while let Some(page_id) = current {
                     let Some(page) = self.pages.get(&page_id) else {
@@ -811,7 +816,7 @@ impl<S: PageStore> TreeCore<S> {
                     output.extend_from_slice(bytes);
                     current = *next;
                 }
-                if output.len() != *len {
+                if u64::try_from(output.len()).ok() != Some(*len) {
                     return Err(Error::InvalidPage(format!(
                         "overflow value length is {}, expected {len}",
                         output.len()
