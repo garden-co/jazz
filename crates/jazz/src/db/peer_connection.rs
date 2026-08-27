@@ -1294,27 +1294,77 @@ where
                                     // An old or unauthenticated upstream must never receive a
                                     // downgraded preflight.  Resolve conservatively instead.
                                     if expected_scope_authority.is_none() {
-                                        self.permission_advice_waiters
-                                            .borrow_mut()
-                                            .remove(request_id);
-                                        scope_lease_manager.requests.remove(request_id);
-                                    } else if self
-                                        .permission_advice_waiters
-                                        .borrow()
-                                        .contains_key(request_id)
-                                    {
-                                        if let Some(existing) = scope_lease_manager
-                                            .requests
-                                            .values_mut()
-                                            .find(|request| request.action == *action)
+                                        if let Some(request) =
+                                            scope_lease_manager.requests.remove(request_id)
                                         {
-                                            existing.waiters.insert(*request_id);
+                                            let mut waiters = self.permission_advice_waiters.borrow_mut();
+                                            for waiter_id in request.waiters {
+                                                waiters.remove(&waiter_id);
+                                            }
+                                        } else {
+                                            self.permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(request_id);
+                                        }
+                                    } else {
+                                        let has_live_waiter = scope_lease_manager
+                                            .requests
+                                            .get(request_id)
+                                            .map(|request| {
+                                                let waiters = self.permission_advice_waiters.borrow();
+                                                request
+                                                    .waiters
+                                                    .iter()
+                                                    .any(|waiter_id| waiters.contains_key(waiter_id))
+                                            })
+                                            .unwrap_or_else(|| {
+                                                self.permission_advice_waiters
+                                                    .borrow()
+                                                    .contains_key(request_id)
+                                            });
+                                        if !has_live_waiter {
+                                            scope_lease_manager.requests.remove(request_id);
+                                            pending.remove(pending_index);
+                                            continue;
+                                        }
+                                        let existing = scope_lease_manager
+                                            .requests
+                                            .iter()
+                                            .find(|(_, request)| request.action == *action)
+                                            .map(|(wire_request_id, request)| {
+                                                (*wire_request_id, request.intent_sent)
+                                            });
+                                        if let Some((wire_request_id, intent_sent)) = existing {
+                                            let request = scope_lease_manager
+                                                .requests
+                                                .get_mut(&wire_request_id)
+                                                .expect("authorization scope request still exists");
+                                            request.waiters.insert(*request_id);
+                                            if !intent_sent {
+                                                if let Err(error) = self.transport.send(
+                                                    SyncMessage::AuthorizationScopeIntent {
+                                                        request_id: wire_request_id,
+                                                        action: request.action.clone(),
+                                                    },
+                                                ) {
+                                                    if handle_transport_backpressure(
+                                                        &self.node,
+                                                        &self.scheduler,
+                                                        &error,
+                                                    ) {
+                                                        return Ok(true);
+                                                    }
+                                                    return Err(transport_error(error));
+                                                }
+                                                request.intent_sent = true;
+                                            }
                                         } else {
                                             scope_lease_manager.requests.insert(
                                                 *request_id,
                                                 AuthorizationScopeLeaseRequest {
                                                     action: action.clone(),
                                                     waiters: BTreeSet::from([*request_id]),
+                                                    intent_sent: false,
                                                     key: None,
                                                     lease: None,
                                                     owner: None,
@@ -1337,6 +1387,11 @@ where
                                                 }
                                                 return Err(transport_error(error));
                                             }
+                                            scope_lease_manager
+                                                .requests
+                                                .get_mut(request_id)
+                                                .expect("inserted authorization scope request")
+                                                .intent_sent = true;
                                         }
                                     }
                                 }
@@ -2021,6 +2076,7 @@ where
                                         AuthorizationScopeLeaseRequest {
                                             action: action.clone(),
                                             waiters,
+                                            intent_sent: false,
                                             key: None,
                                             lease: None,
                                             owner: None,
