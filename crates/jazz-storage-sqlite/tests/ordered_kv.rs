@@ -278,6 +278,17 @@ fn physical_header_ddl_and_jazz_blobs_are_pinned_across_reopen() {
             .unwrap(),
         b"jazz-groove-ordered-kv"
     );
+    assert!(
+        connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'epoch_manifest'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .unwrap()
+            .starts_with(b"JSM1"),
+        "the shared epoch manifest is stored as a raw, canonical metadata blob"
+    );
     let ddl = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE name = 'kv'",
@@ -343,6 +354,22 @@ fn rejects_wrong_sqlite_user_version_and_ddl_identity() {
     connection.pragma_update(None, "user_version", 1).unwrap();
     connection
         .execute("UPDATE meta SET value = x'00' WHERE key = 'ddl_id'", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let path = directory.path().join("bad-epoch-manifest.sqlite");
+    let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+    drop(storage);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE meta SET value = x'4a534d310002' WHERE key = 'epoch_manifest'",
+            [],
+        )
         .unwrap();
     drop(connection);
     assert!(matches!(

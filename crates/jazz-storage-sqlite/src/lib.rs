@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
-    ScanDirection, ScanRequest, StorageCursor, StorageFactory, StorageFuture, StorageScan, Value,
-    validate_physical_storage_names,
+    ScanDirection, ScanRequest, StorageCursor, StorageEpochManifest, StorageFactory, StorageFuture,
+    StorageScan, Value, validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -27,6 +27,7 @@ const USER_VERSION: i64 = 1;
 /// An immutable identity for the v1 DDL, stored beside the format marker so a
 /// same-shaped foreign database cannot be silently adopted.
 const DDL_ID: &[u8] = b"jazz-groove-ordered-kv-ddl-v1";
+const EPOCH_MANIFEST_KEY: &str = "epoch_manifest";
 const META_DDL: &str = "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT";
 const COLUMN_FAMILIES_DDL: &str =
     "CREATE TABLE column_families (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT";
@@ -175,6 +176,7 @@ impl SqliteStorage {
     }
 
     fn create_schema(connection: &mut Connection) -> Result<(), Error> {
+        let manifest = sqlite_manifest()?.encode()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend)?;
@@ -190,8 +192,13 @@ impl SqliteStorage {
         transaction
             .execute(
                 "INSERT INTO meta (key, value) VALUES \
-                 ('format', ?1), ('format_version', ?2), ('ddl_id', ?3)",
-                params![FORMAT, FORMAT_VERSION.to_be_bytes().to_vec(), DDL_ID],
+                 ('format', ?1), ('format_version', ?2), ('ddl_id', ?3), ('epoch_manifest', ?4)",
+                params![
+                    FORMAT,
+                    FORMAT_VERSION.to_be_bytes().to_vec(),
+                    DDL_ID,
+                    manifest
+                ],
             )
             .map_err(backend)?;
         transaction.commit().map_err(backend)
@@ -278,6 +285,17 @@ impl SqliteStorage {
             .optional()
             .map_err(backend)?
             .ok_or_else(|| Error::InvalidStorageLayout("missing sqlite DDL identity".to_owned()))?;
+        let epoch_manifest = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [EPOCH_MANIFEST_KEY],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(backend)?
+            .ok_or_else(|| {
+                Error::InvalidStorageLayout("missing sqlite epoch manifest".to_owned())
+            })?;
         if format != FORMAT
             || version.as_slice() != FORMAT_VERSION.to_be_bytes()
             || ddl_id != DDL_ID
@@ -286,6 +304,7 @@ impl SqliteStorage {
                 "unsupported sqlite ordered-kv format".to_owned(),
             ));
         }
+        sqlite_manifest()?.admit_existing(&epoch_manifest)?;
         Ok(())
     }
 
@@ -399,6 +418,22 @@ impl SqliteStorage {
             }
         })
     }
+}
+
+fn sqlite_manifest() -> Result<StorageEpochManifest, Error> {
+    StorageEpochManifest::epoch_1(
+        "sqlite",
+        1,
+        ["groove.ordered-kv.v1"],
+        BTreeMap::from([
+            (
+                "application-id".to_owned(),
+                APPLICATION_ID.to_be_bytes().to_vec(),
+            ),
+            ("ddl-id".to_owned(), DDL_ID.to_vec()),
+            ("key-order".to_owned(), b"unsigned-lexicographic".to_vec()),
+        ]),
+    )
 }
 
 fn validate_table_columns(

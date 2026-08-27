@@ -10,7 +10,7 @@
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -23,8 +23,8 @@ use serde::Serialize;
 
 use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
-    ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageFactory,
-    StorageFuture, StorageScan, Value, validate_physical_storage_names,
+    ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageEpochManifest,
+    StorageFactory, StorageFuture, StorageScan, Value, validate_physical_storage_names,
 };
 
 trait RocksResultExt<T> {
@@ -61,6 +61,7 @@ const CLASS_META_CF: &str = "__groove_class_meta";
 const ROCKSDB_INTERNAL_CF: &str = "__groove_storage_internal_v3";
 const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
 const ROCKSDB_VALUE_FORMAT_V3: &[u8] = b"raw-v3";
+const ROCKSDB_EPOCH_MANIFEST_KEY: &[u8] = b"epoch-manifest";
 
 /// RocksDB durability tier used for writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -291,13 +292,18 @@ impl RocksDbStorage {
             .cf_handle(ROCKSDB_INTERNAL_CF)
             .expect("internal RocksDB column family was opened");
         if initialize_format {
-            db.put_cf_opt(
+            let mut batch = WriteBatch::default();
+            batch.put_cf(
                 internal_cf,
                 ROCKSDB_VALUE_FORMAT_KEY,
                 ROCKSDB_VALUE_FORMAT_V3,
-                &write_options,
-            )
-            .storage()?;
+            );
+            batch.put_cf(
+                internal_cf,
+                ROCKSDB_EPOCH_MANIFEST_KEY,
+                rocksdb_manifest()?.encode()?,
+            );
+            db.write_opt(&batch, &write_options).storage()?;
         }
         Ok(Self {
             path,
@@ -426,7 +432,16 @@ fn validate_raw_v3_store(
             .storage()?
             .as_deref()
         {
-            Some(ROCKSDB_VALUE_FORMAT_V3) => return Ok(false),
+            Some(ROCKSDB_VALUE_FORMAT_V3) => {
+                let manifest = db
+                    .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
+                    .storage()?
+                    .ok_or_else(|| {
+                        Error::InvalidStorageLayout("missing RocksDB epoch manifest".to_owned())
+                    })?;
+                rocksdb_manifest()?.admit_existing(&manifest)?;
+                return Ok(false);
+            }
             Some(_) => {
                 return Err(Error::InvalidStorageLayout(
                     "incompatible RocksDB storage format marker".to_owned(),
@@ -455,6 +470,26 @@ fn validate_raw_v3_store(
             "unmarked non-empty RocksDB store cannot be opened as raw-v3".to_owned(),
         ))
     }
+}
+
+fn rocksdb_manifest() -> Result<StorageEpochManifest, Error> {
+    StorageEpochManifest::epoch_1(
+        "rocksdb",
+        3,
+        ["groove.ordered-kv.v1"],
+        BTreeMap::from([
+            (
+                "internal-cf".to_owned(),
+                ROCKSDB_INTERNAL_CF.as_bytes().to_vec(),
+            ),
+            ("key-order".to_owned(), b"unsigned-lexicographic".to_vec()),
+            (
+                "rocksdb-comparator".to_owned(),
+                b"rocksdb.bytewise.v1".to_vec(),
+            ),
+            ("value-format".to_owned(), ROCKSDB_VALUE_FORMAT_V3.to_vec()),
+        ]),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -875,9 +910,10 @@ mod tests {
 
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
-        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, ROCKSDB_INTERNAL_CF,
-        ROCKSDB_VALUE_FORMAT_KEY, RocksDbClassProfile, RocksDbStorage, any_available,
-        rocksdb_class_profile, sum_available,
+        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, ROCKSDB_EPOCH_MANIFEST_KEY,
+        ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY, ROCKSDB_VALUE_FORMAT_V3,
+        RocksDbClassProfile, RocksDbStorage, any_available, rocksdb_class_profile,
+        rocksdb_manifest, sum_available,
     };
     use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
@@ -1014,6 +1050,59 @@ mod tests {
         assert_eq!(
             ready(reopened.get("records".into(), b"former-sentinel".to_vec())).unwrap(),
             Some(vec![0xff, 0, 0xff, 17])
+        );
+    }
+
+    #[test]
+    fn rocksdb_epoch_manifest_freezes_marker_comparator_and_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &[CLASS_HISTORY_CF, "records"]).unwrap();
+        drop(storage);
+
+        let db = DB::open_cf(
+            &Options::default(),
+            dir.path(),
+            [CLASS_HISTORY_CF, "records", ROCKSDB_INTERNAL_CF],
+        )
+        .unwrap();
+        let internal = db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap();
+        assert_eq!(
+            db.get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY).unwrap(),
+            Some(ROCKSDB_VALUE_FORMAT_V3.to_vec())
+        );
+        assert_eq!(
+            db.get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY).unwrap(),
+            Some(rocksdb_manifest().unwrap().encode().unwrap())
+        );
+        let families = DB::list_cf(&Options::default(), dir.path()).unwrap();
+        assert!(families.contains(&CLASS_HISTORY_CF.to_owned()));
+        assert!(families.contains(&ROCKSDB_INTERNAL_CF.to_owned()));
+    }
+
+    #[test]
+    fn corrupt_epoch_manifest_is_rejected_before_admitting_requested_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        drop(storage);
+        let db = DB::open_cf(
+            &Options::default(),
+            dir.path(),
+            ["records", ROCKSDB_INTERNAL_CF],
+        )
+        .unwrap();
+        db.put_cf(
+            db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap(),
+            ROCKSDB_EPOCH_MANIFEST_KEY,
+            b"not-jsm1",
+        )
+        .unwrap();
+        drop(db);
+
+        assert!(RocksDbStorage::open(dir.path(), &["records", "must-not-be-created"]).is_err());
+        assert!(
+            !DB::list_cf(&Options::default(), dir.path())
+                .unwrap()
+                .contains(&"must-not-be-created".to_owned())
         );
     }
 
