@@ -132,7 +132,12 @@ pub enum ContributionComponent {
     /// Ordinary named content column.
     Column(String),
     /// Strategy-defined stable operation identity.
-    Operation(Vec<u8>),
+    Operation {
+        /// Column whose merge strategy defines the operation.
+        column: String,
+        /// Canonical strategy-specific bytes interpreted using the declared column type.
+        identity: Vec<u8>,
+    },
     /// Deletion/restore register.
     Register,
 }

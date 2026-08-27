@@ -291,7 +291,8 @@ groove::define_record! {
 
 groove::define_record! {
     struct ContributionOperationStorageRecord {
-        0 => identity: Vec<u8>,
+        0 => column: String,
+        1 => identity: Vec<u8>,
     }
 }
 
@@ -1094,7 +1095,7 @@ fn contribution_component_storage_value(
     };
     let case_name = match component {
         ContributionComponent::Column(_) => "column",
-        ContributionComponent::Operation(_) => "operation",
+        ContributionComponent::Operation { .. } => "operation",
         ContributionComponent::Register => "register",
     };
     let tag = schema
@@ -1111,8 +1112,8 @@ fn contribution_component_storage_value(
                 .record()
                 .clone()
         }
-        ContributionComponent::Operation(identity) => {
-            ContributionOperationStorageRecord::encode(payload, identity.clone())
+        ContributionComponent::Operation { column, identity } => {
+            ContributionOperationStorageRecord::encode(payload, column.clone(), identity.clone())
                 .expect("typed contribution operation matches its descriptor")
                 .record()
                 .clone()
@@ -1221,9 +1222,13 @@ fn contribution_component_from_storage(
         "column" => Ok(ContributionComponent::Column(
             ContributionColumnStorageRecord::new(payload).name()?,
         )),
-        "operation" => Ok(ContributionComponent::Operation(
-            ContributionOperationStorageRecord::new(payload).identity()?,
-        )),
+        "operation" => {
+            let payload = ContributionOperationStorageRecord::new(payload);
+            Ok(ContributionComponent::Operation {
+                column: payload.column()?,
+                identity: payload.identity()?,
+            })
+        }
         "register" if payload.descriptor().fields().is_empty() => {
             payload.to_values()?;
             Ok(ContributionComponent::Register)

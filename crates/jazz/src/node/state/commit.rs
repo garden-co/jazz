@@ -105,25 +105,33 @@ where
                     .clone()
                     .unwrap_or_else(|| commit.cells.keys().cloned().collect());
                 for column in authored {
+                    let column_type = table
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == column)
+                        .expect("authored column exists")
+                        .column_type
+                        .clone();
                     let components = match table.merge_strategy(&column) {
                         MergeStrategy::Lww => vec![ContributionComponent::Column(column)],
-                        MergeStrategy::Counter => {
-                            vec![ContributionComponent::Operation(column.into_bytes())]
-                        }
+                        MergeStrategy::Counter => vec![ContributionComponent::Operation {
+                            column,
+                            identity: Vec::new(),
+                        }],
                         MergeStrategy::GSet => match commit.cells.get(&column) {
                             Some(Value::Array(elements)) => elements
                                 .iter()
                                 .map(|element| {
-                                    postcard::to_allocvec(&(column.as_str(), element)).map(
-                                        ContributionComponent::Operation,
+                                    encode_contribution_gset_identity(
+                                        &column_type,
+                                        element,
                                     )
+                                    .map(|identity| ContributionComponent::Operation {
+                                        column: column.clone(),
+                                        identity,
+                                    })
                                 })
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|_| {
-                                    Error::InvalidMergeableCommit(
-                                        "g-set contribution operation must encode",
-                                    )
-                                })?,
+                                .collect::<Result<Vec<_>, _>>()?,
                             _ => {
                                 return Err(Error::InvalidMergeableCommit(
                                     "g-set calculated merge value must be an array",

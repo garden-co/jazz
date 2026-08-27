@@ -1255,8 +1255,23 @@ fn gset_contribution_merge_tracks_elements_as_native_operations() {
             now_ms,
         }
     };
-    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
+    let first_merge = node
+        .merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
+        .unwrap()
         .unwrap();
+    let provenance = node
+        .transaction_record(first_merge)
+        .unwrap()
+        .contribution_merge
+        .unwrap();
+    let ContributionComponent::Operation { column, identity } =
+        &provenance.substitutions[0].target.component
+    else {
+        panic!("g-set substitution target must carry an operation identity");
+    };
+    assert_eq!(column, "members");
+    let descriptor = records::RecordDescriptor::new([("element", records::ValueType::String)]);
+    assert_eq!(identity, &descriptor.create(&[v("one")]).unwrap());
     node.commit_mergeable_settled(
         MergeableCommit::new("sets", row_uuid, 30)
             .branch(a.clone())

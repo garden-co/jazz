@@ -1575,7 +1575,10 @@ fn contribution_component_column() -> GrooveColumnType {
                 ),
                 EnumCase::new(
                     "operation",
-                    RecordDescriptor::new([("identity", ValueType::Bytes)]),
+                    RecordDescriptor::new([
+                        ("column", ValueType::String),
+                        ("identity", ValueType::Bytes),
+                    ]),
                 ),
                 EnumCase::new(
                     "register",
@@ -2253,6 +2256,15 @@ mod tests {
         assert_eq!(component.tag("column").unwrap(), 0);
         assert_eq!(component.tag("operation").unwrap(), 1);
         assert_eq!(component.tag("register").unwrap(), 2);
+        assert_eq!(
+            component.cases[1]
+                .payload
+                .fields()
+                .iter()
+                .map(|field| field.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["column", "identity"]
+        );
     }
 
     #[test]
