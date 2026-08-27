@@ -65,6 +65,13 @@ are permanently reserved so persisted values from the superseded private
 length-prefixed record. Its payloads use only Groove's canonical primitive,
 record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
+Every engine-owned record field has a permanent numeric identity independent
+of declaration order: `NodeRef = { 1: object_hash, 2: locator }`, edits are
+`{ 1: offset, 2: delete_length, 3: insert_bytes, 4: utf16_offset,
+5: delete_utf16_length, 6: insert_utf16_length }`, and `LargeValueRef` is
+`{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
+5: utf16_length, 6: edit_tail }`. Changing an ID is a format change, not a
+refactor; implementations sort descriptors by these IDs before encoding.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
 its primitive backing is string as well. The ordinary enum schema is

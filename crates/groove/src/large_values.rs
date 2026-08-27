@@ -2238,9 +2238,13 @@ fn stored_scalar_value_type(kind: LargeValueKind) -> &'static ValueType {
 pub(crate) fn node_ref_descriptor() -> RecordDescriptor {
     static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
-        RecordDescriptor::new([
-            ("object_hash", ValueType::raw_bytes()),
-            ("locator", ValueType::raw_bytes()),
+        durable_large_value_record_descriptor([
+            (
+                NODE_REF_OBJECT_HASH_FIELD,
+                "object_hash",
+                ValueType::raw_bytes(),
+            ),
+            (NODE_REF_LOCATOR_FIELD, "locator", ValueType::raw_bytes()),
         ])
     })
 }
@@ -2297,7 +2301,8 @@ pub(crate) fn decode_node_ref(encoded: &[u8]) -> Result<NodeRef, Error> {
 }
 
 fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
-    let primitive = RecordDescriptor::new([(
+    let primitive = durable_large_value_record_descriptor([(
+        PRIMITIVE_VALUE_FIELD,
         "value",
         match kind {
             LargeValueKind::Bytes => ValueType::raw_bytes(),
@@ -2335,13 +2340,25 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
 fn large_value_edit_descriptor() -> RecordDescriptor {
     static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
-        RecordDescriptor::new([
-            ("offset", ValueType::U64),
-            ("delete_length", ValueType::U64),
-            ("insert_bytes", ValueType::raw_bytes()),
-            ("utf16_offset", ValueType::U64),
-            ("delete_utf16_length", ValueType::U64),
-            ("insert_utf16_length", ValueType::U64),
+        durable_large_value_record_descriptor([
+            (EDIT_OFFSET_FIELD, "offset", ValueType::U64),
+            (EDIT_DELETE_LENGTH_FIELD, "delete_length", ValueType::U64),
+            (
+                EDIT_INSERT_BYTES_FIELD,
+                "insert_bytes",
+                ValueType::raw_bytes(),
+            ),
+            (EDIT_UTF16_OFFSET_FIELD, "utf16_offset", ValueType::U64),
+            (
+                EDIT_DELETE_UTF16_LENGTH_FIELD,
+                "delete_utf16_length",
+                ValueType::U64,
+            ),
+            (
+                EDIT_INSERT_UTF16_LENGTH_FIELD,
+                "insert_utf16_length",
+                ValueType::U64,
+            ),
         ])
     })
 }
@@ -2349,16 +2366,34 @@ fn large_value_edit_descriptor() -> RecordDescriptor {
 fn large_value_ref_payload_descriptor() -> RecordDescriptor {
     static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
-        RecordDescriptor::new([
-            ("format_version", ValueType::U8),
-            ("logical_hash", ValueType::raw_bytes()),
-            ("root", ValueType::Record(Box::new(node_ref_descriptor()))),
-            ("byte_length", ValueType::U64),
+        durable_large_value_record_descriptor([
             (
+                LARGE_VALUE_REF_FORMAT_VERSION_FIELD,
+                "format_version",
+                ValueType::U8,
+            ),
+            (
+                LARGE_VALUE_REF_LOGICAL_HASH_FIELD,
+                "logical_hash",
+                ValueType::raw_bytes(),
+            ),
+            (
+                LARGE_VALUE_REF_ROOT_FIELD,
+                "root",
+                ValueType::Record(Box::new(node_ref_descriptor())),
+            ),
+            (
+                LARGE_VALUE_REF_BYTE_LENGTH_FIELD,
+                "byte_length",
+                ValueType::U64,
+            ),
+            (
+                LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
                 "utf16_length",
                 ValueType::Nullable(Box::new(ValueType::U64)),
             ),
             (
+                LARGE_VALUE_REF_EDIT_TAIL_FIELD,
                 "edit_tail",
                 ValueType::Array(Box::new(ValueType::Record(Box::new(
                     large_value_edit_descriptor(),
@@ -2366,6 +2401,41 @@ fn large_value_ref_payload_descriptor() -> RecordDescriptor {
             ),
         ])
     })
+}
+
+const NODE_REF_OBJECT_HASH_FIELD: u16 = 1;
+const NODE_REF_LOCATOR_FIELD: u16 = 2;
+const PRIMITIVE_VALUE_FIELD: u16 = 1;
+const EDIT_OFFSET_FIELD: u16 = 1;
+const EDIT_DELETE_LENGTH_FIELD: u16 = 2;
+const EDIT_INSERT_BYTES_FIELD: u16 = 3;
+const EDIT_UTF16_OFFSET_FIELD: u16 = 4;
+const EDIT_DELETE_UTF16_LENGTH_FIELD: u16 = 5;
+const EDIT_INSERT_UTF16_LENGTH_FIELD: u16 = 6;
+const LARGE_VALUE_REF_FORMAT_VERSION_FIELD: u16 = 1;
+const LARGE_VALUE_REF_LOGICAL_HASH_FIELD: u16 = 2;
+const LARGE_VALUE_REF_ROOT_FIELD: u16 = 3;
+const LARGE_VALUE_REF_BYTE_LENGTH_FIELD: u16 = 4;
+const LARGE_VALUE_REF_UTF16_LENGTH_FIELD: u16 = 5;
+const LARGE_VALUE_REF_EDIT_TAIL_FIELD: u16 = 6;
+
+/// Source declaration order is deliberately not the durable identity of a
+/// large-value record field. Numeric IDs are sorted before constructing the
+/// ordinary Groove descriptor and retained in its field names for review.
+fn durable_large_value_record_descriptor(
+    fields: impl IntoIterator<Item = (u16, &'static str, ValueType)>,
+) -> RecordDescriptor {
+    let mut fields = fields.into_iter().collect::<Vec<_>>();
+    fields.sort_by_key(|(id, _, _)| *id);
+    assert!(
+        fields.windows(2).all(|fields| fields[0].0 != fields[1].0),
+        "large-value record has duplicate durable field IDs"
+    );
+    RecordDescriptor::new(
+        fields
+            .into_iter()
+            .map(|(id, name, value_type)| (format!("f{id:04}_{name}"), value_type)),
+    )
 }
 
 const LARGE_VALUE_REF_BYTES_TAG: u8 = 0;
@@ -2381,7 +2451,7 @@ fn large_value_ref_schema() -> &'static EnumSchema {
             (LARGE_VALUE_REF_STRING_TAG, EnumCase::new("String", payload)),
             (LARGE_VALUE_REF_JSON_TAG, EnumCase::new("Json", payload)),
         ];
-        debug_assert!(
+        assert!(
             cases
                 .iter()
                 .enumerate()
