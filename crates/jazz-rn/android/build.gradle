@@ -67,6 +67,15 @@ android {
     buildConfig true
   }
 
+  // React Native codegen emits the Java TurboModule base class here. Keep that
+  // generated Java directory in the library's main source set so Kotlin can
+  // resolve NativeJazzRelaySpec when compiling the linked AAR.
+  sourceSets {
+    main {
+      java.srcDir("$buildDir/generated/source/codegen/java")
+    }
+  }
+
   buildTypes {
     release {
       minifyEnabled false
@@ -119,14 +128,5 @@ if (isNewArchitectureEnabled()) {
     jsRootDir = file("../src/")
     libraryName = "JazzRelaySpec"
     codegenJavaPackageName = "com.jazzrn"
-  }
-
-  // React Native wires codegen through `preBuild`, but consumers and CI often
-  // invoke a variant's Kotlin compiler directly. The module implements the
-  // generated NativeJazzRelaySpec, so that task must also wait for codegen.
-  // Keep this variant-independent: release and debug (including an app's
-  // flavor variants) all have the same generated TurboModule contract.
-  tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-    dependsOn(tasks.named("generateCodegenArtifactsFromSchema"))
   }
 }

@@ -124,8 +124,11 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(podspec, /requires the React Native New Architecture/);
   assert.match(androidBuild, /relayNativeArtifactsPresent/);
   assert.match(androidBuild, /externalNativeBuild/);
-  assert.match(androidBuild, /KotlinCompile/);
-  assert.match(androidBuild, /generateCodegenArtifactsFromSchema/);
+  assert.match(
+    androidBuild,
+    /sourceSets\s*\{\s*main\s*\{\s*java\.srcDir\("\$buildDir\/generated\/source\/codegen\/java"\)\s*}\s*}/s,
+  );
+  assert.doesNotMatch(androidBuild, /KotlinCompile/);
   assert.doesNotMatch(androidBuild, /AndroidManifestNew/);
   assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
