@@ -264,6 +264,27 @@ where
         if let Some(graph) = self.query.policy_authorization_graph_cache.get(&cache_key) {
             return Ok(graph.clone());
         }
+        self.policy_authorization_row_id_graph_inner(request, None, true)
+            .await
+    }
+
+    pub(super) async fn point_policy_authorization_row_id_graph(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<PolicyAuthorizationGraph, Error> {
+        self.query_engine_read_metrics.policy_authorization_graphs += 1;
+        self.policy_authorization_row_id_graph_inner(request, Some(access_paths), false)
+            .await
+    }
+
+    async fn policy_authorization_row_id_graph_inner(
+        &mut self,
+        request: QueryProgramRequest,
+        forced_access_paths: Option<BTreeMap<SourceId, CurrentAccessPath>>,
+        cache: bool,
+    ) -> Result<PolicyAuthorizationGraph, Error> {
+        let cache_key = policy_authorization_graph_cache_key(&request);
         let proof_table = match &request.policy {
             PolicyContext::AuthorizationSubplan {
                 protected_source, ..
@@ -287,11 +308,24 @@ where
         }
 
         let result = async {
-            let access_paths = self.query_program_access_paths(&request)?;
-            let program = Box::pin(
-                self.compile_query_program_request_with_access_paths(request, access_paths.clone()),
-            )
-            .await?;
+            let access_paths = match forced_access_paths {
+                Some(access_paths) => access_paths,
+                None => self.query_program_access_paths(&request)?,
+            };
+            let program =
+                if cache {
+                    Box::pin(self.compile_query_program_request_with_access_paths(
+                        request,
+                        access_paths.clone(),
+                    ))
+                    .await?
+                } else {
+                    Box::pin(self.compile_query_program_request_with_shared_access_paths(
+                        request,
+                        access_paths.clone(),
+                    ))
+                    .await?
+                };
             let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
             let route_fields = program
                 .lowered
@@ -311,9 +345,11 @@ where
                 route_fields,
                 access_paths,
             };
-            self.query
-                .policy_authorization_graph_cache
-                .insert(cache_key, graph.clone());
+            if cache {
+                self.query
+                    .policy_authorization_graph_cache
+                    .insert(cache_key, graph.clone());
+            }
             Ok(graph)
         }
         .await;

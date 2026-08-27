@@ -318,6 +318,8 @@ where
     /// Fresh non-resumable epoch binding authorization receipts to this link.
     pub(super) connection_epoch: u64,
     pub(super) startup_error: Option<Error>,
+    /// Exact uploads whose applied fate made them globally settled or rejected.
+    pub(super) released_outbox_tx_ids: Vec<TxId>,
     pub(super) link: ConnectionLink,
     pub(super) last_resume_bytes: Option<usize>,
     pub(super) auxiliary_pump: PeerIoPump,
@@ -504,6 +506,20 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    pub(super) fn take_released_outbox_tx_ids(&mut self) -> Vec<TxId> {
+        std::mem::take(&mut self.released_outbox_tx_ids)
+    }
+
+    pub(super) fn forget_released_outbox_tx_ids(&mut self, released: &HashSet<TxId>) {
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &mut self.link
+        else {
+            return;
+        };
+        for tx_id in released {
+            uploaded.remove(tx_id);
+        }
+    }
+
     /// Clone the binding-driven auxiliary I/O endpoint for this peer link.
     pub fn io_pump(&self) -> PeerIoPump {
         self.auxiliary_pump.clone()
@@ -1123,13 +1139,30 @@ where
                             pending.remove(pending_index);
                         }
                         // Upload locally-authored commits not yet shipped on this link.
-                        let to_upload: Vec<TxId> = outbox
-                            .borrow()
-                            .iter()
-                            .map(|pending| pending.tx_id)
-                            .filter(|tx_id| !uploaded.contains(tx_id))
-                            .collect();
-                        for tx_id in to_upload {
+                        let to_upload: Vec<(TxId, Option<SyncMessage>)> = {
+                            let outbox = outbox.borrow();
+                            let expected_missing = outbox.len().checked_sub(uploaded.len());
+                            let mut suffix = outbox
+                                .iter()
+                                .rev()
+                                .take_while(|pending| !uploaded.contains(&pending.tx_id))
+                                .map(|pending| (pending.tx_id, pending.unit.clone()))
+                                .collect::<Vec<_>>();
+                            if expected_missing == Some(suffix.len()) {
+                                suffix.reverse();
+                                suffix
+                            } else {
+                                // Fate cleanup and authority handoff can leave
+                                // holes in this link's uploaded set. Preserve
+                                // the general set-difference behavior there.
+                                outbox
+                                    .iter()
+                                    .filter(|pending| !uploaded.contains(&pending.tx_id))
+                                    .map(|pending| (pending.tx_id, pending.unit.clone()))
+                                    .collect()
+                            }
+                        };
+                        for (tx_id, staged) in to_upload {
                             if failed_large_value_uploads.contains(&tx_id)
                                 || awaiting_large_value_uploads.contains_key(&tx_id)
                                 || !awaiting_large_value_uploads.is_empty()
@@ -1149,11 +1182,6 @@ where
                             self.large_value_upload_retry_deadlines
                                 .borrow_mut()
                                 .remove(&tx_id);
-                            let staged = outbox
-                                .borrow()
-                                .iter()
-                                .find(|pending| pending.tx_id == tx_id)
-                                .and_then(|pending| pending.unit.clone());
                             let unit = if let Some(unit) = staged {
                                 unit
                             } else {
@@ -1933,6 +1961,20 @@ where
                                     }
                                     _ => None,
                                 };
+                                let released_outbox_tx_id = match &message {
+                                    SyncMessage::FateUpdate {
+                                        tx_id,
+                                        fate,
+                                        durability,
+                                        ..
+                                    } if matches!(fate, Fate::Rejected(_))
+                                        || durability
+                                            .is_some_and(|tier| tier >= DurabilityTier::Global) =>
+                                    {
+                                        Some(*tx_id)
+                                    }
+                                    _ => None,
+                                };
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
@@ -2002,6 +2044,9 @@ where
                                     }
                                     drop(routes);
                                     route_local_fate(&self.local_fate_routes, tx_id, &fate);
+                                }
+                                if let Some(tx_id) = released_outbox_tx_id {
+                                    self.released_outbox_tx_ids.push(tx_id);
                                 }
                             }
                         }
@@ -2991,11 +3036,10 @@ where
                             }
                             if let Some((tx_id, unit)) = local_upload {
                                 let mut outbox = outbox.borrow_mut();
-                                if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                                    outbox.push(PendingUpload {
+                                if outbox.push(PendingUpload {
                                         tx_id,
                                         unit: Some(unit),
-                                    });
+                                    }) {
                                     schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                 }
                             }
