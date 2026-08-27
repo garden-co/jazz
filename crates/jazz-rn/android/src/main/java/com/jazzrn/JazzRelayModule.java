@@ -1,6 +1,5 @@
 package com.jazzrn;
 
-import com.facebook.fbreact.specs.NativeJazzRelaySpec;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.module.annotations.ReactModule;
@@ -8,10 +7,12 @@ import com.facebook.react.module.annotations.ReactModule;
 /**
  * Android implementation of the generated JazzRelay TurboModule spec.
  *
- * This is Java deliberately: React Native codegen produces the Java
- * {@link NativeJazzRelaySpec} in the same Android source set, so javac can
- * compile the generated base and this implementation together. The Kotlin
- * bridge remains a thin owner of the opaque native handle.
+ * This is Java deliberately: the React Native Gradle plugin generates
+ * {@link NativeJazzRelaySpec} in this library's declared {@code com.jazzrn}
+ * package and adds that output to the Android source set before javac runs.
+ * Keeping the implementation alongside its generated base is the standard
+ * TurboModule library boundary; the Kotlin bridge remains a thin owner of the
+ * opaque native handle.
  */
 @ReactModule(name = JazzRelayModule.NAME)
 public class JazzRelayModule extends NativeJazzRelaySpec {
