@@ -224,6 +224,40 @@ pub trait ChunkInstallObserver {
         node_ref: crate::large_values::NodeRef,
         encoded: Bytes,
     ) -> ChunkFuture<'_, Result<(), ChunkError>>;
+
+    /// Whether this observer atomically consumes the pending-install journal
+    /// entry as part of its own metadata durability boundary. Groove's
+    /// database observer does this so a resident publication cannot clear the
+    /// recovery obligation before its staged metadata is persisted.
+    fn completes_install_journal(&self) -> bool {
+        false
+    }
+}
+
+/// Groove-owned durable recovery marker for a remotely staged chunk whose
+/// metadata installation has not completed yet.
+///
+/// The byte backend deliberately knows nothing about this state: it can be a
+/// blob service shared by many databases.  Groove records the marker before
+/// staging bytes, retries the policy-blind metadata installation while it is
+/// present, and removes it only after that installation succeeds.  A crash at
+/// any point therefore leaves either no bytes or a marker that makes the next
+/// exact read reconcile the metadata.
+pub trait ChunkInstallJournal {
+    fn mark_pending(
+        &self,
+        node_ref: crate::large_values::NodeRef,
+    ) -> ChunkFuture<'_, Result<(), ChunkError>>;
+
+    fn is_pending(
+        &self,
+        node_ref: crate::large_values::NodeRef,
+    ) -> ChunkFuture<'_, Result<bool, ChunkError>>;
+
+    fn complete(
+        &self,
+        node_ref: crate::large_values::NodeRef,
+    ) -> ChunkFuture<'_, Result<(), ChunkError>>;
 }
 
 #[derive(Clone, Default)]
@@ -234,6 +268,35 @@ impl ChunkInstallObserver for NoopChunkInstallObserver {
         &self,
         _node_ref: crate::large_values::NodeRef,
         _encoded: Bytes,
+    ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The standalone provider constructor has no durable Groove metadata plane.
+/// Database construction supplies a real journal; this no-op implementation
+/// retains the former behavior for embedders that only need byte retrieval.
+#[derive(Clone, Default)]
+pub struct NoopChunkInstallJournal;
+
+impl ChunkInstallJournal for NoopChunkInstallJournal {
+    fn mark_pending(
+        &self,
+        _node_ref: crate::large_values::NodeRef,
+    ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn is_pending(
+        &self,
+        _node_ref: crate::large_values::NodeRef,
+    ) -> ChunkFuture<'_, Result<bool, ChunkError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn complete(
+        &self,
+        _node_ref: crate::large_values::NodeRef,
     ) -> ChunkFuture<'_, Result<(), ChunkError>> {
         Box::pin(async { Ok(()) })
     }
@@ -570,6 +633,11 @@ pub struct StorageChunkProvider<S> {
     storage: S,
     resolver: Rc<dyn MissingChunkResolver>,
     observer: Rc<dyn ChunkInstallObserver>,
+    journal: Rc<dyn ChunkInstallJournal>,
+    /// A successful reconciliation is immutable.  Remembering it makes the
+    /// normal resident path purely a byte read after the first post-reopen
+    /// journal probe; it never reacquires the metadata lifecycle lock.
+    settled_installs: Rc<RefCell<BTreeSet<ChunkRequest>>>,
 }
 
 impl<S> StorageChunkProvider<S> {
@@ -578,6 +646,8 @@ impl<S> StorageChunkProvider<S> {
             storage,
             resolver: Rc::new(UnavailableChunkResolver),
             observer: Rc::new(NoopChunkInstallObserver),
+            journal: Rc::new(NoopChunkInstallJournal),
+            settled_installs: Rc::new(RefCell::new(BTreeSet::new())),
         }
     }
 
@@ -586,6 +656,8 @@ impl<S> StorageChunkProvider<S> {
             storage,
             resolver,
             observer: Rc::new(NoopChunkInstallObserver),
+            journal: Rc::new(NoopChunkInstallJournal),
+            settled_installs: Rc::new(RefCell::new(BTreeSet::new())),
         }
     }
 
@@ -594,10 +666,28 @@ impl<S> StorageChunkProvider<S> {
         resolver: Rc<dyn MissingChunkResolver>,
         observer: Rc<dyn ChunkInstallObserver>,
     ) -> Self {
+        Self::with_resolver_observer_and_journal(
+            storage,
+            resolver,
+            observer,
+            Rc::new(NoopChunkInstallJournal),
+        )
+    }
+
+    /// Construct a provider whose byte plane is independent from the
+    /// Groove-owned journal that records incomplete metadata installation.
+    pub fn with_resolver_observer_and_journal(
+        storage: S,
+        resolver: Rc<dyn MissingChunkResolver>,
+        observer: Rc<dyn ChunkInstallObserver>,
+        journal: Rc<dyn ChunkInstallJournal>,
+    ) -> Self {
         Self {
             storage,
             resolver,
             observer,
+            journal,
+            settled_installs: Rc::new(RefCell::new(BTreeSet::new())),
         }
     }
 }
@@ -616,54 +706,88 @@ where
         observer: Rc<dyn ChunkInstallObserver>,
     ) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
         Box::pin(async move {
+            let node_ref = crate::large_values::NodeRef {
+                object_hash: ContentHash(request.object_hash),
+                locator: request.locator,
+            };
             match self
                 .storage
                 .get(request.locator, ContentHash(request.object_hash))
                 .await
             {
-                // A previous remote resolution may have made the immutable
-                // bytes durable just before its metadata observer failed. Do
-                // not let a subsequent local hit turn that failed install
-                // into a permanently invisible accounting hole: the observer
-                // is deliberately idempotent and reconciles this mapping on
-                // every provider load that reaches storage.
                 Ok(bytes) => {
-                    observer
-                        .installed(
-                            crate::large_values::NodeRef {
-                                object_hash: ContentHash(request.object_hash),
-                                locator: request.locator,
-                            },
-                            bytes.clone(),
-                        )
-                        .await?;
+                    self.reconcile_pending_install(
+                        request.clone(),
+                        node_ref,
+                        bytes.clone(),
+                        observer,
+                        false,
+                    )
+                    .await?;
                     Ok(bytes)
                 }
                 Err(ChunkStorageError::Unavailable) => {
+                    // This durable marker is deliberately written before the
+                    // independent byte store.  If either staging or metadata
+                    // installation is interrupted, a later exact read knows
+                    // that it must finish the install rather than treating
+                    // resident bytes as a complete mapping.
+                    self.journal.mark_pending(node_ref.clone()).await?;
                     let bytes = self.resolver.resolve(request.clone()).await?;
                     self.storage
                         .stage(vec![StagedChunk {
-                            node_ref: crate::large_values::NodeRef {
-                                object_hash: ContentHash(request.object_hash),
-                                locator: request.locator,
-                            },
+                            node_ref: node_ref.clone(),
                             encoded: bytes.to_vec(),
                         }])
                         .await
                         .map_err(ChunkError::from)?;
-                    observer
-                        .installed(
-                            crate::large_values::NodeRef {
-                                object_hash: ContentHash(request.object_hash),
-                                locator: request.locator,
-                            },
-                            bytes.clone(),
-                        )
-                        .await?;
+                    self.reconcile_pending_install(
+                        request,
+                        node_ref,
+                        bytes.clone(),
+                        observer,
+                        true,
+                    )
+                    .await?;
                     Ok(bytes)
                 }
                 Err(error) => Err(ChunkError::from(error)),
             }
+        })
+    }
+}
+
+impl<S> StorageChunkProvider<S>
+where
+    S: ChunkStorage,
+{
+    fn reconcile_pending_install(
+        &self,
+        request: ChunkRequest,
+        node_ref: crate::large_values::NodeRef,
+        bytes: Bytes,
+        observer: Rc<dyn ChunkInstallObserver>,
+        newly_staged: bool,
+    ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+        Box::pin(async move {
+            if self.settled_installs.borrow().contains(&request) {
+                return Ok(());
+            }
+            // A regular resident chunk has no journal marker, so it must not
+            // call the observer or enter the database lifecycle mutex.
+            if !newly_staged && !self.journal.is_pending(node_ref.clone()).await? {
+                self.settled_installs.borrow_mut().insert(request);
+                return Ok(());
+            }
+            observer.installed(node_ref.clone(), bytes).await?;
+            // If the process stops after metadata is durable but before this
+            // compare-and-delete, the next opener retries an idempotent
+            // install.  It can never lose the recovery obligation.
+            if !observer.completes_install_journal() {
+                self.journal.complete(node_ref).await?;
+            }
+            self.settled_installs.borrow_mut().insert(request);
+            Ok(())
         })
     }
 }
@@ -1468,6 +1592,53 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct MemoryInstallJournal {
+        pending: Rc<RefCell<BTreeSet<crate::large_values::NodeRef>>>,
+    }
+
+    impl ChunkInstallJournal for MemoryInstallJournal {
+        fn mark_pending(
+            &self,
+            node_ref: crate::large_values::NodeRef,
+        ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+            self.pending.borrow_mut().insert(node_ref);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn is_pending(
+            &self,
+            node_ref: crate::large_values::NodeRef,
+        ) -> ChunkFuture<'_, Result<bool, ChunkError>> {
+            let pending = self.pending.borrow().contains(&node_ref);
+            Box::pin(async move { Ok(pending) })
+        }
+
+        fn complete(
+            &self,
+            node_ref: crate::large_values::NodeRef,
+        ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+            self.pending.borrow_mut().remove(&node_ref);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingInstallObserver {
+        calls: Cell<usize>,
+    }
+
+    impl ChunkInstallObserver for CountingInstallObserver {
+        fn installed(
+            &self,
+            _node_ref: crate::large_values::NodeRef,
+            _encoded: Bytes,
+        ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     struct CountingProvider {
         calls: Cell<usize>,
         bytes: Bytes,
@@ -2073,10 +2244,12 @@ mod tests {
             attempts: Cell::new(0),
             installed: Cell::new(0),
         });
-        let provider = StorageChunkProvider::with_resolver_and_observer(
+        let journal = Rc::new(MemoryInstallJournal::default());
+        let provider = StorageChunkProvider::with_resolver_observer_and_journal(
             storage.clone(),
             Rc::new(StaticResolver(bytes.clone())),
             observer.clone(),
+            journal.clone(),
         );
 
         // The bytes are already resident when metadata durability fails.
@@ -2092,14 +2265,77 @@ mod tests {
         // A reconstructed provider models reopen: its first load is now a
         // local hit, but it must still reconcile the missing install exactly
         // once instead of silently returning the resident bytes.
-        let reopened = StorageChunkProvider::with_resolver_and_observer(
+        let reopened = StorageChunkProvider::with_resolver_observer_and_journal(
             storage,
             Rc::new(StaticResolver(bytes.clone())),
             observer.clone(),
+            journal,
         );
         assert_eq!(block_on(reopened.get(request)), Ok(bytes));
         assert_eq!(observer.attempts.get(), 2);
         assert_eq!(observer.installed.get(), 1);
+    }
+
+    #[test]
+    fn ordinary_resident_chunk_hits_do_not_reenter_metadata_installation() {
+        let storage = Rc::new(MemoryChunkStorage::new());
+        let bytes = Bytes::from_static(b"already complete local chunk bytes");
+        let request = ChunkRequest {
+            object_hash: object_hash(&bytes).0,
+            locator: Locator::from_seed(b"complete-resident-install"),
+        };
+        block_on(storage.stage(vec![StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: ContentHash(request.object_hash),
+                locator: request.locator,
+            },
+            encoded: bytes.to_vec(),
+        }]))
+        .unwrap();
+        let observer = Rc::new(CountingInstallObserver::default());
+        let provider = StorageChunkProvider::with_resolver_observer_and_journal(
+            storage,
+            Rc::new(StaticResolver(bytes.clone())),
+            observer.clone(),
+            Rc::new(MemoryInstallJournal::default()),
+        );
+
+        assert_eq!(block_on(provider.get(request.clone())), Ok(bytes.clone()));
+        assert_eq!(block_on(provider.get(request)), Ok(bytes));
+        assert_eq!(
+            observer.calls.get(),
+            0,
+            "a fully installed resident mapping must not call the lifecycle-bound observer"
+        );
+    }
+
+    #[test]
+    fn concurrent_pending_install_consumers_run_one_metadata_observer() {
+        let storage = Rc::new(MemoryChunkStorage::new());
+        let bytes = Bytes::from_static(b"one remote chunk, one metadata install");
+        let request = ChunkRequest {
+            object_hash: object_hash(&bytes).0,
+            locator: Locator::from_seed(b"coalesced-pending-install"),
+        };
+        let observer = Rc::new(CountingInstallObserver::default());
+        let provider = Rc::new(StorageChunkProvider::with_resolver_observer_and_journal(
+            storage,
+            Rc::new(StaticResolver(bytes.clone())),
+            observer.clone(),
+            Rc::new(MemoryInstallJournal::default()),
+        ));
+        let owned = OwnedChunkProvider::new(provider);
+
+        let (first, second) = block_on(async {
+            futures::join!(owned.get(request.clone()), owned.get(request.clone()))
+        });
+        assert_eq!(first.unwrap(), bytes);
+        assert_eq!(second.unwrap(), bytes);
+        assert_eq!(
+            observer.calls.get(),
+            1,
+            "coalesced consumers must share one pending metadata installation"
+        );
     }
 
     #[test]

@@ -25,6 +25,148 @@ impl crate::chunks::MissingChunkResolver for FixtureChunkResolver {
     }
 }
 
+/// The byte plane is deliberately separate from Groove metadata. This receipt
+/// fails the metadata observer after the immutable byte has been staged, then
+/// rebuilds the provider over the same metadata store. The pending marker must
+/// cause exactly one retry; a regular byte-store hit alone is not evidence that
+/// child/reference metadata exists.
+#[futures_test::test]
+async fn pending_remote_chunk_install_retries_after_provider_rebuild() {
+    struct FailOnceObserver {
+        attempts: Rc<Cell<usize>>,
+    }
+
+    impl crate::chunks::ChunkInstallObserver for FailOnceObserver {
+        fn installed(
+            &self,
+            _node_ref: crate::large_values::NodeRef,
+            _encoded: Bytes,
+        ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkError>> {
+            let attempts = Rc::clone(&self.attempts);
+            Box::pin(async move {
+                let attempt = attempts.get().saturating_add(1);
+                attempts.set(attempt);
+                if attempt == 1 {
+                    Err(crate::chunks::ChunkError::Backend(
+                        "injected post-staging metadata failure".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    let backing = MemoryStorage::new(&[LARGE_VALUE_METADATA_CF]);
+    let metadata = Rc::new(
+        LayoutStorage::new(backing, StorageLayout::Identity)
+            .await
+            .unwrap(),
+    );
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+    )
+    .unwrap();
+    let root = prepared.value_ref.root.clone();
+    let bytes = Bytes::from(
+        prepared
+            .staged_chunks
+            .iter()
+            .find(|chunk| chunk.node_ref == root)
+            .expect("prepared root is staged")
+            .encoded
+            .clone(),
+    );
+    let request = crate::chunks::ChunkRequest {
+        object_hash: root.object_hash.0,
+        locator: root.locator,
+    };
+    let resolver = Rc::new(FixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            request.clone(),
+            bytes.clone(),
+        )])),
+    });
+    let attempts = Rc::new(Cell::new(0));
+    let provider = crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
+        chunks.clone(),
+        resolver.clone(),
+        Rc::new(FailOnceObserver {
+            attempts: Rc::clone(&attempts),
+        }),
+        Rc::new(MetadataChunkInstallJournal {
+            storage: Rc::downgrade(&metadata),
+        }),
+    );
+
+    assert!(matches!(
+        crate::chunks::ChunkProvider::get(&provider, request.clone()).await,
+        Err(crate::chunks::ChunkError::Backend(message))
+            if message.contains("post-staging metadata failure")
+    ));
+    assert_eq!(
+        crate::chunks::ChunkStorage::get(
+            chunks.as_ref(),
+            request.locator,
+            crate::large_values::ContentHash(request.object_hash),
+        )
+        .await
+        .unwrap(),
+        bytes,
+        "the immutable blob is resident before metadata installation succeeds"
+    );
+
+    let lifecycle = Arc::new(AsyncMutex::new(()));
+    let reopened = crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
+        chunks,
+        resolver,
+        Rc::new(MetadataChunkInstallObserver {
+            storage: Rc::downgrade(&metadata),
+            lifecycle: Arc::downgrade(&lifecycle),
+            resident_install: None,
+        }),
+        Rc::new(MetadataChunkInstallJournal {
+            storage: Rc::downgrade(&metadata),
+        }),
+    );
+    assert_eq!(
+        crate::chunks::ChunkProvider::get(&reopened, request.clone()).await,
+        Ok(bytes)
+    );
+    assert_eq!(
+        attempts.get(),
+        1,
+        "the first post-staging observer failed once"
+    );
+    assert!(
+        metadata
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&root).unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "the reopened retry installs the actual Groove node metadata"
+    );
+    assert!(
+        !crate::chunks::ChunkInstallJournal::is_pending(
+            &MetadataChunkInstallJournal {
+                storage: Rc::downgrade(&metadata),
+            },
+            crate::large_values::NodeRef {
+                object_hash: crate::large_values::ContentHash(request.object_hash),
+                locator: request.locator,
+            },
+        )
+        .await
+        .unwrap(),
+        "a successful observer completion clears its durable recovery marker"
+    );
+}
+
 #[derive(Clone)]
 struct CountingFixtureChunkResolver {
     chunks: Rc<std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>>,
