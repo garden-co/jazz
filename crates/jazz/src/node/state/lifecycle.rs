@@ -591,6 +591,8 @@ where
             ahead_current_keys: FxHashSet::default(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
+            #[cfg(any(test, feature = "testing"))]
+            merge_head_reachability_walks: 0,
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
             permissions_ready: true,
