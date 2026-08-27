@@ -537,6 +537,9 @@ Groove record encoding: there is no metadata magic prefix, private type tag,
 or serde/postcard envelope. Key prefixes are fixed engine-owned namespaces and
 must select their sole expected record shape; malformed, truncated, trailing,
 non-canonical, or mismatched records fail before any lifecycle/GC mutation.
+`reclaim/<NodeRef>` repeats that exact canonical `NodeRef` record as its value
+so reclamation cannot retarget a queue entry; `install/<NodeRef>` is an empty
+presence marker whose key alone carries the identity.
 
 `INV-LARGE-9`: physical-record mutation and descriptor-reference deltas MUST be
 crash-consistent and idempotent. A node/blob MUST NOT be reclaimed while its
