@@ -1172,6 +1172,113 @@ fn stored_authored_columns_require_a_canonical_physical_id_array() {
             "authored columns must be an array of physical column ids"
         ))
     ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![
+            Value::U64(1),
+            Value::String("not an id".to_owned()),
+        ])),
+        Err(Error::InvalidStoredValue(
+            "authored columns must contain physical column ids"
+        ))
+    ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(0)])),
+        Err(Error::InvalidStoredValue(
+            "authored physical column ids must be nonzero"
+        ))
+    ));
+}
+
+#[test]
+fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state() {
+    // Internal storage-boundary receipt: applications cannot manufacture a
+    // physical id, so exercise a deliberately corrupted durable history row.
+    // Reopen must preserve the fail-closed boundary rather than regenerating
+    // ahead/global current carriers from malformed history.
+    for invalid_id in [0, 9_999] {
+        let schema = schema();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let tx_id;
+        {
+            let mut node = open_node_at(&temp_dir, schema.clone());
+            tx_id = node
+                .commit_mergeable_settled(
+                    MergeableCommit::new("todos", row(invalid_id as u8), 10)
+                        .cells(title_cells("corrupt authored ids")),
+                )
+                .unwrap();
+            let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+
+            // Remove the valid derived carrier first, then replace only the
+            // immutable persisted history row with malformed raw bytes.
+            let mut cleanup = node.database.open_batch();
+            node.write_ahead_current_delete(&mut cleanup, &version).unwrap();
+            let applied = crate::db::block_on(node.database.apply_batch(cleanup)).unwrap();
+            let persisted = crate::db::block_on(applied.persist());
+            node.database.finish_persistence(persisted).unwrap();
+            assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
+
+            let schema_version = node
+                .schema_version_for_alias(version.schema_version_alias())
+                .unwrap();
+            let table = node
+                .table_in_schema(version.table(), schema_version)
+                .unwrap()
+                .clone();
+            let corrupted = VersionRow::from_parts_with_schema_version(
+                &table,
+                VersionRowParts {
+                    table: version.table().to_owned(),
+                    branch_key: version.branch_key().clone(),
+                    row_uuid: version.row_uuid(),
+                    tx_node_alias: version.tx_node_alias(),
+                    schema_version_alias: version.schema_version_alias(),
+                    tx_time: version.tx_time(),
+                    parents: version.parents(),
+                    created_by: version.created_by(),
+                    created_at: version.created_at(),
+                    updated_by: version.updated_by(),
+                    updated_at: version.updated_at(),
+                    cells: version.cells(&table).unwrap(),
+                    authored_columns: Some(BTreeSet::from([PhysicalColumnId(invalid_id)])),
+                    deletion: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            let (history_table, raw) = node.version_storage_write_binding(&corrupted).unwrap();
+            let mut corruption = node.database.open_batch();
+            corruption.update_raw(
+                history_table.to_string(),
+                node.version_storage_primary_key(&corrupted).unwrap(),
+                raw,
+            );
+            let applied = crate::db::block_on(node.database.apply_batch(corruption)).unwrap();
+            let persisted = crate::db::block_on(applied.persist());
+            node.database.finish_persistence(persisted).unwrap();
+        }
+
+        let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+        let corrupted = reopened.query_versions_for_tx(tx_id).unwrap().remove(0);
+        let mut ahead = reopened.database.open_batch();
+        assert!(reopened
+            .write_ahead_current_insert(&mut ahead, &corrupted)
+            .is_err());
+        let mut global = reopened.database.open_batch();
+        assert!(reopened
+            .write_global_current_update(&mut global, &corrupted, GlobalTime(1))
+            .is_err());
+        assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
+        let table_id = reopened
+            .physical_table_id_for_schema(reopened.catalogue.current_schema_version_id, "todos")
+            .unwrap();
+        assert!(reopened
+            .database
+            .primary_key_scan_raw(&physical_global_current_table_name(table_id), &[])
+            .unwrap()
+            .is_empty());
+    }
 }
 
 #[test]

@@ -181,6 +181,9 @@ where
         } else {
             &tx
         };
+        let contribution_merge = self.contribution_merge_storage_value(
+            storage_tx.contribution_merge.as_ref(),
+        )?;
         let tx_values = transaction_values_with_cardinality_scope(
             tx_node_alias,
             storage_tx,
@@ -188,6 +191,7 @@ where
             global_time,
             durability,
             view_scoped_cardinality && !preserve_authoritative_cardinality,
+            contribution_merge,
         );
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
@@ -642,6 +646,7 @@ where
             return self.apply_fate_update(tx.tx_id, fate, None, None).await;
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+        let contribution_merge = self.contribution_merge_storage_value(tx.contribution_merge.as_ref())?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -651,6 +656,7 @@ where
                 fate.clone(),
                 None,
                 DurabilityTier::Local,
+                contribution_merge,
             ),
         );
         let applied = self.database.apply_batch(batch).await?;

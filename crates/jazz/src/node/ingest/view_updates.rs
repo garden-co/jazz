@@ -1411,6 +1411,12 @@ where
         version: &VersionRow,
         global_time: Option<GlobalTime>,
     ) -> Result<Vec<Value>, Error> {
+        // Current carriers are derived durable state. Validate the compact
+        // authored-column ids against this row's exact authored schema/table
+        // before copying them into either ahead or global current storage.
+        // The returned logical names are not stored here; this is solely the
+        // local-alias integrity boundary.
+        let _ = self.authored_columns_for_version(version)?;
         global_current_values(table, version, global_time)
     }
 

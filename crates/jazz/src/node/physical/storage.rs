@@ -70,6 +70,110 @@ where
             .map(Some)
     }
 
+    /// Translate a logical contribution coordinate at the local storage
+    /// boundary. Physical column ids are deliberately node-local and must
+    /// never leak into the transaction wire representation.
+    pub(super) fn contribution_column_id_for_storage(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<PhysicalColumnId, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| mapping.tables.get(table))
+            .and_then(|mapping| mapping.columns.get(column))
+            .copied();
+        if let Some(id) = current {
+            return Ok(id);
+        }
+
+        let ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table))
+            .filter_map(|mapping| mapping.columns.get(column).copied())
+            .collect::<BTreeSet<_>>();
+        match ids.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "contribution physical column mapping missing",
+            )),
+            1 => Ok(*ids.first().expect("one physical column id")),
+            _ => Err(Error::InvalidStoredValue(
+                "contribution logical column maps to multiple physical ids",
+            )),
+        }
+    }
+
+    /// Resolve an on-disk contribution column id into the logical name used by
+    /// the runtime and replicated transaction payload. Prefer the active
+    /// schema so a retained physical id follows an ordinary compatible column
+    /// rename; fall back to one retained historical mapping only when the
+    /// logical table is no longer present in the active schema.
+    pub(super) fn contribution_column_name_for_storage(
+        &self,
+        table: &str,
+        column: PhysicalColumnId,
+    ) -> Result<String, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| mapping.tables.get(table))
+            .and_then(|mapping| {
+                mapping
+                    .columns
+                    .iter()
+                    .find_map(|(name, id)| (*id == column).then(|| name.clone()))
+            });
+        if let Some(name) = current {
+            return Ok(name);
+        }
+
+        let names = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table))
+            .flat_map(|mapping| {
+                mapping
+                    .columns
+                    .iter()
+                    .filter(|(_, id)| **id == column)
+                    .map(|(name, _)| name.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        match names.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "stored contribution physical column id is absent from its table mapping",
+            )),
+            1 => Ok(names.into_iter().next().expect("one logical column name")),
+            _ => Err(Error::InvalidStoredValue(
+                "stored contribution physical column id maps to multiple logical names",
+            )),
+        }
+    }
+
+    pub(super) fn contribution_merge_storage_value(
+        &self,
+        provenance: Option<&ContributionMergeProvenance>,
+    ) -> Result<Value, Error> {
+        super::codec::contribution_merge_storage_value(provenance, |table, column| {
+            self.contribution_column_id_for_storage(table, column)
+        })
+    }
+
+    pub(super) fn contribution_merge_from_storage_record(
+        &self,
+        record: OwnedRecord,
+    ) -> Result<ContributionMergeProvenance, Error> {
+        super::codec::contribution_merge_from_storage_record(record, |table, column| {
+            self.contribution_column_name_for_storage(table, column)
+        })
+    }
+
     pub(super) fn authored_columns_for_version(
         &self,
         version: &VersionRow,
