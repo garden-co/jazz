@@ -1242,6 +1242,10 @@ impl ClientDb {
         ClientDbInner::reconnect_upstream(&self.inner).await
     }
 
+    fn disconnect_upstream(&self) -> bool {
+        self.inner.borrow_mut().disconnect_upstream()
+    }
+
     fn ensure_tick_driver_running(&self) -> Result<()> {
         self.inner.borrow().ensure_tick_driver_running()
     }
