@@ -149,6 +149,18 @@ describe("typed app prototype", () => {
     expectTypeOf(query).toMatchTypeOf<
       QueryBuilder<{ id: string; attachment: Uint8Array; title: string }>
     >();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // The object form is a schema-derived partial projection, rather than a
+      // generic descriptor bag. In particular, JSON pointers cannot leak onto
+      // an arbitrary scalar just because its JS representation is primitive.
+      // @ts-expect-error BOOLEAN columns do not support partial projections.
+      app.todos.select({ done: { at: "/" } });
+      // @ts-expect-error bytes use byte ranges, not text UTF-8 coordinates.
+      app.todos.select({ attachment: { fromUtf8: 0, toUtf8: 1 } });
+      // @ts-expect-error TEXT cannot use the JSON-pointer projection form.
+      app.todos.select({ title: { at: "/" } });
+    }
   });
 
   it("serializes nested include builders as query objects", () => {

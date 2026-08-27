@@ -2,6 +2,27 @@
 
 use super::*;
 
+/// JSON pointer writes use the RFC 6901 array-index grammar, so a caller
+/// cannot mutate `alice`'s first array member through a leading-zero path that
+/// an equivalent read treats as absent.
+#[test]
+fn json_set_rejects_noncanonical_array_indices() {
+    let mut value = serde_json::json!({ "items": ["first", "second"] });
+    let error = super::super::mutations::apply_json_set(
+        &mut value,
+        "/items/01",
+        serde_json::json!("replaced"),
+    )
+    .expect_err("leading-zero JSON array pointer must be rejected");
+    assert_eq!(error.code, ErrorCode::Query);
+    assert_eq!(error.message, "JSON array pointer token is not an index");
+    assert_eq!(value, serde_json::json!({ "items": ["first", "second"] }));
+
+    super::super::mutations::apply_json_set(&mut value, "/items/1", serde_json::json!("ok"))
+        .expect("canonical JSON array index succeeds");
+    assert_eq!(value, serde_json::json!({ "items": ["first", "ok"] }));
+}
+
 #[derive(Clone)]
 struct RetryableChunkResolver {
     retry_after_ms: u32,
