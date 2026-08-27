@@ -276,9 +276,12 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
         .unwrap()
         .expect("restoration must publish the frozen base row");
 
-    assert_eq!(update.added.len(), 1);
-    assert_eq!(update.added[0].1.row_uuid(), row_uuid);
-    assert!(update.removed.is_empty());
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].1.row_uuid(), row_uuid);
+    assert!(removed.is_empty());
 }
 
 #[test]
@@ -370,9 +373,12 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("head rejection must restore the frozen base payload");
-    assert_eq!(update.removed.len(), 1);
-    assert_eq!(update.added.len(), 1);
-    assert_eq!(update.added[0].1.cell(table, "title"), Some(v("frozen base")));
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].1.cell(table, "title"), Some(v("frozen base")));
 
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
@@ -404,10 +410,13 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("replacement head content must remain live");
-    assert_eq!(replacement.removed.len(), 1);
-    assert_eq!(replacement.added.len(), 1);
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = replacement else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(added.len(), 1);
     assert_eq!(
-        replacement.added[0].1.cell(table, "title"),
+        added[0].1.cell(table, "title"),
         Some(v("replacement head"))
     );
 }
