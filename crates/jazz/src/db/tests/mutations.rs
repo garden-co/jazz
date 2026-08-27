@@ -363,7 +363,7 @@ fn point_update_preimage_fast_path_preserves_target_and_policy_dispatch() {
                 .column("body", PublicColumnType::Text)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["user_id"]))
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
                         .with_insert(PublicPolicyExpr::True)
                         .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
                 ),
