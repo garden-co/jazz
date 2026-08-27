@@ -1,6 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { build as esbuild } from "esbuild";
+import type { BuildOptions } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
@@ -474,6 +476,24 @@ export default s.defineMigration({
         if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
           return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
         }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+          return new Response(
+            JSON.stringify({
+              schema: { tables: s.defineApp(fromSchema).wasmSchema },
+              publishedAt: 0,
+            }),
+            { status: 200 },
+          );
+        }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+          return new Response(
+            JSON.stringify({
+              schema: { tables: s.defineApp(toSchema).wasmSchema },
+              publishedAt: 0,
+            }),
+            { status: 200 },
+          );
+        }
         if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
           migrationBody = JSON.parse(String(init?.body));
           return new Response(
@@ -514,6 +534,237 @@ export default s.defineMigration({
         operations: [{ type: "rename", column: "email", value: "email_address" }],
       },
     ]);
+  });
+
+  it.each(["hash", "witness"] as const)(
+    "rejects a migration whose embedded %s metadata was tampered before publication",
+    async (tamperKind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      await mkdir(migrationsDir, { recursive: true });
+
+      const fromSchema = {
+        users: s.table({
+          email: s.string(),
+        }),
+      };
+      const toSchema = {
+        users: s.table({
+          email_address: s.string(),
+        }),
+      };
+      const { computeSchemaHash } = await import("./catalogue.js");
+      const fromWasmSchema = s.defineApp(fromSchema).wasmSchema;
+      const toWasmSchema = s.defineApp(toSchema).wasmSchema;
+      const fromHash = await computeSchemaHash(fromWasmSchema);
+      const toHash = await computeSchemaHash(toWasmSchema);
+      const embeddedFromHash =
+        tamperKind === "hash" ? "eeeeeeeeeeee" : fromHash.slice(0, 12);
+      const fromColumn = tamperKind === "witness" ? "s.int()" : "s.string()";
+
+      await writeFile(
+        join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
+        `
+import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
+
+export default s.defineMigration({
+  migrate: {
+    users: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(embeddedFromHash)},
+  toHash: ${JSON.stringify(toHash.slice(0, 12))},
+  from: {
+    users: s.table({
+      email: ${fromColumn},
+    }),
+  },
+  to: {
+    users: s.table({
+      email_address: s.string(),
+    }),
+  },
+});
+`,
+      );
+
+      let migrationPublishCount = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string) => {
+          if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+            return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+          }
+          if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+            return new Response(
+              JSON.stringify({ schema: { tables: fromWasmSchema }, publishedAt: 0 }),
+              { status: 200 },
+            );
+          }
+          if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+            return new Response(
+              JSON.stringify({ schema: { tables: toWasmSchema }, publishedAt: 0 }),
+              { status: 200 },
+            );
+          }
+          if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+            migrationPublishCount++;
+            return new Response(JSON.stringify({ fromHash, toHash }), { status: 201 });
+          }
+          throw new Error(`Unexpected fetch: ${input}`);
+        }),
+      );
+
+      const { pushMigration } = await import("./catalogue-project.js");
+      await expect(
+        pushMigration({
+          appId: APP_ID,
+          serverUrl: SERVER_URL,
+          adminSecret: ADMIN_SECRET,
+          migrationsDir,
+          fromHash,
+          toHash,
+        }),
+      ).rejects.toThrow(tamperKind === "hash" ? "embedded fromHash" : "from schema witness");
+      expect(migrationPublishCount).toBe(0);
+    },
+  );
+
+  it("uses private migration bundles across isolated process realms and removes them", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromSchema = {
+      users: s.table({
+        email: s.string(),
+      }),
+    };
+    const toSchema = {
+      users: s.table({
+        email_address: s.string(),
+      }),
+    };
+    const { computeSchemaHash } = await import("./catalogue.js");
+    const fromWasmSchema = s.defineApp(fromSchema).wasmSchema;
+    const toWasmSchema = s.defineApp(toSchema).wasmSchema;
+    const fromHash = await computeSchemaHash(fromWasmSchema);
+    const toHash = await computeSchemaHash(toWasmSchema);
+    await writeFile(
+      join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
+      `
+import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
+
+export default s.defineMigration({
+  migrate: {
+    users: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromHash.slice(0, 12))},
+  toHash: ${JSON.stringify(toHash.slice(0, 12))},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+  },
+  to: {
+    users: s.table({
+      email_address: s.string(),
+    }),
+  },
+});
+`,
+    );
+
+    const activeOutputs = new Set<string>();
+    let arrivals = 0;
+    let releaseBuilds!: () => void;
+    const bothBuildsStarted = new Promise<void>((resolve) => {
+      releaseBuilds = resolve;
+    });
+    vi.doMock("esbuild", () => ({
+      build: async (options: BuildOptions) => {
+        const outFile = options.outfile!;
+        arrivals++;
+        if (activeOutputs.has(outFile)) {
+          releaseBuilds();
+          throw new Error(`migration bundle collision: ${outFile}`);
+        }
+        activeOutputs.add(outFile);
+        if (arrivals === 2) releaseBuilds();
+        await bothBuildsStarted;
+        try {
+          return await esbuild(options);
+        } finally {
+          activeOutputs.delete(outFile);
+        }
+      },
+    }));
+
+    let migrationPublishCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+          return new Response(
+            JSON.stringify({ schema: { tables: fromWasmSchema }, publishedAt: 0 }),
+            { status: 200 },
+          );
+        }
+        if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+          return new Response(
+            JSON.stringify({ schema: { tables: toWasmSchema }, publishedAt: 0 }),
+            { status: 200 },
+          );
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          migrationPublishCount++;
+          return new Response(JSON.stringify({ fromHash, toHash }), { status: 201 });
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    try {
+      // Fresh module evaluations model two processes whose module-local counters both start at zero.
+      vi.resetModules();
+      const firstProcess = await import("./catalogue-project.js");
+      vi.resetModules();
+      const secondProcess = await import("./catalogue-project.js");
+
+      const results = await Promise.all([
+        firstProcess.pushMigration({
+          appId: APP_ID,
+          serverUrl: SERVER_URL,
+          adminSecret: ADMIN_SECRET,
+          migrationsDir,
+          fromHash,
+          toHash,
+        }),
+        secondProcess.pushMigration({
+          appId: APP_ID,
+          serverUrl: SERVER_URL,
+          adminSecret: ADMIN_SECRET,
+          migrationsDir,
+          fromHash,
+          toHash,
+        }),
+      ]);
+
+      expect(results).toHaveLength(2);
+      expect(migrationPublishCount).toBe(2);
+      expect((await readdir(migrationsDir)).filter((entry) => entry.startsWith(".jazz-bundle-"))).toEqual(
+        [],
+      );
+    } finally {
+      vi.doUnmock("esbuild");
+      vi.resetModules();
+    }
   });
 
   it("pushSchema publishes the local structural schema and returns a structured result", async () => {

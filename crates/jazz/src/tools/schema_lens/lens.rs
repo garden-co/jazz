@@ -685,6 +685,34 @@ mod tests {
     }
 
     #[test]
+    fn lens_apply_ignores_column_operations_for_other_tables() {
+        let source = make_hash(1);
+        let target = make_hash(2);
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Uuid),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ]);
+        let lens = Lens::new(
+            source,
+            target,
+            LensTransform::with_ops(vec![LensOp::RemoveColumn {
+                table: "posts".to_string(),
+                column: "name".to_string(),
+                column_type: ColumnType::Text,
+                default: Value::Null,
+            }]),
+        );
+        let input = vec![
+            Value::Uuid(ObjectId::new()),
+            Value::Text("Alice".to_string()),
+        ];
+
+        let output = lens.apply(&input, &descriptor, &descriptor, Direction::Forward);
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
     fn lens_is_draft() {
         let source = make_hash(1);
         let target = make_hash(2);
