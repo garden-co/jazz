@@ -2212,6 +2212,12 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
+    // A late-attaching browser tab learns the namespace-wide explicit-offline
+    // state through its follower init handshake. Wait for that local-only
+    // handshake before deciding whether RemoteIfPossible means Local or Edge;
+    // otherwise a tab opened after another tab disconnects snapshots `false`
+    // and can incorrectly park on a remote read.
+    if (options?.tier === ReadTier.RemoteIfPossible) await this.ensureReady("local");
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
@@ -2315,7 +2321,38 @@ export class Db {
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
     session?: Session,
+    statusReady = false,
   ): () => void {
+    // See all(): a newly attached browser peer has no authoritative explicit
+    // offline state until its init RPC completes. Delay only this tier's
+    // subscription setup, preserving synchronous LocalFirst subscriptions.
+    if (!statusReady && options?.tier === ReadTier.RemoteIfPossible) {
+      let unsubscribed = false;
+      let unsubscribe = () => {};
+      const readyAbort = new AbortController();
+      void this.ensureReady("local", readyAbort.signal)
+        .then(() => {
+          if (unsubscribed || readyAbort.signal.aborted) return;
+          const installed = this.subscribeDelta(query, callback, options, session, true);
+          // Native subscription installation can synchronously deliver an
+          // opening delta. If that callback unsubscribes the outer handle,
+          // dispose the just-created inner subscription rather than retaining
+          // it after this continuation returns.
+          if (unsubscribed || readyAbort.signal.aborted) installed();
+          else unsubscribe = installed;
+        })
+        .catch((error: unknown) => {
+          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
+          setTimeout(() => {
+            throw error;
+          }, 0);
+        });
+      return () => {
+        unsubscribed = true;
+        readyAbort.abort();
+        unsubscribe();
+      };
+    }
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
     const builderJson = query._build();

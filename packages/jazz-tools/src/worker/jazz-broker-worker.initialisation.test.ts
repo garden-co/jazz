@@ -1,6 +1,8 @@
 import type { Mock } from "vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  BrowserFollowerPortEvent,
+  BrowserFollowerPortRequest,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
@@ -17,6 +19,7 @@ const mocks = vi.hoisted(() => {
   const openConfig = vi.fn(() => new Uint8Array());
   const telemetryDisposers: Mock[] = [];
   const pageStores: Array<{ close: Mock }> = [];
+  const runtimes: Array<Record<string, Mock>> = [];
   const wasmModule = {
     WasmDb: {
       openBrowser,
@@ -35,6 +38,7 @@ const mocks = vi.hoisted(() => {
     openConfig,
     telemetryDisposers,
     pageStores,
+    runtimes,
     wasmModule,
     reset() {
       loadWasmModule.mockReset().mockResolvedValue(wasmModule);
@@ -51,17 +55,34 @@ const mocks = vi.hoisted(() => {
       openBrowser.mockReset().mockResolvedValue({});
       openBrowserWithSelfSignedProof.mockReset().mockResolvedValue({});
       fromDb.mockReset().mockImplementation(() => {
+        const subscriber = {
+          setAuxiliaryTraceEnabled: vi.fn(),
+          setOutboundScheduler: vi.fn(),
+          clearOutboundScheduler: vi.fn(),
+          recvWireFrames: vi.fn(() => []),
+          sendWireFrame: vi.fn(),
+        };
         const runtime = {
           discard: vi.fn(),
           onAuthFailure: vi.fn(),
           onMutationError: vi.fn(),
+          onPeerTransportWork: vi.fn(() => () => {}),
+          progressPeerTransport: vi.fn(async () => undefined),
+          retirePeerTransport: vi.fn(async () => undefined),
+          acceptPeerWhenIdle: vi.fn(async () => subscriber),
+          connect: vi.fn(),
+          disconnect: vi.fn(async () => undefined),
+          updateAuth: vi.fn(async () => undefined),
+          waitForUpstreamServerConnection: vi.fn(async () => undefined),
         };
+        runtimes.push(runtime);
         return runtime;
       });
       encodeSchema.mockClear();
       openConfig.mockClear();
       telemetryDisposers.length = 0;
       pageStores.length = 0;
+      runtimes.length = 0;
     },
   };
 });
@@ -105,6 +126,11 @@ class TestPort {
   private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
   private readonly outcomes: RuntimeOutcome[] = [];
   private readonly outcomeWaiters: Array<(outcome: RuntimeOutcome) => void> = [];
+  private readonly events: BrowserFollowerPortEvent[] = [];
+  private readonly eventWaiters: Array<{
+    predicate: (event: BrowserFollowerPortEvent) => boolean;
+    resolve: (event: BrowserFollowerPortEvent) => void;
+  }> = [];
 
   addEventListener(type: string, listener: (event: MessageEvent) => void): void {
     const listeners = this.listeners.get(type) ?? new Set();
@@ -116,14 +142,20 @@ class TestPort {
     this.listeners.get(type)?.delete(listener);
   }
 
-  postMessage(message: BrowserSharedWorkerConnectResponse): void {
-    if (message.type !== "runtime-ready" && message.type !== "runtime-error") return;
-    const waiter = this.outcomeWaiters.shift();
-    if (waiter) waiter(message);
-    else this.outcomes.push(message);
+  postMessage(message: BrowserSharedWorkerConnectResponse | BrowserFollowerPortEvent): void {
+    if (message.type === "runtime-ready" || message.type === "runtime-error") {
+      const waiter = this.outcomeWaiters.shift();
+      if (waiter) waiter(message);
+      else this.outcomes.push(message);
+      return;
+    }
+    const waiterIndex = this.eventWaiters.findIndex(({ predicate }) => predicate(message));
+    if (waiterIndex >= 0) {
+      this.eventWaiters.splice(waiterIndex, 1)[0]!.resolve(message);
+    } else this.events.push(message);
   }
 
-  emitMessage(message: BrowserSharedWorkerConnectRequest): void {
+  emitMessage(message: BrowserSharedWorkerConnectRequest | BrowserFollowerPortRequest): void {
     for (const listener of this.listeners.get("message") ?? []) {
       listener({ data: message } as MessageEvent);
     }
@@ -134,6 +166,16 @@ class TestPort {
     if (outcome) return Promise.resolve(outcome);
     const waiter = deferred<RuntimeOutcome>();
     this.outcomeWaiters.push(waiter.resolve);
+    return waiter.promise;
+  }
+
+  waitForEvent(
+    predicate: (event: BrowserFollowerPortEvent) => boolean,
+  ): Promise<BrowserFollowerPortEvent> {
+    const index = this.events.findIndex(predicate);
+    if (index >= 0) return Promise.resolve(this.events.splice(index, 1)[0]!);
+    const waiter = deferred<BrowserFollowerPortEvent>();
+    this.eventWaiters.push({ predicate, resolve: waiter.resolve });
     return waiter.promise;
   }
 }
@@ -187,6 +229,12 @@ async function connect(
     options: initOptions,
   });
   return { outcome: await outcome, port };
+}
+
+async function initializeFollower(port: TestPort, id: number): Promise<void> {
+  const result = port.waitForEvent((event) => event.type === "result" && event.id === id);
+  port.emitMessage({ type: "init", id, sessionClaims: {} });
+  await result;
 }
 
 describe("broker worker context initialization", () => {
@@ -405,5 +453,60 @@ describe("broker worker context initialization", () => {
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
+  });
+
+  it("serializes cross-port disconnect and reconnect before publishing state", async () => {
+    const initOptions = { ...options("serialized-transport"), serverUrl: "ws://server.test" };
+    const owner = await connect(initOptions, "owner-tab");
+    const editor = await connect(initOptions, "editor-tab");
+    await initializeFollower(owner.port, 1);
+    await initializeFollower(editor.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    runtime.connect.mockClear();
+
+    const disconnectGate = deferred<void>();
+    runtime.disconnect.mockImplementationOnce(() => disconnectGate.promise);
+    owner.port.emitMessage({ type: "disconnect", id: 2 });
+    await vi.waitFor(() => expect(runtime.disconnect).toHaveBeenCalledOnce());
+
+    editor.port.emitMessage({
+      type: "reconnect",
+      id: 2,
+      authJson: "{}",
+      sessionClaims: {},
+    });
+    await Promise.resolve();
+    expect(runtime.connect).not.toHaveBeenCalled();
+
+    disconnectGate.resolve();
+    await owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    await editor.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    expect(runtime.connect).toHaveBeenCalledOnce();
+
+    for (const port of [owner.port, editor.port]) {
+      expect(await port.waitForEvent((event) => event.type === "transport-state")).toMatchObject({
+        explicitlyDisconnected: true,
+      });
+      expect(await port.waitForEvent((event) => event.type === "transport-state")).toMatchObject({
+        explicitlyDisconnected: false,
+      });
+    }
+  });
+
+  it("reports the settled offline state before a late follower init succeeds", async () => {
+    const initOptions = { ...options("late-offline-follower"), serverUrl: "ws://server.test" };
+    const owner = await connect(initOptions, "owner-tab");
+    await initializeFollower(owner.port, 1);
+    owner.port.emitMessage({ type: "disconnect", id: 2 });
+    await owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+
+    const late = await connect(initOptions, "late-tab");
+    const offline = late.port.waitForEvent((event) => event.type === "transport-state");
+    const initialized = late.port.waitForEvent(
+      (event) => event.type === "result" && event.id === 1,
+    );
+    late.port.emitMessage({ type: "init", id: 1, sessionClaims: {} });
+    expect(await offline).toMatchObject({ explicitlyDisconnected: true });
+    await initialized;
   });
 });
