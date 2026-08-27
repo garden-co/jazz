@@ -957,6 +957,7 @@ where
             startup_error: None,
             released_outbox_tx_ids: Vec::new(),
             pending_chunk_response: None,
+            pending_control_response: None,
             link: ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
@@ -1190,6 +1191,7 @@ where
             startup_error,
             released_outbox_tx_ids: Vec::new(),
             pending_chunk_response: None,
+            pending_control_response: None,
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,

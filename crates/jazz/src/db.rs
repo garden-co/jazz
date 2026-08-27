@@ -2486,23 +2486,20 @@ where
     node.validate_shape_ast_for_registration(shape_id, ast)
 }
 
-fn send_unsupported_shape_capability_rejection(
-    transport: &mut dyn Transport,
+fn unsupported_shape_capability_rejection_message(
     subscription: SubscriptionKey,
     detail: String,
-) -> Result<(), TransportError> {
-    send_subscription_rejection(
-        transport,
+) -> SyncMessage {
+    subscription_rejection_message(
         subscription,
         SubscribeRejectReason::UnsupportedShapeCapability { detail },
     )
 }
 
-fn reject_server_subscription_failure(
-    transport: &mut dyn Transport,
+fn server_subscription_failure_rejection_message(
     subscription: SubscriptionKey,
     error: &crate::node::Error,
-) -> Result<(), TransportError> {
+) -> SyncMessage {
     // Keep the complete error on the serving process only. Subscription keys
     // provide a correlation handle without disclosing schema, policy, or
     // storage details to the peer.
@@ -2510,8 +2507,7 @@ fn reject_server_subscription_failure(
         "jazz subscription rejected: shape={} binding={} read_view={} server_error={error}",
         subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id,
     );
-    send_subscription_rejection(
-        transport,
+    subscription_rejection_message(
         subscription,
         SubscribeRejectReason::ServerFailure {
             code: server_failure_code(error),
@@ -2519,15 +2515,14 @@ fn reject_server_subscription_failure(
     )
 }
 
-fn send_subscription_rejection(
-    transport: &mut dyn Transport,
+fn subscription_rejection_message(
     subscription: SubscriptionKey,
     reason: SubscribeRejectReason,
-) -> Result<(), TransportError> {
-    transport.send(SyncMessage::SubscribeRejected {
+) -> SyncMessage {
+    SyncMessage::SubscribeRejected {
         subscription,
         reason,
-    })
+    }
 }
 
 fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode {
