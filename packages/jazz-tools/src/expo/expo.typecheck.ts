@@ -19,8 +19,7 @@ const secureStore: ExpoSecureStoreLike = {
 const options: ExpoAuthSecretStoreOptions = {
   key: "expo-auth-key",
   appId: "expo-app",
-  userId: "user-1",
-  sessionId: "session-1",
+  profile: "default-profile",
   secureStore,
 };
 

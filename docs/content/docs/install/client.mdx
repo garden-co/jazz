@@ -226,6 +226,11 @@ Create the basic structure for your app with Jazz and a to-do list.
   is not a supported persistence alternative.
 </Callout>
 
+For local-first identity on plain React Native, pass an explicit `AuthSecretStore` backed by that
+platform's secure storage to `useLocalFirstAuth({ store })`; the React Native binding deliberately
+does not fall back to browser `localStorage`. Expo apps can use `ExpoAuthSecretStore` from
+`jazz-tools/expo`.
+
 <Accordions type="single">
   <Accordion title="Client Config">
     `appId` identifies your app for storage and sync. Use the UUID you generated

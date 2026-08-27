@@ -3469,6 +3469,29 @@ mod tests {
         trailing.push(0);
         assert!(BranchKey::from_canonical_bytes(&trailing).is_err());
         assert!(BranchKey::from_canonical_bytes(&[0]).is_err());
+
+        let append_entry = |bytes: &mut Vec<u8>, name: &str, value: &[u8]| {
+            bytes.extend((name.len() as u32).to_le_bytes());
+            bytes.extend(name.as_bytes());
+            bytes.extend((value.len() as u32).to_le_bytes());
+            bytes.extend(value);
+        };
+        let mut duplicate = vec![1];
+        duplicate.extend(2_u32.to_le_bytes());
+        append_entry(&mut duplicate, "a", &[1, 0, 7]);
+        append_entry(&mut duplicate, "a", &[1, 0, 8]);
+        assert!(BranchKey::from_canonical_bytes(&duplicate).is_err());
+
+        let mut descending = vec![1];
+        descending.extend(2_u32.to_le_bytes());
+        append_entry(&mut descending, "z", &[1, 0, 7]);
+        append_entry(&mut descending, "a", &[1, 0, 8]);
+        assert!(BranchKey::from_canonical_bytes(&descending).is_err());
+
+        let mut unknown_tag = vec![1];
+        unknown_tag.extend(1_u32.to_le_bytes());
+        append_entry(&mut unknown_tag, "a", &[1, u8::MAX]);
+        assert!(BranchKey::from_canonical_bytes(&unknown_tag).is_err());
     }
 
     #[test]

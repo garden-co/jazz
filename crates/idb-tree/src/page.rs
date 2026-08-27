@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use xxhash_rust::xxh3::xxh3_64;
 
 pub type PageId = u64;
@@ -34,7 +36,13 @@ pub enum Page {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueCell {
     Inline(Vec<u8>),
-    Overflow { head: PageId, len: usize },
+    /// `len` is a durable logical byte count, not a host allocation size.
+    /// Keep it fixed-width even on wasm32; materialization, rather than page
+    /// decoding, is the only place a host-sized allocation can be relevant.
+    Overflow {
+        head: PageId,
+        len: u64,
+    },
 }
 
 impl Page {
@@ -172,10 +180,7 @@ fn encode_value_cell(output: &mut Vec<u8>, value: &ValueCell) -> Result<(), Stri
             }
             put_u8(output, VALUE_OVERFLOW_TAG);
             put_u64(output, *head);
-            put_u64(
-                output,
-                u64::try_from(*len).map_err(|_| "overflow value length exceeds u64".to_owned())?,
-            );
+            put_u64(output, *len);
             Ok(())
         }
     }
@@ -190,9 +195,10 @@ fn decode_value_cell(decoder: &mut Decoder<'_>) -> Result<ValueCell, String> {
             if encoded_len == 0 {
                 return Err("overflow value length must not be zero".to_owned());
             }
-            let len = usize::try_from(encoded_len)
-                .map_err(|_| "overflow value length exceeds this architecture".to_owned())?;
-            Ok(ValueCell::Overflow { head, len })
+            Ok(ValueCell::Overflow {
+                head,
+                len: encoded_len,
+            })
         }
         tag => Err(format!("unknown value-cell tag {tag}")),
     }
@@ -210,6 +216,10 @@ fn validate_internal_shape(keys: &[Vec<u8>], children: &[PageId]) -> Result<(), 
             keys.len(),
             children.len()
         ));
+    }
+    let mut seen = HashSet::with_capacity(children.len());
+    if children.iter().any(|child| !seen.insert(*child)) {
+        return Err("internal page has a shared child".to_owned());
     }
     Ok(())
 }
@@ -375,6 +385,15 @@ mod tests {
                 next: None,
                 bytes: vec![0xcc],
             },
+            Page::Leaf {
+                entries: vec![(
+                    b"wide".to_vec(),
+                    ValueCell::Overflow {
+                        head: 17,
+                        len: 0x1_0000_0000,
+                    },
+                )],
+            },
         ];
         let encoded = fixtures
             .iter()
@@ -390,7 +409,12 @@ mod tests {
                 "49444254524545000236071af932f362cf0101000000010000006d0200000003000000000000000500000000000000",
                 "494442545245450002f716bc5b181bbaec0201090000000000000002000000aabb",
                 "494442545245450002d6ccf3da52f0ff30020001000000cc",
+                "494442545245450002f5cd4e6dc50a39de000100000004000000776964650111000000000000000000000001000000",
             ]
+        );
+        assert_eq!(
+            to_hex(&encoded[4]),
+            include_str!("../fixtures/page-v2-leaf.hex").trim()
         );
         for (page, encoded) in fixtures.iter().zip(encoded) {
             assert_eq!(decode_page(&encoded).unwrap(), *page);
@@ -476,6 +500,51 @@ mod tests {
         assert_eq!(
             encode_page(&bad_internal).unwrap_err(),
             "internal page has 1 keys but 1 children"
+        );
+
+        let shared_child = Page::Internal {
+            keys: vec![b"m".to_vec()],
+            children: vec![7, 7],
+        };
+        assert_eq!(
+            encode_page(&shared_child).unwrap_err(),
+            "internal page has a shared child"
+        );
+        let shared_child_payload = [
+            PAGE_INTERNAL_TAG,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            b'm',
+            2,
+            0,
+            0,
+            0,
+            7,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            7,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(
+            decode_page(&envelope(&shared_child_payload)).unwrap_err(),
+            "internal page has a shared child"
         );
     }
 }

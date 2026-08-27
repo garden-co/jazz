@@ -71,7 +71,6 @@ describe("createDb in-memory driver", () => {
     db = await createDb({
       appId: "in-memory-large-value-dsl-test",
       driver: { type: "memory" },
-      backendSecret: "test-backend-secret",
       jwtToken:
         "header.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwic3ViIjoibGFyZ2UtdmFsdWUtdGVzdC11c2VyIn0.signature",
     });

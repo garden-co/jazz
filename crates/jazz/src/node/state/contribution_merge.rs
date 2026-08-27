@@ -25,11 +25,18 @@ fn decode_contribution_gset_identity(
     identity: &[u8],
 ) -> Result<Value, Error> {
     let descriptor = contribution_gset_element_descriptor(column_type)?;
-    let element = records::BorrowedRecord::new(identity, &descriptor).get_idx(0)?;
-    if descriptor.create(std::slice::from_ref(&element))? != identity {
-        return Err(Error::InvalidStoredValue(
-            "g-set contribution operation identity must be canonical",
-        ));
+    let malformed = || {
+        Error::InvalidStoredValue("g-set contribution operation identity must be canonical")
+    };
+    let element = records::BorrowedRecord::new(identity, &descriptor)
+        .get_idx(0)
+        .map_err(|_| malformed())?;
+    if descriptor
+        .create(std::slice::from_ref(&element))
+        .map_err(|_| malformed())?
+        != identity
+    {
+        return Err(malformed());
     }
     Ok(element)
 }
@@ -38,6 +45,76 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// The one durable admission boundary for contribution provenance. Every
+    /// path that can persist a transaction must pass through this before it
+    /// can allocate aliases, stage large values, or mutate a batch.
+    pub(super) fn admit_contribution_merge_for_storage(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Value, Error> {
+        self.validate_contribution_merge_operation_identities(tx)?;
+        self.contribution_merge_storage_value(tx.contribution_merge.as_ref())
+    }
+
+    /// Validate strategy-defined operation coordinates before a transaction can
+    /// become durable.  Operation identity is not opaque provenance: its
+    /// canonical spelling is part of merge deduplication, so a received or
+    /// recovered record must be checked against the admitted schema rather
+    /// than deferred until a later contribution calculation happens to read
+    /// it.
+    pub(super) fn validate_contribution_merge_operation_identities(
+        &self,
+        tx: &Transaction,
+    ) -> Result<(), Error> {
+        let Some(provenance) = &tx.contribution_merge else {
+            return Ok(());
+        };
+        provenance.validate().map_err(|_| {
+            Error::InvalidStoredValue("transaction contribution provenance must be canonical")
+        })?;
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let coordinates = provenance.substitutions.iter().flat_map(|substitution| {
+            std::iter::once(&substitution.target)
+                .chain(substitution.sources.iter().map(|source| &source.coordinate))
+        });
+        for coordinate in coordinates {
+            let ContributionComponent::Operation { column, identity } = &coordinate.component
+            else {
+                continue;
+            };
+            if coordinate.layer != MergeAspect::Content {
+                return Err(Error::InvalidStoredValue(
+                    "contribution operation must belong to the content layer",
+                ));
+            }
+            let table = self.table_in_schema(&coordinate.table, schema_version)?;
+            let column_schema = table
+                .columns
+                .iter()
+                .find(|candidate| candidate.name == *column)
+                .ok_or(Error::InvalidStoredValue(
+                    "contribution operation column is absent from its table",
+                ))?;
+            match table.merge_strategy(column) {
+                MergeStrategy::Counter if identity.is_empty() => {}
+                MergeStrategy::Counter => {
+                    return Err(Error::InvalidStoredValue(
+                        "counter contribution operation identity must be empty",
+                    ));
+                }
+                MergeStrategy::GSet => {
+                    decode_contribution_gset_identity(&column_schema.column_type, identity)?;
+                }
+                MergeStrategy::Lww => {
+                    return Err(Error::InvalidStoredValue(
+                        "lww contribution column must not use an operation identity",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Calculate novel scalar, counter, grow-only-set, and deletion-register
     /// contributions between explicit branch views and commit the result as
     /// one ordinary atomic transaction. Unsupported or incomplete calculation
