@@ -5112,6 +5112,18 @@ mod tests {
         .unwrap();
         let mut values = chunked_values(value);
         values[0] = Value::U8(1);
+        // This deliberately constructs the superseded v12 descriptor, whose
+        // field names predate the current numeric field identities. The
+        // receipt must prove those legacy bytes still fail closed rather than
+        // accidentally reusing current helper descriptors.
+        values[2] = Value::Record(crate::records::OwnedRecord::new(
+            root.create(&[
+                Value::Bytes(value.root.object_hash.0.to_vec()),
+                Value::Bytes(value.root.locator.0.to_vec()),
+            ])
+            .unwrap(),
+            root,
+        ));
         let value = EnumValue::create(1, schema.case(1).unwrap().payload, &values).unwrap();
         crate::records::encode_single_field_value(
             &Value::Enum(value),
