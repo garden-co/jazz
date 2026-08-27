@@ -1246,12 +1246,55 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_rocksdb_open_does_not_enable_client_flush_cadence() {
-        // Server storage follows this ordinary open path. The client-only
-        // cadence must stay opt-in so its durability behavior is unchanged.
+    fn default_wal_no_sync_reaches_a_real_sync_boundary() {
+        use groove::storage::{OrderedKvStorage, OwnedWriteOperation};
+        // This stays internal because a successful fsync has no public,
+        // deterministic observation short of a destructive crash harness.
+
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
-        assert!(storage.write_flush_cadence.borrow().is_none());
+        let every = storage
+            .write_flush_cadence
+            .borrow()
+            .as_ref()
+            .map(|cadence| cadence.every)
+            .expect("default WalNoSync must install a bounded sync cadence");
+        assert_eq!(every, 64, "the default sync cadence is part of the promise");
+        assert!(every > 1, "WalNoSync must not sync every write batch");
+
+        for batch in 1..every {
+            ready(storage.write_many(vec![OwnedWriteOperation::Set {
+                cf: "records".to_owned(),
+                key: batch.to_be_bytes().to_vec(),
+                value: b"value".to_vec(),
+            }]))
+            .unwrap();
+            assert_eq!(
+                storage.last_wal_flush_sync.get(),
+                None,
+                "RocksDB buffering knobs are not a durable WAL sync receipt"
+            );
+        }
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Set {
+            cf: "records".to_owned(),
+            key: every.to_be_bytes().to_vec(),
+            value: b"value".to_vec(),
+        }]))
+        .unwrap();
+        assert_eq!(
+            storage.last_wal_flush_sync.get(),
+            Some(true),
+            "the cadence boundary must complete a real synchronous WAL flush"
+        );
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(0)
+        );
     }
 
     #[test]
