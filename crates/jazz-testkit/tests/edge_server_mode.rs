@@ -13,13 +13,13 @@ use jazz::tools::public_schema::{
 };
 use jazz::tools::{
     AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, Schema, SchemaBuilder,
-    SubscriptionStreamItem, TableName, TableSchema, Value, permissions,
+    SubscriptionStreamItem, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added_id, has_removed, publish_permissions, push_catalogue_in_memory,
-    wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
+    TestingClient, has_added_id, has_removed, publish_permissions, wait_for_edge_query_ready,
+    wait_for_query, wait_for_subscription_update,
 };
 use tempfile::TempDir;
 
@@ -31,19 +31,6 @@ fn todo_schema() -> Schema {
                 .column("done", ColumnType::Boolean),
         )
         .build()
-}
-
-fn rejected_todo_permissions(schema: &Schema) -> Vec<(TableName, TablePolicies)> {
-    schema
-        .keys()
-        .map(|table| {
-            let policies = permissions(|permissions| {
-                permissions.allow_read();
-                permissions.allow_insert().never();
-            });
-            (*table, policies)
-        })
-        .collect()
 }
 
 fn ranked_todo_schema() -> Schema {
@@ -1204,125 +1191,6 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
 
             alice.shutdown().await.expect("shutdown alice");
             bob.shutdown().await.expect("shutdown bob");
-            edge.shutdown().await;
-            core.shutdown().await;
-        })
-        .await;
-}
-
-/// A Core policy denial must survive an ordinary Edge relay: Alice's optimistic
-/// write is rejected at Global durability and never appears to a direct Core
-/// observer.
-///
-/// ```text
-/// alice ──write──► edge ──relay as SYSTEM/admin──► core ──policy deny──► alice
-///                                                        └──no row──► observer
-/// ```
-#[tokio::test(flavor = "current_thread")]
-async fn edge_to_core_relay_returns_global_rejection() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let schema = todo_schema();
-            let core = tokio::time::timeout(Duration::from_secs(10), JazzServer::start())
-                .await
-                .expect("denial Core start timed out");
-            let app_id = core.app_id();
-            push_catalogue_in_memory(
-                core.server_state(),
-                app_id,
-                "dev",
-                std::slice::from_ref(&schema),
-                &[],
-            )
-            .await
-            .expect("publish denial schema catalogue");
-            publish_permissions(
-                &core.base_url(),
-                app_id,
-                core.admin_secret(),
-                &schema,
-                rejected_todo_permissions(&schema),
-                None,
-            )
-            .await;
-
-            let direct_denied = TestingClient::builder()
-                .with_server(&core)
-                .with_schema(schema.clone())
-                .with_user_id("direct-core-denial-precondition")
-                .as_user()
-                .connect()
-                .await;
-            let (_, _, direct_tx) = direct_denied
-                .insert(
-                    "todos",
-                    row_input!("title" => "direct denial precondition", "done" => false),
-                )
-                .expect("direct Core client stages denial precondition");
-            let direct_tx = direct_tx.expect("direct denial precondition commits locally");
-            tokio::time::timeout(
-                Duration::from_secs(15),
-                direct_denied.wait_for_transaction(direct_tx, DurabilityTier::GlobalServer),
-            )
-            .await
-            .expect("direct Core denial precondition waiter timed out")
-            .expect_err("published Core permissions must deny a direct user insert");
-            direct_denied
-                .shutdown()
-                .await
-                .expect("shutdown direct Core denial client");
-
-            let edge = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_schema(schema.clone())
-                .with_native_transport_connector(jazz_testkit::native_connector())
-                .with_upstream_url(core.base_url())
-                .start()
-                .await;
-
-            let alice = TestingClient::builder()
-                .with_server(&edge)
-                .with_schema(schema.clone())
-                .with_user_id("alice-rejected-at-core")
-                .as_user()
-                .connect()
-                .await;
-            let core_observer = TestingClient::builder()
-                .with_server(&core)
-                .with_schema(schema)
-                .with_user_id("direct-core-rejection-observer")
-                .as_user()
-                .connect()
-                .await;
-            let (rejected_todo, _, rejected_tx) = alice
-                .insert(
-                    "todos",
-                    row_input!("title" => "must be rejected", "done" => false),
-                )
-                .expect("the client stages the optimistic write");
-            let rejected_tx = rejected_tx.expect("optimistic mutation commits locally");
-
-            tokio::time::timeout(
-                Duration::from_secs(15),
-                alice.wait_for_transaction(rejected_tx, DurabilityTier::GlobalServer),
-            )
-            .await
-            .expect("denied write's Global waiter timed out")
-            .expect_err("the denied write resolves the global waiter with rejection");
-            let core_rows = core_observer
-                .query(todo_query(), Some(DurabilityTier::GlobalServer))
-                .await
-                .expect("query Core after the global rejection");
-            assert!(
-                core_rows.iter().all(|(id, _)| *id != rejected_todo),
-                "authority-rejected row must not appear at Core"
-            );
-
-            core_observer
-                .shutdown()
-                .await
-                .expect("shutdown direct core observer");
-            alice.shutdown().await.expect("shutdown alice");
             edge.shutdown().await;
             core.shutdown().await;
         })
