@@ -12,7 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::middleware::auth::validate_admin_secret;
-use crate::server::{ServerState, ShutdownPhase};
+use crate::server::{EdgeUpstreamHealth, ServerState, ShutdownPhase};
 use jazz::tools::public_schema::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz::tools::transport_error::ErrorResponse;
@@ -1297,6 +1297,17 @@ pub(super) async fn internal_shutdown_handler(
 pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let mut phase = state.shutdown.phase();
     if !state.shutdown.is_shutting_down() && phase.is_running() {
+        if let EdgeUpstreamHealth::Failed { reason } = state.edge_upstream_health() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "unhealthy",
+                    "component": "edge_upstream",
+                    "reason": reason,
+                })),
+            )
+                .into_response();
+        }
         return Json(serde_json::json!({
             "status": "healthy"
         }))

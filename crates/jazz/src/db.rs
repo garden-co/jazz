@@ -702,6 +702,39 @@ pub struct PeerIoPump {
     role: PeerIoPumpRole,
 }
 
+/// One encoded auxiliary frame whose source obligation remains owned by this
+/// pump until the binding commits the handoff. Dropping the reservation restores
+/// the exact request/response batch to the front of its lane.
+pub(crate) struct ReservedOutboundWireFrame {
+    pump: PeerIoPump,
+    message: Option<SyncMessage>,
+    frame: Option<Vec<u8>>,
+}
+
+impl ReservedOutboundWireFrame {
+    pub(crate) fn take_frame(&mut self) -> Vec<u8> {
+        self.frame
+            .take()
+            .expect("reserved auxiliary wire frame is handed to the transport once")
+    }
+
+    pub(crate) fn commit(mut self) {
+        let message = self
+            .message
+            .take()
+            .expect("reserved auxiliary outbound batch is committed once");
+        self.pump.acknowledge_outbound(&message);
+    }
+}
+
+impl Drop for ReservedOutboundWireFrame {
+    fn drop(&mut self) {
+        if let Some(message) = self.message.take() {
+            self.pump.restore_outbound(message);
+        }
+    }
+}
+
 impl PeerIoPump {
     fn new(
         resolver: PeerChunkResolver,
@@ -885,14 +918,45 @@ impl PeerIoPump {
         negotiated_features: crate::wire::WireFeatures,
         session: Option<crate::wire::WireSession>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let mut frames = self.take_outbound_wire_frames(
+        let Some(mut reservation) =
+            self.reserve_outbound_wire_frame(protocol_version, negotiated_features, session)?
+        else {
+            return Ok(None);
+        };
+        let frame = reservation.take_frame();
+        reservation.commit();
+        Ok(Some(frame))
+    }
+
+    /// Reserve one complete auxiliary wire frame for a binding-owned send.
+    /// The caller must commit after its transport accepted the frame or restore
+    /// it after a rejected send; dropping it also restores the original batch.
+    pub(crate) fn reserve_outbound_wire_frame(
+        &self,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+    ) -> Result<Option<ReservedOutboundWireFrame>, String> {
+        let Some(message) = self.take_outbound(1) else {
+            return Ok(None);
+        };
+        let frame = match Self::encode_outbound_wire_frame(
+            message.clone(),
             protocol_version,
             negotiated_features,
             session,
-            1,
-            crate::protocol_limits::MAX_WIRE_FRAME_BYTES,
-        )?;
-        Ok(frames.pop())
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.restore_outbound(message);
+                return Err(error);
+            }
+        };
+        Ok(Some(ReservedOutboundWireFrame {
+            pump: self.clone(),
+            message: Some(message),
+            frame: Some(frame),
+        }))
     }
 
     /// Drain a bounded FIFO prefix of the auxiliary lane into complete wire
