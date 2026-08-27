@@ -339,7 +339,10 @@ where
                     .await?;
                 let same_row = parent_versions
                     .iter()
-                    .filter(|version| self.physical_table_id_for_version(version).ok() == Some(table_id));
+                    .filter(|version| {
+                        version.row_uuid() == commit.row_uuid
+                            && self.physical_table_id_for_version(version).ok() == Some(table_id)
+                    });
                 if same_row.clone().next().is_some()
                     && !same_row.into_iter().any(|version| version.branch_key() == &branch_key)
                 {

@@ -455,6 +455,88 @@ fn version_parents_cannot_cross_branch_keys() {
 }
 
 #[test]
+fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
+    let schema = branch_view_schema();
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x56; 16]), schema);
+    let target = row(0x57);
+    let sibling = row(0x58);
+    let branch_a = branch_selector(0x59);
+    let branch_b = branch_selector(0x5a);
+    let owner = AuthorSubject::for_test_bytes([0x5b; 16]);
+    let cells = |title: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), v(title)),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        ])
+    };
+
+    // A same-table multi-row transaction can legitimately contain a parent
+    // for the target and an unrelated sibling under another branch.
+    let valid_parent = node
+        .commit_mergeable_many_settled(vec![
+            MergeableCommit::new("todos", target, 10)
+                .branch(branch_a.clone())
+                .cells(cells("target base")),
+            MergeableCommit::new("todos", sibling, 11)
+                .branch(branch_b.clone())
+                .cells(cells("sibling other branch")),
+        ])
+        .unwrap();
+    let valid_child = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", target, 20)
+                .branch(branch_a.clone())
+                .parents(vec![valid_parent])
+                .cells(cells("target child")),
+        )
+        .unwrap();
+
+    // Deletion and restore parents use the shared deletion history table, so
+    // retain the normal same-row/branch chain through both lifecycle layers.
+    let deletion_parent = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", target, 30)
+                .branch(branch_a.clone())
+                .parents(vec![valid_child])
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", target, 40)
+            .branch(branch_a.clone())
+            .parents(vec![deletion_parent])
+            .deletion(DeletionEvent::Restored),
+    )
+    .unwrap();
+
+    // This transaction contains the target only under branch B, plus a
+    // sibling deletion under branch A. A table-only lookup would see branch A
+    // and wrongly bless the foreign target parent.
+    let foreign_parent = node
+        .commit_mergeable_many_settled(vec![
+            MergeableCommit::new("todos", target, 50)
+                .branch(branch_b)
+                .cells(cells("foreign target parent")),
+            MergeableCommit::new("todos", sibling, 51)
+                .branch(branch_a.clone())
+                .deletion(DeletionEvent::Deleted),
+        ])
+        .unwrap();
+    let error = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", target, 60)
+                .branch(branch_a)
+                .parents(vec![foreign_parent])
+                .cells(cells("must reject foreign target parent")),
+        )
+        .resolve()
+        .err()
+        .expect("a sibling under the requested branch cannot validate a foreign target parent");
+    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
+}
+
+#[test]
 fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
     let schema = branch_view_schema();
     let (_dir, mut node) =
