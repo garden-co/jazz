@@ -192,7 +192,11 @@ impl<'a> MigrationRegistry<'a> {
         let registry = Self {
             steps: steps.into_iter().collect(),
         };
+        let mut sources = BTreeSet::new();
         for step in &registry.steps {
+            if !sources.insert(step.source_epoch()) {
+                return Err(invalid("multiple migrations have the same source epoch"));
+            }
             if step.target_epoch()
                 != step
                     .source_epoch()
@@ -319,8 +323,27 @@ mod tests {
             3
         }
     }
+    struct OneToTwo;
+    impl StorageMigration for OneToTwo {
+        fn source_epoch(&self) -> u16 {
+            1
+        }
+        fn target_epoch(&self) -> u16 {
+            2
+        }
+    }
     #[test]
     fn migration_registry_rejects_skip_steps() {
         assert!(MigrationRegistry::new([&Skip as &dyn StorageMigration]).is_err());
+    }
+    #[test]
+    fn migration_registry_rejects_ambiguous_source_epoch() {
+        assert!(
+            MigrationRegistry::new([
+                &OneToTwo as &dyn StorageMigration,
+                &OneToTwo as &dyn StorageMigration,
+            ])
+            .is_err()
+        );
     }
 }

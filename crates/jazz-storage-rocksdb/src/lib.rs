@@ -252,7 +252,7 @@ impl RocksDbStorage {
         write_options.disable_wal(false);
         write_options.set_sync(matches!(durability, Durability::FullSync));
 
-        let listed_column_families = DB::list_cf(&Options::default(), &path).ok();
+        let listed_column_families = inspect_existing_column_families(&path)?;
         let initialize_format = match &listed_column_families {
             Some(existing) => {
                 validate_physical_storage_names(existing)?;
@@ -404,6 +404,44 @@ fn rocksdb_options_for_cf(
     write_buffer_manager: &WriteBufferManager,
 ) -> Options {
     rocksdb_options_for_profile(rocksdb_class_profile(cf), block_cache, write_buffer_manager)
+}
+
+/// Distinguish a root that is genuinely absent or directory-empty from one
+/// RocksDB cannot inspect. Treating every `list_cf` failure as a fresh store
+/// would let a malformed existing root reach `create_if_missing`.
+fn inspect_existing_column_families(path: &Path) -> Result<Option<Vec<String>>, Error> {
+    if !path.try_exists().map_err(|error| Error::Backend {
+        backend: "rocksdb",
+        message: format!("could not inspect RocksDB storage root: {error}"),
+    })? {
+        return Ok(None);
+    }
+
+    let mut entries = std::fs::read_dir(path).map_err(|error| {
+        Error::InvalidStorageLayout(format!(
+            "existing RocksDB storage root is not an inspectable directory: {error}"
+        ))
+    })?;
+    if entries
+        .next()
+        .transpose()
+        .map_err(|error| {
+            Error::InvalidStorageLayout(format!(
+                "could not inspect existing RocksDB storage root: {error}"
+            ))
+        })?
+        .is_none()
+    {
+        return Ok(None);
+    }
+
+    DB::list_cf(&Options::default(), path)
+        .map(Some)
+        .map_err(|error| {
+            Error::InvalidStorageLayout(format!(
+                "could not inspect existing RocksDB storage manifest: {error}"
+            ))
+        })
 }
 
 fn validate_raw_v3_store(
@@ -903,7 +941,7 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use groove::storage::{OrderedKvStorage, ReopenableStorage};
+    use groove::storage::{Error, OrderedKvStorage, ReopenableStorage};
     use std::future::Future;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
@@ -912,8 +950,8 @@ mod tests {
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, ROCKSDB_EPOCH_MANIFEST_KEY,
         ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY, ROCKSDB_VALUE_FORMAT_V3,
-        RocksDbClassProfile, RocksDbStorage, any_available, rocksdb_class_profile,
-        rocksdb_manifest, sum_available,
+        RocksDbClassProfile, RocksDbStorage, any_available, inspect_existing_column_families,
+        rocksdb_class_profile, rocksdb_manifest, sum_available,
     };
     use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
@@ -1104,6 +1142,34 @@ mod tests {
                 .unwrap()
                 .contains(&"must-not-be-created".to_owned())
         );
+    }
+
+    #[test]
+    fn malformed_existing_root_is_rejected_before_rocksdb_can_mutate_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed-rocksdb");
+        std::fs::create_dir(&path).unwrap();
+        let current = path.join("CURRENT");
+        let contents = b"this is not a RocksDB manifest\n";
+        std::fs::write(&current, contents).unwrap();
+
+        // This is intentionally internal: the distinction between an absent
+        // root and a failed physical inspection must hold before RocksDB's
+        // mutating open path is reachable.
+        assert!(matches!(
+            inspect_existing_column_families(&path),
+            Err(Error::InvalidStorageLayout(_))
+        ));
+        assert!(matches!(
+            RocksDbStorage::open(&path, &["records"]),
+            Err(Error::InvalidStorageLayout(_))
+        ));
+        assert_eq!(std::fs::read(&current).unwrap(), contents);
+        let entries = std::fs::read_dir(&path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("CURRENT")]);
     }
 
     #[test]

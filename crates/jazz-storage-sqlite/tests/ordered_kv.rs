@@ -336,6 +336,50 @@ fn rejects_wrong_sqlite_header_before_changing_foreign_store() {
 }
 
 #[test]
+fn rejects_table_free_foreign_header_without_claiming_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("foreign-empty.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "application_id", 0x1122_3344i64)
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", 7i64)
+        .unwrap();
+    let before_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .unwrap();
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(application_id, 0x1122_3344);
+    assert_eq!(user_version, 7);
+    let after_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(after_mode, before_mode, "rejection precedes WAL setup");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "rejection creates no Jazz tables"
+    );
+}
+
+#[test]
 fn rejects_wrong_sqlite_user_version_and_ddl_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("jazz.sqlite");

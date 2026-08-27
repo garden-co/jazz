@@ -143,6 +143,10 @@ impl SqliteStorage {
             .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
             .map_err(backend)?;
         if objects == 0 {
+            // A table-free SQLite file is not necessarily ours: another
+            // application can already have claimed its physical header. Only
+            // the neutral SQLite header is a fresh root we may adopt.
+            Self::validate_neutral_empty_header(&connection)?;
             Self::create_schema(&mut connection)?;
         } else {
             // Validation is deliberately before WAL/synchronous setup: an
@@ -173,6 +177,22 @@ impl SqliteStorage {
         };
         storage.intern_column_families(column_families)?;
         Ok(storage)
+    }
+
+    fn validate_neutral_empty_header(connection: &Connection) -> Result<(), Error> {
+        let application_id: i64 = connection
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .map_err(backend)?;
+        let user_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(backend)?;
+        if application_id != 0 || user_version != 0 {
+            return Err(Error::InvalidStorageLayout(
+                "table-free sqlite root has a non-neutral application_id or user_version"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn create_schema(connection: &mut Connection) -> Result<(), Error> {
