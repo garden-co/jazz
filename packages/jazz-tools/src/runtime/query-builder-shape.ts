@@ -31,6 +31,8 @@ export interface NormalizedIncludeEntry {
   includes: NormalizedIncludeSpec;
   requireIncludes: boolean;
   select: string[];
+  /** Retained to fail closed until partial projections compose through includes. */
+  partialSelect: Record<string, LargeValueSelectDescriptor>;
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
@@ -202,6 +204,7 @@ function createEmptyIncludeEntry(): NormalizedIncludeEntry {
     includes: {},
     requireIncludes: false,
     select: [],
+    partialSelect: {},
     orderBy: [],
     hops: [],
   };
@@ -238,6 +241,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       includes: normalized.includes,
       requireIncludes: normalized.requireIncludes,
       select: normalized.select,
+      partialSelect: normalized.partialSelect,
       orderBy: normalized.orderBy,
       limit: normalized.limit,
       offset: normalized.offset,
@@ -253,6 +257,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       includes: normalizeIncludeEntries(raw.includes),
       requireIncludes: raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
       select: normalizeSelect(raw.select),
+      partialSelect: normalizePartialSelect(raw.select),
       orderBy: normalizeOrderBy(raw.orderBy),
       limit: typeof raw.limit === "number" ? raw.limit : undefined,
       offset: typeof raw.offset === "number" ? raw.offset : undefined,
