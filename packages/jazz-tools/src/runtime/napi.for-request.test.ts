@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { schema as s } from "jazz-tools";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
@@ -33,6 +34,7 @@ const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) =>
 type ExternalIdentity = {
   token: string;
   userId: string;
+  user: string;
 };
 
 const EXTERNAL_ISSUER = "https://napi-request.test";
@@ -69,7 +71,7 @@ function createExternalIdentity(actorName: string): ExternalIdentity {
     .digest("base64url");
   const token = `${header}.${payload}.${signature}`;
   const userId = actorName;
-  return { token, userId };
+  return { token, userId, user: canonicalAuthorSubject(EXTERNAL_ISSUER, userId) };
 }
 
 async function createLocalFirstIdentity(
@@ -214,7 +216,7 @@ describe("forRequest auth and policy", () => {
         title: "alice-todo",
         done: false,
         description: scopeTag,
-        owner_id: alice.userId,
+        owner_id: alice.user,
       })
       .wait({ tier: "edge" });
 
@@ -225,7 +227,7 @@ describe("forRequest auth and policy", () => {
           tier: "edge",
         });
         expect(rows).toEqual([
-          expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.userId }),
+          expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.user }),
         ]);
       },
       { timeout: 10_000 },
@@ -369,7 +371,7 @@ describe("forRequest auth and policy", () => {
           title: "alice-item",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       writerBackend
@@ -377,7 +379,7 @@ describe("forRequest auth and policy", () => {
           title: "bob-item",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
       writerBackend
@@ -385,7 +387,7 @@ describe("forRequest auth and policy", () => {
           title: "carol-item",
           done: false,
           description: scopeTag,
-          owner_id: carol.userId,
+          owner_id: carol.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -463,7 +465,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-todo",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       bobDb
@@ -471,7 +473,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-todo",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -505,7 +507,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-as-bob",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -515,7 +517,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-as-alice",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -558,7 +560,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-todo",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       bobDb
@@ -566,7 +568,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-todo",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -621,7 +623,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-todo",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       bobDb
@@ -629,7 +631,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-todo",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -693,7 +695,7 @@ describe("forRequest concurrent session isolation", () => {
         title: "alice-todo",
         done: false,
         description: scopeTag,
-        owner_id: alice.userId,
+        owner_id: alice.user,
       })
       .wait({ tier: "edge" });
 
@@ -715,7 +717,7 @@ describe("forRequest concurrent session isolation", () => {
         title: "bob-todo",
         done: false,
         description: scopeTag,
-        owner_id: bob.userId,
+        owner_id: bob.user,
       })
       .wait({ tier: "edge" });
 
@@ -758,7 +760,7 @@ describe("forRequest concurrent session isolation", () => {
         title: "alice-todo",
         done: false,
         description: scopeTag,
-        owner_id: alice.userId,
+        owner_id: alice.user,
       })
       .wait({ tier: "edge" });
 

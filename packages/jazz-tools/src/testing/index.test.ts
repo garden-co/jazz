@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import { schema as s } from "../index.js";
 import {
   createPolicyTestApp,
@@ -349,7 +350,7 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Ship the direct app API",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 
@@ -424,7 +425,7 @@ describe("createPolicyTestApp", () => {
         db.insert(testApp.todos, {
           title: "Alice can insert her own todo",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 
@@ -432,7 +433,7 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Bob cannot insert Alice's todo",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 

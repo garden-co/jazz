@@ -589,7 +589,7 @@ describe("NAPI integration", () => {
             title: "session-created-item",
             done: false,
             description: "created via forSession",
-            owner_id: "alice",
+            owner_id: aliceAuthor,
           })
           .wait({ tier: "edge" }),
         10_000,
@@ -637,7 +637,7 @@ describe("NAPI integration", () => {
             id: createdTodo.id,
             title: "session-created-item",
             done: false,
-            owner_id: "alice",
+            owner_id: aliceAuthor,
           });
         },
         { timeout: 20_000 },
@@ -649,7 +649,7 @@ describe("NAPI integration", () => {
             title: "session-policy-denied",
             done: false,
             description: "",
-            owner_id: "bob",
+            owner_id: JSON.stringify(["https://issuer.example", "bob"]),
           })
           .wait({ tier: "edge" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -1482,13 +1482,14 @@ describe("NAPI integration", () => {
         claims: { role: "editor", team: "alpha" },
         authMode: "external",
       });
+      const aliceAuthor = JSON.stringify(["https://issuer.example", "alice"]);
 
       const createdTodo = await aliceDb
         .insert(policyTodosTable, {
           title: "nullable-description-repro",
           done: false,
           description: "server-original",
-          owner_id: "alice",
+          owner_id: aliceAuthor,
         })
         .wait({ tier: "edge" });
 

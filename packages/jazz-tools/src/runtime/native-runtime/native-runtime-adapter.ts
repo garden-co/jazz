@@ -3656,6 +3656,7 @@ function sessionClaims(
     ...(isRecord(rawClaims) ? rawClaims : {}),
     iss: session.issuer,
     sub: session.user_id,
+    authMode: session.authMode ?? "external",
   };
 }
 

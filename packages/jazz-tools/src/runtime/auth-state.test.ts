@@ -31,10 +31,8 @@ describe("auth-state", () => {
       authMode: "external",
       error: "expired",
       session: {
-        issuer: "https://issuer.example",
-        user_id: "alice",
         user: canonicalAuthorSubject("https://issuer.example", "alice"),
-        claims: { role: "reader" },
+        claims: { iss: "https://issuer.example", sub: "alice", role: "reader" },
         authMode: "external",
       },
     });
