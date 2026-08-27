@@ -2229,6 +2229,33 @@ impl WasmDb {
     ) -> Result<WasmTransport, JsValue> {
         let identity = author_id_from_bytes(&identity)?;
         let claims = claims_from_js(identity, claims)?;
+        self.accept_subscriber_with_admitted_identity(identity, claims)
+    }
+
+    /// Attach a browser-local follower for a verified first-party identity.
+    ///
+    /// This is deliberately separate from [`Self::accept_subscriber`]: raw
+    /// serialized identities must keep rejecting Jazz-reserved issuers, while
+    /// a local-first or anonymous browser worker can prove its own identity
+    /// with the same signed capability that opened the worker database.
+    #[wasm_bindgen(js_name = acceptSubscriberWithSelfSignedProof)]
+    pub fn accept_subscriber_with_self_signed_proof(
+        &self,
+        claims: JsValue,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmTransport, JsValue> {
+        let identity = verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
+        let claims = claims_from_js(identity, claims)?;
+        self.accept_subscriber_with_admitted_identity(identity, claims)
+    }
+
+    fn accept_subscriber_with_admitted_identity(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();
         // Like the JS-owned upstream carrier, this binding-local transport has
         // no authenticated endpoint context for scoped receipt/view frames.
@@ -4020,6 +4047,11 @@ mod dynamic_schema_view_tests {
             &serde_json::to_string(&(verified.issuer, verified.user_id)).unwrap(),
         )
         .unwrap();
+        // The ordinary browser-worker subscriber ABI receives a serialized
+        // identity from an untrusted port. A reserved author must therefore
+        // remain impossible there even when a genuine proof for that author
+        // exists elsewhere in the worker.
+        assert!(AuthorSubject::from_untrusted_canonical(claimed.canonical()).is_err());
         assert_eq!(
             verify_self_signed_runtime_author_core(&token, app_id, claimed.canonical()).unwrap(),
             claimed

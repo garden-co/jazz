@@ -11,6 +11,15 @@ const proof = {
   claimedAuthor: JSON.stringify(["urn:jazz:local-first", "alice"]),
 };
 
+function fakeTransport() {
+  return {
+    close: vi.fn(() => true),
+    recvWireFrames: vi.fn(() => []),
+    sendWireFrame: vi.fn(),
+    tick: vi.fn(() => 0),
+  };
+}
+
 function fakeDb() {
   // The constructor returns a full NativeDb even though this narrow ABI test
   // only reaches the scheduler and close boundary. Keep the fixture structural
@@ -92,6 +101,50 @@ describe("self-signed native open ABI", () => {
       proof.appId,
       proof.claimedAuthor,
     );
+    void runtime.close();
+  });
+
+  it("uses only proof-verified subscriber admission for a reserved worker identity", () => {
+    const ordinaryAdmission = vi.fn();
+    const proofAdmission = vi.fn(fakeTransport);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      {
+        ...fakeDb(),
+        acceptSubscriber: ordinaryAdmission,
+        acceptSubscriberWithSelfSignedProof: proofAdmission,
+      },
+      schema,
+      node,
+      new TextEncoder().encode(proof.claimedAuthor),
+      1,
+      false,
+      { selfSignedClientProof: proof },
+    );
+
+    runtime.acceptPeer({ role: "writer" });
+
+    expect(ordinaryAdmission).not.toHaveBeenCalled();
+    expect(proofAdmission).toHaveBeenCalledWith(
+      { role: "writer" },
+      proof.token,
+      proof.appId,
+      proof.claimedAuthor,
+    );
+    void runtime.close();
+  });
+
+  it("fails closed if a worker artifact lacks proof-verified subscriber admission", () => {
+    const runtime = NativeRuntimeAdapter.fromDb(
+      { ...fakeDb(), acceptSubscriber: vi.fn() },
+      schema,
+      node,
+      new TextEncoder().encode(proof.claimedAuthor),
+      1,
+      false,
+      { selfSignedClientProof: proof },
+    );
+
+    expect(() => runtime.acceptPeer()).toThrow(/does not support self-signed subscriber admission/);
     void runtime.close();
   });
 
