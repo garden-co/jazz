@@ -211,7 +211,7 @@ impl PeerState {
             .publication_states
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .is_none();
+            .is_none_or(|prepared| !prepared.has_runtime_plan());
         if needs_prepare {
             let plan =
                 node.mark_peer_maintained_query_shape_cache(&shape, &binding, opts.tier);
@@ -450,18 +450,26 @@ impl PeerState {
             .publication_states
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
-            .map(CachedPeerQueryPlan::context);
-        let (tier, read_view) = if let Some(context) = cached_context {
+            .map(|prepared| (prepared.context(), prepared.has_runtime_plan()));
+        let ((tier, read_view), has_runtime_plan) = if let Some(context) = cached_context {
             context
         } else {
-            let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, opts.tier);
-            let cached = CachedPeerQueryPlan::with_plan(&opts, plan);
-            let context = cached.context();
-            let state = self.publication_states.entry(subscription).or_default();
-            state.prepared_query = Some(cached);
-            state.groove_runtime_token = Some(node.groove_runtime_token());
-            context
+            ((opts.tier, std::rc::Rc::new(opts.read_view.clone())), false)
         };
+        if !has_runtime_plan {
+            let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, tier);
+            let state = self.publication_states.entry(subscription).or_default();
+            if let Some(prepared) = &mut state.prepared_query {
+                prepared.replace_runtime_plan(plan);
+            } else {
+                state.prepared_query = Some(CachedPeerQueryPlan::with_context(
+                    tier,
+                    read_view.clone(),
+                    plan,
+                ));
+            }
+            state.groove_runtime_token = Some(node.groove_runtime_token());
+        }
         self.rehydrate_query_maintained_subscription_view(
             node,
             MaintainedRehydrateRequest {

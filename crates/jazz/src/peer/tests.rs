@@ -1299,6 +1299,14 @@ fn maintained_subscription_view_default_rehydrate_installs_subscription() {
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 }
 
+/// A BranchView subscription keeps base membership through a runtime rehydrate.
+///
+/// alice writes two base rows; bob subscribes to a head-over-base BranchView;
+/// alice deletes one row in the head; then bob rebuilds the maintained runtime
+/// and receives only that row's removal.
+///
+/// alice (base) ──rows──► bob (BranchView: head over base)
+/// alice (head) ──delete + runtime rehydrate──► bob (one removal)
 #[test]
 fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
     let schema = public_peer_schema(PublicSchemaBuilder::new().table(
@@ -1399,17 +1407,16 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
                 .branch(head)
                 .authored_columns(BTreeSet::from(["branch_id".to_owned()]))
                 .deletion(DeletionEvent::Deleted),
-        )
-        .unwrap();
+    )
+    .unwrap();
     accept_global(&mut core, deletion_tx, 3);
+    let stale_runtime_token = core.groove_runtime_token().checked_add(1).unwrap();
+    peer.publication_states
+        .get_mut(&subscription)
+        .unwrap()
+        .groove_runtime_token = Some(stale_runtime_token);
     let update = peer
-        .await_query_update_for_subscription_with_opts(
-            &mut core,
-            subscription,
-            &shape,
-            &binding,
-            opts.clone(),
-        )
+        .query_update_for_subscription(&mut core, subscription, &shape, &binding)
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
