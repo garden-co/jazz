@@ -228,11 +228,17 @@ where
             )?;
             let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
             for parent in stored.parents() {
-                let parent_versions = self.query_versions_for_tx(parent).await?;
-                let same_row = parent_versions.iter().filter(|candidate| {
-                    candidate.row_uuid() == stored.row_uuid()
-                        && self.physical_table_id_for_version(candidate).ok() == Some(table_id)
-                });
+                let parent_versions = self
+                    .query_versions_for_tx_physical_row(
+                        parent,
+                        author_schema,
+                        &table_schema.name,
+                        stored.row_uuid(),
+                    )
+                    .await?;
+                let same_row = parent_versions
+                    .iter()
+                    .filter(|candidate| self.physical_table_id_for_version(candidate).ok() == Some(table_id));
                 if same_row.clone().next().is_some()
                     && !same_row
                         .into_iter()
