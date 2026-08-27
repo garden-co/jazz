@@ -3,6 +3,57 @@
 use super::*;
 
 #[test]
+fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let db = open_db(0xc1, author, &schema);
+    let target = row(0x71);
+    let other = row(0x72);
+    for (row_id, title) in [(target, "target"), (other, "other")] {
+        db.insert(
+            "todos",
+            cells(title, false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(target.0))));
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected opening point-subscription delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), target);
+
+    db.update(
+        "todos",
+        other,
+        BTreeMap::from([("title".to_owned(), Value::String("unrelated".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(subscription.try_next_event().is_none());
+
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([("title".to_owned(), Value::String("changed".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let SubscriptionEvent::Delta { updated, .. } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected target-row point-subscription delta");
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row_uuid(), target);
+}
+
+#[test]
 fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
