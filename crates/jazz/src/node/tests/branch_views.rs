@@ -745,14 +745,14 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
 
     let (dir, mut rocks) =
         open_history_complete_node_with_schema(NodeUuid::from_bytes([0x72; 16]), schema.clone());
-    rocks
+    let content_tx = rocks
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(branch.clone())
                 .cells(cells()),
         )
         .unwrap();
-    rocks
+    let deletion_tx = rocks
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 20)
                 .branch(branch.clone())
@@ -790,11 +790,62 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
     assert_eq!(
         rocks
             .database
+            .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &prefix)
+            .unwrap()
+            .len(),
+        1,
+        "locally settled content uses the canonical branch prefix in ahead-current"
+    );
+    assert_eq!(
+        rocks
+            .database
+            .primary_key_scan_raw(
+                &physical_register_ahead_current_table_name(table_id),
+                &prefix,
+            )
+            .unwrap()
+            .len(),
+        1,
+        "locally settled deletion uses the same prefix in register ahead-current"
+    );
+
+    rocks
+        .apply_fate_update(
+            content_tx,
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    rocks
+        .apply_fate_update(
+            deletion_tx,
+            Fate::Accepted,
+            Some(GlobalTime(2)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+
+    assert_eq!(
+        rocks
+            .database
             .primary_key_scan_raw(&physical_global_current_table_name(table_id), &prefix)
             .unwrap()
             .len(),
         1,
-        "current and index-backed query projections retain that branch prefix"
+        "globally accepted content retains the canonical branch prefix in global-current"
+    );
+    assert_eq!(
+        rocks
+            .database
+            .primary_key_scan_raw(
+                &physical_register_global_current_table_name(table_id),
+                &prefix,
+            )
+            .unwrap()
+            .len(),
+        1,
+        "globally accepted deletion retains the same prefix in register global-current"
     );
     drop(rocks);
 
