@@ -2422,6 +2422,34 @@ pub(super) fn tx_ids_from_value(value: Value) -> Result<Vec<TxId>, Error> {
     }
 }
 
+pub(super) fn merge_heads_value(heads: &BTreeSet<TxId>) -> Value {
+    Value::Array(heads.iter().copied().map(tx_id_value).collect())
+}
+
+pub(super) fn merge_heads_from_value(value: Value) -> Result<BTreeSet<TxId>, Error> {
+    // This is an intentional pre-v1 storage cut. Do not accept the former
+    // postcard-in-Bytes representation: this derived table has one
+    // schema-declared representation and can be rebuilt from history.
+    let Value::Array(values) = value else {
+        return Err(Error::InvalidStoredValue(
+            "merge heads must be an array of transaction ids",
+        ));
+    };
+    let mut heads = BTreeSet::new();
+    let mut previous = None;
+    for value in values {
+        let head = tx_id_from_value(value)?;
+        if previous.is_some_and(|previous| previous >= head) {
+            return Err(Error::InvalidStoredValue(
+                "merge heads must be strictly increasing",
+            ));
+        }
+        previous = Some(head);
+        heads.insert(head);
+    }
+    Ok(heads)
+}
+
 pub(super) fn tx_id_from_value(value: Value) -> Result<TxId, Error> {
     match value {
         Value::Tuple(values) if values.len() == 2 => {

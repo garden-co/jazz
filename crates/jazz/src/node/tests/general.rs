@@ -1174,6 +1174,42 @@ fn stored_authored_columns_require_a_canonical_physical_id_array() {
     ));
 }
 
+// This is intentionally an internal codec test: malformed derived storage is
+// not constructible through the public API. It guards the canonical form used
+// for physical merge-head rows before they are consumed by merge semantics.
+#[test]
+fn stored_merge_heads_require_a_canonical_transaction_id_array() {
+    let first = TxId::new(TxTime::from(2), node(1));
+    let second = TxId::new(TxTime::from(3), node(2));
+    let heads = BTreeSet::from([first, second]);
+    assert_eq!(merge_heads_from_value(merge_heads_value(&heads)).unwrap(), heads);
+
+    assert!(matches!(
+        merge_heads_from_value(Value::Array(vec![
+            tx_id_value(first),
+            tx_id_value(first),
+        ])),
+        Err(Error::InvalidStoredValue(
+            "merge heads must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        merge_heads_from_value(Value::Array(vec![
+            tx_id_value(second),
+            tx_id_value(first),
+        ])),
+        Err(Error::InvalidStoredValue(
+            "merge heads must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        merge_heads_from_value(Value::Bytes(Vec::new())),
+        Err(Error::InvalidStoredValue(
+            "merge heads must be an array of transaction ids"
+        ))
+    ));
+}
+
 #[test]
 fn authoring_stamps_explicit_child_after_parent_time() {
     let (_temp_dir, mut core) = open_node();

@@ -1422,7 +1422,7 @@ fn merge_heads_table() -> GrooveTableSchema {
             column("physical_table_id", GrooveColumnType::U64),
             column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
-            column("heads", GrooveColumnType::Bytes),
+            column("heads", tx_id_column().array_of()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -2047,6 +2047,22 @@ mod tests {
                 "row_uuid",
                 "layer"
             ]
+        );
+    }
+
+    // This is intentionally an internal schema test: the physical encoding of
+    // a derived index is not exposed by the public API. The declared type is
+    // the durable contract that keeps Rust/serde layout out of stored rows.
+    #[test]
+    fn merge_heads_use_the_native_transaction_id_array_type() {
+        let table = merge_heads_table();
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "heads")
+                .map(|column| &column.column_type),
+            Some(&tx_id_column().array_of())
         );
     }
 
