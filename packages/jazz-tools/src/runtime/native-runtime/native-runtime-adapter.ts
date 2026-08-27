@@ -2,11 +2,12 @@ import type {
   ColumnDescriptor,
   ColumnType,
   InsertValues,
-  NativeRowDelta,
   NativeTerminalOperation,
-  NativeTerminalRootLayout,
+  RuntimeSubscriptionDelta,
+  RuntimeTerminalOperation,
   TablePolicies,
   Value,
+  WasmRow,
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
@@ -58,7 +59,7 @@ import {
   type ValueType,
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
-import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
+import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import {
   WebSocketCarrier,
   peerIdentityForWebSocketAuth,
@@ -66,13 +67,12 @@ import {
   wireAuthFailureReason,
 } from "./websocket.js";
 import {
-  createNativeRowValueEncoder,
   createRecord,
   createRecordValueDecoder,
+  decodeNativeTerminalRow,
   decodeNativeRowValues,
   encodeNativeColumnValue,
   encodeNativeNullValue,
-  encodeU32Le,
   logicalStorageColumns,
   nativeFixedValueSize,
   storageColumnTypeToValueType,
@@ -123,6 +123,19 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
+type PendingNativeRead = { poll(): Uint8Array | null };
+type NativeReadResult = Uint8Array | PendingNativeRead;
+type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
+type PendingNativeWrite = { poll(): Write | null };
+
+function isPendingNativeRead(value: unknown): value is PendingNativeRead {
+  return typeof (value as PendingNativeRead | null)?.poll === "function";
+}
+
+function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
+  return typeof (value as PendingNativeWrite | null)?.poll === "function";
+}
+
 type NativeInsertOptions = NativeWriteOptions & {
   rowId?: Uint8Array;
   branch?: unknown;
@@ -152,26 +165,29 @@ type NativeDb = {
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
   attachExclusiveTx?(openBatchId: string): Tx;
-  all(query: PreparedQuery, opts: unknown): Uint8Array;
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-  allAsync?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  all(query: PreparedQuery, opts: unknown): NativeReadResult;
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
+  allAsync?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allForIdentityAsync?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
-  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
+  allRelationQuery?(queryJson: string, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allRelationQueryForIdentity?(
     queryJson: string,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
-  allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
+  allRelationSnapshot?(
+    query: PreparedQuery,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
   allRelationSnapshotForIdentity?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -270,7 +286,7 @@ type NativeDb = {
   mergeableTx(openBatchId: OpenBatchId): Tx;
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
-  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): Uint8Array;
+  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadResult;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -290,26 +306,26 @@ type NativeDb = {
     column: string,
     start: number,
     end: number,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
   readTextUtf16Range?(
     table: string,
     rowId: Uint8Array,
     column: string,
     start: number,
     end: number,
-  ): string | Promise<string>;
+  ): string | PendingNativeRead | Promise<string | PendingNativeRead>;
   readJsonPointer?(
     table: string,
     rowId: Uint8Array,
     column: string,
     pointer: string,
-  ): unknown | Promise<unknown>;
+  ): unknown | PendingNativeRead | Promise<unknown | PendingNativeRead>;
   appendValue?(
     table: string,
     rowId: Uint8Array,
     column: string,
     bytes: Uint8Array,
-  ): Write | Promise<Write>;
+  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   spliceValue?(
     table: string,
     rowId: Uint8Array,
@@ -317,14 +333,14 @@ type NativeDb = {
     offset: number,
     deleteLength: number,
     insert: Uint8Array,
-  ): Write | Promise<Write>;
+  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   updateLargeValuesEncoded?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
     descriptors: unknown,
     updatedAtMs?: number | null,
-  ): Write;
+  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -354,8 +370,8 @@ type NativePermissionAdviceRequest = {
 type PreparedQuery = object;
 
 type Subscription = {
-  readAll(): unknown[];
-  drain?(): unknown[];
+  readAll(): unknown[] | PendingNativeSubscriptionBatch;
+  drain?(): unknown[] | PendingNativeSubscriptionBatch;
   close?(): boolean;
 };
 
@@ -449,6 +465,17 @@ type ServerTransportWorkWaiter = {
   resolve: () => void;
 };
 
+type ServerConnectionAttempt = {
+  generation: number;
+  carrier: WebSocketCarrier;
+  terminal: Promise<Error>;
+  resolveTerminal: (error: Error) => void;
+  finished: boolean;
+  outcome: Error | null;
+  transport: Transport | null;
+  retirement: Promise<void> | null;
+};
+
 type AuxiliaryRelayTrace = {
   event: string;
   role: "upstream" | "subscriber";
@@ -476,10 +503,7 @@ type SubscriptionState = {
   identity?: Uint8Array;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
-  packedResetBatches: NativeRowBatch[] | null;
-  packedResetRows: NativeRowDelta | null;
   visibleRows: RowState[];
-  visiblePackedResetRows: NativeRowDelta | null;
   outputColumns: SubscriptionOutputColumns | null;
   session: RuntimeSession | null;
   opts: unknown;
@@ -487,12 +511,11 @@ type SubscriptionState = {
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
-  deferredTerminalOperations: NativeTerminalOperation[];
-  deferredTerminalLayouts: NativeTerminalRootLayout[];
+  deferredTerminalOperations: RuntimeTerminalOperation[];
   deferredPlaceholderChunks: number;
   deferredPlaceholderRows: number;
   deferredPlaceholderBytes: number;
-  callback?: Function;
+  callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   cancelled: boolean;
 };
 
@@ -616,6 +639,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly pendingLocalSettlements = new Set<Promise<void>>();
+  // Streaming sources can be consumed concurrently, but native `finish()`
+  // mutates the owner runtime. WASM evaluates that runtime behind one async
+  // borrow, so overlapping finalization can deadlock. Keep only this atomic
+  // publication boundary FIFO; ordinary writes and source reads stay parallel.
+  private streamingFinalization: Promise<void> = Promise.resolve();
   private readonly ownerRuntime: NativeRuntimeAdapter;
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
@@ -627,6 +655,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
+  private serverConnectionAttempt: ServerConnectionAttempt | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
@@ -869,7 +898,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
     }
     if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
-    return await this.db.readValueRange(table, parseUuid(objectId), column, start, end);
+    return this.awaitNativeRead(
+      this.db.readValueRange(table, parseUuid(objectId), column, start, end),
+    );
   }
 
   async readTextUtf16Range(
@@ -885,7 +916,10 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.readTextUtf16Range) {
       throw new Error("Native runtime does not expose UTF-16 value ranges");
     }
-    return await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+    const result = await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+    return isPendingNativeRead(result)
+      ? new TextDecoder().decode(await this.awaitNativeRead(result))
+      : result;
   }
 
   async readJsonPointer(
@@ -898,7 +932,10 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
     }
     if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
-    const value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    let value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    if (isPendingNativeRead(value)) {
+      value = new TextDecoder().decode(await this.awaitNativeRead(value));
+    }
     return typeof value === "string" ? JSON.parse(value) : value;
   }
 
@@ -912,8 +949,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
     }
     if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
+    const write = await this.db.appendValue(table, parseUuid(objectId), column, bytes);
     return this.finishMutation(
-      await this.db.appendValue(table, parseUuid(objectId), column, bytes),
+      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
     );
   }
 
@@ -936,8 +974,16 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
+    const write = await this.db.spliceValue(
+      table,
+      parseUuid(objectId),
+      column,
+      offset,
+      deleteLength,
+      insert,
+    );
     return this.finishMutation(
-      await this.db.spliceValue(table, parseUuid(objectId), column, offset, deleteLength, insert),
+      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
     );
   }
 
@@ -968,7 +1014,10 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       return await this.ownerRuntime.waitForUpstreamServerConnection();
     }
-    if (!this.serverCarrierPromise) return;
+    if (!this.serverCarrierPromise) {
+      if (this.serverTransportError) throw this.serverTransportError;
+      return;
+    }
     await this.serverCarrierPromise;
   }
 
@@ -1030,6 +1079,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.clear();
     this.completedTxs.clear();
     this.writes.clear();
+    this.serverConnectionGeneration += 1;
+    const connectionAttempt = this.serverConnectionAttempt;
+    this.serverConnectionAttempt = null;
+    if (connectionAttempt) {
+      this.finishServerConnectionAttempt(connectionAttempt, new Error("runtime closed"));
+    }
+    this.serverCarrierPromise = null;
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
@@ -1203,7 +1259,20 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
-      const receipt = this.finishMutation(await upload.finish());
+      const owner = this.ownerRuntime;
+      const previousFinalization = owner.streamingFinalization;
+      let releaseFinalization!: () => void;
+      const finalization = new Promise<void>((resolve) => {
+        releaseFinalization = resolve;
+      });
+      owner.streamingFinalization = previousFinalization.then(() => finalization);
+      await previousFinalization;
+      let receipt: MutationResult;
+      try {
+        receipt = this.finishMutation(await upload.finish());
+      } finally {
+        releaseFinalization();
+      }
       return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
       await upload.abort();
@@ -1669,17 +1738,19 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
         }
-        const payload = await this.db.allRelationQueryForIdentity(
-          coreQueryJson,
-          session?.identity ?? this.peerIdentity,
-          opts,
+        const payload = await this.awaitNativeRead(
+          this.db.allRelationQueryForIdentity(
+            coreQueryJson,
+            session?.identity ?? this.peerIdentity,
+            opts,
+          ),
         );
         return rowsFromBatches(readRowBatches(payload), this.schema);
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
-      const payload = await this.db.allRelationQuery(coreQueryJson, opts);
+      const payload = await this.awaitNativeRead(this.db.allRelationQuery(coreQueryJson, opts));
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
@@ -1692,10 +1763,12 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
           }
-          const payload = await this.db.allRelationSnapshotForIdentity(
-            query,
-            session?.identity ?? this.peerIdentity,
-            opts,
+          const payload = await this.awaitNativeRead(
+            this.db.allRelationSnapshotForIdentity(
+              query,
+              session?.identity ?? this.peerIdentity,
+              opts,
+            ),
           );
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
@@ -1706,7 +1779,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
-        const payload = await this.db.allRelationSnapshot(query, opts);
+        const payload = await this.awaitNativeRead(this.db.allRelationSnapshot(query, opts));
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
@@ -1799,10 +1872,7 @@ export class NativeRuntimeAdapter implements Runtime {
       identity,
       rows: [],
       rowIndexByKey: new Map(),
-      packedResetBatches: null,
-      packedResetRows: null,
       visibleRows: [],
-      visiblePackedResetRows: null,
       outputColumns: usesNativeRelationApi
         ? null
         : subscriptionOutputColumns(queryJson, this.schema),
@@ -1813,7 +1883,6 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
       deferredTerminalOperations: [],
-      deferredTerminalLayouts: [],
       deferredPlaceholderChunks: 0,
       deferredPlaceholderRows: 0,
       deferredPlaceholderBytes: 0,
@@ -1822,18 +1891,22 @@ export class NativeRuntimeAdapter implements Runtime {
     return handle;
   }
 
+  executeSubscription(handle: number, onUpdate: (delta: RuntimeSubscriptionDelta) => void): void;
+  executeSubscription(
+    handle: number,
+    onUpdate: (result: RuntimeSubscriptionDelta | Error) => void,
+  ): void;
   executeSubscription(handle: number, onUpdate: Function): void {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
-    subscription.callback = onUpdate;
+    subscription.callback = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
     if (subscription.visibleOpened) {
       subscription.callback(
-        subscription.visiblePackedResetRows ??
-          nativeResetDeltaFromRows(
-            subscription.visibleRows,
-            this.schema,
-            subscription.outputColumns,
-          ),
+        runtimeResetDeltaFromRows(
+          subscription.visibleRows,
+          this.schema,
+          subscription.outputColumns,
+        ),
       );
     }
     this.startSubscriptionReader(handle, subscription);
@@ -1858,6 +1931,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const transportIdentity = peerIdentityForWebSocketAuth(authJson, this.peerIdentity);
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
+    let resolveTerminal!: (error: Error) => void;
+    const terminal = new Promise<Error>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    let attempt: ServerConnectionAttempt | null = null;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: transportIdentity,
@@ -1884,27 +1962,73 @@ export class NativeRuntimeAdapter implements Runtime {
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
       },
+      onTerminal: (error) => {
+        if (!attempt) return;
+        this.finishServerConnectionAttempt(attempt, new Error(error.message));
+      },
     });
+    attempt = {
+      generation,
+      carrier,
+      terminal,
+      resolveTerminal,
+      finished: false,
+      outcome: null,
+      transport: null,
+      retirement: null,
+    };
+    this.serverConnectionAttempt = attempt;
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then(async (negotiation) => {
-      if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
-        carrier.close();
+    this.serverCarrierPromise = carrier
+      .ready()
+      .then(async (negotiation) => {
+        if (
+          generation !== this.serverConnectionGeneration ||
+          carrier !== this.serverCarrier ||
+          attempt !== this.serverConnectionAttempt
+        ) {
+          carrier.close();
+          return carrier;
+        }
+        const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
+          throw contextualError("connecting the negotiated upstream transport", error);
+        });
+        const outcome = await Promise.race([
+          admission.then((transport) => ({ type: "admitted" as const, transport })),
+          attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
+        ]);
+        if (outcome.type === "terminal") {
+          void admission.then(
+            (transport) => this.retirePeerTransport(transport).catch(reportAsyncRuntimeError),
+            () => undefined,
+          );
+          throw outcome.error;
+        }
+        const transport = outcome.transport;
+        if (
+          this.closed ||
+          generation !== this.serverConnectionGeneration ||
+          carrier !== this.serverCarrier ||
+          attempt !== this.serverConnectionAttempt
+        ) {
+          carrier.close();
+          await this.retirePeerTransport(transport);
+          return carrier;
+        }
+        attempt.transport = transport;
+        this.serverTransport = transport;
+        transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
+        void this.watchAuxiliaryOutbound(transport, carrier, generation);
+        this.flushQueuedServerFrames(carrier);
+        await this.pumpServerTransport();
+        this.pumpSubscriptions();
         return carrier;
-      }
-      let transport: Transport;
-      try {
-        transport = await this.connectNegotiatedUpstream(negotiation);
-      } catch (error) {
-        throw contextualError("connecting the negotiated upstream transport", error);
-      }
-      this.serverTransport = transport;
-      transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
-      void this.watchAuxiliaryOutbound(transport, carrier, generation);
-      this.flushQueuedServerFrames(carrier);
-      await this.pumpServerTransport();
-      this.pumpSubscriptions();
-      return carrier;
-    });
+      })
+      .catch((error) => {
+        const failure = error instanceof Error ? error : new Error(errorMessage(error));
+        this.finishServerConnectionAttempt(attempt, failure);
+        throw attempt.outcome ?? failure;
+      });
     this.serverCarrierPromise.catch((error) => {
       this.handleServerTransportError(error, generation);
     });
@@ -1929,6 +2053,11 @@ export class NativeRuntimeAdapter implements Runtime {
   async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverConnectionGeneration += 1;
+    const attempt = this.serverConnectionAttempt;
+    this.serverConnectionAttempt = null;
+    if (attempt) {
+      this.finishServerConnectionAttempt(attempt, new Error("server transport disconnected"));
+    }
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -1951,6 +2080,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // single-threaded RefCell mutex. Remove it from new work immediately, then
     // perform the physical detach once the owning tick has released the borrow.
     if (transport) await this.retirePeerTransport(transport);
+    if (attempt?.retirement) await attempt.retirement;
   }
 
   updateAuth(authJson: string): Promise<void> | void {
@@ -2057,6 +2187,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.all(query, readOptions());
+    if (isPendingNativeRead(rows)) {
+      throw new Error(
+        "write merge cannot synchronously hydrate a large value; use the exact local row reader",
+      );
+    }
     return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
@@ -2114,7 +2249,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
-    return this.db.allInTransaction(query, this.txForRead(pendingTx), opts);
+    return this.awaitNativeRead(this.db.allInTransaction(query, this.txForRead(pendingTx), opts));
   }
 
   /**
@@ -2123,10 +2258,16 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
-    if (this.trustedBackend && identity === undefined) return this.db.all(query, opts);
-    return this.readAuthorizationHost === "trusted-serving"
-      ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
-      : this.db.all(query, opts);
+    const result =
+      this.trustedBackend && identity === undefined
+        ? this.db.all(query, opts)
+        : this.readAuthorizationHost === "trusted-serving"
+          ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
+          : this.db.all(query, opts);
+    if (isPendingNativeRead(result)) {
+      throw new Error("large-value hydration is pending; use the asynchronous read boundary");
+    }
+    return result;
   }
 
   private async readRowsForHostAsync(
@@ -2135,14 +2276,45 @@ export class NativeRuntimeAdapter implements Runtime {
     identity?: Uint8Array,
   ): Promise<Uint8Array> {
     if (this.trustedBackend && identity === undefined) {
-      return await (this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+      return this.awaitNativeRead(this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
     }
     if (this.readAuthorizationHost === "trusted-serving") {
       const author = identity ?? this.peerIdentity;
-      return await (this.db.allForIdentityAsync?.(query, author, opts) ??
-        this.db.allForIdentity(query, author, opts));
+      return this.awaitNativeRead(
+        this.db.allForIdentityAsync?.(query, author, opts) ??
+          this.db.allForIdentity(query, author, opts),
+      );
     }
-    return await (this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+    return this.awaitNativeRead(this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+  }
+
+  /**
+   * Native NAPI reads may suspend on a routed large-value chunk.  Keep the
+   * thread-affine Rust future in the binding and let the existing peer pump
+   * deliver the missing chunk between polls; never block the JS event loop.
+   */
+  private async awaitNativeRead(
+    started: NativeReadResult | Promise<NativeReadResult>,
+  ): Promise<Uint8Array> {
+    const result = await started;
+    if (!isPendingNativeRead(result)) return result;
+    for (;;) {
+      if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
+      const bytes = result.poll();
+      if (bytes !== null) return bytes;
+      await this.pumpServerTransport();
+      await sleep(0);
+    }
+  }
+
+  private async awaitNativeWrite(pending: PendingNativeWrite): Promise<Write> {
+    for (;;) {
+      if (this.closed) throw new Error("large-value mutation was cancelled by runtime shutdown");
+      const write = pending.poll();
+      if (write !== null) return write;
+      await this.pumpServerTransport();
+      await sleep(0);
+    }
   }
 
   /**
@@ -2219,7 +2391,7 @@ export class NativeRuntimeAdapter implements Runtime {
         attachment = await this.attachQueryIfNeeded("edge", null, query, session);
         if (this.closed) return;
         const opts = readOptions("edge", false, null);
-        this.readRowsForHost(query, opts, session?.identity);
+        await this.readRowsForHostAsync(query, opts, session?.identity);
       } finally {
         if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
       }
@@ -2400,7 +2572,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
-        this.readRowsForHost(query, opts, identity);
+        await this.readRowsForHostAsync(query, opts, identity);
         if (!this.db.queryAttachmentIsCovered) return;
       } catch (error) {
         if (!isPendingCoverageError(error)) throw error;
@@ -2621,7 +2793,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (subscription.cancelled) return;
     for (const source of subscription.sources) {
       if (!isReadableSubscriptionReader(source.source)) {
-        this.drainNativeSubscription(handle, subscription, source);
+        if (source.reading) continue;
+        source.reading = true;
+        void this.drainNativeSubscription(handle, subscription, source);
         continue;
       }
       if (source.reading) continue;
@@ -2654,22 +2828,36 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainNativeSubscription(
+  private async drainNativeSubscription(
     handle: number,
     subscription: SubscriptionState,
     source: SubscriptionSourceState,
-  ): void {
+  ): Promise<void> {
     if (isReadableSubscriptionReader(source.source)) return;
-    for (const event of source.source.readAll()) {
-      if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
-      try {
-        this.applySubscriptionChunk(subscription, event);
-      } catch (error) {
-        this.failSubscription(
-          subscription,
-          error instanceof Error ? error : new Error(String(error)),
-        );
+    try {
+      while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
+        const batch = source.source.readAll();
+        if (!Array.isArray(batch)) {
+          await this.pumpServerTransport();
+          const retryAfterMs = batch.retryAfterMs?.() ?? 0;
+          await sleep(Math.max(0, retryAfterMs));
+          continue;
+        }
+        for (const event of batch) {
+          if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
+          try {
+            this.applySubscriptionChunk(subscription, event);
+          } catch (error) {
+            this.failSubscription(
+              subscription,
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          }
+        }
+        if (batch.length === 0) return;
       }
+    } finally {
+      source.reading = false;
     }
   }
 
@@ -2703,13 +2891,13 @@ export class NativeRuntimeAdapter implements Runtime {
       this.publishSubscriptionRows(
         subscription,
         wasOpened
-          ? nativeDeltaFromRows(
+          ? runtimeDeltaFromRows(
               subscription.rows,
               previousRows,
               this.schema,
               subscription.outputColumns,
             )
-          : nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
+          : runtimeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
         chunk.settled,
         !wasOpened,
       );
@@ -2717,140 +2905,81 @@ export class NativeRuntimeAdapter implements Runtime {
       if (chunk.reset) {
         subscription.rows = [];
         subscription.rowIndexByKey = new Map();
-        subscription.packedResetBatches = null;
-        subscription.packedResetRows = null;
         clearDeferredPlaceholderBuffer(subscription);
       }
-      if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
-        const packedResetRows = nativeResetDeltaFromBatches(
-          chunk.delta.added,
+      const applied = applySubscriptionDeltaWithRootDelta(
+        subscription.rows,
+        chunk.delta,
+        this.schema,
+        chunk.reset === true,
+        subscription.outputColumns,
+      );
+      subscription.rows = applied.rows;
+      subscription.rowIndexByKey = applied.rowIndexByKey;
+      subscription.opened = true;
+      const terminalOperations = decodeRuntimeTerminalOperations(
+        chunk.terminalOperations,
+        subscription.outputColumns?.rootColumns,
+      );
+      if (
+        subscriptionRowsRequireBufferedPublication(
+          subscription.rows,
+          this.schema,
           subscription.outputColumns,
-        );
-        subscription.rows = [];
-        subscription.rowIndexByKey = new Map();
-        subscription.packedResetBatches = chunk.delta.added;
-        subscription.packedResetRows = packedResetRows;
-        subscription.opened = true;
-        packedResetRows.terminalOperations = chunk.terminalOperations;
-        packedResetRows.terminalLayouts = chunk.terminalLayouts;
-        this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
-      } else {
-        materializePackedResetRows(subscription, this.schema);
-        let applied;
-        try {
-          applied = applySubscriptionDeltaWithWireDelta(
-            subscription.rows,
-            subscription.rowIndexByKey,
-            chunk.delta,
-            this.schema,
-            chunk.reset === true,
-            subscription.outputColumns,
-            chunk.terminalOperations,
-            chunk.orderedSuffixStart,
+        )
+      ) {
+        if (chunk.settled === true) {
+          throw new Error(
+            "settled relation subscription chunk retained unresolved placeholder rows",
           );
-        } catch (error) {
-          const buffered = applySubscriptionDeltaToState(
-            subscription.rows,
-            subscription.rowIndexByKey,
-            chunk.delta,
-            this.schema,
-            chunk.reset === true,
-            subscription.outputColumns,
-            chunk.terminalOperations,
-          );
-          if (
-            subscriptionRowsRequireBufferedPublication(
-              buffered.rows,
-              this.schema,
-              subscription.outputColumns,
-            )
-          ) {
-            if (chunk.settled === true) {
-              throw new Error(
-                "settled relation subscription chunk retained unresolved placeholder rows",
-              );
-            }
-            subscription.rows = buffered.rows;
-            subscription.rowIndexByKey = buffered.rowIndexByKey;
-            subscription.opened = true;
-            this.deferSubscriptionRows(
-              subscription,
-              chunk.terminalOperations,
-              chunk.terminalLayouts,
-              chunk.reset === true,
-              chunk.delta,
-            );
-            return;
-          }
-          throw error;
         }
-        subscription.rows = applied.rows;
-        subscription.rowIndexByKey = applied.rowIndexByKey;
-        subscription.opened = true;
-        if (
-          subscriptionRowsRequireBufferedPublication(
-            subscription.rows,
-            this.schema,
-            subscription.outputColumns,
-          )
-        ) {
-          if (chunk.settled === true) {
-            throw new Error(
-              "settled relation subscription chunk retained unresolved placeholder rows",
-            );
-          }
-          this.deferSubscriptionRows(
-            subscription,
-            chunk.terminalOperations,
-            chunk.terminalLayouts,
-            chunk.reset === true,
-            chunk.delta,
-          );
-          return;
-        }
-        applied.wireDelta.terminalOperations = chunk.terminalOperations;
-        applied.wireDelta.terminalLayouts = chunk.terminalLayouts;
-        this.publishSubscriptionRows(
+        this.deferSubscriptionRows(
           subscription,
-          applied.wireDelta,
-          chunk.settled,
+          terminalOperations,
+          chunk.terminalOperations,
           chunk.reset === true,
+          chunk.delta,
         );
+        return;
       }
+      applied.rootDelta.terminalOperations = terminalOperations;
+      this.publishSubscriptionRows(
+        subscription,
+        applied.rootDelta,
+        chunk.settled,
+        chunk.reset === true,
+      );
     }
   }
 
   private publishSubscriptionRows(
     subscription: SubscriptionState,
-    wireDelta: NativeRowDelta,
+    rootDelta: RuntimeSubscriptionDelta,
     settled: boolean | undefined,
     reset: boolean,
   ): void {
     if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
-      subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
-      subscription.deferredTerminalLayouts.push(...(wireDelta.terminalLayouts ?? []));
+      subscription.deferredTerminalOperations.push(...(rootDelta.terminalOperations ?? []));
       return;
     }
 
-    let visibleDelta = wireDelta;
+    let visibleDelta = rootDelta;
     if (
       subscription.deferredVisiblePublication ||
       subscription.deferredVisibleReset ||
       !subscription.visibleOpened
     ) {
       const publishReset = subscription.deferredVisibleReset || !subscription.visibleOpened;
-      if (publishReset && subscription.packedResetRows) {
-        visibleDelta = subscription.packedResetRows;
-      } else if (publishReset) {
-        visibleDelta = nativeResetDeltaFromRows(
+      if (publishReset) {
+        visibleDelta = runtimeResetDeltaFromRows(
           subscription.rows,
           this.schema,
           subscription.outputColumns,
         );
       } else {
-        visibleDelta = nativeDeltaFromRows(
+        visibleDelta = runtimeDeltaFromRows(
           subscription.rows,
           subscription.visibleRows,
           this.schema,
@@ -2863,30 +2992,19 @@ export class NativeRuntimeAdapter implements Runtime {
     // full present-state terminal values. Replaying producer operations that
     // led to that state on top of it can address occurrence lifecycles that no
     // longer exist (for example, a deferred Move after a synthesized reset).
-    // Raw terminal history belongs only to a forwarded producer delta.
-    if (visibleDelta === wireDelta) {
+    // Producer terminal history belongs only to a forwarded producer delta.
+    if (visibleDelta === rootDelta) {
       const terminalOperations = [
         ...subscription.deferredTerminalOperations,
-        ...(wireDelta.terminalOperations ?? []),
-      ];
-      const terminalLayouts = [
-        ...subscription.deferredTerminalLayouts,
-        ...(wireDelta.terminalLayouts ?? []),
+        ...(rootDelta.terminalOperations ?? []),
       ];
       if (terminalOperations.length > 0) {
         visibleDelta.terminalOperations = terminalOperations;
       }
-      if (terminalLayouts.length > 0) visibleDelta.terminalLayouts = terminalLayouts;
     }
 
     subscription.callback?.(visibleDelta);
-    if (visibleDelta === subscription.packedResetRows) {
-      subscription.visibleRows = [];
-      subscription.visiblePackedResetRows = subscription.packedResetRows;
-    } else {
-      subscription.visibleRows = [...subscription.rows];
-      subscription.visiblePackedResetRows = null;
-    }
+    subscription.visibleRows = [...subscription.rows];
     subscription.visibleOpened = true;
     clearDeferredPlaceholderBuffer(subscription);
   }
@@ -2898,21 +3016,20 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private deferSubscriptionRows(
     subscription: SubscriptionState,
-    terminalOperations: NativeTerminalOperation[] | undefined,
-    terminalLayouts: NativeTerminalRootLayout[] | undefined,
+    terminalOperations: RuntimeTerminalOperation[] | undefined,
+    nativeTerminalOperations: NativeTerminalOperation[] | undefined,
     reset: boolean,
     delta: NativeSubscriptionDelta,
   ): void {
     subscription.deferredVisiblePublication = true;
     subscription.deferredVisibleReset ||= reset;
     subscription.deferredTerminalOperations.push(...(terminalOperations ?? []));
-    subscription.deferredTerminalLayouts.push(...(terminalLayouts ?? []));
     subscription.deferredPlaceholderChunks = reset ? 1 : subscription.deferredPlaceholderChunks + 1;
     subscription.deferredPlaceholderRows = subscription.rows.length;
     subscription.deferredPlaceholderBytes = reset
-      ? subscriptionDeltaPayloadBytes(delta, terminalOperations)
+      ? subscriptionDeltaPayloadBytes(delta, nativeTerminalOperations)
       : subscription.deferredPlaceholderBytes +
-        subscriptionDeltaPayloadBytes(delta, terminalOperations);
+        subscriptionDeltaPayloadBytes(delta, nativeTerminalOperations);
     if (
       subscription.deferredPlaceholderChunks > MAX_DEFERRED_PLACEHOLDER_CHUNKS ||
       subscription.deferredPlaceholderRows > MAX_DEFERRED_PLACEHOLDER_ROWS ||
@@ -3118,6 +3235,34 @@ export class NativeRuntimeAdapter implements Runtime {
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
   }
 
+  private finishServerConnectionAttempt(attempt: ServerConnectionAttempt, error: Error): void {
+    if (attempt.finished) return;
+    attempt.finished = true;
+    attempt.outcome = error;
+    attempt.resolveTerminal(error);
+    const isCurrent =
+      attempt === this.serverConnectionAttempt &&
+      attempt.generation === this.serverConnectionGeneration &&
+      attempt.carrier === this.serverCarrier;
+    if (isCurrent) {
+      this.serverConnectionGeneration += 1;
+      this.serverConnectionAttempt = null;
+      this.serverCarrier = null;
+      this.serverCarrierPromise = null;
+    }
+    attempt.carrier.close();
+    const transport = attempt.transport;
+    attempt.transport = null;
+    if (transport) {
+      if (transport === this.serverTransport) this.serverTransport = null;
+      attempt.retirement = this.retirePeerTransport(transport).catch(reportAsyncRuntimeError);
+    }
+    if (isCurrent) {
+      this.handleServerTransportError(error);
+      this.resolveServerTransportWorkWaiters();
+    }
+  }
+
   private failActiveSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
@@ -3131,7 +3276,7 @@ export class NativeRuntimeAdapter implements Runtime {
     clearDeferredPlaceholderBuffer(subscription);
     closeSubscriptionSourceState(subscription);
     try {
-      subscription.callback?.(error, null);
+      subscription.callback?.(error);
     } catch (callbackError) {
       setTimeout(() => {
         throw callbackError;
@@ -3241,7 +3386,6 @@ function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
   subscription.deferredVisiblePublication = false;
   subscription.deferredVisibleReset = false;
   subscription.deferredTerminalOperations = [];
-  subscription.deferredTerminalLayouts = [];
   subscription.deferredPlaceholderChunks = 0;
   subscription.deferredPlaceholderRows = 0;
   subscription.deferredPlaceholderBytes = 0;
@@ -3817,6 +3961,93 @@ function subscriptionOutputColumns(
       readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
     ),
   };
+}
+
+/**
+ * Compile the native producer's named terminal path and packed row payloads
+ * into the logical edit shape consumed by the TypeScript materializer.
+ */
+function decodeRuntimeTerminalOperations(
+  operations: readonly NativeTerminalOperation[] | undefined,
+  rootColumns: readonly ColumnDescriptor[] | undefined,
+): RuntimeTerminalOperation[] | undefined {
+  if (!operations || operations.length === 0) return undefined;
+
+  return operations.map((operation) => {
+    let columns = rootColumns;
+    let targetColumns: readonly ColumnDescriptor[] | undefined;
+    const path: RuntimeTerminalOperation["path"] = operation.path.map((segment) => {
+      if ("Key" in segment) return { Key: segment.Key };
+
+      if (!columns) {
+        throw new Error("native terminal collection path requires subscription output columns");
+      }
+
+      const collectionName = segment.Collection.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
+        ? segment.Collection.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
+        : segment.Collection;
+      const collectionIndex = columns.findIndex((column) => column.name === collectionName);
+      const collectionType = columns[collectionIndex]?.column_type;
+      if (collectionType?.type !== "Array" || collectionType.element.type !== "Row") {
+        throw new Error(`native terminal operation addressed unknown collection ${collectionName}`);
+      }
+      columns = collectionType.element.columns;
+      targetColumns = columns;
+      return { Collection: collectionIndex };
+    });
+
+    const edit = operation.edit;
+    if ("Insert" in edit) {
+      if (!targetColumns) throw new Error("native terminal insert has no collection target");
+      const id = terminalPayloadRowId(edit.Insert.key);
+      return {
+        root_key: operation.root_key,
+        path,
+        edit: {
+          Insert: {
+            index: edit.Insert.index,
+            key: edit.Insert.key,
+            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Insert.value)),
+          },
+        },
+      };
+    }
+    if ("Update" in edit) {
+      if (!targetColumns) throw new Error("native terminal update has no collection target");
+      const id = terminalPayloadRowId(edit.Update.key);
+      return {
+        root_key: operation.root_key,
+        path,
+        edit: {
+          Update: {
+            key: edit.Update.key,
+            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Update.value)),
+          },
+        },
+      };
+    }
+    if ("Remove" in edit) {
+      return {
+        root_key: operation.root_key,
+        path,
+        edit: { Remove: edit.Remove },
+      };
+    }
+    return {
+      root_key: operation.root_key,
+      path,
+      edit: { Move: edit.Move },
+    };
+  });
+}
+
+/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+function terminalPayloadRowId(encoded: readonly number[]): string {
+  const bytes = Uint8Array.from(encoded);
+  if (bytes.length < 17 || bytes[0] !== 10) {
+    throw new Error("terminal key must begin with a UUID row key");
+  }
+  return formatUuid(bytes.subarray(1, 17));
 }
 
 function outputColumnsForTable(
@@ -5174,61 +5405,35 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
   return row;
 }
 
-export function applySubscriptionDeltaWithWireDelta(
+export function applySubscriptionDeltaWithRootDelta(
   currentRows: RowState[],
-  currentIndexByKey: Map<string, number>,
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-  terminalOperations?: readonly NativeTerminalOperation[],
-  orderedSuffixStart?: number,
-): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
+): {
+  rows: RowState[];
+  rowIndexByKey: Map<string, number>;
+  rootDelta: RuntimeSubscriptionDelta;
+} {
   const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
-    applySubscriptionDeltaToState(
-      currentRows,
-      currentIndexByKey,
-      delta,
-      schema,
-      reset,
-      outputColumns,
-      terminalOperations,
-    );
-  const wireIndexByKey = new Map(rowIndexByKey);
-  if (orderedSuffixStart !== undefined) {
-    for (const [index, row] of subscriptionOutputRows(addedRows, outputColumns).entries()) {
-      wireIndexByKey.set(rowStateKey(row), orderedSuffixStart + index);
-    }
-  }
-  // Relation storage order is not public terminal order. A local replacement
-  // carrying terminal edits retains its current slot until SubscriptionManager
-  // applies the edit. An edit-free remove/add pair is instead an authoritative
-  // ordered-suffix reconciliation and must use the producer's new order.
-  const replacedKeys = new Set(
-    delta.removed.map((removed, index) => {
-      const id = formatUuid(removed.rowId);
-      const occurrenceKey = delta.removedOccurrenceKeys[index];
-      return occurrenceKey
-        ? occurrenceStateKey(occurrenceKey, removed.table, id)
-        : rowKey(removed.table, id);
-    }),
+    applySubscriptionDeltaToState(currentRows, delta, schema, reset, outputColumns);
+  const rootIndexByKey = new Map<string, number>();
+  addedRows.forEach((row, index) =>
+    rootIndexByKey.set(rowStateKey(row), delta.addedIndices[index]!),
   );
-  for (const row of addedRows.concat(updatedRows)) {
-    const key = rowStateKey(row);
-    const currentIndex = currentIndexByKey.get(key);
-    if (currentIndex !== undefined && replacedKeys.has(key) && terminalOperations?.length) {
-      wireIndexByKey.set(key, currentIndex);
-    }
-  }
+  updatedRows.forEach((row, index) =>
+    rootIndexByKey.set(rowStateKey(row), delta.updatedIndices[index]!),
+  );
   return {
     rows,
     rowIndexByKey,
-    wireDelta: {
-      ...nativeDeltaFromChanges(
+    rootDelta: {
+      ...runtimeDeltaFromChanges(
         subscriptionOutputRows(addedRows, outputColumns),
         subscriptionOutputRows(updatedRows, outputColumns),
         subscriptionOutputRemovals(removedEntries, outputColumns),
-        wireIndexByKey,
+        rootIndexByKey,
         schema,
         outputColumns,
       ),
@@ -5253,12 +5458,10 @@ function subscriptionOutputRemovals(
 
 function applySubscriptionDeltaToState(
   currentRows: RowState[],
-  currentIndexByKey: Map<string, number>,
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-  terminalOperations?: readonly NativeTerminalOperation[],
 ): {
   addedRows: RowState[];
   updatedRows: RowState[];
@@ -5286,36 +5489,38 @@ function applySubscriptionDeltaToState(
   attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
   attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
 
-  // A locally changed row can arrive as a remove/add pair because relational
-  // record bytes include the changed value. When the frame also carries
-  // terminal edits, it remains the same public occurrence and must retain its
-  // slot until those edits are applied. Edit-free remove/add pairs are ordered
-  // authority suffixes and intentionally fall through to deletion/reinsertion.
-  const replacementKeys = terminalOperations?.length
-    ? new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)))
-    : new Set<string>();
   for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
     const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
     const key = resultKeyBytes
       ? occurrenceStateKey(resultKeyBytes, removed.table, id)
       : rowKey(removed.table, id);
-    if (replacementKeys.has(key)) continue;
     removedEntries.push({
       table: removed.table,
       id,
-      index: currentIndexByKey.get(key) ?? 0,
+      index: delta.removedIndices[removedIndex]!,
       resultKeyBytes,
     });
     rowsByKey.delete(key);
   }
 
-  for (const row of addedRows.concat(updatedRows)) {
+  const changedRows = addedRows.concat(updatedRows);
+  for (const row of changedRows) {
     rowsByKey.set(rowStateKey(row), row);
   }
 
-  const rows = Array.from(rowsByKey.values());
-  applyTerminalRootOrdering(rows, terminalOperations, outputColumns?.rootTable);
+  const changedKeys = new Set(changedRows.map((row) => rowStateKey(row)));
+  const rows = (reset ? [] : currentRows).filter((row) => {
+    const key = rowStateKey(row);
+    return rowsByKey.has(key) && !changedKeys.has(key);
+  });
+  const placements = [
+    ...addedRows.map((row, index) => ({ row, index: delta.addedIndices[index]! })),
+    ...updatedRows.map((row, index) => ({ row, index: delta.updatedIndices[index]! })),
+  ].sort((left, right) => left.index - right.index);
+  for (const placement of placements) {
+    rows.splice(Math.max(0, Math.min(placement.index, rows.length)), 0, placement.row);
+  }
   const rowIndexByKey = indexRowsByKey(rows);
   return {
     addedRows,
@@ -5324,40 +5529,6 @@ function applySubscriptionDeltaToState(
     rows,
     rowIndexByKey,
   };
-}
-
-/**
- * Relation deltas describe row membership while terminal edits own public
- * root positions. Root Remove edits therefore do not delete adapter state: a
- * changed sort key is represented as Remove followed by Insert for the same
- * occurrence, and the relation replacement already supplies its new payload.
- * Apply only unambiguous flat-root Insert/Move positions here; composite
- * occurrence keys intentionally remain opaque rather than guessing which
- * duplicate physical row they address.
- */
-function applyTerminalRootOrdering(
-  rows: RowState[],
-  operations: readonly NativeTerminalOperation[] | undefined,
-  rootTable: string | undefined,
-): void {
-  for (const operation of operations ?? []) {
-    if (operation.path.length !== 0) continue;
-    const rootEdit = operation.edit;
-    if (!("Insert" in rootEdit) && !("Move" in rootEdit)) continue;
-    const key = "Insert" in rootEdit ? rootEdit.Insert.key : rootEdit.Move.key;
-    if (key.length !== 17 || key[0] !== 10) continue;
-    const id = formatUuid(Uint8Array.from(key.slice(1)));
-    const matches = rows
-      .map((row, index) =>
-        row.id === id && (rootTable === undefined || row.table === rootTable) ? index : -1,
-      )
-      .filter((index) => index !== -1);
-    if (matches.length !== 1) continue;
-    const index = matches[0]!;
-    const target = "Insert" in rootEdit ? rootEdit.Insert.index : rootEdit.Move.index;
-    const [row] = rows.splice(index, 1);
-    rows.splice(Math.max(0, Math.min(target, rows.length)), 0, row!);
-  }
 }
 
 function rowsFromSubscriptionBatches(
@@ -5704,8 +5875,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       reset?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
-      terminalLayouts?: NativeTerminalRootLayout[];
-      orderedSuffixStart?: number;
       settled?: boolean;
       publishable?: boolean;
     }
@@ -5727,8 +5896,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
     settled?: unknown;
     publishable?: unknown;
     terminalOperations?: unknown;
-    terminalLayouts?: unknown;
-    orderedSuffixStart?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -5750,15 +5917,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
-      terminalLayouts: Array.isArray(record.terminalLayouts)
-        ? (record.terminalLayouts as NativeTerminalRootLayout[])
-        : undefined,
-      orderedSuffixStart:
-        typeof record.orderedSuffixStart === "number" &&
-        Number.isSafeInteger(record.orderedSuffixStart) &&
-        record.orderedSuffixStart >= 0
-          ? record.orderedSuffixStart
-          : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
       publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };
@@ -5825,12 +5983,12 @@ function isReadableSubscriptionReader(
   return "read" in source && typeof source.read === "function";
 }
 
-function nativeDeltaFromRows(
+function runtimeDeltaFromRows(
   rows: RowState[],
   previousRows: RowState[] = [],
   schema?: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null = null,
-): NativeRowDelta {
+): RuntimeSubscriptionDelta {
   const previousByKey = new Map(
     previousRows.map((row, index) => [rowStateKey(row), { row, index }]),
   );
@@ -5859,175 +6017,18 @@ function nativeDeltaFromRows(
     }
   });
 
-  return nativeDeltaFromChanges(added, updated, removed, rowIndexByKey, schema, outputColumns);
+  return runtimeDeltaFromChanges(added, updated, removed, rowIndexByKey, schema, outputColumns);
 }
 
-function nativeResetDeltaFromRows(
+function runtimeResetDeltaFromRows(
   rows: RowState[],
   schema: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null = null,
-): NativeRowDelta {
+): RuntimeSubscriptionDelta {
   return {
-    ...nativeDeltaFromChanges(rows, [], [], indexRowsByKey(rows), schema, outputColumns),
+    ...runtimeDeltaFromChanges(rows, [], [], indexRowsByKey(rows), schema, outputColumns),
     reset: true,
   };
-}
-
-function nativeResetDeltaFromBatches(
-  batches: NativeRowBatch[],
-  outputColumns: SubscriptionOutputColumns | null,
-): NativeRowDelta {
-  let rowIndex = 0;
-  const chunks: Uint8Array[] = [];
-  for (const batch of batches) {
-    const frameColumns =
-      outputColumns && batch.table === outputColumns.rootTable
-        ? logicalStorageColumns(outputColumns.rootColumns)
-        : null;
-    const encodeFrameRow = frameColumns
-      ? createRawNativeFrameRowEncoder(batch.descriptor, frameColumns)
-      : (raw: Uint8Array) => raw;
-    for (const row of batch.rows) {
-      const raw = encodeFrameRow(row.raw);
-      chunks.push(row.rowId, encodeU32Le(rowIndex), encodeU32Le(raw.byteLength), raw);
-      rowIndex += 1;
-    }
-  }
-  return {
-    __jazzNativeRowDelta: true,
-    added: concatBytes(chunks),
-    removed: new Uint8Array(),
-    updated: new Uint8Array(),
-    addedCount: rowIndex,
-    removedCount: 0,
-    updatedCount: 0,
-    reset: true,
-  };
-}
-
-function plainResetChunkCanStayPacked(
-  subscription: SubscriptionState,
-  chunk: {
-    reset?: boolean;
-    delta: NativeSubscriptionDelta;
-  },
-  schema: WasmSchema,
-): boolean {
-  const reset = chunk.reset === true;
-  const noUpdated = chunk.delta.updated.length === 0;
-  const noRemoved = chunk.delta.removed.length === 0;
-  const identityProjection = subscriptionOutputColumnsAreIdentityProjection(
-    subscription.outputColumns,
-    schema,
-  );
-  const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
-    (key) => key.length === 17 && key[0] === 1,
-  );
-  // Packed resets bypass `rowsFromBatches`, so their raw records may only go
-  // straight to the public delta decoder when every producer descriptor is
-  // already the exact public logical frame. Relation queries can return a
-  // different table (for example a hop target) or a CurrentRow carrier; both
-  // need the normal decode/re-encode bridge before publication.
-  const directPublicFrames = chunk.delta.added.every((batch) => {
-    const columns = subscription.outputColumns
-      ? batch.table === subscription.outputColumns.rootTable
-        ? subscription.outputColumns.rootColumns
-        : undefined
-      : schema[batch.table]?.columns;
-    return (
-      columns !== undefined &&
-      nativeDescriptorMatchesColumns(batch.descriptor, logicalStorageColumns(columns))
-    );
-  });
-  const canStayPacked =
-    reset &&
-    noUpdated &&
-    noRemoved &&
-    identityProjection &&
-    sourceRowKeysOnly &&
-    directPublicFrames;
-  return canStayPacked;
-}
-
-function subscriptionOutputColumnsAreIdentityProjection(
-  outputColumns: SubscriptionOutputColumns | null,
-  schema: WasmSchema,
-): boolean {
-  if (!outputColumns) return true;
-  const tableColumns = publicTableColumns(schema[outputColumns.rootTable]?.columns ?? []);
-  if (outputColumns.rootColumns.length !== tableColumns.length) return false;
-  return outputColumns.rootColumns.every((column, index) => column === tableColumns[index]);
-}
-
-function publicTableColumns(columns: readonly ColumnDescriptor[]): ColumnDescriptor[] {
-  return columns.filter((column) => !isHiddenIncludeColumn(column.name));
-}
-
-function createRawNativeFrameRowEncoder(
-  sourceDescriptor: DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-): (raw: Uint8Array) => Uint8Array {
-  if (nativeDescriptorMatchesColumns(sourceDescriptor, columns)) {
-    return (raw) => raw;
-  }
-  const outputDescriptor = columns.map((column) => ({
-    name: column.name,
-    valueType: storageColumnValueType(column),
-  }));
-  const decodeRecord = createRecordValueDecoder(sourceDescriptor);
-  const sourceIndexesByPublicName = new Map<string, number>();
-  for (let index = 0; index < sourceDescriptor.length; index += 1) {
-    const fieldName = sourceDescriptor[index]?.name;
-    if (!fieldName || isInternalField(fieldName)) continue;
-    sourceIndexesByPublicName.set(publicFieldName(fieldName), index);
-  }
-
-  return (raw) => {
-    const values = columns.map((column) => {
-      const sourceIndex = sourceIndexesByPublicName.get(column.name);
-      const outputValueType = storageColumnValueType(column);
-      if (sourceIndex === undefined) return encodeNativeNullValue(outputValueType);
-      const decoded = decodeRecord(raw, sourceIndex);
-      if (decoded == null) return encodeNativeNullValue(outputValueType);
-      return encodeFrameColumnValue(decoded, outputValueType);
-    });
-    return createRecord(outputDescriptor, values);
-  };
-}
-
-function encodeFrameColumnValue(decoded: Uint8Array, outputValueType: ValueType): Uint8Array {
-  if (outputValueType.tag !== 14) return decoded;
-  const output = new Uint8Array(decoded.length + 1);
-  output[0] = 1;
-  output.set(decoded, 1);
-  return output;
-}
-
-function nativeDescriptorMatchesColumns(
-  descriptor: readonly DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-): boolean {
-  if (descriptor.length !== columns.length) return false;
-  return columns.every((column, index) => {
-    const field = descriptor[index];
-    return (
-      field?.name === column.name &&
-      valueTypeCacheKey(field.valueType) === valueTypeCacheKey(storageColumnValueType(column))
-    );
-  });
-}
-
-function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
-  if (!subscription.packedResetBatches) return;
-  subscription.rows = rowsFromBatches(
-    subscription.packedResetBatches,
-    schema,
-    subscription.outputColumns?.rootColumns,
-    "full-record",
-  );
-  subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-  subscription.packedResetBatches = null;
-  subscription.packedResetRows = null;
 }
 
 function subscriptionDeltaPayloadBytes(
@@ -6054,7 +6055,6 @@ function subscriptionDeltaPayloadBytes(
 }
 
 function nativeTerminalOperationBytes(operation: NativeTerminalOperation): number {
-  const layoutIdBytes = operation.rootLayoutId?.length ?? operation.rootDescriptor?.length ?? 0;
   const rootKeyBytes = operation.root_key.length;
   const pathBytes = operation.path.reduce((sum, segment) => {
     if ("Collection" in segment) {
@@ -6070,80 +6070,111 @@ function nativeTerminalOperationBytes(operation: NativeTerminalOperation): numbe
         : "Remove" in operation.edit
           ? operation.edit.Remove.key.length
           : operation.edit.Move.key.length;
-  return layoutIdBytes + rootKeyBytes + pathBytes + editBytes;
+  return rootKeyBytes + pathBytes + editBytes;
 }
 
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function nativeDeltaFromChanges(
+function runtimeDeltaFromChanges(
   added: RowState[],
   updated: RowState[],
   removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>,
   rowIndexByKey: Map<string, number>,
   schema?: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null = null,
-): NativeRowDelta {
+): RuntimeSubscriptionDelta {
   return {
-    __jazzNativeRowDelta: true,
-    added: encodeNativeRows(added, rowIndexByKey, schema, false, outputColumns),
-    removed: encodeNativeRemoves(removed),
-    updated: encodeNativeRows(updated, rowIndexByKey, schema, true, outputColumns),
-    addedCount: added.length,
-    removedCount: removed.length,
-    updatedCount: updated.length,
-    addedOccurrenceKeys: added.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
-    updatedOccurrenceKeys: updated.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
-    removedOccurrenceKeys: removed.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
+    added: added.map((row) => ({
+      sourceId: row.id,
+      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
+      row: runtimeSubscriptionRow(row, schema, outputColumns),
+    })),
+    updated: updated.map((row) => ({
+      sourceId: row.id,
+      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      index: rowIndexByKey.get(rowStateKey(row)) ?? 0,
+      row: runtimeSubscriptionRow(row, schema, outputColumns),
+    })),
+    removed: removed.map((row) => ({
+      sourceId: row.id,
+      occurrenceKey: row.resultKeyBytes ?? legacyResultKey(row.id),
+      index: row.index,
+    })),
   };
 }
 
-function encodeNativeRows(
-  rows: RowState[],
-  rowIndexByKey: Map<string, number>,
+function runtimeSubscriptionRow(
+  row: RowState,
   schema: WasmSchema | undefined,
-  updated = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-): Uint8Array {
-  const chunks: Uint8Array[] = [];
-  const encodersByColumns = new Map<
-    readonly ColumnDescriptor[],
-    (values: readonly Value[]) => Uint8Array
-  >();
-  for (const row of rows) {
-    const physicalColumns =
-      outputColumns && row.table === outputColumns.rootTable
-        ? outputColumns.rootColumns
-        : schema?.[row.table]?.columns;
-    const columns = physicalColumns ? logicalStorageColumns(physicalColumns) : undefined;
-    if (!columns) {
-      throw new Error(`missing schema for subscription row table ${row.table}`);
-    }
-    let encodeRow = encodersByColumns.get(columns);
-    if (!encodeRow) {
-      encodeRow = createNativeRowValueEncoder(columns);
-      encodersByColumns.set(columns, encodeRow);
-    }
-    const frameValues = valuesForNativeFrame(row, columns);
-    let raw: Uint8Array;
-    try {
-      raw = encodeRow(frameValues);
-    } catch (error) {
-      throw new Error(
-        `${String(error)} while encoding ${row.table}: ${columns
-          .map((column, index) => {
-            const value = frameValues[index];
-            return `${column.name}:${column.column_type.type}=${String(value?.type)}(${typeof value?.type}; value=${typeof (value && "value" in value ? value.value : undefined)})`;
-          })
-          .join(", ")}`,
-      );
-    }
-    chunks.push(requiredUuidBytes(row.id), encodeU32Le(rowIndexByKey.get(rowStateKey(row)) ?? 0));
-    if (updated) chunks.push(Uint8Array.of(1));
-    chunks.push(encodeU32Le(raw.byteLength), raw);
+): WasmRow {
+  const physicalColumns =
+    outputColumns && row.table === outputColumns.rootTable
+      ? outputColumns.rootColumns
+      : schema?.[row.table]?.columns;
+  const columns = physicalColumns ? logicalStorageColumns(physicalColumns) : undefined;
+  if (!columns) {
+    throw new Error(`missing schema for subscription row table ${row.table}`);
   }
-  return concatBytes(chunks);
+  const values = valuesForNativeFrame(row, columns).map((value, index) =>
+    runtimeSubscriptionValue(value, columns[index]!.column_type),
+  );
+  const result: WasmRow = { id: row.id, values };
+  Object.defineProperty(result, "valuesByColumn", {
+    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
+    configurable: true,
+  });
+  return result;
+}
+
+function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
+  if (value.type === "Null") return value;
+  if (type.type === "Array" && value.type === "Array") {
+    return {
+      type: "Array",
+      value: value.value.map((entry) => runtimeSubscriptionValue(entry, type.element)),
+    };
+  }
+  if (type.type === "Row" && value.type === "Row") {
+    return { type: "Row", value: runtimeSubscriptionNestedRow(value.value, type.columns) };
+  }
+  if (type.type === "EnumPayload" && value.type === "Enum") {
+    const payload = type.cases.find((entry) => entry.name === value.value.case)?.fields;
+    if (!payload) return value;
+    return {
+      type: "Enum",
+      value: {
+        case: value.value.case,
+        values: value.value.values.map((entry, index) =>
+          payload[index] ? runtimeSubscriptionValue(entry, payload[index]!.column_type) : entry,
+        ),
+      },
+    };
+  }
+  return value;
+}
+
+function runtimeSubscriptionNestedRow(
+  row: { id?: string; values: Value[] },
+  columns: readonly ColumnDescriptor[],
+): { id?: string; values: Value[] } {
+  const named = (row as { valuesByColumn?: Map<string, Value> }).valuesByColumn;
+  const values = columns.map((column, index) => {
+    const value = named?.get(column.name) ?? row.values[index];
+    const resolved =
+      value ??
+      (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
+    return runtimeSubscriptionValue(resolved, column.column_type);
+  });
+  const result = { id: row.id, values };
+  Object.defineProperty(result, "valuesByColumn", {
+    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
+    configurable: true,
+  });
+  return result;
 }
 
 function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[]): Value[] {
@@ -6182,18 +6213,8 @@ function subscriptionRowsRequireBufferedPublication(
   });
 }
 
-function encodeNativeRemoves(removed: Array<{ id: string; index: number }>): Uint8Array {
-  return concatBytes(removed.flatMap((row) => [requiredUuidBytes(row.id), encodeU32Le(row.index)]));
-}
-
 function legacyResultKey(id: string): Uint8Array {
-  return Uint8Array.from([1, ...requiredUuidBytes(id)]);
-}
-
-function requiredUuidBytes(id: string): Uint8Array {
-  const hex = id.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid UUID ${id}`);
-  return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
+  return Uint8Array.from([1, ...parseUuid(id)]);
 }
 
 function rowValuesEqual(left: Value[], right: Value[]): boolean {
@@ -6299,16 +6320,6 @@ function canonicalJson(value: unknown): string {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
 }
 
 function publicFieldName(name: string): string {

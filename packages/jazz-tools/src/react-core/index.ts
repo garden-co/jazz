@@ -13,11 +13,4 @@ export { useOne, useOneSuspense, type UseOneResult } from "./use-one.js";
 export { useAuthState, type AuthStateInfo } from "./use-auth-state.js";
 export { createUseLocalFirstAuth, type LocalFirstAuth } from "./use-local-first-auth.js";
 
-export type {
-  DurabilityTier,
-  QueryBuilder,
-  QueryOptions,
-  RowDelta,
-  SubscriptionDelta,
-  TableProxy,
-} from "../runtime/index.js";
+export type { DurabilityTier, QueryBuilder, QueryOptions, TableProxy } from "../runtime/index.js";

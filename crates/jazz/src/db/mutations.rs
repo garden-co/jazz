@@ -2965,21 +2965,28 @@ where
         row: RowUuid,
         identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
+        // A policy-free table cannot hide the preimage from this client. Use
+        // the point lookup directly instead of building and hydrating an
+        // unbounded policy query only to select one row afterward.
+        if self.table_schema(table)?.read_policy.is_none() {
+            return self.local_current_row(table, row).await;
+        }
         let query = self.prepare_query(&Query::from(table))?;
         Ok(self
             .node
             .node
             .lock()
             .await
-            .query_rows_for_client(
+            .query_rows_for_client_physical_row(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
+                row,
             )
             .await?
             .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
+            .next())
     }
 
     pub(super) async fn local_row_for_trusted_identity(
@@ -2994,16 +3001,16 @@ where
             .node
             .lock()
             .await
-            .query_rows_with_prepared_plan_for_identity(
+            .query_rows_for_link_physical_row(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
-                None,
                 identity,
+                row,
             )
             .await?
             .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
+            .next())
     }
 
     pub(super) async fn visible_branch_view_cells_for_identity(
@@ -3112,7 +3119,29 @@ where
         patch: RowCells,
         identity: AuthorSubject,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
+        let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row).await?;
+        let is_partial = table_schema
+            .columns
+            .iter()
+            .any(|column| !patch.contains_key(&column.name));
+        if is_partial && (identity == AuthorSubject::SYSTEM || table_schema.read_policy.is_none()) {
+            // The serving query below proves that a partial writer may observe
+            // the cells it inherits. SYSTEM and policy-free tables are
+            // unconditionally visible, so that query cannot change the answer.
+            // Preserve indirect descriptors by reading the physical winner.
+            let (mut cells, parent) = {
+                let mut node = self.node.node.lock().await;
+                let (cells, parent) = node
+                    .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
+                    .await?
+                    .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                (cells, Some(parent))
+            };
+            let authored_columns = patch.keys().cloned().collect();
+            cells.extend(patch);
+            return Ok((cells, parent, authored_columns));
+        }
         let existing = self
             .local_row_for_client_identity(table, row, identity)
             .await?
@@ -3167,18 +3196,13 @@ where
             };
             return Ok((patch, parent, authored_columns));
         }
-        let existing = self
-            .local_row_for_trusted_identity(table, row, identity)
-            .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
-            let cells = node
-                .current_physical_cells_in_schema(self.schema_version_id, table, row)
+            let (cells, parent) = node
+                .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                 .await?
-                .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
-            let parent = node.current_row_tx_id(&existing).await;
-            (cells, parent)
+                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            (cells, Some(parent))
         };
         cells.extend(patch);
         Ok((cells, parent, authored_columns))

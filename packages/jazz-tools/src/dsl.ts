@@ -94,7 +94,7 @@ interface ColumnBuilder {
 }
 
 type MergeStrategyColumnType = {
-  counter: "INTEGER";
+  counter: "INTEGER" | "BIGINT";
   "g-set": { kind: "ARRAY" };
 };
 
@@ -369,8 +369,10 @@ function normalizeColumnMergeStrategy(
     }
     return "g-set";
   }
-  if (sqlType !== "INTEGER" || nullable) {
-    throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+  if ((sqlType !== "INTEGER" && sqlType !== "BIGINT") || nullable) {
+    throw new Error(
+      "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+    );
   }
   return "counter";
 }
@@ -385,7 +387,9 @@ class ScalarBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;
@@ -471,7 +475,9 @@ class EnumBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;
@@ -528,7 +534,9 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;
@@ -578,7 +586,9 @@ class RefBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;

@@ -442,7 +442,6 @@ where
                 result_payload_removes,
                 program_fact_adds,
                 program_fact_removes,
-                structured_app_row_changes: BTreeSet::new(),
                 allow_storage_witness_fallback: true,
                 observed_result_delta_batches: 0,
                 requires_authoritative_membership_reconcile: false,

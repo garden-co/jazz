@@ -81,7 +81,7 @@ where
             node: Rc::new(futures::lock::Mutex::new(node)),
             receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
-            outbox: Rc::new(RefCell::new(Vec::new())),
+            outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -193,10 +193,9 @@ where
 
     pub(super) fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+        if !outbox.push(PendingUpload { tx_id, unit }) {
             return;
         }
-        outbox.push(PendingUpload { tx_id, unit });
         drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
@@ -805,15 +804,11 @@ where
                 drop(routes);
                 let mut outbox = self.outbox.borrow_mut();
                 for tx_id in routed_txs {
-                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                        outbox.push(PendingUpload {
-                            tx_id,
-                            unit: crate::db::block_on(
-                                self.node.borrow_mut().commit_unit_for(tx_id),
-                            )
+                    outbox.push(PendingUpload {
+                        tx_id,
+                        unit: crate::db::block_on(self.node.borrow_mut().commit_unit_for(tx_id))
                             .ok(),
-                        });
-                    }
+                    });
                 }
             }
         }
@@ -960,6 +955,7 @@ where
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
             startup_error: None,
+            released_outbox_tx_ids: Vec::new(),
             link: ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
@@ -1191,6 +1187,7 @@ where
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
             startup_error,
+            released_outbox_tx_ids: Vec::new(),
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
@@ -1407,15 +1404,13 @@ where
                         for tx_id in &routed_txs {
                             uploaded.remove(tx_id);
                             let mut outbox = outbox.borrow_mut();
-                            if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
-                                outbox.push(PendingUpload {
-                                    tx_id: *tx_id,
-                                    unit: crate::db::block_on(
-                                        self.node.borrow_mut().commit_unit_for(*tx_id),
-                                    )
-                                    .ok(),
-                                });
-                            }
+                            outbox.push(PendingUpload {
+                                tx_id: *tx_id,
+                                unit: crate::db::block_on(
+                                    self.node.borrow_mut().commit_unit_for(*tx_id),
+                                )
+                                .ok(),
+                            });
                         }
                     }
                     self.schedule_tick(TickUrgency::Immediate);
@@ -1458,6 +1453,7 @@ where
                 .set(chunk_completion_generation);
         }
         let mut remote_sync_applied = false;
+        let mut released_outbox_tx_ids = HashSet::new();
         // A later subscriber can mutate Core state after an earlier peer link
         // has already had its turn in this pass.  Remember that generation so
         // the post-receive serve pass below reaches that earlier link too;
@@ -1466,7 +1462,9 @@ where
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         let connections = self.connections.borrow().clone();
         for connection in &connections {
-            let next = connection.lock().await.tick().await?;
+            let mut connection = connection.lock().await;
+            let next = connection.tick().await?;
+            released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
@@ -1480,7 +1478,9 @@ where
                     connection.mark_subscriber_dirty() || subscriber_state_changed
                 };
                 if should_tick {
-                    let next = connection.lock().await.tick().await?;
+                    let mut connection = connection.lock().await;
+                    let next = connection.tick().await?;
+                    released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                     stats.subscription_events += next.subscription_events;
                     stats.remote_sync_applied += next.remote_sync_applied;
                 }
@@ -1497,33 +1497,21 @@ where
                 .enforce_edge_cache_budget(&pins, budget)
                 .await?;
         }
-        self.prune_settled_outbox_uploads();
+        if !released_outbox_tx_ids.is_empty() {
+            self.release_outbox_uploads(released_outbox_tx_ids);
+        }
         Ok(stats)
     }
 
-    fn prune_settled_outbox_uploads(&self) {
+    fn release_outbox_uploads(&self, released_tx_ids: HashSet<TxId>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.is_empty() {
-            return;
-        }
-        let mut node = self.node.borrow_mut();
-        let mut released_tx_ids = BTreeSet::new();
-        outbox.retain(|pending| {
-            let state = crate::db::block_on(node.transaction_state(pending.tx_id));
-            let Some((fate, _, durability)) = state else {
-                return true;
-            };
-            let retain = matches!(fate, Fate::Pending | Fate::Accepted)
-                && durability < DurabilityTier::Global;
-            if !retain {
-                released_tx_ids.insert(pending.tx_id);
-            }
-            retain
-        });
-        drop(node);
+        let mut remaining = released_tx_ids.clone();
+        outbox.remove_released(&mut remaining);
         drop(outbox);
-        if released_tx_ids.is_empty() {
-            return;
+        for connection in self.connections.borrow().iter() {
+            connection
+                .borrow_mut()
+                .forget_released_outbox_tx_ids(&released_tx_ids);
         }
         self.large_value_upload_retry_deadlines
             .borrow_mut()
@@ -1873,15 +1861,24 @@ where
                     let (update, suppressed) = drained?;
                     debug_assert!(suppressed);
                     if let Some(update) = update {
+                        let state_ref = state.borrow();
+                        let SubscriptionKind::Prepared {
+                            maintained_subscription,
+                            ..
+                        } = &state_ref.kind;
+                        let terminal_layout = maintained_subscription
+                            .as_ref()
+                            .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
                         let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                         let _ = apply_maintained_update_to_snapshot(
                             &mut snapshot,
                             &mut snapshot_index,
                             update,
+                            shape.query().table.as_str(),
                             read_tier,
                             previous_settled,
-                            terminal_rows,
-                        );
+                            terminal_layout,
+                        )?;
                     }
                     consumed_authoritative_resets.insert(binding_view);
                 } else {
@@ -2272,15 +2269,20 @@ where
                         (fallback, false)
                     };
                 if let Some(update) = maintained_update {
+                    let terminal_layout = refresh
+                        .maintained
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
                     let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                     let _ = apply_maintained_update_to_snapshot(
                         &mut snapshot,
                         &mut snapshot_index,
                         update,
+                        shape.query().table.as_str(),
                         snapshot_tier,
                         previous_settled,
-                        terminal_rows,
-                    );
+                        terminal_layout,
+                    )?;
                 }
                 let settled = subscription_is_settled(
                     &node.borrow(),
@@ -2301,10 +2303,6 @@ where
                 )
             } else {
                 if terminal_rows && !peer_terminal_operations.is_empty() {
-                    let terminal_layout = refresh
-                        .maintained
-                        .as_ref()
-                        .and_then(|maintained| maintained.terminal_root_layout().cloned());
                     if let Some(maintained) = refresh.maintained.as_mut() {
                         // The serving terminal is authoritative for
                         // structural publication. Advance the local
@@ -2325,22 +2323,29 @@ where
                         remote_propagate_upstream,
                         requires_authority_receipt,
                     );
-                    let state_ref = &mut refresh;
-                    let event = SubscriptionEvent::Delta {
-                        reset: false,
-                        publishable: true,
-                        added: Vec::new(),
-                        updated: Vec::new(),
-                        removed: Vec::new(),
-                        ordered_suffix_start: None,
-                        terminal_operations: peer_terminal_operations,
+                    let terminal_layout = refresh
+                        .maintained
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "terminal operation arrived without a prepared root layout",
+                            )
+                        })?;
+                    let event = apply_terminal_operations_to_subscription_snapshot(
+                        &mut refresh.snapshot,
+                        &mut refresh.snapshot_index,
+                        peer_terminal_operations,
+                        None,
                         terminal_layout,
+                        shape.query().table.as_str(),
+                        snapshot_tier,
                         settled,
-                        tier: snapshot_tier,
-                    };
-                    state_ref.settled = settled;
+                    )?;
+                    refresh.settled = settled;
                     retained.push(Rc::downgrade(&state));
-                    if state_ref.sender.unbounded_send(event).is_ok() {
+                    if refresh.sender.unbounded_send(event).is_ok() {
                         changed += 1;
                     }
                     continue;
@@ -2383,8 +2388,63 @@ where
                         (None, false)
                     };
                 if let Some(update) = maintained_update {
-                    if terminal_rows {
-                        if !update.terminal_operations.is_empty() {
+                    match update {
+                        LocalMaintainedViewSubscriptionUpdate::Structured {
+                            terminal_operations,
+                        } => {
+                            if !terminal_operations.is_empty() {
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    active_authority_view_receipts,
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                    remote_propagate_upstream,
+                                    requires_authority_receipt,
+                                );
+                                let terminal_layout = refresh
+                                    .maintained
+                                    .as_ref()
+                                    .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                                    .ok_or_else(|| {
+                                        Error::new(
+                                            ErrorCode::Protocol,
+                                            "terminal operation arrived without a prepared root layout",
+                                        )
+                                    })?;
+                                let event = apply_terminal_operations_to_subscription_snapshot(
+                                    &mut refresh.snapshot,
+                                    &mut refresh.snapshot_index,
+                                    terminal_operations,
+                                    None,
+                                    terminal_layout,
+                                    shape.query().table.as_str(),
+                                    snapshot_tier,
+                                    settled,
+                                )?;
+                                refresh.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if refresh.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
+                            }
+                            let Some(maintained) = refresh.maintained.as_ref() else {
+                                return Err(Error::new(
+                                    ErrorCode::Protocol,
+                                    "structured subscription lost its Groove terminal",
+                                ));
+                            };
+                            let materialized = node
+                                .lock()
+                                .await
+                                .materialize_local_maintained_relation_snapshot_with_occurrences(
+                                    maintained,
+                                )
+                                .await?;
+                            let snapshot = materialized.snapshot;
+                            let current_root_occurrences = materialized.root_occurrence_ids;
                             let settled = subscription_is_settled(
                                 &node.borrow(),
                                 active_authority_view_receipts,
@@ -2396,18 +2456,25 @@ where
                                 requires_authority_receipt,
                             );
                             let state_ref = &mut refresh;
-                            let event = SubscriptionEvent::Delta {
-                                reset: false,
-                                publishable: true,
-                                added: Vec::new(),
-                                updated: Vec::new(),
-                                removed: Vec::new(),
-                                ordered_suffix_start: None,
-                                terminal_operations: update.terminal_operations,
-                                terminal_layout: update.terminal_layout,
+                            let previous_root_occurrences = snapshot_root_occurrences(
+                                &state_ref.snapshot,
+                                &state_ref.snapshot_index,
+                            )?;
+                            let event = subscription_terminal_delta_event(
+                                snapshot_tier,
                                 settled,
-                                tier: snapshot_tier,
-                            };
+                                &state_ref.snapshot,
+                                &previous_root_occurrences,
+                                &snapshot,
+                                &current_root_occurrences,
+                            )?;
+                            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+                            state_ref.snapshot_index =
+                                relation_snapshot_index_with_root_occurrences(
+                                    &state_ref.snapshot,
+                                    &current_root_occurrences,
+                                )?;
+                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
                             if state_ref.sender.unbounded_send(event).is_ok() {
@@ -2415,125 +2482,85 @@ where
                             }
                             continue;
                         }
-                        let Some(maintained) = refresh.maintained.as_ref() else {
-                            return Err(Error::new(
-                                ErrorCode::Protocol,
-                                "structured subscription lost its Groove terminal",
-                            ));
-                        };
-                        let materialized = node
-                            .lock()
-                            .await
-                            .materialize_local_maintained_relation_snapshot_with_occurrences(
-                                maintained,
-                            )
-                            .await?;
-                        let snapshot = materialized.snapshot;
-                        let current_root_occurrences = materialized.root_occurrence_ids;
-                        let settled = subscription_is_settled(
-                            &node.borrow(),
-                            active_authority_view_receipts,
-                            &shape,
-                            &binding,
-                            settled_tier,
-                            read_view,
-                            remote_propagate_upstream,
-                            requires_authority_receipt,
-                        );
-                        let state_ref = &mut refresh;
-                        let previous_root_occurrences = snapshot_root_occurrences(
-                            &state_ref.snapshot,
-                            &state_ref.snapshot_index,
-                        )?;
-                        let event = subscription_terminal_delta_event(
-                            snapshot_tier,
-                            settled,
-                            &state_ref.snapshot,
-                            &previous_root_occurrences,
-                            &snapshot,
-                            &current_root_occurrences,
-                        )?;
-                        state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-                        state_ref.snapshot_index = relation_snapshot_index_with_root_occurrences(
-                            &state_ref.snapshot,
-                            &current_root_occurrences,
-                        )?;
-                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                        state_ref.settled = settled;
-                        retained.push(Rc::downgrade(&state));
-                        if state_ref.sender.unbounded_send(event).is_ok() {
-                            changed += 1;
-                        }
-                        continue;
-                    } else {
-                        let state_ref = &mut refresh;
-                        let previous_snapshot = state_ref.snapshot.clone();
-                        let previous_snapshot_index = state_ref.snapshot_index.clone();
-                        let authoritative_membership_changed =
-                            update.authoritative_membership_changed;
-                        let mut event = apply_maintained_update_to_snapshot(
-                            &mut state_ref.snapshot,
-                            &mut state_ref.snapshot_index,
-                            update,
-                            snapshot_tier,
-                            previous_settled,
-                            terminal_rows,
-                        );
-                        if authoritative_membership_changed {
-                            order_maintained_snapshot_roots(
-                                &node.borrow(),
-                                &shape.query(),
+                        LocalMaintainedViewSubscriptionUpdate::Flat {
+                            authoritative_membership_changed,
+                            added,
+                            removed,
+                            terminal_operations,
+                        } => {
+                            let state_ref = &mut refresh;
+                            let previous_snapshot = state_ref.snapshot.clone();
+                            let previous_snapshot_index = state_ref.snapshot_index.clone();
+                            let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
-                            )?;
-                            // Authority reconciliation carries row
-                            // additions/removals without positions.
-                            // Re-publish the first changed ordered
-                            // suffix so consumers apply TopBy order.
-                            event = subscription_terminal_delta_event(
+                                LocalMaintainedViewSubscriptionUpdate::Flat {
+                                    authoritative_membership_changed,
+                                    added,
+                                    removed,
+                                    terminal_operations,
+                                },
+                                shape.query().table.as_str(),
                                 snapshot_tier,
                                 previous_settled,
-                                &previous_snapshot,
-                                &snapshot_root_occurrences(
+                                None,
+                            )?;
+                            if authoritative_membership_changed {
+                                order_maintained_snapshot_roots(
+                                    &node.borrow(),
+                                    &shape.query(),
+                                    &mut state_ref.snapshot,
+                                    &mut state_ref.snapshot_index,
+                                )?;
+                                // Authority reconciliation carries row
+                                // additions/removals without positions.
+                                // Re-publish the first changed ordered
+                                // suffix so consumers apply TopBy order.
+                                event = subscription_terminal_delta_event(
+                                    snapshot_tier,
+                                    previous_settled,
                                     &previous_snapshot,
-                                    &previous_snapshot_index,
-                                )?,
-                                &state_ref.snapshot,
-                                &snapshot_root_occurrences(
+                                    &snapshot_root_occurrences(
+                                        &previous_snapshot,
+                                        &previous_snapshot_index,
+                                    )?,
                                     &state_ref.snapshot,
-                                    &state_ref.snapshot_index,
-                                )?,
-                            )?;
+                                    &snapshot_root_occurrences(
+                                        &state_ref.snapshot,
+                                        &state_ref.snapshot_index,
+                                    )?,
+                                )?;
+                            }
+                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                            let settled = subscription_is_settled(
+                                &node.borrow(),
+                                active_authority_view_receipts,
+                                &shape,
+                                &binding,
+                                settled_tier,
+                                read_view,
+                                remote_propagate_upstream,
+                                requires_authority_receipt,
+                            ) && node
+                                .borrow()
+                                .relation_snapshot_has_materialized_required_cells(
+                                    shape.query(),
+                                    &state_ref.snapshot,
+                                )?;
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
+                            if let SubscriptionEvent::Delta {
+                                settled: event_settled,
+                                ..
+                            } = &mut event
+                            {
+                                *event_settled = settled;
+                            }
+                            if state_ref.sender.unbounded_send(event).is_ok() {
+                                changed += 1;
+                            }
+                            continue;
                         }
-                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                        let settled = subscription_is_settled(
-                            &node.borrow(),
-                            active_authority_view_receipts,
-                            &shape,
-                            &binding,
-                            settled_tier,
-                            read_view,
-                            remote_propagate_upstream,
-                            requires_authority_receipt,
-                        ) && node
-                            .borrow()
-                            .relation_snapshot_has_materialized_required_cells(
-                                shape.query(),
-                                &state_ref.snapshot,
-                            )?;
-                        state_ref.settled = settled;
-                        retained.push(Rc::downgrade(&state));
-                        if let SubscriptionEvent::Delta {
-                            settled: event_settled,
-                            ..
-                        } = &mut event
-                        {
-                            *event_settled = settled;
-                        }
-                        if state_ref.sender.unbounded_send(event).is_ok() {
-                            changed += 1;
-                        }
-                        continue;
                     }
                 }
                 let preserve_local_overlay = suppressed_authoritative_change;

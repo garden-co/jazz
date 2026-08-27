@@ -50,6 +50,50 @@ chooses either
 retention or deletion through a separate, user-visible storage-lifecycle API.
 No current host may reuse a relay after an auth-scope change.
 
+#### Trusted platform admission codec
+
+The host admission ABI is deliberately separate from the generic relay command
+ABI. Kotlin and Swift/Objective-C pass one complete strict JSON object to
+`jazz_native_relay_host_admit_scope_json`; JavaScript never receives that
+object or a method that accepts it. Its exact top-level fields are:
+
+```text
+{
+  scope: { app_namespace, storage_namespace, auth_scope },
+  sqlite_path,
+  schema_json,
+  identity: { node, author },
+  claims
+}
+```
+
+Unknown fields at the top level, scope, or identity level fail closed. Rust
+parses the schema JSON, serializes it to its normalized JSON spelling, builds
+the `JazzSchema`, validates scope and the non-`SYSTEM` author, and validates
+the typed claims before it admits the scope. Admission input is bounded to
+1 MiB independently of peer-frame limits. Credential-bearing claims named
+`authorization`, `access_token`, `refresh_token`, `id_token`,
+`bearer_token`, or `token` (case-insensitive) fail closed. This is a boundary
+rule, not a replacement for JWT verification: platform authentication verifies
+a credential first, derives `auth_scope` and validated claims, then discards
+the bearer material from this admission call.
+
+On success the ABI returns exactly 32 random bytes: the opaque admission
+capability. The trusted platform layer owns its lifetime and may hand that
+opaque value to foreground JavaScript only for relay lifecycle commands. It
+never logs, derives storage names from, or decodes the capability. A second
+admission for the same scope with different SQLite path, schema, durable
+identity, or claims fails before minting a capability, including when no relay
+alias has yet been opened.
+
+Auth switching is ordered: revoke every capability for the old authenticated
+scope (which atomically closes its relay and UI-client aliases), then admit the
+new complete scope. A revoked or guessed capability cannot open or attach a
+client. Platform host destruction occurs only after its foreground runtime
+leases and trusted capabilities are both gone, at which point it calls
+`jazz_native_relay_host_free`; it does not retain Rust `Db` pointers across
+that lifecycle.
+
 `Db` and its peer connections are executor-local. A native relay therefore owns
 all core values on one dedicated native owner thread. Host calls are encoded
 commands with responses; JSI/JNI/Swift must never retain or dereference a Rust
@@ -92,6 +136,13 @@ bounded batch, and each pump services a bounded round-robin subset of UI peers.
 Callers retry after draining or scheduling another pump rather than spinning an
 unbounded native turn.
 
+`execute` and the `JazzRelay` TurboModule expose only the opaque postcard
+`RelayCommandRequest` command/frame vocabulary. Neither admits nor revokes a
+scope, and neither accepts claims, tokens, storage paths, schema, or durable
+identity. The dedicated trusted admission/revocation C entries are callable
+only by platform lifecycle code; this prohibition is source-contract tested in
+the RN package in addition to the Rust ABI tests.
+
 ### 19.3 SQLite backend contract
 
 `jazz-storage-sqlite` is a native implementation of Groove's existing async
@@ -100,7 +151,7 @@ unbounded native turn.
 - versioned `meta` format markers;
 - a stable interned-column-family catalog;
 - bytewise ordered `(column_family, key)` primary keys;
-- atomic `write_many`, including ordered storage deltas;
+- atomic `write_many` over ordinary ordered-key/value sets and deletes;
 - explicit close and flush boundaries;
 - reopen that adds requested column families without losing existing contents.
 
@@ -150,6 +201,10 @@ and Maven/Kotlin packages consume the same relay core and artifact slices.
    deltas, flush/close, and planted negative checks.
 2. Native relay contracts: two UI clients sharing one relay, distinct scopes,
    auth switch/logout, upstream reconnect, reload/reopen, and corrupted store.
+   The exact host receipt
+   `jazz_native_relay::tests::admitted_scope_capabilities_are_unguessable_and_revocation_closes_all_aliases`
+   proves that revocation closes every alias and that the old capability cannot
+   be reused; do not duplicate this lifecycle assertion in binding-only tests.
 3. First-party RN test app: scenarios emit structured machine-readable
    results; the app itself is not a Maestro test script.
 4. Linux Blacksmith: Rust/TS contracts, Android native artifact build, Android

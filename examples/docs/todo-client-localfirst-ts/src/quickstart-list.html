@@ -17,7 +17,7 @@
 
       const list = document.getElementById("todos");
 
-      db.subscribeAll(app.todos, ({ all: todos }) => {
+      db.subscribe(app.todos, (todos) => {
         list.replaceChildren(
           ...todos.map((todo) => {
             const li = Object.assign(document.createElement("li"), {

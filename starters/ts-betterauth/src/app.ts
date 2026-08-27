@@ -67,7 +67,6 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
     unsubscribeTodos = mountTodoWidget(
       root.querySelector<HTMLElement>('[data-slot="todo"]')!,
       todoDb,
-      (query, callback, options) => todoDb.subscribeAll(query, callback, options),
     );
   }
 

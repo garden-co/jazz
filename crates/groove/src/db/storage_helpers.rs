@@ -326,6 +326,7 @@ pub struct StorageReadMetrics {
     pub total: StorageReadBucket,
     pub history_rows: StorageReadBucket,
     pub history_indexes: StorageReadBucket,
+    pub ahead_current_rows: StorageReadBucket,
     pub global_current_rows: StorageReadBucket,
     pub global_current_indexes: StorageReadBucket,
     pub register_global_current_rows: StorageReadBucket,
@@ -359,6 +360,9 @@ impl StorageReadMetrics {
         match destination {
             StorageReadDestination::HistoryRows => self.history_rows.record(reads, ranges),
             StorageReadDestination::HistoryIndexes => self.history_indexes.record(reads, ranges),
+            StorageReadDestination::AheadCurrentRows => {
+                self.ahead_current_rows.record(reads, ranges)
+            }
             StorageReadDestination::GlobalCurrentRows => {
                 self.global_current_rows.record(reads, ranges)
             }
@@ -534,6 +538,29 @@ where
         self.storage.get(cf, key)
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::Value>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.put_if_absent(cf, key, value)
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> crate::storage::StorageFuture<'_, Result<bool, crate::storage::Error>> {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.compare_and_delete(cf, key, expected)
+    }
+
     fn set(
         &self,
         cf: String,
@@ -661,7 +688,6 @@ pub(super) fn write_operation_bytes(operation: &crate::storage::WriteOperation<'
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
         crate::storage::WriteOperation::Delete { key, .. } => key.len(),
-        crate::storage::WriteOperation::Delta { key, delta, .. } => key.len() + delta.payload.len(),
     }
 }
 
@@ -683,6 +709,7 @@ pub(super) enum StorageWriteDestination {
 pub(super) enum StorageReadDestination {
     HistoryRows,
     HistoryIndexes,
+    AheadCurrentRows,
     GlobalCurrentRows,
     GlobalCurrentIndexes,
     RegisterGlobalCurrentRows,
@@ -698,8 +725,7 @@ pub(super) fn storage_write_destination(
 ) -> StorageWriteDestination {
     match operation {
         crate::storage::WriteOperation::Set { cf, key, .. }
-        | crate::storage::WriteOperation::Delete { cf, key }
-        | crate::storage::WriteOperation::Delta { cf, key, .. } => {
+        | crate::storage::WriteOperation::Delete { cf, key } => {
             if *cf == "indices" {
                 storage_index_write_destination(key)
             } else {
@@ -764,6 +790,11 @@ pub(super) fn storage_read_destination(cf: &str, key: &[u8]) -> StorageReadDesti
 }
 
 pub(super) fn storage_table_read_destination(table: &str) -> StorageReadDestination {
+    if table.starts_with("jazz_")
+        && (table.ends_with("_ahead_current") || table.ends_with("_register_ahead_current"))
+    {
+        return StorageReadDestination::AheadCurrentRows;
+    }
     match storage_table_write_destination(table) {
         StorageWriteDestination::HistoryRows => StorageReadDestination::HistoryRows,
         StorageWriteDestination::GlobalCurrentRows => StorageReadDestination::GlobalCurrentRows,

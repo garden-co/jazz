@@ -85,15 +85,15 @@ export declare class NapiDb {
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
-  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   /** Read through an open transaction using the identity bound at begin. */
-  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
@@ -108,17 +108,47 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array
-  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string
-  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null
-  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write
-  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write
+  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
+  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string | PendingNativeRead
+  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | undefined | null | PendingNativeRead
+  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write | PendingNativeWrite
+  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write | PendingNativeWrite
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openBatchId: string): Tx
   mergeableTxForIdentity(openBatchId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
+}
+
+/**
+ * A JavaScript-thread-owned binding read which suspended on asynchronous
+ * large-value storage. NAPI promises execute on a Send worker pool, whereas
+ * a Jazz runtime is deliberately `Rc`/thread-affine. The adapter drives this
+ * object after its peer transport makes progress instead of blocking Node.
+ */
+export declare class PendingNativeRead {
+  poll(): Uint8Array | null
+}
+
+/**
+ * Opaque marker returned while the next bounded native subscription batch is
+ * waiting for chunk I/O. Call `readAll` again after transport progress.
+ */
+export declare class PendingNativeSubscriptionBatch {
+  /**
+   * The host should wait this bounded delay before asking the subscription
+   * to retry a retained chunk-hydration batch.
+   */
+  retryAfterMs(): number | null
+}
+
+/**
+ * Thread-affine large-value mutation setup which is waiting for local or
+ * routed chunks. The completed value is the ordinary write receipt.
+ */
+export declare class PendingNativeWrite {
+  poll(): Write | null
 }
 
 export declare class PreparedQuery {
@@ -141,8 +171,8 @@ export declare class StreamingMutation {
 }
 
 export declare class Subscription {
-  readAll(): Array<SubscriptionEvent>
-  drain(): Array<SubscriptionEvent>
+  readAll(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
+  drain(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
   close(): boolean
 }
 
@@ -227,9 +257,7 @@ export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
   delta: Uint8Array
-  orderedSuffixStart?: number
   terminalOperations: Array<SubscriptionTerminalOperation>
-  terminalLayouts: Array<SubscriptionTerminalLayout>
   settled: boolean
   tier: 'None' | 'Local' | 'Edge' | 'Global'
 }
@@ -275,20 +303,6 @@ export interface SubscriptionTerminalKeyPathSegment {
   Key: Array<number>
 }
 
-/**
- * Immutable producer-owned root record contract.  The descriptor and public
- * slots are published once per NAPI subscription, before an operation may
- * reference `id`; TypeScript never has to infer a CurrentRow/layout family.
- */
-export interface SubscriptionTerminalLayout {
-  id: string
-  rootDescriptor: Array<number>
-  rootKeySlot: number
-  rootKeyFieldName: string
-  publicFields: Array<SubscriptionTerminalPublicField>
-  carrier: string
-}
-
 export interface SubscriptionTerminalMove {
   key: Array<number>
   index: number
@@ -299,7 +313,6 @@ export interface SubscriptionTerminalMoveEdit {
 }
 
 export interface SubscriptionTerminalOperation {
-  rootLayoutId: string
   root_key: Array<number>
   path: Array<SubscriptionTerminalPathSegment>
   edit: SubscriptionTerminalEdit
@@ -307,13 +320,6 @@ export interface SubscriptionTerminalOperation {
 
 export type SubscriptionTerminalPathSegment =
   SubscriptionTerminalCollectionPathSegment | SubscriptionTerminalKeyPathSegment
-
-export interface SubscriptionTerminalPublicField {
-  name: string
-  descriptorFieldName: string
-  slot: number
-  carrier: string
-}
 
 export interface SubscriptionTerminalRemove {
   key: Array<number>

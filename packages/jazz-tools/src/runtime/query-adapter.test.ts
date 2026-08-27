@@ -27,6 +27,110 @@ const app = s.defineApp({
 });
 
 describe("translateQuery", () => {
+  it("rejects colliding externally supplied relation schemas during query lowering", () => {
+    const ambiguousRelationsSchema = {
+      users: {
+        columns: [{ name: "name", column_type: { type: "Text" as const }, nullable: false }],
+      },
+      todos: {
+        columns: [
+          {
+            name: "ownerId",
+            column_type: { type: "Uuid" as const },
+            nullable: false,
+            references: "users",
+          },
+          {
+            name: "owner_id",
+            column_type: { type: "Uuid" as const },
+            nullable: false,
+            references: "users",
+          },
+        ],
+      },
+    };
+
+    expect(() => translateQuery(app.todos._build(), ambiguousRelationsSchema)).toThrow(
+      /Generated relation name "owner" is ambiguous on table "todos".*"todos.ownerId".*"todos.owner_id"/,
+    );
+  });
+
+  it("rejects duplicate external descriptors before allowing a reference-name alias", () => {
+    const duplicateDescriptorSchema = {
+      users: {
+        columns: [{ name: "name", column_type: { type: "Text" as const }, nullable: false }],
+      },
+      todos: {
+        columns: [
+          { name: "owner", column_type: { type: "Text" as const }, nullable: false },
+          {
+            name: "owner",
+            column_type: { type: "Uuid" as const },
+            nullable: false,
+            references: "users",
+          },
+        ],
+      },
+    };
+
+    expect(() => translateQuery(app.todos._build(), duplicateDescriptorSchema)).toThrow(
+      /Table "todos" has duplicate column descriptor "owner": descriptor #1 \(Text\) conflicts with descriptor #2 \(Uuid referencing "users"\)/,
+    );
+  });
+
+  it("rejects a forward relation that would shadow a stored output column", () => {
+    expect(() =>
+      s.defineApp({
+        users: s.table({ name: s.string() }),
+        todos: s.table({
+          owner: s.string(),
+          ownerId: s.ref("users"),
+        }),
+      }),
+    ).toThrow(
+      /Generated relation name "owner" on table "todos".*forward relation generated from reference column "todos.ownerId".*stored\/public output column "todos.owner"/,
+    );
+  });
+
+  it("rejects a generated relation that would shadow the implicit public id", () => {
+    expect(() =>
+      s.defineApp({
+        users: s.table({ name: s.string() }),
+        todos: s.table({
+          idId: s.ref("users"),
+        }),
+      }),
+    ).toThrow(
+      /Generated relation name "id" on table "todos".*forward relation generated from reference column "todos.idId".*stored\/public output column "todos.id"/,
+    );
+  });
+
+  it("rejects a nested reverse relation that would shadow a stored output column", () => {
+    expect(() =>
+      s.defineApp({
+        users: s.table({
+          todosViaOwner: s.string(),
+        }),
+        todos: s.table({
+          ownerId: s.ref("users"),
+        }),
+      }),
+    ).toThrow(
+      /Generated relation name "todosViaOwner" on table "users".*reverse relation generated from reference column "todos.ownerId".*stored\/public output column "users.todosViaOwner"/,
+    );
+  });
+
+  it("preserves the established reference-column relation alias", () => {
+    expect(() =>
+      s.defineApp({
+        users: s.table({ name: s.string() }),
+        todos: s.table({
+          owner: s.ref("users"),
+        }),
+      }),
+    ).not.toThrow();
+  });
+
   it("emits ordinary table queries on the flat Query path", () => {
     const query = app.todos
       .includeDeleted()

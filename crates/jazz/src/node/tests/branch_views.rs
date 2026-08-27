@@ -180,6 +180,248 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
 }
 
 #[test]
+/// Frozen-base lowering keeps the base content and deletion registers separate.
+/// This internal test is needed because it verifies the maintained graph's
+/// frozen input and its live head fate transition in one evaluation boundary.
+///
+/// alice writes and deletes base content at the snapshot, then the head's
+/// `Restored` winner reveals that frozen content without a head content write.
+fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
+    let schema = branch_view_schema();
+    let node_id = NodeUuid::from_bytes([0x4a; 16]);
+    let (_dir, mut node) = open_history_complete_node_with_schema(node_id, schema.clone());
+    let row_uuid = row(0x4b);
+    let base = branch_selector(0x4c);
+    let head = branch_selector(0x4d);
+    let owner = AuthorSubject::for_test_bytes([0x4e; 16]);
+    let base_tx = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(base.clone())
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("frozen base")),
+                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                ])),
+        )
+        .unwrap();
+    let base_delete = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 15)
+                .branch(base.clone())
+                .parents(vec![base_tx])
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row_uuid, 20)
+            .branch(head.clone())
+            .deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+
+    let read_view = crate::protocol::ReadViewSpec::branch_view(
+        head.clone(),
+        Some(crate::protocol::BranchViewBase::snapshot(
+            base.clone(),
+            crate::protocol::SnapshotRef {
+                owner: node_id,
+                global_base: GlobalTime(0),
+                local_base: base_delete.time,
+                dots: Vec::new(),
+            },
+        )),
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (shape, binding, plan) = node
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let (mut maintained, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Local,
+            &read_view,
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    assert_eq!(initial.root_count, 0);
+
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row_uuid, 30)
+            .branch(head)
+            .deletion(DeletionEvent::Restored),
+    )
+    .unwrap();
+    let fresh = node
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap();
+    assert_eq!(fresh.root_count, 1, "fresh evaluation must see the restoration");
+    let update = node
+        .drain_local_maintained_view_subscription(&mut maintained, None)
+        .unwrap()
+        .expect("restoration must publish the frozen base row");
+
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].1.row_uuid(), row_uuid);
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn frozen_base_subscription_does_not_capture_pending_head_content() {
+    let schema = branch_view_schema();
+    let node_id = NodeUuid::from_bytes([0x3a; 16]);
+    let (_dir, mut node) = open_history_complete_node_with_schema(node_id, schema.clone());
+    let row_uuid = row(0x3b);
+    let base = branch_selector(0x3c);
+    let head = branch_selector(0x3d);
+    let base_tx = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(base.clone())
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("frozen base")),
+                    ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+                ])),
+        )
+        .unwrap();
+    let (pending, _) = node
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .branch(head.clone())
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("pending head")),
+                    ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+                ])),
+        )
+        .unwrap();
+    let read_view = crate::protocol::ReadViewSpec::branch_view(
+        head,
+        Some(crate::protocol::BranchViewBase::snapshot(
+            base.clone(),
+            crate::protocol::SnapshotRef {
+                owner: node_id,
+                global_base: GlobalTime(0),
+                local_base: base_tx.time,
+                dots: Vec::new(),
+            },
+        )),
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (shape, binding, plan) = node
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let (mut maintained, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Local,
+            &read_view,
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .unwrap();
+    let table = schema.tables.iter().find(|table| table.name == "todos").unwrap();
+    assert_eq!(initial.rows[0].cell(table, "title"), Some(v("pending head")));
+
+    node.apply_sync_message_settled(SyncMessage::FateUpdate {
+        tx_id: pending,
+        fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+        global_time: None,
+        durability: None,
+    })
+    .unwrap();
+    let fresh = node
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap();
+    assert_eq!(
+        fresh.root_count, 1,
+        "fresh rejection evaluation must restore the frozen base"
+    );
+    let update = node
+        .drain_local_maintained_view_subscription(&mut maintained, None)
+        .unwrap()
+        .expect("head rejection must restore the frozen base payload");
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].1.cell(table, "title"), Some(v("frozen base")));
+
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row_uuid, 30)
+            .branch(base)
+            .parents(vec![base_tx])
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("later base")),
+                ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+            ])),
+    )
+    .unwrap();
+    assert!(
+        node.drain_local_maintained_view_subscription(&mut maintained, None)
+            .unwrap()
+            .is_none(),
+        "later base changes must remain outside the frozen relation"
+    );
+
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row_uuid, 40)
+            .branch(branch_selector(0x3d))
+            .cells(BTreeMap::from([
+                ("title".to_owned(), v("replacement head")),
+                ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+            ])),
+    )
+    .unwrap();
+    let replacement = node
+        .drain_local_maintained_view_subscription(&mut maintained, None)
+        .unwrap()
+        .expect("replacement head content must remain live");
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = replacement else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(added.len(), 1);
+    assert_eq!(
+        added[0].1.cell(table, "title"),
+        Some(v("replacement head"))
+    );
+}
+
+#[test]
 fn version_parents_cannot_cross_branch_keys() {
     let schema = branch_view_schema();
     let (_dir, mut node) =
@@ -884,8 +1126,11 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("live-base write must emit a maintained delta");
-    assert_eq!(update.added.len(), 1);
-    assert_eq!(update.removed.len(), 1);
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(removed.len(), 1);
 }
 
 #[test]

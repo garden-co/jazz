@@ -27,6 +27,7 @@ use groove::ivm::ProjectField;
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
 use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
+use rustc_hash::FxHashSet;
 use thiserror::Error;
 
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
@@ -381,6 +382,8 @@ mod source_resolution;
 mod views;
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
+#[cfg(test)]
+pub(crate) use query_eval::take_client_physical_row_query_calls_for_test;
 pub(crate) use query_eval::{
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
 };
@@ -563,12 +566,9 @@ pub struct NodeState<S> {
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
-    /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
-    ahead_current_keys: BTreeSet<(String, BranchKey, VersionLayer, RowUuid, TxTime, NodeAlias)>,
-    /// Rows touched by the ahead-current overlay.
-    ahead_current_rows: BTreeSet<(String, RowUuid)>,
-    /// Latest ahead-current key per table/layer/row for local overlay reads.
-    ahead_current_latest: BTreeMap<(String, VersionLayer, RowUuid), (TxTime, NodeAlias)>,
+    /// Exact ahead-current keys used to make peer replay idempotent. No caller
+    /// needs ordering, so use the low-overhead deterministic hasher here.
+    ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.

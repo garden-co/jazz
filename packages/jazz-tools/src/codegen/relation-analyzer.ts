@@ -27,6 +27,72 @@ export interface Relation {
   nullable: boolean;
 }
 
+export class AmbiguousRelationNameError extends Error {}
+export class DuplicateColumnNameError extends Error {}
+
+function columnDescriptorProvenance(
+  index: number,
+  column: WasmSchema[string]["columns"][number],
+): string {
+  const reference = column.references ? ` referencing "${column.references}"` : "";
+  return `descriptor #${index + 1} (${column.column_type.type}${reference})`;
+}
+
+function validateUniqueColumnDescriptors(schema: WasmSchema): void {
+  for (const [tableName, table] of Object.entries(schema)) {
+    const seen = new Map<string, number>();
+    for (const [index, column] of table.columns.entries()) {
+      const previousIndex = seen.get(column.name);
+      if (previousIndex !== undefined) {
+        const previous = table.columns[previousIndex]!;
+        throw new DuplicateColumnNameError(
+          `Table "${tableName}" has duplicate column descriptor "${column.name}": ${columnDescriptorProvenance(previousIndex, previous)} conflicts with ${columnDescriptorProvenance(index, column)}. Column names must be unique before relation names are derived.`,
+        );
+      }
+      seen.set(column.name, index);
+    }
+  }
+}
+
+function relationProvenance(relation: Relation): string {
+  const referenceColumn = relation.type === "forward" ? relation.fromColumn : relation.toColumn;
+  const referenceTable = relation.type === "forward" ? relation.fromTable : relation.toTable;
+  const referencedTable = relation.type === "forward" ? relation.toTable : relation.fromTable;
+
+  return `${relation.type} relation generated from reference column "${referenceTable}.${referenceColumn}" to "${referencedTable}.id"`;
+}
+
+function addRelation(
+  relations: Map<string, Relation[]>,
+  outputColumnsByTable: Map<string, Set<string>>,
+  relation: Relation,
+): void {
+  const tableRelations = relations.get(relation.fromTable);
+  if (!tableRelations) {
+    throw new Error(`Unknown relation source table "${relation.fromTable}"`);
+  }
+
+  // A scalar reference may intentionally use its own relation name (for
+  // example `team: ref("teams")`). The typed include API replaces that one
+  // reference value with the joined row. Every other output-column collision
+  // would instead make two independently-addressable public values share a
+  // key, so reject it.
+  const isOwnReferenceColumn = relation.type === "forward" && relation.fromColumn === relation.name;
+  if (!isOwnReferenceColumn && outputColumnsByTable.get(relation.fromTable)?.has(relation.name)) {
+    throw new AmbiguousRelationNameError(
+      `Generated relation name "${relation.name}" on table "${relation.fromTable}" (${relationProvenance(relation)}) collides with the stored/public output column "${relation.fromTable}.${relation.name}". Rename the reference column or the output column.`,
+    );
+  }
+
+  const existing = tableRelations.find((candidate) => candidate.name === relation.name);
+  if (existing) {
+    throw new AmbiguousRelationNameError(
+      `Generated relation name "${relation.name}" is ambiguous on table "${relation.fromTable}" between ${relationProvenance(existing)} and ${relationProvenance(relation)}. Rename one of the reference columns.`,
+    );
+  }
+  tableRelations.push(relation);
+}
+
 /**
  * Capitalize the first letter of a string.
  */
@@ -53,11 +119,18 @@ function forwardRefNameFromFK(columnName: string): string {
  * @returns Map from table name to array of relations on that table
  */
 export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
+  validateUniqueColumnDescriptors(schema);
+
   const relations = new Map<string, Relation[]>();
+  const outputColumnsByTable = new Map<string, Set<string>>();
 
   // Initialize empty arrays for all tables
-  for (const tableName of Object.keys(schema)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     relations.set(tableName, []);
+    // `id` is implicit in every public row even though it is not a stored
+    // descriptor. Includes are materialized onto the same public row object,
+    // so relation names must not shadow either it or a stored column.
+    outputColumnsByTable.set(tableName, new Set(["id", ...table.columns.map((col) => col.name)]));
   }
 
   for (const [tableName, table] of Object.entries(schema)) {
@@ -85,7 +158,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           isArray: isForwardArray,
           nullable: col.nullable,
         };
-        relations.get(tableName)!.push(forwardRelation);
+        addRelation(relations, outputColumnsByTable, forwardRelation);
 
         // Verify the referenced table exists
         if (!relations.has(col.references)) {
@@ -106,7 +179,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           isArray: true,
           nullable: false, // Arrays are not nullable, just empty
         };
-        relations.get(col.references)!.push(reverseRelation);
+        addRelation(relations, outputColumnsByTable, reverseRelation);
       }
     }
   }

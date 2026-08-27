@@ -757,6 +757,8 @@ where
         start: TxId,
         target: TxId,
     ) -> Result<bool, Error> {
+        #[cfg(test)]
+        MERGE_HEAD_REACHABILITY_WALKS.fetch_add(1, Ordering::Relaxed);
         let mut stack = vec![start];
         let mut seen = BTreeSet::new();
         while let Some(tx_id) = stack.pop() {
@@ -789,6 +791,8 @@ where
         start: TxId,
         target: TxId,
     ) -> Result<bool, Error> {
+        #[cfg(test)]
+        MERGE_HEAD_REACHABILITY_WALKS.fetch_add(1, Ordering::Relaxed);
         let mut stack = vec![start];
         let mut seen = BTreeSet::new();
         while let Some(tx_id) = stack.pop() {
@@ -1326,19 +1330,19 @@ where
         // its pending-current projection must be idempotent too. Otherwise a
         // self-referential schema can visit the same version twice and try to
         // insert its exact current primary key again.
-        if self.ahead_current_keys.contains(&(
-            version.table().to_owned(),
-            version.branch_key().clone(),
-            version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
-        )) {
-            return Ok(());
-        }
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let physical_table_id =
+            self.physical_table_id_for_schema(schema_version, version.table())?;
+        let encoded_primary_key = history_primary_key(version).into_bytes();
+        if self.ahead_current_keys.contains(&(
+            physical_table_id,
+            version.layer(),
+            encoded_primary_key.clone(),
+        )) {
+            return Ok(());
+        }
         match version.layer() {
             VersionLayer::Content => {
                 let plan = self.prepared_physical_write_plan(
@@ -1389,12 +1393,9 @@ where
             ),
         }
         self.insert_ahead_current_key(
-            version.table().to_owned(),
-            version.branch_key().clone(),
+            physical_table_id,
             version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
+            encoded_primary_key,
         );
         Ok(())
     }
@@ -1425,12 +1426,9 @@ where
         )?;
         batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
-            version.table(),
-            version.branch_key(),
+            self.physical_table_id_for_schema(schema_version, version.table())?,
             version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
+            history_primary_key(version).into_bytes(),
         );
         Ok(())
     }

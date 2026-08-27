@@ -269,6 +269,144 @@ fn session_branch_updates_require_read_visibility_before_staging() {
     );
 }
 
+/// A policy-free point update uses its known row id, while absent/deleted
+/// targets retain the facade's existing rejection behavior. Tables with a
+/// read policy deliberately retain the client-local query dispatch; client
+/// replicas rely on upstream sync, rather than local policy re-evaluation, for
+/// confidentiality.
+///
+/// policy-free root update ──► direct current-row lookup
+/// policy-bearing root update ──► existing ClientLocal point-query dispatch
+#[test]
+fn point_update_preimage_fast_path_preserves_target_and_policy_dispatch() {
+    let unscoped_schema = schema();
+    let db = open_db(0x7d, AuthorSubject::SYSTEM, &unscoped_schema);
+    let unscoped_owner = AuthorSubject::for_test_bytes([0x7d; 16]);
+    let live = row(0x7e);
+    let deleted = row(0x7f);
+    let missing = row(0x80);
+
+    for (row_id, title) in [(live, "live"), (deleted, "deleted")] {
+        let write = db
+            .insert(
+                "todos",
+                cells(title, false, unscoped_owner),
+                InsertOptions {
+                    row_id: Some(row_id),
+                    ..Default::default()
+                },
+            )
+            .expect("seed policy-free row");
+        block_on(write.wait(DurabilityTier::Local)).expect("settle policy-free seed");
+    }
+
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        0,
+        "discard point-query calls from earlier tests on this thread"
+    );
+    let update = block_on(db.update(
+        "todos",
+        live,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    ))
+    .expect("known policy-free point target updates");
+    block_on(update.wait(DurabilityTier::Local)).expect("settle point update");
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        0,
+        "policy-free preimage must use the direct current-row lookup"
+    );
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(
+        rows.iter()
+            .find(|candidate| candidate.row_uuid() == live)
+            .and_then(|candidate| candidate.cell(&unscoped_schema.tables[0], "done")),
+        Some(Value::Bool(true))
+    );
+
+    let missing_error = match block_on(db.update(
+        "todos",
+        missing,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )) {
+        Ok(_) => panic!("absent point target stays rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(missing_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(missing_error.message.contains("UPDATE"));
+
+    let deletion = db
+        .delete("todos", deleted, Default::default())
+        .expect("delete policy-free row");
+    block_on(deletion.wait(DurabilityTier::Local)).expect("settle deletion");
+    let deleted_error = match block_on(db.update(
+        "todos",
+        deleted,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )) {
+        Ok(_) => panic!("deleted point target stays rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(deleted_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(deleted_error.message.contains("deleted"));
+
+    let owner = AuthorSubject::for_test_bytes([0x81; 16]);
+    let intruder = AuthorSubject::for_test_bytes([0x82; 16]);
+    let scoped_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("owner", PublicColumnType::Uuid)
+                .column("body", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["user_id"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let scoped = open_db(0x81, intruder, &scoped_schema);
+    scoped.set_identity_claims(intruder, test_provider_claims(intruder));
+    let hidden = row(0x83);
+    let seed = scoped
+        .insert(
+            "documents",
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                ("body".to_owned(), Value::String("private".to_owned())),
+            ]),
+            InsertOptions {
+                row_id: Some(hidden),
+                ..Default::default()
+            },
+        )
+        .expect("authority seeds hidden row");
+    block_on(seed.wait(DurabilityTier::Local)).expect("settle hidden seed");
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        0,
+        "discard unrelated point-query calls before the policy-bearing update"
+    );
+    let policy_bearing_update = block_on(scoped.update(
+        "documents",
+        hidden,
+        BTreeMap::from([("body".to_owned(), Value::String("leak".to_owned()))]),
+        Default::default(),
+    ))
+    .expect("the manually resident row follows ordinary ClientLocal staging semantics");
+    block_on(policy_bearing_update.wait(DurabilityTier::Local))
+        .expect("settle policy-bearing update");
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        1,
+        "a table with a read policy must retain ClientLocal point-query dispatch"
+    );
+}
+
 #[test]
 fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
@@ -330,6 +468,49 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     assert_eq!(
         rows[0].cell(table, "title"),
         Some(Value::String("restored todo".to_owned()))
+    );
+    assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+}
+
+/// A policy-free partial update inherits its omitted cells directly from the
+/// physical winner; it must not prepare a serving query merely to prove
+/// unconditional read visibility.
+#[test]
+fn policy_free_partial_update_skips_the_serving_read_query() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("original", false),
+            Default::default(),
+        )
+        .unwrap();
+    let row = write.row_uuid();
+    doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let write = db
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+    doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        metrics.source_primary_key_scans, 0,
+        "policy-free partial updates must not prepare a physical serving query"
+    );
+    assert_eq!(metrics.source_full_scans, 0);
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(rows.len(), 1);
+    let table = &doctest_support::schema().tables[0];
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String("original".to_owned()))
     );
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
 }

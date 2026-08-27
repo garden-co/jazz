@@ -6,7 +6,12 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
+import type {
+  InsertValues,
+  RuntimeSubscriptionDelta,
+  Value,
+  WasmSchema,
+} from "../drivers/types.js";
 import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import {
@@ -240,7 +245,10 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): number;
-  executeSubscription(handle: number, on_update: Function): void;
+  executeSubscription(
+    handle: number,
+    onUpdate: (result: RuntimeSubscriptionDelta | Error) => void,
+  ): void;
   unsubscribe(handle: number): void;
   close?(): void | Promise<void>;
   /** Abandon a runtime whose backing persistence epoch was invalidated. */
@@ -503,7 +511,7 @@ interface WriteContextPayload {
 /**
  * Subscription callback type.
  */
-export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
+export type SubscriptionCallback = (delta: RuntimeSubscriptionDelta) => void;
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
@@ -617,25 +625,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   }
 
   return JSON.stringify(payload);
-}
-
-function normalizeSubscriptionCallbackArgs(
-  args: unknown[],
-): Error | SubscriptionWireDelta | string | undefined {
-  if (args.length === 2 && args[0] instanceof Error) {
-    return args[0];
-  }
-
-  if (args.length === 1) {
-    return args[0] as SubscriptionWireDelta | string;
-  }
-
-  if (args.length === 2 && args[0] == null) {
-    return args[1] as SubscriptionWireDelta | string | undefined;
-  }
-
-  console.error("Invalid subscription callback arguments", args);
-  return undefined;
 }
 
 function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
@@ -1572,18 +1561,9 @@ export class JazzClient {
     );
 
     try {
-      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-        if (deltaJsonOrObject === undefined) {
-          return;
-        }
-        if (deltaJsonOrObject instanceof Error) {
-          throw deltaJsonOrObject;
-        }
-
-        const delta: SubscriptionWireDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(delta);
+      this.runtime.executeSubscription(handle, (result) => {
+        if (result instanceof Error) throw result;
+        callback(result);
       });
     } catch (error) {
       // createSubscription already transferred ownership to this facade. If

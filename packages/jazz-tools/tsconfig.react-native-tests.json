@@ -12,6 +12,7 @@
     "src/expo/**/*.typecheck.tsx",
     "src/expo/vendor.d.ts",
     "src/dev/expo.typecheck.ts",
+    "src/types/fs-native-extensions.d.ts",
     "src/types/jazz-wasm-mutation-error.d.ts"
   ],
   "exclude": ["node_modules", "dist"]

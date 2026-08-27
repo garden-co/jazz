@@ -15,7 +15,10 @@ import com.facebook.react.module.annotations.ReactModule
  */
 @ReactModule(name = JazzRelayModule.NAME)
 class JazzRelayModule(reactContext: ReactApplicationContext) : NativeJazzRelaySpec(reactContext) {
-  private val bridge = runCatching { JazzRelayBridge }.getOrNull()
+  private val bridge = runCatching {
+    JazzRelayBridge.acquireRuntime()
+    JazzRelayBridge
+  }.getOrNull()
 
   override fun getAbiVersion(): Double = bridge?.abiVersion() ?: 0.0
 
@@ -28,6 +31,14 @@ class JazzRelayModule(reactContext: ReactApplicationContext) : NativeJazzRelaySp
     runCatching { bridge.execute(encodedCommand) }
       .onSuccess(promise::resolve)
       .onFailure { promise.reject("E_JAZZ_RELAY_COMMAND", it) }
+  }
+
+  override fun invalidate() {
+    // Runtime leases make `nativeDestroy` deterministic without destroying a
+    // shared process host while another RN runtime still uses it. Trusted
+    // admissions keep their host alive until explicit logout/revocation.
+    bridge?.let { JazzRelayBridge.releaseRuntime() }
+    super.invalidate()
   }
 
   companion object {

@@ -75,6 +75,7 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
 #[test]
 fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     let alice = user(0xa1);
+    let bob = user(0xa2);
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("documents")
             .column("id", PublicColumnType::Uuid)
@@ -95,7 +96,12 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
         alice,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
     );
+    core.set_session_claims(
+        bob,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.test_uuid()))]),
+    );
     let physical_row = row(0xc1);
+    let other_physical_row = row(0xc2);
     let declared_id = row(0xd1);
     let tx = core
         .commit_mergeable_unit_settled(
@@ -106,6 +112,35 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
         )
         .unwrap();
     core.accept_global_for_test(tx.0).unwrap();
+    let other_tx = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", other_physical_row, 11).cells(BTreeMap::from([
+                ("id".to_owned(), Value::Uuid(row(0xd2).0)),
+                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+            ])),
+        )
+        .unwrap();
+    core.accept_global_for_test(other_tx.0).unwrap();
+
+    let generic = Query::from("documents")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let generic_binding = generic.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, alice)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([physical_row, other_physical_row]),
+        "the generic policy graph must initially authorize both of Alice's documents"
+    );
+    let cached_policy_graphs = core
+        .query
+        .policy_authorization_graph_cache
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     core.reset_query_engine_read_metrics();
     assert!(
@@ -117,9 +152,104 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
         1,
         "the authorization probe must point-scan the physical row"
     );
+    assert_eq!(
+        core.query
+            .policy_authorization_graph_cache
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        cached_policy_graphs,
+        "point authorization must preserve the reusable generic policy graph"
+    );
     assert!(
         core.dry_run_write_current_allows("documents", physical_row, alice)
             .unwrap()
+    );
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "a point-specialized policy proof must retain its session scope"
+    );
+    assert_eq!(
+        core.query
+            .policy_authorization_graph_cache
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        cached_policy_graphs,
+        "a denied point proof must not retain another identity's specialization"
+    );
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, alice)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([physical_row, other_physical_row]),
+        "a generic query after a point proof must not inherit that point's bound"
+    );
+
+    let ownership_change = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", physical_row, 20)
+                .cells(BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))])),
+        )
+        .unwrap();
+    core.accept_global_for_test(ownership_change.0).unwrap();
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", physical_row, alice)
+            .unwrap(),
+        "policy-dependency changes must revoke the former owner's point access"
+    );
+    assert!(
+        core.dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "policy-dependency changes must grant the new owner's point access"
+    );
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, bob)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([physical_row]),
+        "a generic query after a point proof must use its generic policy graph"
+    );
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, alice)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([other_physical_row]),
+        "the former owner keeps only the separately authorized generic result"
+    );
+
+    let deletion = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", physical_row, 30).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    core.accept_global_for_test(deletion.0).unwrap();
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "a deleted target must be a point-authorization miss"
+    );
+    let restoration = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", physical_row, 40)
+                .deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+    core.accept_global_for_test(restoration.0).unwrap();
+    assert!(
+        core.dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "restoring the target must restore point authorization from current policy evidence"
     );
 }
 

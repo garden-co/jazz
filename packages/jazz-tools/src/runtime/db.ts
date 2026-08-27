@@ -10,13 +10,7 @@
  * - all/one are async (need storage I/O for queries)
  */
 
-import type {
-  ColumnDescriptor,
-  ColumnType,
-  WasmSchema,
-  WasmRow,
-  StorageDriver,
-} from "../drivers/types.js";
+import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   ExclusiveWriteHandle,
@@ -59,14 +53,11 @@ import {
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
-import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltRelation,
-  type NormalizedIncludeSpec,
   type NormalizedBuiltQuery,
 } from "./query-builder-shape.js";
-import { resolveSelectedColumns } from "./select-projection.js";
 import {
   BrowserConnectionManager,
   DirectConnectionManager,
@@ -199,6 +190,30 @@ export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
   base?: BranchBase;
 };
 
+/** Package-internal subscription surface used by Jazz's UI bindings. */
+export interface DbSubscriptionSource {
+  all?<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): Promise<T[]> | T[];
+  subscribeDelta<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void;
+}
+
+const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
+
+/** @internal Retrieve the incremental source associated with a public Db. */
+export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
+  const source = dbSubscriptionSources.get(db);
+  if (!source) throw new Error("Jazz Db is missing its internal subscription source.");
+  return source;
+}
+
 interface TimestampOverrideOptions {
   updatedAt?: number;
 }
@@ -315,7 +330,10 @@ function nativeDbQueryOptions(
     if (base !== undefined) throw new Error("A branch base requires a branch head.");
     return rest;
   }
-  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+  return {
+    ...rest,
+    branch: normalizeBranchView(schema, tableName, branch, base),
+  };
 }
 
 function normalizeInsertOptions(
@@ -327,7 +345,10 @@ function normalizeInsertOptions(
   const { branch, ...rest } = options;
   return branch === undefined
     ? rest
-    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+    : {
+        ...rest,
+        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
+      };
 }
 
 function normalizeRestoreOptions(
@@ -339,7 +360,10 @@ function normalizeRestoreOptions(
   const { branch, ...rest } = options;
   return branch === undefined
     ? rest
-    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+    : {
+        ...rest,
+        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
+      };
 }
 
 function normalizeUpdateOptions(
@@ -353,7 +377,10 @@ function normalizeUpdateOptions(
     if (base !== undefined) throw new Error("A branch base requires a branch head.");
     return rest;
   }
-  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+  return {
+    ...rest,
+    branch: normalizeBranchView(schema, tableName, branch, base),
+  };
 }
 
 export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -427,7 +454,7 @@ function trimSubscriptionTraceStack(stack: string | undefined): string | undefin
   const isInternalFrame = (line: string): boolean => {
     return (
       line.includes("Db.registerActiveQuerySubscriptionTrace") ||
-      line.includes("Db.subscribeAll") ||
+      line.includes("Db.subscribe") ||
       line.includes("SubscriptionsOrchestrator.ensureEntryForKey") ||
       line.includes("SubscriptionsOrchestrator.getCacheEntry") ||
       line.includes("/node_modules/") ||
@@ -522,23 +549,6 @@ function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string):
   }
 
   throw new Error(`Query schema is missing table "${tableName}".`);
-}
-
-function resolveOutputColumnDescriptor(
-  tableName: string,
-  schema: WasmSchema,
-  columnName: string,
-): ColumnDescriptor | undefined {
-  const magicType = magicColumnType(columnName);
-  if (magicType) {
-    return {
-      name: columnName,
-      column_type: magicType,
-      nullable: isPermissionIntrospectionColumn(columnName),
-    };
-  }
-
-  return schema[tableName]?.columns.find((column) => column.name === columnName);
 }
 
 function toWriteRecordForOperation(
@@ -813,68 +823,6 @@ function applyPartialValueSelections<T>(
 
 function escapeWriteErrorReason(message: string): string {
   return message.replaceAll('"', '\\"');
-}
-
-function resolveNativeSubscriptionColumns(
-  tableName: string,
-  schema: WasmSchema,
-  includes: NormalizedIncludeSpec,
-  projection?: readonly string[],
-  rootTerminal = true,
-): ColumnDescriptor[] {
-  const wildcard = projection === undefined || projection.length === 0;
-  const selectedColumns = resolveSelectedColumns(tableName, schema, projection);
-  // IDs are implicit in query results, so an explicit `select("id")` resolves
-  // to no ordinary public columns. The native query projection represents that
-  // state with its empty/default sentinel and therefore retains the full
-  // physical record; decode that carrier fully before the row transformer
-  // applies the public ID-only projection.
-  const usesDefaultNativeProjection = wildcard || selectedColumns.length === 0;
-  const nativeColumns = usesDefaultNativeProjection
-    ? resolveSelectedColumns(tableName, schema, undefined)
-    : selectedColumns;
-  const columns = nativeColumns
-    .map((columnName) => {
-      const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
-      return column && usesDefaultNativeProjection && rootTerminal
-        ? { ...column, sparse: true }
-        : column;
-    })
-    .filter((column): column is ColumnDescriptor => column !== undefined);
-
-  if (Object.keys(includes).length === 0) {
-    return columns;
-  }
-
-  const relationsByTable = analyzeRelations(schema);
-  const relations = relationsByTable.get(tableName) ?? [];
-
-  for (const [relationName, include] of Object.entries(includes)) {
-    const relation = relations.find((candidate) => candidate.name === relationName);
-    if (!relation) {
-      throw new Error(`Unknown relation "${relationName}" on table "${tableName}"`);
-    }
-
-    const nestedColumns = resolveNativeSubscriptionColumns(
-      relation.toTable,
-      schema,
-      include.includes,
-      include.select.length > 0 ? include.select : undefined,
-      false,
-    );
-    const columnType: ColumnType = {
-      type: "Array",
-      element: { type: "Row", columns: nestedColumns },
-    };
-
-    columns.push({
-      name: relationName,
-      column_type: columnType,
-      nullable: false,
-    });
-  }
-
-  return columns;
 }
 
 /**
@@ -1448,9 +1396,8 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
  * const todo = await db.one(app.todos.where({ id: inserted.id }));
  *
  * // Subscriptions
- * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
- *   console.log("All todos:", delta.all);
- *   console.log("Changes:", delta.delta);
+ * const unsubscribe = db.subscribe(app.todos, (todos) => {
+ *   console.log("All todos:", todos);
  * });
  * ```
  */
@@ -1486,6 +1433,11 @@ export class Db {
     this.runtimeSource = runtimeSource;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
+    dbSubscriptionSources.set(this, {
+      all: (query, options) => this.all(query, options),
+      subscribeDelta: (query, callback, options, session) =>
+        this.subscribeDelta(query, callback, options, session),
+    });
   }
 
   private dbForConnection(): DbForConnection {
@@ -2283,6 +2235,29 @@ export class Db {
   }
 
   /**
+   * Subscribe to a query and receive its complete current result whenever it changes.
+   * Each callback receives a fresh result array.
+   */
+  subscribe<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (rows: T[]) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void {
+    return this.subscribeDelta(
+      query,
+      (update) => {
+        if (update.all === undefined) {
+          throw new Error("Jazz subscription update is missing its materialized result.");
+        }
+        callback(update.all);
+      },
+      options,
+      session,
+    );
+  }
+
+  /**
    * Subscribe to a query and receive updates when results change.
    *
    * The callback receives a SubscriptionDelta with:
@@ -2301,7 +2276,7 @@ export class Db {
    * ```typescript
    * import { RowChangeKind } from "jazz-tools";
    *
-   * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
+   * const unsubscribe = db.subscribeDelta(app.todos, (delta) => {
    *   setTodos(delta.all);
    *   for (const change of delta.delta) {
    *     if (change.kind === RowChangeKind.Added) {
@@ -2314,7 +2289,7 @@ export class Db {
    * unsubscribe();
    * ```
    */
-  subscribeAll<T extends { id: string }>(
+  private subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
@@ -2328,12 +2303,6 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const nativeOutputColumns = resolveNativeSubscriptionColumns(
-      outputTable,
-      outputSchema,
-      outputIncludes,
-      builtQuery.select,
-    );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
@@ -2345,7 +2314,7 @@ export class Db {
         ),
       );
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
+      const typedDelta = manager.handleDelta(delta, transform);
       callback(typedDelta);
     };
 
@@ -2476,7 +2445,11 @@ export class Db {
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
-        this.all(query, { ...options, tier: "local", propagation: "local-only" });
+        this.all(query, {
+          ...options,
+          tier: "local",
+          propagation: "local-only",
+        });
       const seedRows =
         session == null
           ? seedQuery()
@@ -2590,7 +2563,10 @@ export class Db {
 
   private parseRuntimeQueryTracePayload(queryJson: string): RuntimeQueryTracePayload {
     try {
-      const parsed = JSON.parse(queryJson) as { table?: unknown; branches?: unknown };
+      const parsed = JSON.parse(queryJson) as {
+        table?: unknown;
+        branches?: unknown;
+      };
       const table = typeof parsed.table === "string" ? parsed.table : "unknown";
       const branches = Array.isArray(parsed.branches)
         ? parsed.branches.filter((branch): branch is string => typeof branch === "string")
@@ -2693,7 +2669,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
         parseJwtPayload(jwtToken) ?? {},
         "local-first",
       );
-      resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
+      resolvedConfig = {
+        ...configWithoutAuth,
+        jwtToken,
+        trustedReservedSession,
+      };
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.

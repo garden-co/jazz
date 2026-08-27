@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage,
-    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, apply_storage_delta,
-    key_codec,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -240,6 +239,44 @@ impl OrderedKvStorage for MemoryStorage {
         Box::pin(async move { self.with_cf(&cf, |values| values.get(&key).cloned()) })
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
+            let values = inner
+                .get_mut(&cf)
+                .ok_or_else(|| Error::ColumnFamilyNotFound(cf.clone()))?;
+            if let Some(existing) = values.get(&key) {
+                return Ok(Some(existing.clone()));
+            }
+            values.insert(key, value);
+            Ok(None)
+        })
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        Box::pin(async move {
+            let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
+            let values = inner
+                .get_mut(&cf)
+                .ok_or_else(|| Error::ColumnFamilyNotFound(cf.clone()))?;
+            if values.get(&key) != Some(&expected) {
+                return Ok(false);
+            }
+            values.remove(&key);
+            Ok(true)
+        })
+    }
+
     fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
         Box::pin(async move {
             self.with_cf(&cf, |values| {
@@ -360,20 +397,6 @@ impl OrderedKvStorage for MemoryStorage {
                             return Err(Error::ColumnFamilyNotFound(cf));
                         }
                         planned.insert((cf, key), None);
-                    }
-                    OwnedWriteOperation::Delta { cf, key, delta } => {
-                        let Some(values) = inner.get(&cf) else {
-                            return Err(Error::ColumnFamilyNotFound(cf));
-                        };
-                        let planned_key = (cf, key);
-                        let encoded = delta.encode()?;
-                        let existing = match planned.get(&planned_key) {
-                            Some(Some(value)) => Some(value.as_slice()),
-                            Some(None) => None,
-                            None => values.get(&planned_key.1).map(Vec::as_slice),
-                        };
-                        let merged = apply_storage_delta(existing, &encoded)?;
-                        planned.insert(planned_key, merged);
                     }
                 }
             }

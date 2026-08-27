@@ -149,6 +149,7 @@ impl IvmRuntime {
                 table,
                 index,
                 scan,
+                intersections,
                 row_projection,
             } => {
                 let table = self
@@ -162,8 +163,13 @@ impl IvmRuntime {
                     .find(|candidate| candidate.name == *index)
                     .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?
                     .clone();
-                let source =
-                    self.index_source_op(&table, &index, scan.clone(), row_projection.clone())?;
+                let source = self.index_source_op(
+                    &table,
+                    &index,
+                    scan.clone(),
+                    intersections.clone(),
+                    row_projection.clone(),
+                )?;
                 let output = inferred_output;
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(OpType::IndexSource(source), [], output),
@@ -1325,8 +1331,18 @@ impl IvmRuntime {
         table: &TableSchema,
         index: &IndexSchema,
         scan: Option<StaticScanSpec>,
+        intersections: Vec<(String, StaticScanSpec)>,
         row_projection: Option<String>,
     ) -> Result<IndexSourceOp, IvmRuntimeError> {
+        for (intersection, _) in &intersections {
+            if !table
+                .indices
+                .iter()
+                .any(|index| index.name == *intersection)
+            {
+                return Err(IvmRuntimeError::IndexNotFound(intersection.clone()));
+            }
+        }
         let (table_descriptor, variant_projection) = if table.has_variants() {
             (
                 schema_index_input_descriptor(table, index)?,
@@ -1365,6 +1381,7 @@ impl IvmRuntime {
         Ok(IndexSourceOp {
             table: table.name.clone(),
             index: index.name.clone(),
+            intersections,
             input_descriptor: table_descriptor,
             variant_projection,
             row_projection: row_projection.map(VariantProjectionTarget::Named),

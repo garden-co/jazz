@@ -1,6 +1,9 @@
 //! Canonical indirect representation for large logical scalar values.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -2055,6 +2058,8 @@ pub fn prepare_reusing(
 /// record codecs. The containing schema supplies the declared kind, including
 /// the backing primitive type and the expected kind of every referenced node.
 pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Result<Vec<u8>, Error> {
+    #[cfg(test)]
+    STORED_SCALAR_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let schema = stored_scalar_schema(kind);
     let enum_value = match value {
         StoredScalar::Primitive(bytes) => {
@@ -2081,9 +2086,28 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
     };
     crate::records::encode_single_field_value(
         &Value::Enum(enum_value),
-        &ValueType::Enum(Box::new(schema)),
+        stored_scalar_value_type(kind),
     )
     .map_err(|_| Error::MalformedScalar)
+}
+
+// A structural receipt for the current-row materialization fast path. This is
+// deliberately test-only: the production contract is that inline values are
+// returned verbatim without entering the scalar encoder, not that callers pay
+// for metrics bookkeeping.
+#[cfg(test)]
+std::thread_local! {
+    static STORED_SCALAR_ENCODE_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_stored_scalar_encode_calls() {
+    STORED_SCALAR_ENCODE_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn stored_scalar_encode_calls() -> usize {
+    STORED_SCALAR_ENCODE_CALLS.with(|calls| calls.get())
 }
 
 /// Decode and canonically validate the internal stored-scalar enum. The
@@ -2091,21 +2115,18 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
 /// interpreted directly through that schema; indirect values authenticate the
 /// expected kind when their content-addressed nodes are decoded.
 pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<StoredScalar, Error> {
-    let schema = stored_scalar_schema(kind);
-    let decoded = crate::records::decode_single_field_value(
-        encoded,
-        &ValueType::Enum(Box::new(schema.clone())),
-    )
-    .map_err(|error| match error {
-        crate::records::Error::InvalidUtf8 => Error::InvalidUtf8,
-        _ => Error::MalformedScalar,
-    })?;
+    let decoded =
+        crate::records::decode_single_field_value(encoded, stored_scalar_value_type(kind))
+            .map_err(|error| match error {
+                crate::records::Error::InvalidUtf8 => Error::InvalidUtf8,
+                _ => Error::MalformedScalar,
+            })?;
     let Value::Enum(value) = decoded else {
         return Err(Error::MalformedScalar);
     };
     let canonical = crate::records::encode_single_field_value(
         &Value::Enum(value.clone()),
-        &ValueType::Enum(Box::new(schema.clone())),
+        stored_scalar_value_type(kind),
     )
     .map_err(|_| Error::MalformedScalar)?;
     if canonical != encoded {
@@ -2163,7 +2184,41 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
     }
 }
 
-fn stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
+fn stored_scalar_schema(kind: LargeValueKind) -> &'static EnumSchema {
+    // Current-row evaluation decodes this ordinary scalar envelope on every
+    // affected record. Building its nested descriptors repeatedly re-hashes
+    // their layouts even though `RecordDescriptor` later interns them, making
+    // a rapid stream of revisions pay avoidable work proportional to every
+    // historical update. The schema is immutable and kind-parametric, so one
+    // process-wide instance per declared kind is the canonical interpretation.
+    static BYTES: OnceLock<EnumSchema> = OnceLock::new();
+    static STRING: OnceLock<EnumSchema> = OnceLock::new();
+    static JSON: OnceLock<EnumSchema> = OnceLock::new();
+
+    let schema = match kind {
+        LargeValueKind::Bytes => &BYTES,
+        LargeValueKind::String => &STRING,
+        LargeValueKind::Json => &JSON,
+    };
+    schema.get_or_init(|| build_stored_scalar_schema(kind))
+}
+
+fn stored_scalar_value_type(kind: LargeValueKind) -> &'static ValueType {
+    // `ValueType::Enum` owns its schema. Cache this wrapper as well so the
+    // ordinary scalar codec does not deep-clone the schema for every cell.
+    static BYTES: OnceLock<ValueType> = OnceLock::new();
+    static STRING: OnceLock<ValueType> = OnceLock::new();
+    static JSON: OnceLock<ValueType> = OnceLock::new();
+
+    let value_type = match kind {
+        LargeValueKind::Bytes => &BYTES,
+        LargeValueKind::String => &STRING,
+        LargeValueKind::Json => &JSON,
+    };
+    value_type.get_or_init(|| ValueType::Enum(Box::new(stored_scalar_schema(kind).clone())))
+}
+
+fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
     let primitive = RecordDescriptor::new([(
         "value",
         match kind {
@@ -3235,13 +3290,18 @@ pub(crate) fn materialize_record_attempt(
 ) -> Result<Vec<u8>, IvmRuntimeError> {
     let mut values = descriptor.bind(raw).to_values()?;
     let mut blocked = false;
+    let mut changed = false;
     for value in &mut values {
-        materialize_value_attempt(value, inputs, &mut blocked)?;
+        changed |= materialize_value_attempt(value, inputs, &mut blocked)?;
     }
     if blocked {
         return Err(IvmRuntimeError::EvaluationBlocked);
     }
-    Ok(descriptor.create(&values)?)
+    if changed {
+        Ok(descriptor.create(&values)?)
+    } else {
+        Ok(raw.to_vec())
+    }
 }
 
 /// Materialize only the logical fields an operator will inspect. Unselected
@@ -3254,6 +3314,7 @@ pub(crate) fn materialize_record_fields_attempt(
 ) -> Result<Vec<u8>, IvmRuntimeError> {
     let mut values = descriptor.bind(raw).to_values()?;
     let mut blocked = false;
+    let mut changed = false;
     for index in field_indices {
         let value = values
             .get_mut(*index)
@@ -3261,19 +3322,23 @@ pub(crate) fn materialize_record_fields_attempt(
                 index: *index,
                 len: descriptor.fields().len(),
             })?;
-        materialize_value_attempt(value, inputs, &mut blocked)?;
+        changed |= materialize_value_attempt(value, inputs, &mut blocked)?;
     }
     if blocked {
         return Err(IvmRuntimeError::EvaluationBlocked);
     }
-    Ok(descriptor.create(&values)?)
+    if changed {
+        Ok(descriptor.create(&values)?)
+    } else {
+        Ok(raw.to_vec())
+    }
 }
 
 fn materialize_value_attempt(
     value: &mut Value,
     inputs: &mut EvaluationInputs,
     blocked: &mut bool,
-) -> Result<(), IvmRuntimeError> {
+) -> Result<bool, IvmRuntimeError> {
     match value {
         Value::Large(large) => match materialize_attempt(large, inputs) {
             Ok(bytes) => {
@@ -3286,19 +3351,20 @@ fn materialize_value_attempt(
                         Value::String(String::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?)
                     }
                 };
-                Ok(())
+                Ok(true)
             }
             Err(IvmRuntimeError::EvaluationBlocked) => {
                 *blocked = true;
-                Ok(())
+                Ok(false)
             }
             Err(error) => Err(error),
         },
         Value::Tuple(values) | Value::Array(values) => {
+            let mut changed = false;
             for value in values {
-                materialize_value_attempt(value, inputs, blocked)?;
+                changed |= materialize_value_attempt(value, inputs, blocked)?;
             }
-            Ok(())
+            Ok(changed)
         }
         Value::Nullable(Some(value)) => materialize_value_attempt(value, inputs, blocked),
         Value::Record(record) => {
@@ -3306,12 +3372,13 @@ fn materialize_value_attempt(
             let materialized = materialize_record_attempt(&descriptor, record.raw(), inputs);
             match materialized {
                 Ok(raw) => {
+                    let changed = raw.as_slice() != record.raw();
                     *record = crate::records::OwnedRecord::new(raw, descriptor);
-                    Ok(())
+                    Ok(changed)
                 }
                 Err(IvmRuntimeError::EvaluationBlocked) => {
                     *blocked = true;
-                    Ok(())
+                    Ok(false)
                 }
                 Err(error) => Err(error),
             }
@@ -3321,17 +3388,21 @@ fn materialize_value_attempt(
             let descriptor = *enum_value.record().descriptor();
             match materialize_record_attempt(&descriptor, enum_value.record().raw(), inputs) {
                 Ok(raw) => {
+                    let changed = raw.as_slice() != enum_value.record().raw();
                     *enum_value = crate::records::EnumValue::new(
                         tag,
                         crate::records::OwnedRecord::new(raw, descriptor),
                     );
+                    Ok(changed)
                 }
-                Err(IvmRuntimeError::EvaluationBlocked) => *blocked = true,
-                Err(error) => return Err(error),
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    *blocked = true;
+                    Ok(false)
+                }
+                Err(error) => Err(error),
             }
-            Ok(())
         }
-        _ => Ok(()),
+        _ => Ok(false),
     }
 }
 
@@ -5658,6 +5729,61 @@ mod tests {
     }
 
     #[test]
+    fn stored_scalar_schema_is_cached_per_declared_kind() {
+        let bytes = stored_scalar_schema(LargeValueKind::Bytes);
+        let string = stored_scalar_schema(LargeValueKind::String);
+        let json = stored_scalar_schema(LargeValueKind::Json);
+
+        assert!(std::ptr::eq(
+            bytes,
+            stored_scalar_schema(LargeValueKind::Bytes)
+        ));
+        assert!(std::ptr::eq(
+            string,
+            stored_scalar_schema(LargeValueKind::String)
+        ));
+        assert!(std::ptr::eq(
+            json,
+            stored_scalar_schema(LargeValueKind::Json)
+        ));
+        assert!(!std::ptr::eq(bytes, string));
+        assert!(!std::ptr::eq(bytes, json));
+        assert!(!std::ptr::eq(string, json));
+    }
+
+    #[test]
+    fn materializing_inline_projected_fields_does_not_reencode_the_current_row() {
+        // Point reads in policy evaluation and projected subscriptions use this
+        // path for each current row. Inline scalar values cannot need chunk
+        // resolution, so rebuilding the surrounding record would only replay
+        // its scalar codec once per historical update.
+        let descriptor = RecordDescriptor::new([
+            ("title", ValueType::String),
+            ("body", ValueType::String),
+            ("revision", ValueType::U64),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::String("current title".to_owned()),
+                Value::String("current body".to_owned()),
+                Value::U64(500),
+            ])
+            .unwrap();
+        let mut inputs = EvaluationInputs::default();
+
+        reset_stored_scalar_encode_calls();
+        let materialized =
+            materialize_record_fields_attempt(&descriptor, &raw, &[0], &mut inputs).unwrap();
+
+        assert_eq!(materialized, raw);
+        assert_eq!(
+            stored_scalar_encode_calls(),
+            0,
+            "an already-inline current row must pass through without scalar re-encoding"
+        );
+    }
+
+    #[test]
     fn stored_scalar_is_a_canonical_generic_enum_for_each_declared_kind() {
         for prefix in 0..=u8::MAX {
             let logical = vec![prefix, 1, 2, 3];
@@ -5672,7 +5798,9 @@ mod tests {
             );
             let generic = crate::records::decode_single_field_value(
                 &encoded,
-                &ValueType::Enum(Box::new(stored_scalar_schema(LargeValueKind::Bytes))),
+                &ValueType::Enum(Box::new(
+                    stored_scalar_schema(LargeValueKind::Bytes).clone(),
+                )),
             )
             .unwrap();
             assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 2));
@@ -5769,7 +5897,7 @@ mod tests {
             assert_eq!(decoded, StoredScalar::Chunked(value));
             let generic = crate::records::decode_single_field_value(
                 &encoded,
-                &ValueType::Enum(Box::new(stored_scalar_schema(kind))),
+                &ValueType::Enum(Box::new(stored_scalar_schema(kind).clone())),
             )
             .unwrap();
             assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 3));
