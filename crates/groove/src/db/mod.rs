@@ -782,6 +782,10 @@ pub enum Error {
     DirectRecordStoreNotFound(String),
     #[error("invalid direct record store key: {0}")]
     InvalidDirectRecordStoreKey(String),
+    #[error("invalid application storage name {name:?}: {reason}")]
+    InvalidApplicationStorageName { name: String, reason: String },
+    #[error("application table/direct-record-store storage name is duplicated: {0}")]
+    DuplicateApplicationStorageName(String),
     #[error(transparent)]
     Storage(Box<crate::storage::Error>),
     #[error("table not found: {0}")]

@@ -1,6 +1,113 @@
 //! Schema admission, variants, enum registries, row encoding, and validation.
 
 use super::*;
+use crate::storage::TestStorage;
+
+fn storage_name_table(name: impl Into<String>) -> TableSchema {
+    TableSchema::new(name, [ColumnSchema::new("id", ColumnType::U64)])
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+}
+
+fn storage_name_direct_store(name: impl Into<String>) -> DirectRecordStoreSchema {
+    DirectRecordStoreSchema::new(
+        name,
+        RecordDescriptor::new([("id", ValueType::U64)]),
+        RecordDescriptor::new([("value", ValueType::Bytes)]),
+    )
+}
+
+/// Schema names are rejected before `LayoutStorage` can create its durable
+/// class-layout marker (or issue any other storage operation).
+#[futures_test::test]
+async fn reserved_application_storage_names_fail_before_durable_open() {
+    for name in [
+        "__groove_large_values",
+        "__groove_class_meta",
+        "__groove_storage_internal_v3",
+        "indices",
+        "default",
+    ] {
+        let schema = DatabaseSchema::new([storage_name_table(name)]);
+        let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
+        let error = match Database::new_with_storage_layout(
+            schema,
+            storage,
+            StorageLayout::jazz_class_v1(),
+        )
+        .await
+        {
+            Ok(_) => panic!("reserved application storage name must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            Error::InvalidApplicationStorageName { name: rejected, .. } if rejected == name
+        ));
+        assert!(
+            control.observed().is_empty(),
+            "{name:?} reached storage before rejection: {:?}",
+            control.observed()
+        );
+    }
+
+    let schema = DatabaseSchema::new([])
+        .with_direct_record_store(storage_name_direct_store("__groove_large_values"));
+    let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
+    let error =
+        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v1())
+            .await
+        {
+            Ok(_) => panic!("reserved direct-record-store name must fail"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error,
+        Error::InvalidApplicationStorageName { name, .. } if name == "__groove_large_values"
+    ));
+    assert!(control.observed().is_empty());
+}
+
+#[futures_test::test]
+async fn application_storage_names_reject_duplicates_and_are_case_sensitive() {
+    let duplicate = DatabaseSchema::new([storage_name_table("records")])
+        .with_direct_record_store(storage_name_direct_store("records"));
+    let error = match Database::new(duplicate, MemoryStorage::new(&["records"])).await {
+        Ok(_) => panic!("duplicate application storage name must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        Error::DuplicateApplicationStorageName(name) if name == "records"
+    ));
+
+    // Backend CF identity is byte/case-sensitive. Reserve only the exact
+    // engine namespace rather than silently folding app names differently by
+    // backend.
+    let schema = DatabaseSchema::new([storage_name_table("__GROOVE_large_values")]);
+    let storage = MemoryStorage::new(&["__GROOVE_large_values", LARGE_VALUE_METADATA_CF]);
+    Database::new(schema, storage)
+        .await
+        .expect("case-distinct application name is valid");
+}
+
+#[futures_test::test]
+async fn application_storage_name_length_is_portable_before_open() {
+    let too_long = "a".repeat(crate::storage::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+    let schema = DatabaseSchema::new([storage_name_table(too_long.clone())]);
+    let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
+    let error =
+        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v1())
+            .await
+        {
+            Ok(_) => panic!("oversized name must be rejected before storage access"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error,
+        Error::InvalidApplicationStorageName { name, .. } if name == too_long
+    ));
+    assert!(control.observed().is_empty());
+}
 
 #[futures_test::test]
 async fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layout() {
