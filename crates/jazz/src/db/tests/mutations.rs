@@ -270,15 +270,15 @@ fn session_branch_updates_require_read_visibility_before_staging() {
 }
 
 /// A policy-free point update uses its known row id, while absent/deleted
-/// targets retain the facade's existing rejection behavior and a read-hidden
-/// target remains undisclosed even when its write policy would otherwise allow
-/// the patch.
+/// targets retain the facade's existing rejection behavior. Tables with a
+/// read policy deliberately retain the client-local query dispatch; client
+/// replicas rely on upstream sync, rather than local policy re-evaluation, for
+/// confidentiality.
 ///
-/// authority ──seed──► policy-free / owner-scoped rows
-/// session ──update──► policy-free existing row ──► staged
-/// session ──update──► missing, deleted, or read-hidden row ──► rejected
+/// policy-free root update ──► direct current-row lookup
+/// policy-bearing root update ──► existing ClientLocal point-query dispatch
 #[test]
-fn point_update_preimage_fast_path_preserves_target_and_read_visibility_contracts() {
+fn point_update_preimage_fast_path_preserves_target_and_policy_dispatch() {
     let unscoped_schema = schema();
     let db = open_db(0x7d, AuthorSubject::SYSTEM, &unscoped_schema);
     let unscoped_owner = AuthorSubject::for_test_bytes([0x7d; 16]);
@@ -300,6 +300,11 @@ fn point_update_preimage_fast_path_preserves_target_and_read_visibility_contract
         block_on(write.wait(DurabilityTier::Local)).expect("settle policy-free seed");
     }
 
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        0,
+        "discard point-query calls from earlier tests on this thread"
+    );
     let update = block_on(db.update(
         "todos",
         live,
@@ -308,6 +313,11 @@ fn point_update_preimage_fast_path_preserves_target_and_read_visibility_contract
     ))
     .expect("known policy-free point target updates");
     block_on(update.wait(DurabilityTier::Local)).expect("settle point update");
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        0,
+        "policy-free preimage must use the direct current-row lookup"
+    );
     let rows = prepared_read(&db, &db.table("todos"));
     assert_eq!(
         rows.iter()
@@ -359,7 +369,7 @@ fn point_update_preimage_fast_path_preserves_target_and_read_visibility_contract
                 ),
         ),
     );
-    let scoped = open_db(0x81, AuthorSubject::SYSTEM, &scoped_schema);
+    let scoped = open_db(0x81, intruder, &scoped_schema);
     scoped.set_identity_claims(intruder, test_provider_claims(intruder));
     let hidden = row(0x83);
     let seed = scoped
@@ -376,20 +386,25 @@ fn point_update_preimage_fast_path_preserves_target_and_read_visibility_contract
         )
         .expect("authority seeds hidden row");
     block_on(seed.wait(DurabilityTier::Local)).expect("settle hidden seed");
-    let hidden_error = match block_on(scoped.update(
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        0,
+        "discard unrelated point-query calls before the policy-bearing update"
+    );
+    let policy_bearing_update = block_on(scoped.update(
         "documents",
         hidden,
         BTreeMap::from([("body".to_owned(), Value::String("leak".to_owned()))]),
-        UpdateOptions {
-            identity: crate::db::WriteIdentity::Session(intruder),
-            ..Default::default()
-        },
-    )) {
-        Ok(_) => panic!("read-hidden target cannot use the policy-free fast path"),
-        Err(error) => error,
-    };
-    assert_eq!(hidden_error.code, crate::db::ErrorCode::WriteRejected);
-    assert!(hidden_error.message.contains("UPDATE"));
+        Default::default(),
+    ))
+    .expect("the manually resident row follows ordinary ClientLocal staging semantics");
+    block_on(policy_bearing_update.wait(DurabilityTier::Local))
+        .expect("settle policy-bearing update");
+    assert_eq!(
+        crate::node::take_client_physical_row_query_calls_for_test(),
+        1,
+        "a table with a read policy must retain ClientLocal point-query dispatch"
+    );
 }
 
 #[test]
