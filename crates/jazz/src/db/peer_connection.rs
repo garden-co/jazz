@@ -2858,7 +2858,7 @@ where
                             let subscription = subscribe.subscription;
                             if shape_id != subscription.shape_id {
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             let values = subscribe.values.clone();
                             let known_state = subscribe.known_state.clone();
@@ -2916,7 +2916,7 @@ where
                             };
                             if values.len() != shape.params().len() {
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             let value_map = shape
                                 .params()
@@ -2944,13 +2944,13 @@ where
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             if served_current_rows.contains_key(&subscription) {
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             if let Some(existing_coverage) = served.get(&subscription)
                                 && existing_coverage != &coverage
                             {
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             if pending_catalogue_admission {
                                 shape_registrations.insert(
