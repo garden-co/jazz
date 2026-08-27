@@ -770,7 +770,10 @@ where
         newly_staged: bool,
     ) -> ChunkFuture<'_, Result<(), ChunkError>> {
         Box::pin(async move {
-            if self.settled_installs.borrow().contains(&request) {
+            // A miss which was subsequently re-staged must not be hidden by
+            // an earlier ordinary-resident cache entry.  The journal has just
+            // acquired a new durability obligation in that case.
+            if !newly_staged && self.settled_installs.borrow().contains(&request) {
                 return Ok(());
             }
             // A regular resident chunk has no journal marker, so it must not
@@ -784,9 +787,19 @@ where
             // compare-and-delete, the next opener retries an idempotent
             // install.  It can never lose the recovery obligation.
             if !observer.completes_install_journal() {
-                self.journal.complete(node_ref).await?;
+                self.journal.complete(node_ref.clone()).await?;
             }
-            self.settled_installs.borrow_mut().insert(request);
+            // A resident publication may have staged the metadata operation
+            // without persisting it yet.  Its observer legitimately reports
+            // success so the publication can continue, but its physical
+            // journal marker remains until that publication reaches the
+            // durable frontier.  Do not cache that provisional result: a
+            // later read in the same process must still see the marker and
+            // retry after a failed/cancelled publication, rather than waiting
+            // for a process restart to recover it.
+            if !self.journal.is_pending(node_ref).await? {
+                self.settled_installs.borrow_mut().insert(request);
+            }
             Ok(())
         })
     }
@@ -1639,6 +1652,29 @@ mod tests {
         }
     }
 
+    /// Models a resident publication observer: it has staged its metadata
+    /// mutation successfully, but the shared journal remains physically
+    /// pending until the publication is persisted.
+    #[derive(Default)]
+    struct DeferredInstallObserver {
+        calls: Cell<usize>,
+    }
+
+    impl ChunkInstallObserver for DeferredInstallObserver {
+        fn installed(
+            &self,
+            _node_ref: crate::large_values::NodeRef,
+            _encoded: Bytes,
+        ) -> ChunkFuture<'_, Result<(), ChunkError>> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn completes_install_journal(&self) -> bool {
+            true
+        }
+    }
+
     struct CountingProvider {
         calls: Cell<usize>,
         bytes: Bytes,
@@ -2307,6 +2343,47 @@ mod tests {
             0,
             "a fully installed resident mapping must not call the lifecycle-bound observer"
         );
+    }
+
+    #[test]
+    fn pending_marker_is_not_hidden_by_a_provisional_same_process_install() {
+        let storage = Rc::new(MemoryChunkStorage::new());
+        let bytes = Bytes::from_static(b"publication metadata not durable yet");
+        let request = ChunkRequest {
+            object_hash: object_hash(&bytes).0,
+            locator: Locator::from_seed(b"provisional-install-marker"),
+        };
+        let observer = Rc::new(DeferredInstallObserver::default());
+        let journal = Rc::new(MemoryInstallJournal::default());
+        let provider = StorageChunkProvider::with_resolver_observer_and_journal(
+            storage,
+            Rc::new(StaticResolver(bytes.clone())),
+            observer.clone(),
+            journal.clone(),
+        );
+
+        // The first read stages bytes and metadata into a resident
+        // publication. It is usable immediately, but it must not be cached as
+        // durable while the physical marker remains.
+        assert_eq!(block_on(provider.get(request.clone())), Ok(bytes.clone()));
+        assert_eq!(observer.calls.get(), 1);
+
+        // Model a failed/cancelled publication without a process restart.
+        // The next reader must re-run the installer rather than treating its
+        // earlier in-memory success as proof that metadata survived.
+        assert_eq!(block_on(provider.get(request.clone())), Ok(bytes.clone()));
+        assert_eq!(observer.calls.get(), 2);
+
+        // Once the actual durable boundary clears the marker, a regular hit
+        // becomes cacheable and later reads never re-enter metadata lifecycle.
+        let node_ref = crate::large_values::NodeRef {
+            object_hash: ContentHash(request.object_hash),
+            locator: request.locator,
+        };
+        block_on(journal.complete(node_ref)).unwrap();
+        assert_eq!(block_on(provider.get(request.clone())), Ok(bytes.clone()));
+        assert_eq!(block_on(provider.get(request)), Ok(bytes));
+        assert_eq!(observer.calls.get(), 2);
     }
 
     #[test]
