@@ -58,6 +58,7 @@ async function boot() {
     ? ((await buildJwtConfig()) ?? (await buildLocalFirstConfig()))
     : await buildLocalFirstConfig();
   let db = await createDb(initialConfig);
+  let authGeneration = 0;
 
   const app: AppHandle = mountApp(root, db);
 
@@ -76,12 +77,23 @@ async function boot() {
     const nowAuth = isAuthenticated(next);
     if (nowAuth === currentlyAuthenticated) return;
     currentlyAuthenticated = nowAuth;
+    const generation = ++authGeneration;
 
     const nextConfig = nowAuth
       ? ((await buildJwtConfig()) ?? (await buildLocalFirstConfig()))
       : await buildLocalFirstConfig();
-    db = await createDb(nextConfig);
-    app.setDb(db);
+    if (generation !== authGeneration) return;
+
+    const nextDb = await createDb(nextConfig);
+    if (generation !== authGeneration) {
+      await nextDb.shutdown();
+      return;
+    }
+
+    const previousDb = db;
+    db = nextDb;
+    app.setDb(nextDb);
+    await previousDb.shutdown();
   });
 }
 

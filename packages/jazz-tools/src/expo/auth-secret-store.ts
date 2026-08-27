@@ -38,6 +38,7 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
   private readonly key: string;
   private readonly store: ExpoSecureStoreLike;
   private cachedPromise: Promise<string> | null = null;
+  private operationTail: Promise<void> = Promise.resolve();
 
   constructor(options: ExpoAuthSecretStoreOptions = {}) {
     this.key = resolveExpoAuthSecretKey(options);
@@ -77,22 +78,44 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
     return secret;
   }
 
-  async saveSecret(secret: string): Promise<void> {
+  saveSecret(secret: string): Promise<void> {
     parseAuthSecret(secret);
-    await this.store.setItemAsync(this.key, secret);
-    this.cachedPromise = Promise.resolve(secret);
+    const saving = this.serialize(() => this.store.setItemAsync(this.key, secret));
+    const cached = saving.then(() => secret);
+    this.cachedPromise = cached;
+    void cached.catch(() => {
+      if (this.cachedPromise === cached) {
+        this.cachedPromise = null;
+      }
+    });
+    return saving;
   }
 
-  async clearSecret(): Promise<void> {
-    await this.store.deleteItemAsync(this.key);
+  clearSecret(): Promise<void> {
     this.cachedPromise = null;
+    return this.serialize(() => this.store.deleteItemAsync(this.key));
   }
 
   getOrCreateSecret(): Promise<string> {
     if (!this.cachedPromise) {
-      this.cachedPromise = this.getOrCreateSecretInternal();
+      const pending = this.serialize(() => this.getOrCreateSecretInternal());
+      this.cachedPromise = pending;
+      void pending.catch(() => {
+        if (this.cachedPromise === pending) {
+          this.cachedPromise = null;
+        }
+      });
     }
     return this.cachedPromise;
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationTail.then(operation);
+    this.operationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async getOrCreateSecretInternal(): Promise<string> {
