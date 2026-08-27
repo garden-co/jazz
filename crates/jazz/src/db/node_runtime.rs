@@ -81,7 +81,7 @@ where
             node: Rc::new(futures::lock::Mutex::new(node)),
             receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
-            outbox: Rc::new(RefCell::new(Vec::new())),
+            outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -193,10 +193,9 @@ where
 
     pub(super) fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+        if !outbox.push(PendingUpload { tx_id, unit }) {
             return;
         }
-        outbox.push(PendingUpload { tx_id, unit });
         drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
@@ -805,15 +804,11 @@ where
                 drop(routes);
                 let mut outbox = self.outbox.borrow_mut();
                 for tx_id in routed_txs {
-                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                        outbox.push(PendingUpload {
-                            tx_id,
-                            unit: crate::db::block_on(
-                                self.node.borrow_mut().commit_unit_for(tx_id),
-                            )
+                    outbox.push(PendingUpload {
+                        tx_id,
+                        unit: crate::db::block_on(self.node.borrow_mut().commit_unit_for(tx_id))
                             .ok(),
-                        });
-                    }
+                    });
                 }
             }
         }
@@ -960,6 +955,7 @@ where
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
             startup_error: None,
+            released_outbox_tx_ids: Vec::new(),
             link: ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
@@ -1191,6 +1187,7 @@ where
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
             startup_error,
+            released_outbox_tx_ids: Vec::new(),
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
@@ -1407,15 +1404,13 @@ where
                         for tx_id in &routed_txs {
                             uploaded.remove(tx_id);
                             let mut outbox = outbox.borrow_mut();
-                            if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
-                                outbox.push(PendingUpload {
-                                    tx_id: *tx_id,
-                                    unit: crate::db::block_on(
-                                        self.node.borrow_mut().commit_unit_for(*tx_id),
-                                    )
-                                    .ok(),
-                                });
-                            }
+                            outbox.push(PendingUpload {
+                                tx_id: *tx_id,
+                                unit: crate::db::block_on(
+                                    self.node.borrow_mut().commit_unit_for(*tx_id),
+                                )
+                                .ok(),
+                            });
                         }
                     }
                     self.schedule_tick(TickUrgency::Immediate);
@@ -1458,6 +1453,7 @@ where
                 .set(chunk_completion_generation);
         }
         let mut remote_sync_applied = false;
+        let mut released_outbox_tx_ids = HashSet::new();
         // A later subscriber can mutate Core state after an earlier peer link
         // has already had its turn in this pass.  Remember that generation so
         // the post-receive serve pass below reaches that earlier link too;
@@ -1466,7 +1462,9 @@ where
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         let connections = self.connections.borrow().clone();
         for connection in &connections {
-            let next = connection.lock().await.tick().await?;
+            let mut connection = connection.lock().await;
+            let next = connection.tick().await?;
+            released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
@@ -1480,7 +1478,9 @@ where
                     connection.mark_subscriber_dirty() || subscriber_state_changed
                 };
                 if should_tick {
-                    let next = connection.lock().await.tick().await?;
+                    let mut connection = connection.lock().await;
+                    let next = connection.tick().await?;
+                    released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                     stats.subscription_events += next.subscription_events;
                     stats.remote_sync_applied += next.remote_sync_applied;
                 }
@@ -1497,41 +1497,21 @@ where
                 .enforce_edge_cache_budget(&pins, budget)
                 .await?;
         }
-        self.prune_settled_outbox_uploads();
+        if !released_outbox_tx_ids.is_empty() {
+            self.release_outbox_uploads(released_outbox_tx_ids);
+        }
         Ok(stats)
     }
 
-    fn prune_settled_outbox_uploads(&self) {
-        // With no peer connection, no transaction in the upload outbox can
-        // advance to Global during this tick. Keep every entry for a future
-        // reconnect without re-reading its unchanged fate from storage. This
-        // also prevents an offline host that ticks after each local write from
-        // turning the outbox into an O(writes²) transaction-state scan.
-        if self.connections.borrow().is_empty() {
-            return;
-        }
+    fn release_outbox_uploads(&self, released_tx_ids: HashSet<TxId>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.is_empty() {
-            return;
-        }
-        let mut node = self.node.borrow_mut();
-        let mut released_tx_ids = BTreeSet::new();
-        outbox.retain(|pending| {
-            let state = crate::db::block_on(node.transaction_state(pending.tx_id));
-            let Some((fate, _, durability)) = state else {
-                return true;
-            };
-            let retain = matches!(fate, Fate::Pending | Fate::Accepted)
-                && durability < DurabilityTier::Global;
-            if !retain {
-                released_tx_ids.insert(pending.tx_id);
-            }
-            retain
-        });
-        drop(node);
+        let mut remaining = released_tx_ids.clone();
+        outbox.remove_released(&mut remaining);
         drop(outbox);
-        if released_tx_ids.is_empty() {
-            return;
+        for connection in self.connections.borrow().iter() {
+            connection
+                .borrow_mut()
+                .forget_released_outbox_tx_ids(&released_tx_ids);
         }
         self.large_value_upload_retry_deadlines
             .borrow_mut()
