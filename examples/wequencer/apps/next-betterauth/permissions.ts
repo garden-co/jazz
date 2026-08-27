@@ -5,31 +5,31 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowe
   const isMember = (sessionId: RowRefValue) =>
     policy.session_members.exists.where({
       session_id: sessionId,
-      user_id: session.claims["user_id"],
+      user_id: session.claims["sub"],
     });
   const canEdit = (sessionId: RowRefValue) =>
     anyOf([
       policy.session_members.exists.where({
         session_id: sessionId,
-        user_id: session.claims["user_id"],
+        user_id: session.claims["sub"],
         role: "editor",
       }),
       policy.session_members.exists.where({
         session_id: sessionId,
-        user_id: session.claims["user_id"],
+        user_id: session.claims["sub"],
         role: "owner",
       }),
     ]);
   const isOwner = (sessionId: RowRefValue) =>
     policy.session_members.exists.where({
       session_id: sessionId,
-      user_id: session.claims["user_id"],
+      user_id: session.claims["sub"],
       role: "owner",
     });
 
-  policy.profiles.allowRead.where({ user_id: session.claims["user_id"] });
-  policy.profiles.allowInsert.where({ user_id: session.claims["user_id"] });
-  policy.profiles.allowUpdate.where({ user_id: session.claims["user_id"] });
+  policy.profiles.allowRead.where({ user_id: session.claims["sub"] });
+  policy.profiles.allowInsert.where({ user_id: session.claims["sub"] });
+  policy.profiles.allowUpdate.where({ user_id: session.claims["sub"] });
 
   policy.sessions.allowRead.where((row) => isMember(row.id));
   policy.sessions.allowInsert.always();
