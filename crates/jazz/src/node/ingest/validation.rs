@@ -157,6 +157,10 @@ where
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<Vec<VersionRow>, Error> {
+        // Provenance operation identities participate in merge deduplication.
+        // Validate them before accepting staged values or writing any derived
+        // transaction/current state, on every local, remote, and view ingress.
+        self.validate_contribution_merge_operation_identities(&tx)?;
         let large_value_descriptors = version_indirect_descriptors(&versions);
         for staged_id in self
             .current_staged_ids_for_descriptors(&large_value_descriptors, false)
