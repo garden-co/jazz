@@ -320,6 +320,10 @@ where
     pub(super) startup_error: Option<Error>,
     /// Exact uploads whose applied fate made them globally settled or rejected.
     pub(super) released_outbox_tx_ids: Vec<TxId>,
+    /// One ordinary-wire chunk reply held at its semantic producer boundary.
+    /// Dedicated auxiliary chunk traffic uses `PeerIoPump`'s bounded
+    /// take/restore queue; this covers the legacy ordinary-wire responder.
+    pub(super) pending_chunk_response: Option<ChunkResponseBatch>,
     pub(super) link: ConnectionLink,
     pub(super) last_resume_bytes: Option<usize>,
     pub(super) auxiliary_pump: PeerIoPump,
@@ -2214,6 +2218,13 @@ where
                 )? {
                     return Ok(true);
                 }
+                if !flush_pending_chunk_response(
+                    self.transport.as_mut(),
+                    &mut self.pending_chunk_response,
+                    &self.scheduler,
+                )? {
+                    return Ok(true);
+                }
                 if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                     if let Err(error) = self.transport.send(message.clone()) {
                         self.auxiliary_pump.restore_outbound(message);
@@ -2274,11 +2285,13 @@ where
                             if !responses.is_empty()
                                 && !self.auxiliary_pump.is_disconnected()
                             {
-                                self.transport
-                                    .send(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
-                                        responses,
-                                    }))
-                                    .map_err(transport_error)?;
+                                debug_assert!(
+                                    self.pending_chunk_response.is_none(),
+                                    "subscriber drains a retained chunk response before reading another request"
+                                );
+                                self.pending_chunk_response = Some(ChunkResponseBatch { responses });
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                return Ok(true);
                             }
                             continue;
                         }
@@ -4330,6 +4343,32 @@ where
                 return Ok(false);
             }
             Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Retry the one ordinary-wire chunk response whose byte admission was refused.
+/// The auxiliary lane has its own bounded take/restore queue; this covers the
+/// legacy canonical-wire request path without giving a stalled peer an
+/// unbounded second response buffer.
+fn flush_pending_chunk_response(
+    transport: &mut dyn Transport,
+    pending: &mut Option<ChunkResponseBatch>,
+    scheduler: &SharedTickScheduler,
+) -> Result<bool, Error> {
+    let Some(response) = pending.take() else {
+        return Ok(true);
+    };
+    match transport.send(SyncMessage::ChunkResponseBatch(response.clone())) {
+        Ok(()) => Ok(true),
+        Err(TransportError::Backpressure) => {
+            *pending = Some(response);
+            schedule_tick_in(scheduler, TickUrgency::Deferred);
+            Ok(false)
+        }
+        Err(error) => {
+            *pending = Some(response);
+            Err(transport_error(error))
         }
     }
 }
