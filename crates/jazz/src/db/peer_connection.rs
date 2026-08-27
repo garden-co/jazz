@@ -1324,6 +1324,7 @@ where
                                             });
                                         if !has_live_waiter {
                                             scope_lease_manager.requests.remove(request_id);
+                                            pending.remove(pending_index);
                                             continue;
                                         }
                                         let existing = scope_lease_manager
