@@ -550,6 +550,13 @@ impl OrderedChunkStorage {
         let (hash, bytes) = value
             .split_at_checked(32)
             .ok_or(ChunkStorageError::Integrity)?;
+        // Do this while the ordered-KV buffer is still borrowed. Otherwise a
+        // corrupt durable entry makes `Bytes::copy_from_slice` allocate and
+        // copy an arbitrarily large node before the managed layer can reject
+        // it (and before any integrity hash is considered).
+        if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES {
+            return Err(ChunkStorageError::Integrity);
+        }
         let mut expected = [0_u8; 32];
         expected.copy_from_slice(hash);
         Ok((ContentHash(expected), Bytes::copy_from_slice(bytes)))
@@ -2589,6 +2596,36 @@ mod tests {
             crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
             OrderedChunkStorage::key(locator.as_bytes()),
             OrderedChunkStorage::encode(hash, &bytes),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            block_on(backend.get_exact(locator)),
+            Err(ChunkStorageError::Integrity)
+        );
+    }
+
+    #[test]
+    fn ordered_chunk_storage_rejects_oversized_receipted_mappings_before_copying() {
+        // The durable ordered adapter is itself a ChunkKvStorage boundary.
+        // It must reject oversized raw metadata before converting the stored
+        // slice into a fresh Bytes allocation for ManagedChunkStorage.
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let layout = Rc::new(
+            block_on(LayoutStorage::new(
+                storage,
+                crate::storage::StorageLayout::Identity,
+            ))
+            .unwrap(),
+        );
+        let backend = OrderedChunkStorage::new(Rc::downgrade(&layout));
+        let bytes = vec![0; crate::large_values::MAX_ENCODED_NODE_BYTES + 1];
+        let hash = object_hash(&bytes);
+        let locator = Locator::from_seed(b"oversized-receipted-ordered-chunk-locator");
+        block_on(layout.set(
+            crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+            OrderedChunkStorage::key(locator.as_bytes()),
+            OrderedChunkStorage::encode_with_install_receipt(hash, &bytes, [0; 16]),
         ))
         .unwrap();
 
