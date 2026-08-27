@@ -17,7 +17,10 @@ export type Value =
   | { type: "Uuid"; value: string }
   | { type: "Bytea"; value: Uint8Array }
   | { type: "Array"; value: Value[] }
-  | { type: "Row"; value: { id?: string; values: Value[] } }
+  | {
+      type: "Row";
+      value: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> };
+    }
   | { type: "Enum"; value: { case: string; values: Value[] } }
   | { type: "Null" };
 
@@ -28,38 +31,10 @@ export type FFIRecord = InsertValues;
 export interface WasmRow {
   id: string;
   values: Value[];
+  valuesByColumn?: Map<string, Value>;
 }
 
 export type FFIRow = WasmRow;
-
-export type RowAdded = 0;
-export type RowRemoved = 1;
-export type RowUpdated = 2;
-export type RowChangeKind = RowAdded | RowRemoved | RowUpdated;
-
-export interface WireRowDeltaAdded {
-  kind: RowAdded;
-  id: string;
-  index: number;
-  row: WasmRow;
-}
-
-export interface WireRowDeltaRemoved {
-  kind: RowRemoved;
-  id: string;
-  index: number;
-}
-
-export interface WireRowDeltaUpdated {
-  kind: RowUpdated;
-  id: string;
-  index: number;
-  row?: WasmRow | null;
-}
-
-export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDeltaUpdated;
-
-export type RowDelta = WireRowChange[];
 
 export type NativeTerminalPathSegment = { Collection: string } | { Key: number[] };
 export type NativeTerminalEdit =
@@ -67,7 +42,7 @@ export type NativeTerminalEdit =
   | { Update: { key: number[]; value: number[] } }
   | { Remove: { key: number[] } }
   | { Move: { key: number[]; index: number } };
-/** Immutable producer-owned root descriptor contract, registered before use. */
+/** Immutable producer-owned root descriptor contract retained for codec compatibility. */
 export interface NativeTerminalRootLayout {
   id: string;
   rootDescriptor: number[];
@@ -82,32 +57,54 @@ export interface NativeTerminalRootLayout {
   carrier: "CurrentRow" | "Logical";
 }
 export interface NativeTerminalOperation {
-  /** Stable ID of a layout published in the same or an earlier delta. */
   rootLayoutId?: string;
-  /** Legacy self-describing operation; new native producers must not send it. */
   rootDescriptor?: number[];
   root_key: number[];
   path: NativeTerminalPathSegment[];
   edit: NativeTerminalEdit;
 }
 
-export interface NativeRowDelta {
-  __jazzNativeRowDelta: true;
-  reset?: boolean;
-  added: Uint8Array;
-  removed: Uint8Array;
-  updated: Uint8Array;
-  addedCount: number;
-  removedCount: number;
-  updatedCount: number;
-  addedOccurrenceKeys?: Uint8Array[];
-  updatedOccurrenceKeys?: Uint8Array[];
-  removedOccurrenceKeys?: Uint8Array[];
-  terminalLayouts?: NativeTerminalRootLayout[];
-  terminalOperations?: NativeTerminalOperation[];
+/** Logical terminal-tree path consumed by the TypeScript materializer. */
+export type RuntimeTerminalPathSegment = { Collection: number } | { Key: number[] };
+export type RuntimeTerminalEdit =
+  | { Insert: { index: number; key: number[]; row: WasmRow } }
+  | { Update: { key: number[]; row: WasmRow } }
+  | { Remove: { key: number[] } }
+  | { Move: { key: number[]; index: number } };
+export interface RuntimeTerminalOperation {
+  root_key: number[];
+  path: RuntimeTerminalPathSegment[];
+  edit: RuntimeTerminalEdit;
 }
 
-export type SubscriptionWireDelta = RowDelta | NativeRowDelta;
+export interface RuntimeSubscriptionAddedRow {
+  sourceId: string;
+  occurrenceKey: Uint8Array;
+  index: number;
+  row: WasmRow;
+}
+
+export interface RuntimeSubscriptionUpdatedRow {
+  sourceId: string;
+  occurrenceKey: Uint8Array;
+  index: number;
+  row?: WasmRow;
+}
+
+export interface RuntimeSubscriptionRemovedRow {
+  sourceId: string;
+  occurrenceKey: Uint8Array;
+  index: number;
+}
+
+/** Structured root changes published by a runtime adapter to the TS facade. */
+export interface RuntimeSubscriptionDelta {
+  reset?: boolean;
+  added: RuntimeSubscriptionAddedRow[];
+  removed: RuntimeSubscriptionRemovedRow[];
+  updated: RuntimeSubscriptionUpdatedRow[];
+  terminalOperations?: RuntimeTerminalOperation[];
+}
 
 export type ColumnType =
   | { type: "Integer" }

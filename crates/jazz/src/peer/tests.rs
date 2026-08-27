@@ -1330,6 +1330,13 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::new();
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        peer.maintained_subscription_view_metrics()
+            .footprint
+            .structured_app_rows,
+        1,
+        "array output retains its parent collector for later child mutations"
+    );
 
     let child_tx = core
         .commit_mergeable_settled(
@@ -1886,6 +1893,10 @@ fn maintained_subscription_view_order_by_asc_limit_two_initial_hydration() {
     );
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.unsupported_skips_out, 0);
+    assert_eq!(
+        metrics.footprint.structured_app_rows, 2,
+        "ordered roots retain the collector needed for later order maintenance"
+    );
 }
 
 #[test]
@@ -2723,6 +2734,33 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
     assert!(metrics.footprint.version_identities >= 1);
     assert!(metrics.footprint.version_tx_entries >= 1);
+
+    // Flat subscriptions release this duplicate collector after the reset, but
+    // membership/version witnesses must still publish a later removal and a
+    // restoration of the same logical row.
+    let removed_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_001).cells(title_cells("other")),
+        )
+        .unwrap();
+    accept_global(&mut core, removed_tx, 2);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![],
+        vec![("todos", row(0x51), tx_id)],
+    );
+
+    let restored_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_002).cells(title_cells("match")),
+        )
+        .unwrap();
+    accept_global(&mut core, restored_tx, 3);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![("todos", row(0x51), restored_tx)],
+        vec![],
+    );
 }
 
 #[test]

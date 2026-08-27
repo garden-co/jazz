@@ -1,0 +1,21 @@
+[package]
+name = "jazz-example-w1-benchmark"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jazz = { workspace = true }
+jazz-storage-rocksdb = { workspace = true }
+tempfile = "3.27.0"
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "reads_memory_walltime"
+harness = false
+
+[[bench]]
+name = "reads_rocksdb_walltime"
+harness = false

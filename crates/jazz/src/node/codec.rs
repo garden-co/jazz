@@ -975,7 +975,7 @@ pub(super) fn version_tx_id_from_aliases(
         .map(|node| TxId::new(version.tx_time(), node))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum VersionLayer {
     Content,
     Deletion,

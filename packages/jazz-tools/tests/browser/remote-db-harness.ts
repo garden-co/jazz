@@ -10,6 +10,7 @@ export interface RemoteBrowserDbCreateInput {
   queryJson?: string;
   schemaJson: string;
   serverUrl?: string;
+  jwtToken?: string;
   adminSecret?: string;
   localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
@@ -77,9 +78,11 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
-    ...(input.localFirstSecret
-      ? { secret: input.localFirstSecret }
-      : { adminSecret: input.adminSecret }),
+    ...(input.jwtToken
+      ? { jwtToken: input.jwtToken }
+      : input.localFirstSecret
+        ? { secret: input.localFirstSecret }
+        : { adminSecret: input.adminSecret }),
     logLevel: input.logLevel,
   });
 
@@ -114,6 +117,7 @@ export async function insertRemoteBrowserDbRow(input: {
   id: string;
   row: Record<string, unknown>;
   table?: string;
+  tier?: "local" | "edge";
 }): Promise<string> {
   const state = getRemoteStateStore().get(input.id);
   if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
@@ -126,7 +130,7 @@ export async function insertRemoteBrowserDbRow(input: {
       }
     : state.table;
   const result = state.db.insert(table, input.row);
-  await result.wait({ tier: "local" });
+  await result.wait({ tier: input.tier ?? "local" });
   return result.value.id;
 }
 
@@ -179,10 +183,10 @@ export async function waitForRemoteBrowserDbTitle(
         ),
       );
     }, input.timeoutMs);
-    unsubscribe = state.db.subscribeAll(
+    unsubscribe = state.db.subscribe(
       state.query,
-      (delta) => {
-        lastRows = [...delta.all];
+      (rows) => {
+        lastRows = rows;
         if (lastRows.some((row) => row.title === input.title)) {
           clearTimeout(timeout);
           unsubscribe();

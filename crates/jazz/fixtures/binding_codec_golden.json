@@ -13,32 +13,12 @@
   "subscription_deltas": [
     {
       "name": "added_updated_removed_with_v1_and_v2_occurrence_keys",
-      "payload_hex": "0105746f646f73020108726f775f757569640b010a757365725f7469746c650f080110111111111111111111111111111111110017111111111111111111111111111111110102666972737401056e6f746573020108726f775f757569640b01057469746c6508011021212121212121212121212121212121001521212121212121212121212121212121026e6f74650105746f646f731013131313131313131313131313131313011101a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1013c02b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b100000001b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b200000001000000000000000b6d6174636865642d61726d013c02b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b100000001b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b200000001000000000000000b6d6174636865642d61726d"
+      "payload_hex": "0105746f646f73020108726f775f757569640b010a757365725f7469746c650f080110111111111111111111111111111111110017111111111111111111111111111111110102666972737401056e6f746573020108726f775f757569640b01057469746c6508011021212121212121212121212121212121001521212121212121212121212121212121026e6f74650105746f646f731013131313131313131313131313131313011101a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1013c02b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b100000001b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b200000001000000000000000b6d6174636865642d61726d013c02b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b100000001b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b200000001000000000000000b6d6174636865642d61726d0102010401010103"
     }
   ],
   "terminal": {
     "events": [
       {
-        "terminalLayouts": [
-          {
-            "carrier": "CurrentRow",
-            "id": "current-row-v1",
-            "publicFields": [
-              {
-                "carrier": "CurrentRow",
-                "descriptorFieldName": "user_title",
-                "name": "title",
-                "slot": 1
-              }
-            ],
-            "rootDescriptor": [
-              2, 1, 8, 114, 111, 119, 95, 117, 117, 105, 100, 11, 1, 10, 117, 115, 101, 114, 95,
-              116, 105, 116, 108, 101, 15, 8
-            ],
-            "rootKeyFieldName": "row_uuid",
-            "rootKeySlot": 0
-          }
-        ],
         "terminalOperations": [
           {
             "edit": {
@@ -51,34 +31,13 @@
                 ]
               }
             },
-            "path": [],
-            "rootLayoutId": "current-row-v1",
-            "root_key": [10, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17]
-          }
-        ],
-        "type": "delta"
-      },
-      {
-        "terminalLayouts": [
-          {
-            "carrier": "Logical",
-            "id": "logical-v1",
-            "publicFields": [
+            "path": [
               {
-                "carrier": "Logical",
-                "descriptorFieldName": "title",
-                "name": "title",
-                "slot": 1
+                "Collection": "children"
               }
             ],
-            "rootDescriptor": [
-              2, 1, 8, 114, 111, 119, 95, 117, 117, 105, 100, 11, 1, 5, 116, 105, 116, 108, 101, 8
-            ],
-            "rootKeyFieldName": "row_uuid",
-            "rootKeySlot": 0
-          }
-        ],
-        "terminalOperations": [
+            "root_key": [10, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17]
+          },
           {
             "edit": {
               "Insert": {
@@ -90,16 +49,13 @@
                 ]
               }
             },
-            "path": [],
-            "rootLayoutId": "logical-v1",
+            "path": [
+              {
+                "Collection": "children"
+              }
+            ],
             "root_key": [10, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33]
-          }
-        ],
-        "type": "delta"
-      },
-      {
-        "terminalLayouts": [],
-        "terminalOperations": [
+          },
           {
             "edit": {
               "Update": {
@@ -110,16 +66,13 @@
                 ]
               }
             },
-            "path": [],
-            "rootLayoutId": "current-row-v1",
+            "path": [
+              {
+                "Collection": "children"
+              }
+            ],
             "root_key": [10, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17]
-          }
-        ],
-        "type": "delta"
-      },
-      {
-        "terminalLayouts": [],
-        "terminalOperations": [
+          },
           {
             "edit": {
               "Move": {
@@ -127,8 +80,11 @@
                 "key": [10, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33]
               }
             },
-            "path": [],
-            "rootLayoutId": "logical-v1",
+            "path": [
+              {
+                "Collection": "children"
+              }
+            ],
             "root_key": [10, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33]
           },
           {
@@ -137,8 +93,11 @@
                 "key": [10, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33]
               }
             },
-            "path": [],
-            "rootLayoutId": "logical-v1",
+            "path": [
+              {
+                "Collection": "children"
+              }
+            ],
             "root_key": [10, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33]
           }
         ],
@@ -147,7 +106,7 @@
     ],
     "rejections": [
       {
-        "detail": "terminal layout missing",
+        "detail": "unsupported descendant terminal shape",
         "type": "UnsupportedShapeCapability"
       },
       {

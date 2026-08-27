@@ -11,10 +11,8 @@ export async function readTodosOneshot(db: Db) {
 
 // #region subscribe-svelte
 export function subscribeTodos(db: Db, onUpdate: (results: unknown[]) => void) {
-  const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), (delta) => {
-    // delta.all       — Todo[] full current result set
-    // delta.delta     — RowDelta<Todo>[] granular row-level changes
-    onUpdate(delta.all ?? []);
+  const unsubscribe = db.subscribe(app.todos.where({ done: false }), (todos) => {
+    onUpdate(todos);
   });
 
   return unsubscribe;

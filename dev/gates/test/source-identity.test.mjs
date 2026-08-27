@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { sourceIdentity } from "../source-identity.mjs";
+import { checkedOutCommit, sourceIdentity } from "../source-identity.mjs";
 
 const git = (root, args) => {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
@@ -54,3 +54,18 @@ for (const [name, secret, mutate, restore] of [
     assert.equal(JSON.stringify(dirty).includes(secret), false);
     restore(root);
   });
+
+test("identity reads survive a container checkout ownership boundary", () => {
+  const root = fixture();
+  const previous = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+  process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
+  try {
+    const identity = sourceIdentity(root);
+    assert.equal(identity.dirty, false);
+    assert.match(checkedOutCommit(root), /^[0-9a-f]{40}$/);
+  } finally {
+    if (previous === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previous;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

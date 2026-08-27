@@ -94,8 +94,7 @@ export async function startApp(
   container.appendChild(list);
   // Subscribe to all todos.
   const query = app.todos;
-  db.subscribeAll(query, ({ all }) => {
-    const todos = all ?? [];
+  db.subscribe(query, (todos) => {
     const ordered = orderTodosWithDepth(todos);
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);

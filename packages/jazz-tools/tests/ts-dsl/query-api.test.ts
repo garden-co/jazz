@@ -1,5 +1,4 @@
 import { createDb, type Db, type QueryBuilder, type QueryOptions } from "../../src/runtime/db.js";
-import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
 import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser } from "./factories";
@@ -636,7 +635,6 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     it("updates a live included relation as an in filter starts matching", async () => {
       const project = insertProject(db, "Announcements");
       const todo = insertTodo(db, { projectId: project.id, title: "Draft" });
-      const current: Array<{ id: string; todosViaProject: Array<{ id: string }> }> = [];
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const matching = new Promise<void>((resolve, reject) => {
@@ -644,17 +642,15 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
           unsubscribe();
           reject(new Error("Timed out waiting for included in-filter update"));
         }, 10_000);
-        unsubscribe = db.subscribeAll(
+        unsubscribe = db.subscribe(
           app.projects
             .where({ id: { eq: project.id } })
             .select("id")
             .include({
               todosViaProject: app.todos.where({ title: { in: ["Published"] } }).select("id"),
             }),
-          (delta) => {
-            const next = applySubscriptionDelta(current, delta as any);
-            current.splice(0, current.length, ...next);
-            if (current[0]?.todosViaProject.map((child) => child.id).includes(todo.id)) resolve();
+          (rows) => {
+            if (rows[0]?.todosViaProject.map((child) => child.id).includes(todo.id)) resolve();
           },
         );
       });
@@ -669,7 +665,6 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     it("updates a live reverse include as a notIn filter changes from excluded to included", async () => {
       const project = insertProject(db, "Announcements");
       const todo = insertTodo(db, { projectId: project.id, title: "Blocked" });
-      const current: Array<{ id: string; todosViaProject: Array<{ id: string }> }> = [];
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let resolveInitial: (() => void) | undefined;
@@ -685,18 +680,16 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
           rejectInitial?.(error);
           reject(error);
         }, 10_000);
-        unsubscribe = db.subscribeAll(
+        unsubscribe = db.subscribe(
           app.projects
             .where({ id: { eq: project.id } })
             .select("id")
             .include({
               todosViaProject: app.todos.where({ title: { notIn: ["Blocked"] } }).select("id"),
             }),
-          (delta) => {
-            const next = applySubscriptionDelta(current, delta as any);
-            current.splice(0, current.length, ...next);
-            if (current[0]?.todosViaProject.length === 0) resolveInitial?.();
-            if (current[0]?.todosViaProject.map((child) => child.id).includes(todo.id)) resolve();
+          (rows) => {
+            if (rows[0]?.todosViaProject.length === 0) resolveInitial?.();
+            if (rows[0]?.todosViaProject.map((child) => child.id).includes(todo.id)) resolve();
           },
         );
       });
@@ -1204,7 +1197,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect(assignee.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
     });
 
-    it("subscribeAll preserves projected root columns with includes", async () => {
+    it("subscribe preserves projected root columns with includes", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
 
@@ -1214,29 +1207,24 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         project: {
           id: string;
           name: string;
-        };
+        } | null;
       };
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const current: SubscribedTodo[] = [];
       const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
-          reject(new Error("Timed out waiting for subscribeAll projection update"));
+          reject(new Error("Timed out waiting for subscribe projection update"));
         }, 10_000);
 
-        unsubscribe = db.subscribeAll(
-          app.todos.select("title").include({ project: true }),
-          (delta) => {
-            const all = applySubscriptionDelta(current, delta as any);
-            if (all.length !== 1) {
-              return;
-            }
+        unsubscribe = db.subscribe(app.todos.select("title").include({ project: true }), (rows) => {
+          if (rows.length !== 1) {
+            return;
+          }
 
-            resolve([...all]);
-          },
-        );
+          resolve(rows);
+        });
       });
 
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1271,7 +1259,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect("tags" in all[0]).toBe(false);
     });
 
-    it("subscribeAll returns null for selected nullable columns while omitting unselected columns", async () => {
+    it("subscribe returns null for selected nullable columns while omitting unselected columns", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
 
       type SubscribedTodo = {
@@ -1282,20 +1270,17 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const current: SubscribedTodo[] = [];
       const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
-          reject(new Error("Timed out waiting for subscribeAll nullable update"));
+          reject(new Error("Timed out waiting for subscribe nullable update"));
         }, 10_000);
 
-        unsubscribe = db.subscribeAll(app.todos.select("title", "ownerId"), (delta) => {
-          const all = applySubscriptionDelta(current, delta as any);
-          if (all.length !== 1) {
+        unsubscribe = db.subscribe(app.todos.select("title", "ownerId"), (rows) => {
+          if (rows.length !== 1) {
             return;
           }
-
-          resolve([...all]);
+          resolve(rows);
         });
       });
 

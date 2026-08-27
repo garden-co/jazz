@@ -1,11 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
+import { promisify } from "node:util";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createTempRootTracker, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
-import { ManagedDevRuntime } from "./managed-runtime.js";
-import { readFile, writeFile } from "node:fs/promises";
+import { ensureEnvAppId, ManagedDevRuntime } from "./managed-runtime.js";
+import { chmod, lstat, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { build } from "esbuild";
+import { unlock, waitForLockSync } from "fs-native-extensions";
+import {
+  appendFileSync,
+  closeSync,
+  fsyncSync,
+  openSync,
+  renameSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+
+const execFile = promisify(execFileCallback);
 
 const tempRoots = createTempRootTracker();
 
@@ -113,6 +128,365 @@ describe("ManagedDevRuntime", () => {
       expect(envAtServerStartup).toContain(`VITE_JAZZ_APP_ID=${appId}`);
     } finally {
       await runtime.dispose();
+    }
+  });
+
+  it("separates a generated app ID from a final unterminated env line", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-unterminated-env-");
+    const appId = "00000000-0000-0000-0000-000000000125";
+    await writeFile(join(schemaDir, ".env"), "EXISTING=value");
+
+    const runtime = makeRuntime();
+    expect(runtime.prepareEnv({ appId, schemaDir })).toBe(appId);
+
+    await expect(readFile(join(schemaDir, ".env"), "utf8")).resolves.toBe(
+      `EXISTING=value\nVITE_JAZZ_APP_ID=${appId}\n`,
+    );
+  });
+
+  it("does not mistake comments or longer variable names for the app ID", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-similar-env-");
+    const appId = "00000000-0000-0000-0000-000000000126";
+    await writeFile(
+      join(schemaDir, ".env"),
+      "# VITE_JAZZ_APP_ID=disabled\nMY_VITE_JAZZ_APP_ID=other\n",
+    );
+
+    const runtime = makeRuntime();
+    expect(runtime.prepareEnv({ appId, schemaDir })).toBe(appId);
+
+    await expect(readFile(join(schemaDir, ".env"), "utf8")).resolves.toBe(
+      `# VITE_JAZZ_APP_ID=disabled\nMY_VITE_JAZZ_APP_ID=other\nVITE_JAZZ_APP_ID=${appId}\n`,
+    );
+  });
+
+  it("uses dotenv quoting, comments, whitespace, and export syntax", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-syntax-");
+    await writeFile(
+      join(schemaDir, ".env"),
+      'OTHER=value\n  export VITE_JAZZ_APP_ID = "quoted app id" # comment\n',
+    );
+
+    expect(makeRuntime().prepareEnv({ schemaDir })).toBe("quoted app id");
+  });
+
+  it("rejects duplicate and empty exact assignments without exposing values", async () => {
+    const duplicateDir = await tempRoots.create("jazz-managed-dotenv-duplicate-");
+    await writeFile(
+      join(duplicateDir, ".env"),
+      "VITE_JAZZ_APP_ID=first-secret\nexport VITE_JAZZ_APP_ID=second-secret\n",
+    );
+    expect(() => makeRuntime().prepareEnv({ schemaDir: duplicateDir })).toThrow(
+      "VITE_JAZZ_APP_ID is assigned more than once in .env (lines 1, 2)",
+    );
+    try {
+      makeRuntime().prepareEnv({ schemaDir: duplicateDir });
+    } catch (error) {
+      expect(String(error)).not.toContain("first-secret");
+      expect(String(error)).not.toContain("second-secret");
+    }
+
+    const emptyDir = await tempRoots.create("jazz-managed-dotenv-empty-");
+    await writeFile(join(emptyDir, ".env"), "VITE_JAZZ_APP_ID= # intentionally empty\n");
+    expect(() => makeRuntime().prepareEnv({ schemaDir: emptyDir })).toThrow(
+      "VITE_JAZZ_APP_ID is empty in .env",
+    );
+  });
+
+  it("preserves CRLF, inode, and file mode when appending", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-preserve-");
+    const envPath = join(schemaDir, ".env");
+    await writeFile(envPath, "FIRST=one\r\nSECOND=two");
+    await chmod(envPath, 0o640);
+    const appId = "00000000-0000-0000-0000-000000000127";
+
+    const before = await stat(envPath);
+    expect(makeRuntime().prepareEnv({ appId, schemaDir })).toBe(appId);
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      `FIRST=one\r\nSECOND=two\r\nVITE_JAZZ_APP_ID=${appId}\r\n`,
+    );
+    expect((await stat(envPath)).mode & 0o777).toBe(0o640);
+    expect((await stat(envPath)).ino).toBe(before.ino);
+  });
+
+  it("creates .env with ordinary umask-derived permissions", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-mode-");
+    const previousUmask = process.umask(0o027);
+    try {
+      makeRuntime().prepareEnv({ schemaDir, appId: "mode-id" });
+    } finally {
+      process.umask(previousUmask);
+    }
+    expect((await stat(join(schemaDir, ".env"))).mode & 0o777).toBe(0o640);
+  });
+
+  it("rejects a symlinked .env without changing its target", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-symlink-");
+    const target = join(schemaDir, "target.env");
+    const envPath = join(schemaDir, ".env");
+    await writeFile(target, "EXISTING=untouched\n");
+    await symlink(target, envPath);
+
+    expect(() => makeRuntime().prepareEnv({ schemaDir, appId: "not-written" })).toThrow(
+      "refusing to update symlinked .env",
+    );
+    await expect(readFile(target, "utf8")).resolves.toBe("EXISTING=untouched\n");
+    expect((await lstat(envPath)).isSymbolicLink()).toBe(true);
+  });
+
+  it("serializes concurrent process writers without lost updates", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-process-race-");
+    const bundlePath = join(schemaDir, "managed-runtime.mjs");
+    await build({
+      entryPoints: [join(import.meta.dirname, "managed-runtime.ts")],
+      outfile: bundlePath,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      external: ["fs-native-extensions"],
+    });
+    const envPath = join(schemaDir, ".env");
+    await writeFile(envPath, "EXISTING=preserved");
+    const prefixes = ["VITE", "NEXT_PUBLIC", "EXPO_PUBLIC"];
+    const candidates = Array.from({ length: 9 }, (_, index) => ({
+      key: `${prefixes[index % prefixes.length]}_JAZZ_APP_ID`,
+      value: `00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`,
+    }));
+    const workers = candidates.map(({ key, value }) =>
+      execFile(process.execPath, [
+        "--input-type=module",
+        "--eval",
+        `import { ensureEnvAppId } from ${JSON.stringify(bundlePath)}; process.stdout.write(ensureEnvAppId(${JSON.stringify(envPath)}, ${JSON.stringify(key)}, ${JSON.stringify(value)}, undefined));`,
+      ]),
+    );
+    const results = (await Promise.all(workers)).map(({ stdout }) => stdout);
+    const content = await readFile(envPath, "utf8");
+    expect(content).toContain("EXISTING=preserved\n");
+    for (const prefix of prefixes) {
+      const key = `${prefix}_JAZZ_APP_ID`;
+      const matchingResults = results.filter((_, index) => candidates[index]?.key === key);
+      expect(new Set(matchingResults).size).toBe(1);
+      expect(content.match(new RegExp(`^${key}=`, "gm"))).toHaveLength(1);
+      expect(content).toContain(`${key}=${matchingResults[0]}\n`);
+    }
+  });
+
+  it("recovers the advisory lock after a writer is killed", async () => {
+    if (process.platform === "win32") return;
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-crash-");
+    const envPath = join(schemaDir, ".env");
+    await writeFile(envPath, "EXISTING=preserved\n");
+    const worker = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { openSync } from "node:fs"; import { waitForLockSync } from "fs-native-extensions"; const fd=openSync(${JSON.stringify(envPath)}, "a+"); waitForLockSync(fd); process.stdout.write("locked\\n"); setInterval(()=>{}, 1000);`,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    await new Promise<void>((resolve, reject) => {
+      worker.once("error", reject);
+      worker.stdout.once("data", () => resolve());
+    });
+    worker.kill("SIGKILL");
+    await new Promise<void>((resolve) => worker.once("exit", () => resolve()));
+
+    expect(makeRuntime().prepareEnv({ schemaDir, appId: "after-crash" })).toBe("after-crash");
+    await expect(readFile(envPath, "utf8")).resolves.toContain("VITE_JAZZ_APP_ID=after-crash\n");
+  });
+
+  it("waits for a live lock owner instead of stealing its lock", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-live-owner-");
+    const envPath = join(schemaDir, ".env");
+    const bundlePath = join(schemaDir, "managed-runtime.mjs");
+    await writeFile(envPath, "EXISTING=preserved\n");
+    await build({
+      entryPoints: [join(import.meta.dirname, "managed-runtime.ts")],
+      outfile: bundlePath,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      external: ["fs-native-extensions"],
+    });
+    const descriptor = openSync(envPath, "a+");
+    waitForLockSync(descriptor);
+    const worker = execFile(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      `import { ensureEnvAppId } from ${JSON.stringify(bundlePath)}; process.stdout.write(ensureEnvAppId(${JSON.stringify(envPath)}, "VITE_JAZZ_APP_ID", "after-owner", undefined));`,
+    ]);
+    let settled = false;
+    void worker.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(settled).toBe(false);
+    } finally {
+      unlock(descriptor);
+      closeSync(descriptor);
+    }
+    await expect(worker).resolves.toMatchObject({ stdout: "after-owner" });
+  });
+
+  it("preserves external edits made before the locked append", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-external-");
+    const envPath = join(schemaDir, ".env");
+    await writeFile(envPath, "EXTERNAL=first\n");
+    await writeFile(envPath, "EXTERNAL=changed\nOTHER=kept\n");
+    ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined);
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "EXTERNAL=changed\nOTHER=kept\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
+  it("reparses an unrelated external append after acquiring the lock", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-external-locked-");
+    const envPath = join(schemaDir, ".env");
+    await writeFile(envPath, "FIRST=one\n");
+    ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined, {
+      waitForLock(descriptor) {
+        waitForLockSync(descriptor);
+        // Model a non-cooperating editor that appends after the Jazz process has
+        // opened the file but before it reparses the latest bytes.
+        appendFileSync(envPath, "EXTERNAL=kept\n");
+      },
+      unlock,
+      write: (descriptor, bytes, offset) =>
+        writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+      fsync: fsyncSync,
+    });
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "FIRST=one\nEXTERNAL=kept\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
+  it("retries against an atomic replacement made after lock acquisition", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-replaced-locked-");
+    const envPath = join(schemaDir, ".env");
+    const replacementPath = join(schemaDir, ".env.replacement");
+    await writeFile(envPath, "ORIGINAL=old\n");
+    let replaced = false;
+
+    expect(
+      ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined, {
+        waitForLock(descriptor) {
+          waitForLockSync(descriptor);
+          if (!replaced) {
+            writeFileSync(replacementPath, "REPLACED=visible\n");
+            renameSync(replacementPath, envPath);
+            replaced = true;
+          }
+        },
+        unlock,
+        write: (descriptor, bytes, offset) =>
+          writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+        fsync: fsyncSync,
+      }),
+    ).toBe("generated");
+
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "REPLACED=visible\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
+  it("retries an atomic replacement between opening .env and its first identity check", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-replaced-opening-");
+    const envPath = join(schemaDir, ".env");
+    const replacementPath = join(schemaDir, ".env.replacement");
+    await writeFile(envPath, "ORIGINAL=old\n");
+    let replaced = false;
+
+    expect(
+      ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined, {
+        afterOpen() {
+          if (!replaced) {
+            writeFileSync(replacementPath, "REPLACED=visible\n");
+            renameSync(replacementPath, envPath);
+            replaced = true;
+          }
+        },
+        waitForLock: waitForLockSync,
+        unlock,
+        write: (descriptor, bytes, offset) =>
+          writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+        fsync: fsyncSync,
+      }),
+    ).toBe("generated");
+
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "REPLACED=visible\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
+  it("retries when .env is atomically replaced after the append", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-replaced-final-");
+    const envPath = join(schemaDir, ".env");
+    const replacementPath = join(schemaDir, ".env.replacement");
+    await writeFile(envPath, "ORIGINAL=old\n");
+    let replaced = false;
+
+    expect(
+      ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined, {
+        waitForLock: waitForLockSync,
+        unlock,
+        write: (descriptor, bytes, offset) =>
+          writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+        fsync(descriptor) {
+          fsyncSync(descriptor);
+          if (!replaced) {
+            writeFileSync(replacementPath, "REPLACED=visible\n");
+            renameSync(replacementPath, envPath);
+            replaced = true;
+          }
+        },
+      }),
+    ).toBe("generated");
+
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "REPLACED=visible\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
+  it("full-writes short writes and surfaces write, fsync, and unlock errors", async () => {
+    const makeOperations = () => ({
+      waitForLock: waitForLockSync,
+      unlock,
+      write: (descriptor: number, bytes: Uint8Array, offset: number) =>
+        writeSync(descriptor, bytes, offset, Math.min(2, bytes.byteLength - offset)),
+      fsync: fsyncSync,
+    });
+    const shortDir = await tempRoots.create("jazz-managed-dotenv-short-write-");
+    ensureEnvAppId(
+      join(shortDir, ".env"),
+      "VITE_JAZZ_APP_ID",
+      "short",
+      undefined,
+      makeOperations(),
+    );
+    await expect(readFile(join(shortDir, ".env"), "utf8")).resolves.toBe(
+      "VITE_JAZZ_APP_ID=short\n",
+    );
+
+    for (const failure of ["write", "fsync", "unlock"] as const) {
+      const schemaDir = await tempRoots.create(`jazz-managed-dotenv-${failure}-`);
+      const operations = makeOperations();
+      operations[failure] = (() => {
+        throw new Error(`${failure}-failed`);
+      }) as never;
+      expect(() =>
+        ensureEnvAppId(join(schemaDir, ".env"), "VITE_JAZZ_APP_ID", failure, undefined, operations),
+      ).toThrow(`${failure}-failed`);
+      // close(2) releases the OS lock even if explicit unlock reports an error.
+      expect(() =>
+        ensureEnvAppId(join(schemaDir, ".env"), "OTHER", "retry", undefined),
+      ).not.toThrow();
     }
   });
 

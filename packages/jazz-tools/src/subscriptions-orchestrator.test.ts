@@ -70,14 +70,14 @@ function createUnitHarness(
   let throwOnSubscribe: Error | null = null;
 
   const db: {
-    subscribeAll<T extends { id: string }>(
+    subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
       session?: Session,
     ): () => void;
   } = {
-    subscribeAll<T extends { id: string }>(
+    subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
@@ -260,7 +260,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U09b getCacheEntry forwards full QueryOptions to subscribeAll", async () => {
+  it("SO-U09b getCacheEntry forwards full QueryOptions to the delta source", async () => {
     const harness = createUnitHarness();
     try {
       const options = {
@@ -370,7 +370,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
   it("SO-U14 subscribe setup exception marks entry rejected and emits onError", async () => {
     const harness = createUnitHarness();
-    const setupError = new Error("subscribeAll failed");
+    const setupError = new Error("delta subscription failed");
     harness.setThrowOnSubscribe(setupError);
 
     try {

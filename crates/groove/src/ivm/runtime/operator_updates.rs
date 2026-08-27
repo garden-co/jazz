@@ -49,6 +49,33 @@ impl NodeState {
         input: &IndexSourceOp,
     ) -> Result<Option<super::evaluation_session::StorageRequestKey>, IvmRuntimeError> {
         if input.row_projection.is_some() {
+            if !input.intersections.is_empty() {
+                let StaticScanBounds::Prefix(prefix) =
+                    persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                else {
+                    return Err(IvmRuntimeError::UnsupportedIndexIntersectionScan);
+                };
+                let intersections = input
+                    .intersections
+                    .iter()
+                    .map(|(index, scan)| {
+                        let StaticScanBounds::Prefix(prefix) =
+                            persisted_index_scan_bounds(&input.table, index, Some(scan))?
+                        else {
+                            return Err(IvmRuntimeError::UnsupportedIndexIntersectionScan);
+                        };
+                        Ok((index.clone(), prefix))
+                    })
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                return Ok(Some(
+                    super::evaluation_session::StorageRequestKey::IndexedRowsIntersection {
+                        table: input.table.clone(),
+                        index: input.index.clone(),
+                        prefix,
+                        intersections,
+                    },
+                ));
+            }
             let max_items = scan_max_items(input.scan.as_ref());
             return Ok(Some(
                 match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?

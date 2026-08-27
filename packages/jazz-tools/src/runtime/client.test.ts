@@ -151,7 +151,7 @@ describe("JazzClient subscription ownership", () => {
     const failure = new Error("executeSubscription failed after callback");
     runtime.createSubscription.mockReturnValue(41);
     runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
-      onUpdate([]);
+      onUpdate({ added: [], updated: [], removed: [] });
       throw failure;
     });
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
