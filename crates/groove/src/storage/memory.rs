@@ -154,6 +154,8 @@ pub enum MemoryStorageSnapshotError {
     Decode(postcard::Error),
     #[error("unsupported memory storage snapshot version {found}; expected {expected}")]
     UnsupportedVersion { found: u16, expected: u16 },
+    #[error("memory storage snapshot has an invalid physical column-family name: {0}")]
+    InvalidColumnFamily(#[from] Error),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,6 +232,7 @@ impl MemoryStorage {
                 expected: MEMORY_STORAGE_SNAPSHOT_VERSION,
             });
         }
+        super::validate_physical_storage_names(snapshot.column_families.keys())?;
         *self.inner.lock().expect("memory storage mutex poisoned") = snapshot.column_families;
         Ok(())
     }
@@ -576,6 +579,29 @@ mod tests {
             target.get("other".into(), b"stale".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(_))
         ));
+    }
+
+    #[futures_test::test]
+    async fn import_snapshot_rejects_invalid_families_without_replacing_state() {
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
+        storage
+            .set("rows".into(), b"keep".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+        let snapshot = MemoryStorageSnapshot {
+            version: MEMORY_STORAGE_SNAPSHOT_VERSION,
+            column_families: BTreeMap::from([("rows\0evil".to_owned(), BTreeMap::new())]),
+        };
+        let bytes = postcard::to_allocvec(&snapshot).unwrap();
+
+        assert!(matches!(
+            storage.import_snapshot(&bytes),
+            Err(MemoryStorageSnapshotError::InvalidColumnFamily(_))
+        ));
+        assert_eq!(
+            storage.get("rows".into(), b"keep".to_vec()).await.unwrap(),
+            Some(b"value".to_vec())
+        );
     }
 
     #[futures_test::test]

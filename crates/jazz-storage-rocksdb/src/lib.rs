@@ -254,6 +254,7 @@ impl RocksDbStorage {
         let listed_column_families = DB::list_cf(&Options::default(), &path).ok();
         let initialize_format = match &listed_column_families {
             Some(existing) => {
+                validate_physical_storage_names(existing)?;
                 validate_raw_v3_store(&path, existing, &block_cache, &write_buffer_manager)?
             }
             None => true,
@@ -958,6 +959,31 @@ mod tests {
                 .iter()
                 .any(|name| name == invalid),
             "reopen must reject before creating an invalid physical family"
+        );
+    }
+
+    #[test]
+    fn open_rejects_invalid_listed_family_before_opening_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = "a".repeat(groove::storage::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [ColumnFamilyDescriptor::new(&invalid, Options::default())],
+        )
+        .unwrap();
+        drop(db);
+
+        assert!(RocksDbStorage::open(dir.path(), &["must-not-be-admitted"]).is_err());
+        assert!(
+            !DB::list_cf(&Options::default(), dir.path())
+                .unwrap()
+                .iter()
+                .any(|name| name == "must-not-be-admitted"),
+            "open must reject before admitting requested families"
         );
     }
 

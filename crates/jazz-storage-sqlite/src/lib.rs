@@ -275,6 +275,7 @@ impl SqliteStorage {
     }
 
     fn intern_column_families(&self, names: &[&str]) -> Result<(), Error> {
+        self.validate_discovered_column_families()?;
         self.with_connection(|connection| {
             let transaction = connection.unchecked_transaction().map_err(backend)?;
             for name in names {
@@ -288,7 +289,19 @@ impl SqliteStorage {
             transaction.commit().map_err(backend)?;
             Ok(())
         })?;
-        let discovered = self.with_connection(|connection| {
+        let discovered = self.discover_column_families()?;
+        validate_physical_storage_names(discovered.iter().map(|(name, _)| name))?;
+        *self.column_families.borrow_mut() = discovered.into_iter().collect();
+        Ok(())
+    }
+
+    fn validate_discovered_column_families(&self) -> Result<(), Error> {
+        let discovered = self.discover_column_families()?;
+        validate_physical_storage_names(discovered.iter().map(|(name, _)| name))
+    }
+
+    fn discover_column_families(&self) -> Result<Vec<(String, i64)>, Error> {
+        self.with_connection(|connection| {
             let mut statement = connection
                 .prepare("SELECT name, id FROM column_families")
                 .map_err(backend)?;
@@ -299,9 +312,7 @@ impl SqliteStorage {
                 .map_err(backend)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(backend)
-        })?;
-        *self.column_families.borrow_mut() = discovered.into_iter().collect();
-        Ok(())
+        })
     }
 
     fn scan_rows(
@@ -783,5 +794,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0, "reopen must reject before inserting the family");
+    }
+
+    #[test]
+    fn open_rejects_invalid_persisted_family_before_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid-existing.sqlite");
+        drop(SqliteStorage::open(&path, &["records"]).unwrap());
+        let invalid = "records\0evil";
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute("INSERT INTO column_families (name) VALUES (?1)", [invalid])
+            .unwrap();
+        drop(connection);
+
+        assert!(SqliteStorage::open(&path, &["must-not-be-admitted"]).is_err());
+        let connection = Connection::open(&path).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM column_families WHERE name = ?1",
+                ["must-not-be-admitted"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "open must reject before admitting requested families"
+        );
     }
 }
