@@ -185,25 +185,120 @@ fn subscriber_control_reply_retries_after_bounded_transport_backpressure() {
         },
         reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
     };
-    subscriber.borrow_mut().pending_control_response = Some(rejection.clone());
+    subscriber
+        .borrow_mut()
+        .pending_control_responses
+        .extend([rejection.clone(), rejection.clone()]);
 
     subscriber
         .borrow_mut()
         .tick()
         .expect("backpressure retains the subscriber control reply");
     assert_eq!(
-        subscriber.borrow().pending_control_response,
-        Some(rejection.clone())
+        subscriber
+            .borrow()
+            .pending_control_responses
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![rejection.clone(), rejection.clone()],
+        "a stalled link keeps every already-bounded control obligation in FIFO order"
     );
     assert!(outbound.borrow().is_empty());
 
     subscriber
         .borrow_mut()
         .tick()
-        .expect("later capacity accepts the retained control reply");
-    assert!(subscriber.borrow().pending_control_response.is_none());
+        .expect("later capacity accepts only the first retained control reply");
+    assert_eq!(
+        subscriber
+            .borrow()
+            .pending_control_responses
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![rejection.clone()],
+        "one accepted reply does not let a tick skip or duplicate the next obligation"
+    );
     assert_eq!(outbound.borrow_mut().pop_front(), Some(rejection));
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("the following tick accepts the second retained control reply");
+    assert!(subscriber.borrow().pending_control_responses.is_empty());
+    assert!(matches!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::SubscribeRejected { .. })
+    ));
     assert!(outbound.borrow().is_empty());
+}
+
+/// A permanently stalled link may retain only the control obligations already
+/// implied by its live registrations/rejections. This stays at the transport
+/// seam because a public client cannot deliberately hold an accepted frame
+/// forever without also hiding the scheduler wake that the test needs to
+/// inspect.
+#[test]
+fn subscriber_control_replies_stay_bounded_during_permanent_backpressure() {
+    struct PermanentlyBackpressuredTransport {
+        sends: Rc<Cell<usize>>,
+    }
+
+    impl Transport for PermanentlyBackpressuredTransport {
+        fn send(&mut self, _message: SyncMessage) -> Result<(), TransportError> {
+            self.sends.set(self.sends.get() + 1);
+            Err(TransportError::Backpressure)
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            None
+        }
+    }
+
+    let identity = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let schema = schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let sends = Rc::new(Cell::new(0));
+    let subscriber = server.accept_subscriber(
+        Box::new(PermanentlyBackpressuredTransport {
+            sends: Rc::clone(&sends),
+        }),
+        identity,
+    );
+    let rejection = SyncMessage::SubscribeRejected {
+        subscription: SubscriptionKey {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([5; 16])),
+            binding_id: BindingId(uuid::Uuid::from_bytes([5; 16])),
+            read_view: ReadViewKey::default(),
+        },
+        reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+    };
+    subscriber
+        .borrow_mut()
+        .pending_control_responses
+        .extend([rejection.clone(), rejection.clone()]);
+
+    for _ in 0..4 {
+        subscriber
+            .borrow_mut()
+            .tick()
+            .expect("backpressure is a deferred retry, not a fatal connection error");
+        assert_eq!(
+            subscriber
+                .borrow()
+                .pending_control_responses
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![rejection.clone(), rejection.clone()],
+            "retries retain the same bounded FIFO without accumulating copies"
+        );
+    }
+    assert_eq!(
+        sends.get(),
+        4,
+        "one logical control reply is retried per tick"
+    );
 }
 
 #[test]
