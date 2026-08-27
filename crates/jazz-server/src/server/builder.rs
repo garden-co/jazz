@@ -660,7 +660,12 @@ async fn handle_edge_connector_outcome(
     recovery_attempts: &mut u32,
 ) -> bool {
     let (reason, reconnect) = match outcome {
-        EdgeConnectorOutcome::Stopped => return false,
+        EdgeConnectorOutcome::Stopped => {
+            if let Some(state) = state.upgrade() {
+                state.set_edge_upstream_health(EdgeUpstreamHealth::Stopped);
+            }
+            return false;
+        }
         EdgeConnectorOutcome::Fatal(reason) => {
             if let Some(state) = state.upgrade() {
                 state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
@@ -904,6 +909,62 @@ mod tests {
         }
     }
 
+    struct OwnerDroppingConnector {
+        snapshot: jazz::protocol::CatalogueSnapshot,
+        connect_count: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for OwnerDroppingConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.connect_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(ConnectedNativeTransport {
+                    transport: Box::new(NoopWireTransport),
+                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                    features: jazz::wire::FEATURE_NONE,
+                    session_context: None,
+                    terminal: Box::pin(std::future::ready(NativeTransportTerminal::OwnerDropped)),
+                })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
+        }
+    }
+
+    struct PendingTerminalConnector {
+        snapshot: jazz::protocol::CatalogueSnapshot,
+        connect_count: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for PendingTerminalConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.connect_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(ConnectedNativeTransport {
+                    transport: Box::new(NoopWireTransport),
+                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                    features: jazz::wire::FEATURE_NONE,
+                    session_context: None,
+                    terminal: Box::pin(std::future::pending()),
+                })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
+        }
+    }
+
     struct MalformedWireTransport {
         returned_frame: bool,
     }
@@ -1024,6 +1085,118 @@ mod tests {
 
         assert!(connector.connect_count.load(Ordering::SeqCst) >= 2);
         edge.shutdown().await;
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owner_drop_stops_connected_edge_upstream_without_reconnect() {
+        let app_id = AppId::from_name("edge-owner-drop-stopped-health");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .runtime()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let connector = Arc::new(OwnerDroppingConnector {
+            snapshot,
+            connect_count: AtomicUsize::new(0),
+        });
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .with_native_transport_connector(connector.clone())
+            .build()
+            .await
+            .expect("build edge");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if edge.state.edge_upstream_health() == EdgeUpstreamHealth::Stopped {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner drop publishes stopped health");
+        assert_eq!(
+            connector.connect_count.load(Ordering::SeqCst),
+            1,
+            "owner drop must stop the connector rather than opening a replacement transport"
+        );
+
+        edge.shutdown().await;
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_connected_edge_upstream_without_reconnect() {
+        let app_id = AppId::from_name("edge-connected-cancellation-stopped-health");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .runtime()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let connector = Arc::new(PendingTerminalConnector {
+            snapshot,
+            connect_count: AtomicUsize::new(0),
+        });
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .with_native_transport_connector(connector.clone())
+            .build()
+            .await
+            .expect("build edge");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if edge.state.edge_upstream_health() == EdgeUpstreamHealth::Connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("edge reaches connected before cancellation");
+        edge.shutdown().await;
+        assert_eq!(
+            edge.state.edge_upstream_health(),
+            EdgeUpstreamHealth::Stopped,
+            "cancelling the attached driver publishes stopped health"
+        );
+        assert_eq!(
+            connector.connect_count.load(Ordering::SeqCst),
+            1,
+            "cancellation must not open a replacement transport"
+        );
         core.shutdown().await;
     }
 
@@ -1556,6 +1729,10 @@ mod tests {
             connected_transport_outcome(ServerUpstreamTerminalReason::NativeTransport(
                 NativeTransportTerminal::OwnerDropped,
             )),
+            EdgeConnectorOutcome::Stopped
+        ));
+        assert!(matches!(
+            connected_transport_outcome(ServerUpstreamTerminalReason::Cancelled),
             EdgeConnectorOutcome::Stopped
         ));
         assert!(matches!(
