@@ -265,7 +265,7 @@ async fn ws_admission(
         && !has_session_header
         && ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
     {
-        validate_ws_cookie_origin(&headers)?;
+        validate_ws_cookie_origin(&headers, state.auth_config.trust_forwarded_host)?;
     }
 
     let session = crate::middleware::auth::extract_session(
@@ -347,12 +347,15 @@ fn ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
         })
 }
 
-fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
+fn validate_ws_cookie_origin(
+    headers: &HeaderMap,
+    trust_forwarded_host: bool,
+) -> Result<(), String> {
     let origin = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
-    let host = ws_cookie_origin_host(headers)
+    let host = ws_cookie_origin_host(headers, trust_forwarded_host)
         .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
 
     if ws_origin_matches_host(origin, host) {
@@ -361,18 +364,22 @@ fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
     Err("cookie websocket auth Origin does not match Host".to_owned())
 }
 
-fn ws_cookie_origin_host(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("X-Forwarded-Host")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
+fn ws_cookie_origin_host(headers: &HeaderMap, trust_forwarded_host: bool) -> Option<&str> {
+    let forwarded_host = trust_forwarded_host
+        .then(|| {
             headers
-                .get(axum::http::header::HOST)
+                .get("X-Forwarded-Host")
                 .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
         })
+        .flatten();
+    forwarded_host.or_else(|| {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+    })
 }
 
 fn ws_origin_matches_host(origin: &str, host: &str) -> bool {
@@ -1174,13 +1181,13 @@ mod tests {
         headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
 
         assert!(
-            validate_ws_cookie_origin(&headers).is_err(),
+            validate_ws_cookie_origin(&headers, false).is_err(),
             "an untrusted forwarded host must not bypass the cookie origin guard"
         );
     }
 
     #[test]
-    fn ws_cookie_origin_uses_first_forwarded_host() {
+    fn ws_cookie_origin_uses_first_forwarded_host_when_trusted_proxy_enabled() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
@@ -1192,7 +1199,7 @@ mod tests {
             "app.example, proxy.local".parse().unwrap(),
         );
 
-        assert!(validate_ws_cookie_origin(&headers).is_ok());
+        assert!(validate_ws_cookie_origin(&headers, true).is_ok());
     }
 
     #[test]
@@ -1204,13 +1211,13 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers, false).is_err());
 
         headers.insert(
             axum::http::header::ORIGIN,
             "https://evil.example".parse().unwrap(),
         );
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers, false).is_err());
     }
 
     #[test]

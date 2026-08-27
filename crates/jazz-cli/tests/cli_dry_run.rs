@@ -42,6 +42,8 @@ fn jazz_server_command() -> Command {
         .env_remove("JAZZ_ADMIN_SECRET")
         .env_remove("JAZZ_BACKEND_SECRET")
         .env_remove("JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM")
+        .env_remove("JAZZ_JWT_ISSUER")
+        .env_remove("JAZZ_JWT_AUDIENCE")
         .env_remove("JAZZ_ALLOW_LOCAL_FIRST_AUTH")
         .env_remove("JAZZ_UPSTREAM_URL")
         .env_remove("JAZZ_SERVER_ANONYMOUS_SUBJECT");
@@ -55,6 +57,9 @@ fn jazz_tools_command() -> Command {
         .env_remove("JAZZ_SERVER_DATA_DIR")
         .env_remove("JAZZ_SERVER_IN_MEMORY")
         .env_remove("JAZZ_ADMIN_SECRET")
+        .env_remove("JAZZ_JWT_ISSUER")
+        .env_remove("JAZZ_JWT_AUDIENCE")
+        .env_remove("JAZZ_TRUST_PROXY")
         .env_remove("JAZZ_UPSTREAM_URL")
         .env_remove("JAZZ_BOUND_PORT_FILE");
     command
@@ -450,12 +455,10 @@ fn help_lists_dev_server_commands() {
             .iter()
             .any(|line| line.contains("JAZZ_SERVER_AUTH_STATIC_BEARER"))
     );
-    assert!(lines.iter().any(|line| line.contains("JAZZ_ADMIN_SECRET")));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("JAZZ_BACKEND_SECRET"))
-    );
+    assert!(!lines.iter().any(|line| line.contains("JAZZ_ADMIN_SECRET")));
+    assert!(!lines.iter().any(|line| line.contains("JAZZ_BACKEND_SECRET")));
+    assert!(lines.iter().any(|line| line.contains("JAZZ_JWT_ISSUER")));
+    assert!(lines.iter().any(|line| line.contains("JAZZ_JWT_AUDIENCE")));
     assert!(
         lines
             .iter()
@@ -989,7 +992,7 @@ fn dry_run_rejects_upstream_url_for_local_server_mode() {
 }
 
 #[test]
-fn dry_run_accepts_alpha_aliases() {
+fn dry_run_accepts_non_privileged_alpha_aliases() {
     let output = jazz_server_command()
         .args([
             "dry-run",
@@ -998,7 +1001,7 @@ fn dry_run_accepts_alpha_aliases() {
             "--dataDir=/tmp/jazz-server-alias-data",
             "--memory",
             "--ws-path=/alias-sync",
-            "--admin-secret=alias-secret",
+            "--static-bearer=alias-secret",
             "--allow-local-first-auth=true",
             "--anonymous-subject=alias-user",
         ])

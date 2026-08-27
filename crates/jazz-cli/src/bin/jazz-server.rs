@@ -264,7 +264,7 @@ fn run_loopback_websocket_schema(
 
 fn print_usage(program: &str) {
     println!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
     print_server_usage(program);
     print_serve_usage(program, "serve");
@@ -272,13 +272,13 @@ fn print_usage(program: &str) {
     print_serve_usage(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage(program);
     println!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_ADMIN_SECRET,JAZZ_BACKEND_SECRET,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
     );
 }
 
 fn print_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} dry-run [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
     print_server_usage_stderr(program);
     print_serve_usage_stderr(program, "serve");
@@ -286,43 +286,43 @@ fn print_usage_stderr(program: &str) {
     print_serve_usage_stderr(program, "serve-loopback-websocket-schema");
     print_serve_data_dir_usage_stderr(program);
     eprintln!(
-        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_ADMIN_SECRET,JAZZ_BACKEND_SECRET,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
+        "env=JAZZ_SERVER_LISTEN,JAZZ_SERVER_PORT,JAZZ_SERVER_DATA_DIR,JAZZ_SERVER_IN_MEMORY,JAZZ_SERVER_WEBSOCKET_PATH,JAZZ_SERVER_AUTH_STATIC_BEARER,JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM,JAZZ_JWT_ISSUER,JAZZ_JWT_AUDIENCE,JAZZ_ALLOW_LOCAL_FIRST_AUTH,JAZZ_SERVER_ANONYMOUS_SUBJECT,JAZZ_UPSTREAM_URL"
     );
 }
 
 fn print_server_usage(program: &str) {
     println!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_server_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} server <APP_ID> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_usage(program: &str, command: &str) {
     println!(
-        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_usage_stderr(program: &str, command: &str) {
     eprintln!(
-        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} {command} <schema-source-json-hex> [--listen <addr>|--bind <addr>] [--port <port>] [--data-dir <dir>|--dataDir <dir>|--in-memory|--memory] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_data_dir_usage(program: &str) {
     println!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
 fn print_serve_data_dir_usage_stderr(program: &str) {
     eprintln!(
-        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>|--admin-secret <token>] [--auth-jwt-ed-public-key-pem <pem>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
+        "usage={program} serve-loopback-websocket-schema-data-dir <schema-source-json-hex> <data-dir> [--listen <addr>|--bind <addr>] [--port <port>] [--websocket-path <path>|--ws-path <path>] [--auth-static-bearer <token>|--static-bearer <token>] [--auth-jwt-ed-public-key-pem <pem>] [--jwt-issuer <issuer>] [--jwt-audience <audience>] [--allow-local-first-auth <bool>] [--anonymous-subject <subject>] [--upstream-url <url>]"
     );
 }
 
@@ -566,14 +566,29 @@ impl CliOptions {
                 "--websocket-path" | "--ws-path" => {
                     options.websocket_path = next_value(&mut args, &arg)?;
                 }
-                "--auth-static-bearer" | "--static-bearer" | "--admin-secret" => {
+                "--auth-static-bearer" | "--static-bearer" => {
                     options.auth_admission =
                         AuthAdmissionConfig::static_bearer(next_value(&mut args, &arg)?);
                 }
+                "--admin-secret" => {
+                    return Err(
+                        "--admin-secret is not a jazz-server bearer credential; use --auth-static-bearer for client bearer admission or jazz-tools server --admin-secret for administrative access"
+                            .to_owned(),
+                    );
+                }
                 "--auth-jwt-ed-public-key-pem" => {
-                    options.auth_admission = AuthAdmissionConfig::jwt(
+                    options.auth_admission.static_bearer_token = None;
+                    options.auth_admission.jwt_verifier = Some(
                         JwtVerifierConfig::ed_public_key_pem(next_value(&mut args, &arg)?),
                     );
+                }
+                "--jwt-issuer" => {
+                    options.auth_admission.expected_issuer =
+                        Some(next_value(&mut args, &arg)?);
+                }
+                "--jwt-audience" => {
+                    options.auth_admission.expected_audience =
+                        Some(next_value(&mut args, &arg)?);
                 }
                 "--allow-local-first-auth" => {
                     options.auth_admission.allow_local_first_auth =
@@ -605,16 +620,30 @@ impl CliOptions {
                     options.websocket_path = value_after_equals(&arg)?.to_owned();
                 }
                 _ if arg.starts_with("--auth-static-bearer=")
-                    || arg.starts_with("--static-bearer=")
-                    || arg.starts_with("--admin-secret=") =>
+                    || arg.starts_with("--static-bearer=") =>
                 {
                     options.auth_admission =
                         AuthAdmissionConfig::static_bearer(value_after_equals(&arg)?);
                 }
+                _ if arg.starts_with("--admin-secret=") => {
+                    return Err(
+                        "--admin-secret is not a jazz-server bearer credential; use --auth-static-bearer for client bearer admission or jazz-tools server --admin-secret for administrative access"
+                            .to_owned(),
+                    );
+                }
                 _ if arg.starts_with("--auth-jwt-ed-public-key-pem=") => {
-                    options.auth_admission = AuthAdmissionConfig::jwt(
+                    options.auth_admission.static_bearer_token = None;
+                    options.auth_admission.jwt_verifier = Some(
                         JwtVerifierConfig::ed_public_key_pem(value_after_equals(&arg)?),
                     );
+                }
+                _ if arg.starts_with("--jwt-issuer=") => {
+                    options.auth_admission.expected_issuer =
+                        Some(value_after_equals(&arg)?.to_owned());
+                }
+                _ if arg.starts_with("--jwt-audience=") => {
+                    options.auth_admission.expected_audience =
+                        Some(value_after_equals(&arg)?.to_owned());
                 }
                 _ if arg.starts_with("--allow-local-first-auth=") => {
                     options.auth_admission.allow_local_first_auth =
@@ -657,15 +686,29 @@ impl CliOptions {
         if let Ok(value) = env::var("JAZZ_SERVER_WEBSOCKET_PATH") {
             options.websocket_path = value;
         }
-        if let Ok(value) = env::var("JAZZ_SERVER_AUTH_STATIC_BEARER")
-            .or_else(|_| env::var("JAZZ_ADMIN_SECRET"))
-            .or_else(|_| env::var("JAZZ_BACKEND_SECRET"))
-        {
+        for (name, replacement) in [
+            ("JAZZ_ADMIN_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+            ("JAZZ_BACKEND_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+        ] {
+            if env::var_os(name).is_some() {
+                return Err(format!(
+                    "{name} is not a jazz-server bearer credential; use {replacement} for explicit client bearer admission or jazz-tools server for privileged admin/backend access"
+                ));
+            }
+        }
+        if let Ok(value) = env::var("JAZZ_SERVER_AUTH_STATIC_BEARER") {
             options.auth_admission = AuthAdmissionConfig::static_bearer(value);
         }
         if let Ok(value) = env::var("JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM") {
-            options.auth_admission =
-                AuthAdmissionConfig::jwt(JwtVerifierConfig::ed_public_key_pem(value));
+            options.auth_admission.static_bearer_token = None;
+            options.auth_admission.jwt_verifier =
+                Some(JwtVerifierConfig::ed_public_key_pem(value));
+        }
+        if let Ok(value) = env::var("JAZZ_JWT_ISSUER") {
+            options.auth_admission.expected_issuer = Some(value);
+        }
+        if let Ok(value) = env::var("JAZZ_JWT_AUDIENCE") {
+            options.auth_admission.expected_audience = Some(value);
         }
         if let Ok(value) = env::var("JAZZ_ALLOW_LOCAL_FIRST_AUTH") {
             options.auth_admission.allow_local_first_auth =
@@ -752,7 +795,7 @@ mod tests {
                 "--listen".to_owned(),
                 "127.0.0.1:9999".to_owned(),
                 "--in-memory".to_owned(),
-                "--admin-secret".to_owned(),
+                "--auth-static-bearer".to_owned(),
                 "secret".to_owned(),
             ],
             "jazz-server",

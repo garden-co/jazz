@@ -18,9 +18,11 @@ pub struct AuthAdmissionConfig {
     pub static_bearer_token: Option<String>,
     /// Static JWT verifier accepted by this process-local admission gate.
     pub jwt_verifier: Option<JwtVerifierConfig>,
+    /// Issuer that external JWTs must contain.
+    pub expected_issuer: Option<String>,
     /// Whether local-first JWT auth is allowed by configuration.
     pub allow_local_first_auth: bool,
-    /// Optional app id/audience that local-first JWTs must target.
+    /// App id/audience that external and local-first JWTs must target.
     pub expected_audience: Option<String>,
     /// Fallback subject used when no explicit auth is required.
     pub anonymous_subject: String,
@@ -31,6 +33,7 @@ impl Default for AuthAdmissionConfig {
         Self {
             static_bearer_token: None,
             jwt_verifier: None,
+            expected_issuer: None,
             allow_local_first_auth: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
@@ -44,6 +47,7 @@ impl AuthAdmissionConfig {
         Self {
             static_bearer_token: Some(token.into()),
             jwt_verifier: None,
+            expected_issuer: None,
             allow_local_first_auth: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
@@ -55,13 +59,20 @@ impl AuthAdmissionConfig {
         Self {
             static_bearer_token: None,
             jwt_verifier: Some(verifier),
+            expected_issuer: None,
             allow_local_first_auth: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
         }
     }
 
-    /// Bind local-first JWT admission to a configured app id/audience.
+    /// Bind external JWT admission to a configured issuer.
+    pub fn with_expected_issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.expected_issuer = Some(issuer.into());
+        self
+    }
+
+    /// Bind JWT admission to a configured app id/audience.
     pub fn with_expected_audience(mut self, audience: impl Into<String>) -> Self {
         self.expected_audience = Some(audience.into());
         self
@@ -135,13 +146,7 @@ pub enum JwtVerificationKey {
 pub struct AuthHandshake {
     /// Bearer JWT/token supplied by a client when the upgrade request did not
     /// carry an `Authorization` header.
-    #[serde(
-        default,
-        alias = "admin_secret",
-        alias = "backend_secret",
-        alias = "jwt_token",
-        alias = "backend_session"
-    )]
+    #[serde(default, alias = "jwt_token", alias = "backend_session")]
     pub bearer_jwt: Option<String>,
     /// Stable application subject to bind into a Jazz author id.
     pub sub: String,
@@ -268,12 +273,24 @@ pub fn admit_bearer_jwt(
         .jwt_verifier
         .as_ref()
         .ok_or(AuthAdmissionError::InvalidBearer)?;
+    let expected_issuer = config.expected_issuer.as_deref().ok_or_else(|| {
+        AuthAdmissionError::InvalidJwt("external JWT expected issuer is not configured".to_owned())
+    })?;
+    let expected_audience = config.expected_audience.as_deref().ok_or_else(|| {
+        AuthAdmissionError::InvalidJwt(
+            "external JWT expected audience is not configured".to_owned(),
+        )
+    })?;
     let token = bearer.ok_or(AuthAdmissionError::MissingBearer)?;
     let key = jwt_decoding_key(verifier)?;
     let mut validation = Validation::new(verifier.algorithm);
     validation.required_spec_claims.insert("exp".to_owned());
     validation.required_spec_claims.insert("iss".to_owned());
+    validation.required_spec_claims.insert("aud".to_owned());
     validation.required_spec_claims.insert("sub".to_owned());
+    validation.validate_nbf = true;
+    validation.set_issuer(&[expected_issuer]);
+    validation.set_audience(&[expected_audience]);
     let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
     if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
@@ -536,6 +553,7 @@ mod tests {
             &Header::new(Algorithm::HS256),
             &json!({
                 "iss": issuer,
+                "aud": "jazz-audience",
                 "sub": subject,
                 "exp": 4_102_444_800_u64,
                 "claims": {
@@ -547,11 +565,13 @@ mod tests {
         .unwrap()
     }
 
-    fn test_jwt_config() -> AuthAdmissionConfig {
+    fn test_jwt_config(issuer: &str) -> AuthAdmissionConfig {
         AuthAdmissionConfig::jwt(JwtVerifierConfig::hmac_secret(
             Algorithm::HS256,
             TEST_JWT_SECRET,
         ))
+        .with_expected_issuer(issuer)
+        .with_expected_audience("jazz-audience")
     }
 
     #[test]
@@ -590,7 +610,7 @@ mod tests {
     fn signed_external_jwt_preserves_exact_issuer_and_subject() {
         let token = signed_test_jwt(" https://issuer.example ", " user ");
         let admitted = admit_bearer_jwt(
-            &test_jwt_config(),
+            &test_jwt_config(" https://issuer.example "),
             Some(&token),
             AdmissionSource::AuthorizationHeader,
         )
@@ -621,7 +641,7 @@ mod tests {
             let token = signed_test_jwt(issuer, "user");
             assert_eq!(
                 admit_bearer_jwt(
-                    &test_jwt_config(),
+                    &test_jwt_config(issuer),
                     Some(&token),
                     AdmissionSource::AuthorizationHeader,
                 ),

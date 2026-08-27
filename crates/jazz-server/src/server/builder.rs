@@ -764,6 +764,35 @@ fn validate_server_config(
     auth_config: &AuthConfig,
     topology: ServerTopology,
 ) -> Result<(), String> {
+    let has_external_jwt_key =
+        auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
+    if has_external_jwt_key {
+        if auth_config
+            .jwt_issuer
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(
+                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
+            );
+        }
+        if auth_config
+            .jwt_audience
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(
+                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE"
+                    .to_owned(),
+            );
+        }
+    } else if auth_config.jwt_issuer.is_some() || auth_config.jwt_audience.is_some() {
+        return Err(
+            "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
+                .to_owned(),
+        );
+    }
+
     if topology.is_edge() && auth_config.admin_secret.is_none() {
         return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
@@ -773,11 +802,14 @@ fn validate_server_config(
 
 fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, topology={:?}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}, topology={:?}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
         auth_config.jwt_public_key.is_some(),
+        auth_config.jwt_issuer.is_some(),
+        auth_config.jwt_audience.is_some(),
         auth_config.auth_cookie_name.is_some(),
+        auth_config.trust_forwarded_host,
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
         topology
