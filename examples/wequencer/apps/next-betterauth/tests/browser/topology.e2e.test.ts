@@ -405,6 +405,14 @@ describe("Wequencer cross-topology recovery", () => {
               );
               expect(replayedSteps).toHaveLength(stepsPerTrack);
               expect(subscribedTrackSteps).toHaveLength(stepsPerTrack);
+              await waitForQuery(
+                owner,
+                trackSteps(tracks[0].id),
+                (rows) => rows.some((step) => step.id === subscribedOwnerStepId),
+                "persistent owner reopens target track steps",
+                20_000,
+                "edge",
+              );
               // The collaborator's subscription was established before the
               // owner's partition. A later update after reconnect *and*
               // owner restart must still reach that same subscription rather
