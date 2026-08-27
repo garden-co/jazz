@@ -208,6 +208,13 @@ coordinate only, while `BranchKey`, `RowUuid`, and `TxId` retain their canonical
 portable meanings. A parent is only a `TxId` within that same enclosing
 table/branch/row/layer coordinate. Parent lists are strictly sorted and unique;
 cross-coordinate parents are rejected rather than inferred or re-routed.
+When a child arrives before its parent, the pending receipt durably carries the
+child's full expected coordinate alongside that `TxId`; arrival of a
+multi-version parent satisfies it only by an exact coordinate match. A
+different row, branch, table, or layer rejects the pending child rather than
+leaving an unconstrained causal edge behind. A deliberately partial
+view-scoped transaction receipt is not proof of mismatch; it retains the
+constraint until that coordinate or a complete authority receipt arrives.
 
 `BranchKey` bytes use the frozen engine-owned codec in SPEC 11: a versioned,
 length-delimited, strictly increasing `(column name, canonical typed value

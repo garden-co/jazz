@@ -1642,3 +1642,187 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
         vec![(row, title_cells("parent"))]
     );
 }
+
+#[test]
+fn local_history_rejects_noncanonical_parent_order_before_persistence() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x71));
+    let later = TxId::new(TxTime::from(20), node(0x01));
+    let earlier = TxId::new(TxTime::from(10), node(0x01));
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x71), 30)
+                .parents(vec![later, earlier])
+                .cells(title_cells("must not reorder durable parents")),
+        ),
+        Err(Error::InvalidMergeableCommit("row version parents must be sorted and unique"))
+    ));
+    assert!(core.row_history("todos", row(0x71)).unwrap().is_empty());
+}
+
+#[test]
+fn remote_history_rejects_noncanonical_parent_order_before_parking() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x76));
+    let tx_id = TxId::new(TxTime::from(30), node(0x77));
+    let later = TxId::new(TxTime::from(20), node(0x01));
+    let earlier = TxId::new(TxTime::from(10), node(0x01));
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row(0x76),
+            vec![later, earlier],
+            title_cells("must reject before parking"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        core.transaction_record(tx_id).unwrap().fate,
+        Fate::Rejected(RejectionReason::MalformedCommit(ref detail))
+            if detail == "row version parents must be sorted and unique"
+    ));
+}
+
+#[test]
+fn known_parent_must_match_exact_row_coordinate_and_layer() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x72));
+    let content_parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 10).cells(title_cells("parent")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x73), 11)
+                .parents(vec![content_parent])
+                .cells(title_cells("wrong row")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    let deletion_parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 12)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 13)
+                .parents(vec![deletion_parent])
+                .cells(title_cells("wrong layer")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+}
+
+#[test]
+fn unknown_parent_constraint_rejects_child_when_wrong_parent_row_arrives() {
+    let schema = schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&dir, schema.clone());
+    let child_row = row(0x73);
+    let parent = TxId::new(TxTime::from(40), node(0x74));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", child_row, 50)
+                .parents(vec![parent])
+                .cells(title_cells("constrained pending child")),
+        )
+        .unwrap();
+    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
+
+    core.database.close().unwrap();
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(1), schema);
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row(0x75),
+            Vec::new(),
+            title_cells("wrong parent coordinate"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(
+        core.transaction_record(child).unwrap().fate,
+        Fate::Rejected(RejectionReason::CausalityViolation),
+        "arrival of a parent transaction with only another row must resolve the durable constraint"
+    );
+}
+
+#[test]
+fn unknown_parent_constraint_survives_matching_parent_arrival() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x78));
+    let row_uuid = row(0x78);
+    let parent = TxId::new(TxTime::from(40), node(0x79));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 50)
+                .parents(vec![parent])
+                .cells(title_cells("constrained pending child")),
+        )
+        .unwrap();
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row_uuid,
+            Vec::new(),
+            title_cells("matching parent coordinate"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
+}

@@ -1958,12 +1958,11 @@ pub struct BranchKey {
 }
 
 impl BranchKey {
-    /// Canonical bytes used as the physical branch-local row-key prefix.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        assert!(
-            self.is_canonical(),
-            "branch keys require canonical ordered names and values"
-        );
+    /// Check and encode the physical branch-local row-key prefix.
+    pub fn try_canonical_bytes(&self) -> Result<Vec<u8>, BranchCodecError> {
+        if !self.is_canonical() {
+            return Err(BranchCodecError::InvalidEnvelope);
+        }
         let mut bytes = Vec::new();
         bytes.push(BRANCH_KEY_CODEC_VERSION);
         put_branch_component_len(&mut bytes, self.values.len());
@@ -1973,7 +1972,13 @@ impl BranchKey {
             put_branch_component_len(&mut bytes, value.0.len());
             bytes.extend(&value.0);
         }
-        bytes
+        Ok(bytes)
+    }
+
+    /// Canonical bytes for an already-validated key.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        self.try_canonical_bytes()
+            .expect("branch keys must be canonical before serialization")
     }
 
     /// Decode a persisted exact branch key.

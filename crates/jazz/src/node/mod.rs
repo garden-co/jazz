@@ -792,44 +792,11 @@ struct Parking {
 #[derive(Clone, Debug, Default)]
 struct CachedTransactionVersions {
     versions: Vec<VersionRow>,
-    by_schema_table_row: BTreeMap<(SchemaVersionAlias, String, RowUuid), Vec<usize>>,
 }
 
 impl CachedTransactionVersions {
     fn new(versions: Vec<VersionRow>) -> Self {
-        let mut by_schema_table_row = BTreeMap::new();
-        for (index, version) in versions.iter().enumerate() {
-            by_schema_table_row
-                .entry((
-                    version.schema_version_alias(),
-                    version.table().to_owned(),
-                    version.row_uuid(),
-                ))
-                .or_insert_with(Vec::new)
-                .push(index);
-        }
-        Self {
-            versions,
-            by_schema_table_row,
-        }
-    }
-
-    fn versions_for_schema_table_row(
-        &self,
-        schema_alias: SchemaVersionAlias,
-        table: &str,
-        row_uuid: RowUuid,
-    ) -> Vec<VersionRow> {
-        let key = (schema_alias, table.to_owned(), row_uuid);
-        let Some(indexes) = self.by_schema_table_row.get(&key) else {
-            return Vec::new();
-        };
-        #[cfg(test)]
-        record_parent_version_lookup_materialized_rows(indexes.len());
-        indexes
-            .iter()
-            .map(|index| self.versions[*index].clone())
-            .collect()
+        Self { versions }
     }
 }
 
@@ -1811,6 +1778,7 @@ impl MergeableCommit {
             )
         })?;
         validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
+        codec::validate_parent_tx_ids(&self.parents)?;
         if self.cells.iter().any(|(column, value)| {
             value_contains_indirect_descriptor(value)
                 && !self.prepared_large_columns.contains(column)

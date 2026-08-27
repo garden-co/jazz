@@ -1560,11 +1560,13 @@ fn decode_typed_version_witness(
     } else {
         register_values_from_parts(&parts)?
     };
-    Ok(VersionRow {
+    let version = VersionRow {
         table: groove::Intern::new(parts.table),
         branch_key: parts.branch_key,
         record: owned_record_from_storage_values_with_descriptor(plan.descriptor, values)?,
-    })
+    };
+    version.validate_canonical()?;
+    Ok(version)
 }
 
 fn build_version_decode_plan(

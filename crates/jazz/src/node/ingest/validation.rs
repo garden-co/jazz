@@ -2,6 +2,130 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Validate a TxId parent in the only coordinate where it has row-version
+    /// meaning. A missing transaction remains a constrained pending edge; a
+    /// known transaction without this exact version is malformed, never a
+    /// substitute from a sibling row, branch, or deletion layer.
+    pub(super) async fn validate_known_parent_coordinate(
+        &mut self,
+        parent: TxId,
+        coordinate: &ParentCoordinate,
+    ) -> Result<(), Error> {
+        let Some(parent_tx) = self.query_transaction(parent).await? else {
+            return Ok(());
+        };
+        let parent_versions = self.query_versions_for_tx(parent).await?;
+        if parent_versions.is_empty() {
+            return Ok(());
+        }
+        for candidate in &parent_versions {
+            if candidate.row_uuid() == coordinate.row_uuid
+                && candidate.branch_key() == &coordinate.branch_key
+                && candidate.layer() == coordinate.layer
+                && self.physical_table_id_for_version(candidate)? == coordinate.physical_table_id
+            {
+                return Ok(());
+            }
+        }
+        let parent_is_complete = !parent_tx.view_scoped_cardinality
+            && usize::try_from(parent_tx.tx.n_total_writes)
+                .is_ok_and(|expected| parent_versions.len() >= expected);
+        if !parent_is_complete {
+            // A view-scoped transaction may contain only another row so far.
+            // Retain the durable constraint until the requested parent
+            // coordinate arrives or an authority sees the complete unit.
+            return Ok(());
+        }
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer",
+        ))
+    }
+
+    /// Resolve durable constraints left by children that referenced a parent
+    /// before this node received it. A parent transaction can carry many row
+    /// versions, so transaction existence alone is never sufficient.
+    pub(super) async fn reject_mismatched_pending_children_for_parent(
+        &mut self,
+        parent: TxId,
+    ) -> Result<(), Error> {
+        let Some(parent_tx) = self.query_transaction(parent).await? else {
+            return Ok(());
+        };
+        if matches!(parent_tx.fate, Fate::Rejected(_)) {
+            return Ok(());
+        }
+        let parent_versions = self.query_versions_for_tx(parent).await?;
+        if parent_versions.is_empty() {
+            return Ok(());
+        }
+
+        let mut invalid_children = BTreeSet::new();
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .await?
+        {
+            let record = raw.record();
+            let parent_alias = NodeAlias(record.get_u64(
+                PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX,
+            )?);
+            let stored_parent = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
+                self.node_for_alias(parent_alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge parent alias must exist",
+                ))?,
+            );
+            if stored_parent != parent {
+                continue;
+            }
+            let coordinate = pending_edge_coordinate_from_record(record)?;
+            let mut exact = false;
+            for candidate in &parent_versions {
+                if candidate.row_uuid() == coordinate.row_uuid
+                    && candidate.branch_key() == &coordinate.branch_key
+                    && candidate.layer() == coordinate.layer
+                    && self.physical_table_id_for_version(candidate)?
+                        == coordinate.physical_table_id
+                {
+                    exact = true;
+                    break;
+                }
+            }
+            let parent_is_complete = !parent_tx.view_scoped_cardinality
+                && usize::try_from(parent_tx.tx.n_total_writes)
+                    .is_ok_and(|expected| parent_versions.len() >= expected);
+            if !exact && parent_is_complete {
+                let child_alias = NodeAlias(record.get_u64(
+                    PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX,
+                )?);
+                let child = TxId::new(
+                    TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
+                    self.node_for_alias(child_alias).ok_or(Error::InvalidStoredValue(
+                        "pending edge child alias must exist",
+                    ))?,
+                );
+                invalid_children.insert(child);
+            }
+        }
+
+        for child in invalid_children {
+            if self
+                .query_transaction(child)
+                .await?
+                .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
+            {
+                Box::pin(self.apply_fate_update(
+                    child,
+                    Fate::Rejected(RejectionReason::CausalityViolation),
+                    None,
+                    None,
+                ))
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn ingest_transaction_and_versions(
         &mut self,
         tx: Transaction,
@@ -142,6 +266,8 @@ where
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         self.invalidate_tx_version_table_names_cache(tx_id);
+        self.reject_mismatched_pending_children_for_parent(tx_id)
+            .await?;
         Ok(())
     }
 
@@ -166,6 +292,13 @@ where
         }
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+        let parent_nodes = versions
+            .iter()
+            .flat_map(|version| version.parents().into_iter().map(|parent| parent.node))
+            .collect::<BTreeSet<_>>();
+        for parent_node in parent_nodes {
+            self.ensure_node_alias(parent_node).await?;
+        }
         let stored_tx = self.query_transaction(tx.tx_id).await?;
         let tx_already_known = stored_tx.is_some();
         let preserve_authoritative_cardinality = view_scoped_cardinality
@@ -195,23 +328,8 @@ where
             batch.insert("jazz_transactions", tx_values);
         }
 
-        let parent_edges = versions
-            .iter()
-            .flat_map(|version| version.parents())
-            .collect::<BTreeSet<_>>();
-        let pending_edge_rows = if matches!(fate, Fate::Pending) {
-            parent_edges
-                .iter()
-                .map(|parent| {
-                    let parent_alias = self.node_aliases.get(&parent.node).copied().ok_or(
-                        Error::InvalidStoredValue("pending edge parent alias must exist"),
-                    )?;
-                    Ok((*parent, parent_alias))
-                })
-                .collect::<Result<Vec<_>, Error>>()?
-        } else {
-            Vec::new()
-        };
+        let mut parent_edges = BTreeSet::new();
+        let mut pending_parent_constraints = Vec::new();
         let mut pending_global_updates =
             BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
         let mut content_versions = Vec::new();
@@ -237,29 +355,21 @@ where
                     .then_some(author_schema),
             )?;
             let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
+            let layer = VersionLayer::for_record(&version);
+            let parent_coordinate = ParentCoordinate {
+                physical_table_id: table_id,
+                branch_key: stored.branch_key().clone(),
+                row_uuid: stored.row_uuid(),
+                layer,
+            };
             for parent in stored.parents() {
-                let parent_versions = self
-                    .query_versions_for_tx_physical_row(
-                        parent,
-                        author_schema,
-                        &table_schema.name,
-                        stored.row_uuid(),
-                    )
+                self.validate_known_parent_coordinate(parent, &parent_coordinate)
                     .await?;
-                let same_row = parent_versions
-                    .iter()
-                    .filter(|candidate| self.physical_table_id_for_version(candidate).ok() == Some(table_id));
-                if same_row.clone().next().is_some()
-                    && !same_row
-                        .into_iter()
-                        .any(|candidate| candidate.branch_key() == stored.branch_key())
-                {
-                    return Err(Error::InvalidMergeableCommit(
-                        "version parent belongs to a different branch-local row",
-                    ));
+                parent_edges.insert(parent);
+                if matches!(fate, Fate::Pending) {
+                    pending_parent_constraints.push((parent, parent_coordinate.clone()));
                 }
             }
-            let layer = VersionLayer::for_record(&version);
             let previous_current = self.query_local_layer_winner_in_branch(
                 &table_schema.name,
                 stored.branch_key(),
@@ -373,8 +483,17 @@ where
                 }
             }
         }
-        for (parent, parent_alias) in &pending_edge_rows {
-            let values = pending_edge_values(tx_node_alias, tx.tx_id, *parent_alias, *parent);
+        for (parent, coordinate) in &pending_parent_constraints {
+            let parent_alias = self.node_aliases.get(&parent.node).copied().ok_or(
+                Error::InvalidStoredValue("pending edge parent alias must exist"),
+            )?;
+            let values = pending_edge_values(
+                tx_node_alias,
+                tx.tx_id,
+                parent_alias,
+                *parent,
+                coordinate,
+            )?;
             if tx_already_known {
                 batch.update("jazz_pending_edges", values);
             } else {
@@ -453,6 +572,11 @@ where
                         version.table()
                     ));
                 }
+            }
+            if let Err(Error::InvalidMergeableCommit(reason)) =
+                validate_canonical_version_parts(version.branch_key(), &version.parents())
+            {
+                return Some(reason.to_owned());
             }
             let Some(schema) = self
                 .catalogue

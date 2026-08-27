@@ -101,9 +101,10 @@ where
                             "pending edge parent alias must exist",
                         ))?,
                 );
+                let coordinate = pending_edge_coordinate_from_record(record)?;
                 batch.delete(
                     "jazz_pending_edges",
-                    pending_edge_primary_key(child_alias, tx_id, parent_alias, parent),
+                    pending_edge_primary_key(child_alias, tx_id, parent_alias, parent, &coordinate)?,
                 );
             }
         }

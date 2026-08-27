@@ -1467,6 +1467,10 @@ fn pending_edges_table() -> GrooveTableSchema {
             column("child_node_id", GrooveColumnType::U64),
             column("parent_time", GrooveColumnType::U64),
             column("parent_node_id", GrooveColumnType::U64),
+            column("physical_table_id", GrooveColumnType::U64),
+            column("branch_key", GrooveColumnType::Bytes),
+            column("row_uuid", GrooveColumnType::Uuid),
+            column("layer", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1474,6 +1478,10 @@ fn pending_edges_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("child_node_id", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("parent_time", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("parent_node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::bytes("branch_key"),
+        PrimaryKeyColumn::uuid("row_uuid"),
+        PrimaryKeyColumn::bytes("layer"),
     ]))
 }
 
