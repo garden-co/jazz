@@ -260,8 +260,8 @@ describe("React Todo App core browser canary", () => {
   it("reopened persistent IndexedDB client catches up a locally durable write after websocket reconnect", async () => {
     const writerDbName = uniqueDbName("core-reconnect-writer");
     const readerDbName = uniqueDbName("core-reconnect-reader");
-    const writerSecret = "71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
-    const readerSecret = "Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
+    const writerSecret = "jazz-auth-v1:71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
+    const readerSecret = "jazz-auth-v1:Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
     const onlineTitle = "Core reconnect online todo";
     const offlineTitle = "Core reconnect offline todo";
     let writerEdgeResult: Error | null | undefined;
