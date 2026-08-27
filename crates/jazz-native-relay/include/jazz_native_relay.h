@@ -42,27 +42,11 @@ jazz_native_relay_status jazz_native_relay_host_execute(
     size_t request_len,
     jazz_native_relay_bytes *out);
 
-/* Admit a postcard RelayScopeAdmissionRequest supplied by trusted platform
- * code. JavaScript receives only the resulting opaque random capability. */
-jazz_native_relay_status jazz_native_relay_host_admit_scope(
-    jazz_native_relay_host *host,
-    const uint8_t *request,
-    size_t request_len,
-    jazz_native_relay_bytes *out);
-
 /* Admit strict JSON from trusted Kotlin/Swift platform code. This is not a
  * JavaScript command: unknown fields, malformed config, SYSTEM identity, and
  * bearer-token claims are rejected by Rust. On success `out` is exactly the
  * opaque 32-byte admission capability, never a config or claim echo. */
 jazz_native_relay_status jazz_native_relay_host_admit_scope_json(
-    jazz_native_relay_host *host,
-    const uint8_t *request,
-    size_t request_len,
-    jazz_native_relay_bytes *out);
-
-/* Revoke a postcard RelayScopeRevocationRequest from trusted platform code.
- * This closes every relay and UI-client alias opened by that capability. */
-jazz_native_relay_status jazz_native_relay_host_revoke_scope(
     jazz_native_relay_host *host,
     const uint8_t *request,
     size_t request_len,

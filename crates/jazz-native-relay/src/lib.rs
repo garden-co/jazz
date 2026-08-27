@@ -100,11 +100,10 @@ pub struct RelayScopeRequest {
     pub auth_scope: Option<String>,
 }
 
-/// Configuration admitted by trusted platform code before JavaScript may open
-/// a relay. This uses a separate C ABI entry point and is deliberately not a
-/// [`RelayCommandRequest`] variant.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeAdmissionRequest {
+/// Normalized configuration admitted internally after the strict trusted JSON
+/// boundary. It is deliberately not a [`RelayCommandRequest`] variant.
+#[derive(Clone, Debug, PartialEq)]
+struct RelayScopeAdmissionRequest {
     pub scope: RelayScopeRequest,
     pub sqlite_path: String,
     pub schema_json: String,
@@ -198,15 +197,10 @@ fn reject_bearer_claims(claims: &BTreeMap<String, Value>) -> Result<(), JazzNati
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeAdmissionResponse {
-    pub admitted_scope: AdmissionCapability,
-}
-
 /// Unguessable authority to open one host-admitted native scope.
 ///
 /// Its representation is opaque to JavaScript and platform bindings. They
-/// carry the postcard bytes returned by trusted admission unchanged.
+/// carry its raw 32 bytes only as a handle for ordinary relay commands.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct AdmissionCapability([u8; 32]);
 
@@ -214,16 +208,6 @@ impl std::fmt::Debug for AdmissionCapability {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("AdmissionCapability([redacted])")
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeRevocationRequest {
-    pub admitted_scope: AdmissionCapability,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeRevocationResponse {
-    pub revoked: bool,
 }
 
 impl From<RelayScopeRequest> for RelayScope {
@@ -534,7 +518,7 @@ impl NativeRelayHost {
     fn admit_scope(
         &mut self,
         request: RelayScopeAdmissionRequest,
-    ) -> Result<RelayScopeAdmissionResponse, JazzNativeRelayStatus> {
+    ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
         RelayScope::from(request.scope.clone())
             .validate()
             .map_err(relay_status)?;
@@ -578,9 +562,7 @@ impl NativeRelayHost {
                 claims: request.claims,
             },
         );
-        Ok(RelayScopeAdmissionResponse {
-            admitted_scope: handle,
-        })
+        Ok(handle)
     }
 
     fn revoke_scope(&mut self, admitted_scope: AdmissionCapability) -> bool {
@@ -792,61 +774,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_execute(
     JazzNativeRelayStatus::Ok
 }
 
-/// Admit one persistence/authentication scope from trusted platform code.
-///
-/// This entry point is intentionally separate from the opaque JavaScript
-/// command channel. JNI/Swift derive the path, schema, database identity, and
-/// opaque authentication scope, admit them here, then reveal only the returned
-/// handle to JavaScript.
-///
-/// # Safety
-/// `host`, request bytes, and `out` follow the same rules as
-/// [`jazz_native_relay_host_execute`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn jazz_native_relay_host_admit_scope(
-    host: *mut JazzNativeRelayHost,
-    request: *const u8,
-    request_len: usize,
-    out: *mut JazzNativeRelayBytes,
-) -> JazzNativeRelayStatus {
-    if out.is_null() {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    unsafe { *out = JazzNativeRelayBytes::EMPTY };
-    if host.is_null() || (request.is_null() && request_len != 0) {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let request = if request_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(request, request_len) }
-    };
-    let request = match postcard::from_bytes::<RelayScopeAdmissionRequest>(request) {
-        Ok(request) => request,
-        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
-    };
-    let mut host = match unsafe { (&*host).inner.lock() } {
-        Ok(host) => host,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    let response = match host.admit_scope(request) {
-        Ok(response) => response,
-        Err(status) => return status,
-    };
-    let bytes = match postcard::to_allocvec(&response) {
-        Ok(bytes) => bytes,
-        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
-    };
-    let boxed = bytes.into_boxed_slice();
-    unsafe {
-        *out = JazzNativeRelayBytes {
-            len: boxed.len(),
-            data: Box::into_raw(boxed).cast(),
-        };
-    }
-    JazzNativeRelayStatus::Ok
-}
-
 /// Admit one complete trusted scope described as strict JSON by Kotlin or
 /// Swift/Objective-C. This is intentionally a separate platform-only entry
 /// point: generic JavaScript `execute` accepts only [`RelayCommandRequest`]
@@ -890,11 +817,11 @@ pub unsafe extern "C" fn jazz_native_relay_host_admit_scope_json(
         Ok(host) => host,
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
-    let response = match host.admit_scope(request) {
-        Ok(response) => response,
+    let capability = match host.admit_scope(request) {
+        Ok(capability) => capability,
         Err(status) => return status,
     };
-    let mut capability = response.admitted_scope.0.to_vec();
+    let mut capability = capability.0.to_vec();
     unsafe {
         *out = JazzNativeRelayBytes {
             len: capability.len(),
@@ -902,56 +829,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_admit_scope_json(
         };
     }
     std::mem::forget(capability);
-    JazzNativeRelayStatus::Ok
-}
-
-/// Revoke one trusted admission capability and close every relay/client alias
-/// opened through it. Unknown or already-revoked capabilities are idempotent.
-///
-/// # Safety
-/// `host`, request bytes, and `out` follow the same rules as
-/// [`jazz_native_relay_host_execute`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn jazz_native_relay_host_revoke_scope(
-    host: *mut JazzNativeRelayHost,
-    request: *const u8,
-    request_len: usize,
-    out: *mut JazzNativeRelayBytes,
-) -> JazzNativeRelayStatus {
-    if out.is_null() {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    unsafe { *out = JazzNativeRelayBytes::EMPTY };
-    if host.is_null() || (request.is_null() && request_len != 0) {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let request = if request_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(request, request_len) }
-    };
-    let request = match postcard::from_bytes::<RelayScopeRevocationRequest>(request) {
-        Ok(request) => request,
-        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
-    };
-    let mut host = match unsafe { (&*host).inner.lock() } {
-        Ok(host) => host,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    let response = RelayScopeRevocationResponse {
-        revoked: host.revoke_scope(request.admitted_scope),
-    };
-    let bytes = match postcard::to_allocvec(&response) {
-        Ok(bytes) => bytes,
-        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
-    };
-    let boxed = bytes.into_boxed_slice();
-    unsafe {
-        *out = JazzNativeRelayBytes {
-            len: boxed.len(),
-            data: Box::into_raw(boxed).cast(),
-        };
-    }
     JazzNativeRelayStatus::Ok
 }
 
@@ -2189,25 +2066,8 @@ mod tests {
             identity,
             claims: BTreeMap::new(),
         };
-        let admission_bytes = postcard::to_allocvec(&admission).unwrap();
-        let mut admission_output = JazzNativeRelayBytes::EMPTY;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_admit_scope(
-                    host,
-                    admission_bytes.as_ptr(),
-                    admission_bytes.len(),
-                    &mut admission_output,
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        let admitted_scope = postcard::from_bytes::<RelayScopeAdmissionResponse>(unsafe {
-            std::slice::from_raw_parts(admission_output.data, admission_output.len)
-        })
-        .unwrap()
-        .admitted_scope;
-        unsafe { jazz_native_relay_bytes_free(&mut admission_output) };
+        let admitted_scope = unsafe { (*host).inner.lock().unwrap().admit_scope(admission) }
+            .expect("test admission is valid");
         let open = RelayCommandRequest::Open {
             supported_abi_minimum: NATIVE_RELAY_ABI_VERSION,
             supported_abi_maximum: NATIVE_RELAY_ABI_VERSION,
@@ -2332,7 +2192,6 @@ mod tests {
                     claims: BTreeMap::new(),
                 })
                 .unwrap()
-                .admitted_scope
         };
         let request = |minimum, maximum| RelayCommandRequest::Open {
             supported_abi_minimum: minimum,
@@ -2449,11 +2308,16 @@ mod tests {
             JazzNativeRelayStatus::InvalidCommand
         );
 
-        let bearer = serde_json::to_vec(&request(BTreeMap::from([(
+        let mut bearer = request(BTreeMap::from([(
             "access_token".to_owned(),
             Value::String("never-persist-a-bearer".to_owned()),
-        )])))
-        .unwrap();
+        )]));
+        // Keep this otherwise-valid request outside the already-admitted
+        // scope, so rejection proves the credential filter rather than the
+        // immutable-scope configuration check below.
+        bearer["scope"]["auth_scope"] =
+            serde_json::Value::String("different-valid-subject".to_owned());
+        let bearer = serde_json::to_vec(&bearer).unwrap();
         assert_eq!(
             unsafe {
                 jazz_native_relay_host_admit_scope_json(
@@ -2548,25 +2412,8 @@ mod tests {
             host: *mut JazzNativeRelayHost,
             request: RelayScopeAdmissionRequest,
         ) -> AdmissionCapability {
-            let request = postcard::to_allocvec(&request).unwrap();
-            let mut output = JazzNativeRelayBytes::EMPTY;
-            assert_eq!(
-                unsafe {
-                    jazz_native_relay_host_admit_scope(
-                        host,
-                        request.as_ptr(),
-                        request.len(),
-                        &mut output,
-                    )
-                },
-                JazzNativeRelayStatus::Ok
-            );
-            let response = postcard::from_bytes::<RelayScopeAdmissionResponse>(unsafe {
-                std::slice::from_raw_parts(output.data, output.len)
-            })
-            .unwrap();
-            unsafe { jazz_native_relay_bytes_free(&mut output) };
-            response.admitted_scope
+            unsafe { (*host).inner.lock().unwrap().admit_scope(request) }
+                .expect("test admission is valid")
         }
         let alice = unsafe { admit(host, admission("alice", 0xa1)) };
         let bob = unsafe { admit(host, admission("bob", 0xb1)) };
@@ -2605,30 +2452,7 @@ mod tests {
             Err(JazzNativeRelayStatus::InvalidHandle)
         );
 
-        let request = postcard::to_allocvec(&RelayScopeRevocationRequest {
-            admitted_scope: alice,
-        })
-        .unwrap();
-        let mut output = JazzNativeRelayBytes::EMPTY;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_revoke_scope(
-                    host,
-                    request.as_ptr(),
-                    request.len(),
-                    &mut output,
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        assert!(
-            postcard::from_bytes::<RelayScopeRevocationResponse>(unsafe {
-                std::slice::from_raw_parts(output.data, output.len)
-            })
-            .unwrap()
-            .revoked
-        );
-        unsafe { jazz_native_relay_bytes_free(&mut output) };
+        assert!(unsafe { (*host).inner.lock().unwrap().revoke_scope(alice) });
 
         assert_eq!(
             execute(open(alice)),
