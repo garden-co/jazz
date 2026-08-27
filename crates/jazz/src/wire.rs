@@ -793,7 +793,10 @@ mod tests {
         VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons, expand_version_carriers,
     };
-    use crate::protocol_limits::{MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_WIRE_FRAME_BYTES};
+    use crate::protocol_limits::{
+        MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES,
+        MAX_WIRE_FRAME_BYTES,
+    };
     use crate::query::{BindingId, Operand, Predicate, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
@@ -1095,9 +1098,6 @@ mod tests {
         );
     }
 
-    const BUG_124_POLICY_EXPRESSION_MAX_DEPTH: usize = 64;
-    const BUG_124_POLICY_EXPRESSION_MAX_NODES: usize = 4_096;
-
     fn nested_policy_predicate(nodes: usize) -> Predicate {
         assert!(nodes > 0);
         (1..nodes).fold(
@@ -1131,7 +1131,7 @@ mod tests {
         // This stays internal because postcard decode is the untrusted wire
         // boundary; public query builders only construct already-owned trees.
         let at_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
-            BUG_124_POLICY_EXPRESSION_MAX_DEPTH,
+            MAX_POLICY_EXPRESSION_DEPTH,
         ));
         let encoded = encode_sync_message(&at_depth_limit).expect("encode depth-limit policy");
         assert_eq!(
@@ -1140,7 +1140,7 @@ mod tests {
         );
 
         let over_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
-            BUG_124_POLICY_EXPRESSION_MAX_DEPTH + 1,
+            MAX_POLICY_EXPRESSION_DEPTH + 1,
         ));
         let encoded =
             encode_sync_message(&over_depth_limit).expect("encode over-depth policy fixture");
@@ -1150,7 +1150,7 @@ mod tests {
         );
 
         let at_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
-            BUG_124_POLICY_EXPRESSION_MAX_NODES,
+            MAX_POLICY_EXPRESSION_NODES,
         ));
         let encoded = encode_sync_message(&at_node_limit).expect("encode node-limit policy");
         assert_eq!(
@@ -1159,13 +1159,56 @@ mod tests {
         );
 
         let over_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
-            BUG_124_POLICY_EXPRESSION_MAX_NODES + 1,
+            MAX_POLICY_EXPRESSION_NODES + 1,
         ));
         let encoded =
             encode_sync_message(&over_node_limit).expect("encode over-node policy fixture");
         assert!(
             decode_sync_message(&encoded).is_err(),
             "policy node count must be rejected while postcard is parsing"
+        );
+    }
+
+    #[test]
+    fn ordinary_policy_predicate_variants_keep_their_postcard_roundtrip() {
+        let operands = || {
+            (
+                Operand::Column("owner".to_owned()),
+                Operand::Param("subject".to_owned()),
+            )
+        };
+        let (eq_left, eq_right) = operands();
+        let (ne_left, ne_right) = operands();
+        let (gt_left, gt_right) = operands();
+        let (gte_left, gte_right) = operands();
+        let (lt_left, lt_right) = operands();
+        let (lte_left, lte_right) = operands();
+        let (contains_left, contains_right) = operands();
+        let predicate = Predicate::All(vec![
+            Predicate::Any(Vec::new()),
+            Predicate::Eq(eq_left, eq_right),
+            Predicate::Ne(ne_left, ne_right),
+            Predicate::In(
+                Operand::Column("team".to_owned()),
+                vec![Operand::Param("team".to_owned())],
+            ),
+            Predicate::Gt(gt_left, gt_right),
+            Predicate::Gte(gte_left, gte_right),
+            Predicate::Lt(lt_left, lt_right),
+            Predicate::Lte(lte_left, lte_right),
+            Predicate::Contains(contains_left, contains_right),
+            Predicate::EnumMatch {
+                column: "status".to_owned(),
+                case: "active".to_owned(),
+                payload: Box::new(Predicate::IsNull(Operand::Column("deleted_at".to_owned()))),
+            },
+        ]);
+        let message = register_shape_with_policy_predicate(predicate);
+        let encoded = encode_sync_message(&message).expect("encode ordinary policy variants");
+
+        assert_eq!(
+            decode_sync_message(&encoded).expect("decode ordinary policy variants"),
+            message
         );
     }
 
