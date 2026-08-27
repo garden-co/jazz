@@ -20,12 +20,12 @@ const wequencerPermissions = s.definePermissions(
           role: "owner",
         }),
       ]);
-    const isOwner = (sessionId: RowRefValue) =>
-      policy.session_members.exists.where({
-        session_id: sessionId,
-        member_author: session.user,
-        role: "owner",
-      });
+    // Administrative authority is the immutable system author of the session
+    // row. `owner` is only the creator's initial collaboration role: deleting
+    // or replacing that mutable membership row must not transfer or revoke the
+    // creator's ability to administer the session.
+    const isCreator = (sessionId: RowRefValue) =>
+      policy.sessions.exists.where({ id: sessionId, $createdBy: session.user });
     policy.profiles.allowRead.where({ author: session.user });
     policy.profiles.allowInsert.where({ author: session.user });
     policy.profiles.allowUpdate
@@ -45,7 +45,7 @@ const wequencerPermissions = s.definePermissions(
     policy.tracks.allowRead.where((row) => isMember(row.session_id));
     policy.tracks.allowInsert.where((row) => canEdit(row.session_id));
     policy.tracks.allowUpdate.where((row) => canEdit(row.session_id));
-    policy.tracks.allowDelete.where((row) => isOwner(row.session_id));
+    policy.tracks.allowDelete.where((row) => isCreator(row.session_id));
     policy.steps.allowRead.where(allowedTo.read("track_id"));
     policy.steps.allowInsert.where(allowedTo.update("track_id"));
     policy.steps.allowUpdate.where(allowedTo.update("track_id"));

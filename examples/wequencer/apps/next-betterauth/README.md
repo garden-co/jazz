@@ -11,9 +11,11 @@ It is a product-shaped Jazz example, not an audio engine.
   canonical issuer-scoped author, not a raw provider user id.
 - The authenticated dashboard performs idempotent profile bootstrap on the
   server. Queries never create profiles, sessions, or membership rows.
-- The session creator manages membership through creator-bound policy. The
-  `owner` role records the creator's initial membership but is not transferable;
-  richer ownership semantics are tracked in [#2100](https://github.com/garden-co/jazz/issues/2100).
+- The session creator manages membership through immutable `$createdBy`
+  metadata. The `owner` role records the creator's initial collaboration
+  membership but is neither transferable nor administrative; deleting or
+  downgrading that row does not change creator authority. Richer ownership
+  semantics are tracked in [#2100](https://github.com/garden-co/jazz/issues/2100).
   Editors change tracks, pads, and transport observations; viewers only read.
 - Each pad is an ordinary indexed row. Parent-scoped ordered queries keep a
   4×16 grid locally responsive and converge independent edits after reconnect.
@@ -29,10 +31,12 @@ pnpm test:browser:focused -- tests/browser/topology.e2e.test.ts
 cargo test -p jazz-example-wequencer-benchmark --tests
 ```
 
-The topology receipt covers creator bootstrap, editor admission, ordered 64-pad
-projection, local offline edits, reconnect convergence, viewer denial, and
-advisory presence. The benchmark uses the same session/track/pad query shapes
-and asserts their ordering and subscription delivery contract.
+The topology receipt, run through the current fingerprinted WASM/NAPI artifacts,
+covers creator bootstrap, immutable creator administration after an `owner`
+membership change, editor admission, ordered 64-pad projection, local offline
+edits, reconnect convergence, viewer denial, and advisory presence. The
+benchmark uses the same session/track/pad query shapes and asserts their ordering
+and subscription delivery contract.
 
 ## Non-goals
 
