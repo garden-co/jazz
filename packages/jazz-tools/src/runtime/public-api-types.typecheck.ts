@@ -57,9 +57,9 @@ const cookie: RuntimeDbConfig = {
   cookieSession,
 };
 const admin: PackageDbConfig = { appId: "app", adminSecret: "admin" };
-// @ts-expect-error backend admission credentials are server-only; use jazz-tools/backend.
 const backend: PackageDbConfig = {
   appId: "app",
+  // @ts-expect-error backend admission credentials are server-only; use jazz-tools/backend.
   backendSecret: "backend",
   cookieSession,
 };
