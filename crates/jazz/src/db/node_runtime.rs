@@ -1252,22 +1252,51 @@ where
         let mut connection_ref = connection.borrow_mut();
         let connection_epoch = connection_ref.connection_epoch;
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
+        let mut reconnect_permission_advice = Vec::new();
         let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
             match &mut connection_ref.link {
                 ConnectionLink::Upstream(UpstreamConnectionState {
                     expected_scope_authority,
                     large_value_uploads,
                     awaiting_large_value_uploads,
+                    pending,
+                    scope_lease_manager,
                     ..
-                }) => (
-                    *expected_scope_authority,
-                    Some(connection_epoch),
-                    Some(peer_connection::take_reconnectable_large_value_uploads(
-                        large_value_uploads,
-                        awaiting_large_value_uploads,
-                    )),
-                    Vec::new(),
-                ),
+                }) => {
+                    // Permission-advice futures outlive one transport. Rebuild
+                    // their link-local scope bookkeeping on the successor,
+                    // one command per live waiter so identical actions can
+                    // coalesce under its fresh authority context and wire id.
+                    let live_waiters = self.permission_advice_waiters.borrow();
+                    let mut queued = BTreeSet::new();
+                    for command in pending.iter() {
+                        let PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } =
+                            command
+                        else {
+                            continue;
+                        };
+                        if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
+                            reconnect_permission_advice.push((*request_id, action.clone()));
+                        }
+                    }
+                    for request in scope_lease_manager.requests.values() {
+                        for request_id in &request.waiters {
+                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
+                                reconnect_permission_advice
+                                    .push((*request_id, request.action.clone()));
+                            }
+                        }
+                    }
+                    (
+                        *expected_scope_authority,
+                        Some(connection_epoch),
+                        Some(peer_connection::take_reconnectable_large_value_uploads(
+                            large_value_uploads,
+                            awaiting_large_value_uploads,
+                        )),
+                        Vec::new(),
+                    )
+                }
                 ConnectionLink::Subscriber(SubscriberConnectionState {
                     peer,
                     served,
@@ -1327,6 +1356,19 @@ where
                 retired_relay_subscriptions
                     .into_iter()
                     .map(|(subscription, _)| PendingUpstreamCommand::Unsubscribe(subscription)),
+            );
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+        if !reconnect_permission_advice.is_empty() {
+            self.upstream_subscriptions.borrow_mut().extend(
+                reconnect_permission_advice
+                    .into_iter()
+                    .map(
+                        |(request_id, action)| PendingUpstreamCommand::AuthorizationScopeIntent {
+                            request_id,
+                            action,
+                        },
+                    ),
             );
             self.schedule_tick(TickUrgency::Immediate);
         }
