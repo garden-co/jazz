@@ -2064,7 +2064,8 @@ impl CoreDb {
     }
 
     pub(super) fn tick(&self) -> Result<(), Error> {
-        block_on(self.server.tick()).map(|_| ())
+        let tick = Box::pin(self.server.tick());
+        block_on(tick).map(|_| ())
     }
 
     pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
