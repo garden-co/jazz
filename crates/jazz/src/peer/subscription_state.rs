@@ -6,7 +6,7 @@
 //! assignment.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use groove::ivm::MultisinkSubscription;
 
@@ -201,18 +201,18 @@ pub(super) enum MemberIndexKey {
 #[derive(Debug)]
 pub(super) struct CachedPeerQueryPlan {
     tier: DurabilityTier,
-    read_view: Rc<ReadViewSpec>,
+    read_view: Arc<ReadViewSpec>,
     plan: Option<PreparedQueryPlanHandle>,
 }
 
 impl CachedPeerQueryPlan {
     pub(super) fn with_plan(opts: &RegisterShapeOptions, plan: PreparedQueryPlanHandle) -> Self {
-        Self::with_context(opts.tier, Rc::new(opts.read_view.clone()), plan)
+        Self::with_context(opts.tier, Arc::new(opts.read_view.clone()), plan)
     }
 
     pub(super) fn with_context(
         tier: DurabilityTier,
-        read_view: Rc<ReadViewSpec>,
+        read_view: Arc<ReadViewSpec>,
         plan: PreparedQueryPlanHandle,
     ) -> Self {
         Self {
@@ -238,8 +238,8 @@ impl CachedPeerQueryPlan {
         self.plan = None;
     }
 
-    pub(super) fn context(&self) -> (DurabilityTier, Rc<ReadViewSpec>) {
-        (self.tier, Rc::clone(&self.read_view))
+    pub(super) fn context(&self) -> (DurabilityTier, Arc<ReadViewSpec>) {
+        (self.tier, Arc::clone(&self.read_view))
     }
 }
 

@@ -86,6 +86,12 @@ fn fast_cursor_membership_mismatch_detects_pre_cursor_changes() {
 }
 
 #[test]
+fn peer_state_remains_send_for_threaded_simulations() {
+    fn assert_send<T: Send>() {}
+    assert_send::<PeerState>();
+}
+
+#[test]
 fn fast_cursor_membership_bounds_authoritative_resets() {
     // This is intentionally an internal test: the four-way decision is a
     // peer-only protocol control-plane predicate, with no public API
