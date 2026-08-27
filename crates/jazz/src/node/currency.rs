@@ -542,17 +542,18 @@ where
         Ok(versions)
     }
 
-    /// Return the versions authored by one transaction for one logical table.
+    /// Return the versions authored by one transaction for one physical row.
     ///
     /// Unlike [`Self::query_versions_for_tx`], this deliberately visits only
     /// the requested table's physical history sources. It still uses the
     /// transaction index rather than a branch-local primary key so callers
     /// validating a causal parent can observe versions from every branch.
-    pub(super) async fn query_versions_for_tx_table(
+    pub(super) async fn query_versions_for_tx_physical_row(
         &mut self,
         tx_id: TxId,
         schema_version: SchemaVersionId,
         table: &str,
+        row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
         let requested_table_id = self.physical_table_id_for_schema(schema_version, table)?;
         if let Some(cached) = self.query.tx_versions_cache.get(&tx_id) {
@@ -568,14 +569,14 @@ where
                             .flatten()
                     })
                 })
-                .collect::<Vec<_>>();
+                .collect::<BTreeSet<_>>();
             let mut versions = Vec::new();
-            for version in cached {
-                if table_aliases.iter().any(|(schema_alias, table)| {
-                    table == version.table() && *schema_alias == version.schema_version_alias()
-                }) {
-                    versions.push(version.clone());
-                }
+            for (schema_alias, table) in table_aliases {
+                versions.extend(cached.versions_for_schema_table_row(
+                    schema_alias,
+                    &table,
+                    row_uuid,
+                ));
             }
             return Ok(versions);
         }
@@ -599,6 +600,22 @@ where
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
             for raw in raws {
+                if storage_table == SHARED_DELETION_HISTORY_TABLE
+                    && PhysicalTableId(
+                        raw.borrowed()
+                            .get_u64(SharedDeletionHistoryRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
+                    ) != requested_table_id
+                {
+                    continue;
+                }
+                let row_uuid_index = if storage_table == SHARED_DELETION_HISTORY_TABLE {
+                    SharedDeletionHistoryRowRecord::FIELD_ROW_UUID_IDX
+                } else {
+                    HistoryRowRecord::FIELD_ROW_UUID_IDX
+                };
+                if RowUuid(raw.borrowed().get_uuid(row_uuid_index)?) != row_uuid {
+                    continue;
+                }
                 let requested_table = if storage_table == SHARED_DELETION_HISTORY_TABLE {
                     ""
                 } else {
@@ -607,6 +624,8 @@ where
                 let version =
                     self.decode_history_owned_record(requested_table, &storage_table, raw)?;
                 if self.physical_table_id_for_version(&version)? == requested_table_id {
+                    #[cfg(test)]
+                    record_parent_version_lookup_materialized_rows(1);
                     versions.push(version);
                 }
             }
