@@ -517,6 +517,8 @@ export interface DefinedMigration<
 > {
   readonly from: TFrom;
   readonly to: TTo;
+  readonly fromHash?: string;
+  readonly toHash?: string;
   readonly forward: Lens[];
 }
 
@@ -986,11 +988,11 @@ export function defineMigration<
 >(
   config: {
     /**
-     * Optional schema hash. Used only for documentation purposes.
+     * Optional hash witness for the source schema.
      */
     fromHash?: string;
     /**
-     * Optional schema hash. Used only for documentation purposes.
+     * Optional hash witness for the destination schema.
      */
     toHash?: string;
     /**
@@ -1017,6 +1019,8 @@ export function defineMigration<
   return {
     from: config.from,
     to: config.to,
+    fromHash: config.fromHash,
+    toHash: config.toHash,
     forward: buildForwardLenses(
       config.migrate,
       config.renameTables,

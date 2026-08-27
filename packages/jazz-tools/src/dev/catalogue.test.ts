@@ -1,8 +1,7 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { build as esbuild } from "esbuild";
-import type { BuildOptions } from "esbuild";
+import { build as esbuild, type BuildOptions } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
@@ -617,6 +616,8 @@ export default s.defineMigration({
       );
 
       const { pushMigration } = await import("./catalogue-project.js");
+      const expectedError =
+        tamperKind === "hash" ? "embedded fromHash" : "from schema witness";
       await expect(
         pushMigration({
           appId: APP_ID,
@@ -626,8 +627,12 @@ export default s.defineMigration({
           fromHash,
           toHash,
         }),
-      ).rejects.toThrow(tamperKind === "hash" ? "embedded fromHash" : "from schema witness");
+      ).rejects.toThrow(expectedError);
       expect(migrationPublishCount).toBe(0);
+      const temporaryEntries = (await readdir(migrationsDir)).filter((entry) =>
+        entry.startsWith(".jazz-bundle-"),
+      );
+      expect(temporaryEntries).toEqual([]);
     },
   );
 
