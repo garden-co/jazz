@@ -1498,6 +1498,10 @@ struct PendingAuthorityViewUpdate {
 struct EdgeFateRoute {
     authority: Option<AuthorityContext>,
     queue: Weak<RefCell<Vec<SyncMessage>>>,
+    /// The edge-local acceptance has already been emitted to this exact
+    /// downstream session.  The later Core terminal fate remains separately
+    /// routable through the same retained obligation.
+    edge_acknowledged: bool,
 }
 type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
 
@@ -1592,6 +1596,38 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
             return false;
         };
         queue.borrow_mut().push(fate.clone());
+        !terminal
+    });
+    if pending.is_empty() {
+        routes.remove(&tx_id);
+    }
+}
+
+/// Deliver the edge's own admission fate through the same route registry that
+/// later carries the selected Core fate.  This avoids a direct-response path
+/// that would acknowledge only the tick currently handling the upload (and
+/// would duplicate a retransmitted upload), while a rejection retires the
+/// obligation because there is no admitted unit for Core to settle.
+fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMessage) {
+    let terminal = matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(_),
+            ..
+        }
+    );
+    let mut routes = routes.borrow_mut();
+    let Some(pending) = routes.get_mut(&tx_id) else {
+        return;
+    };
+    pending.retain_mut(|route| {
+        let Some(queue) = route.queue.upgrade() else {
+            return false;
+        };
+        if terminal || !route.edge_acknowledged {
+            queue.borrow_mut().push(fate.clone());
+            route.edge_acknowledged = true;
+        }
         !terminal
     });
     if pending.is_empty() {

@@ -126,6 +126,7 @@ fn dispatch_admitted_subscriber_message<'a, S>(
     edge_fate_routes: &'a EdgeFateRoutes,
     local_fate_routes: &'a LocalFateRoutes,
     downstream_fates: &'a PendingDownstreamFates,
+    now_ms: u64,
     message: SyncMessage,
 ) -> Pin<Box<dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a>>
 where
@@ -188,6 +189,7 @@ where
                                 pending.push(EdgeFateRoute {
                                     authority: Some(authority),
                                     queue: Rc::downgrade(downstream_fates),
+                                    edge_acknowledged: false,
                                 });
                                 true
                             } else {
@@ -221,6 +223,7 @@ where
                                 pending.push(EdgeFateRoute {
                                     authority: None,
                                     queue: Rc::downgrade(downstream_fates),
+                                    edge_acknowledged: false,
                                 });
                                 true
                             }
@@ -238,16 +241,25 @@ where
                     }]));
                 }
 
-                node.lock()
+                let mut node = node.lock().await;
+                let outcome = peer
+                    .ingest_edge_mergeable_commit_unit(&mut node, tx, versions, now_ms)
                     .await
-                    .ingest_relay_commit_unit(tx, versions)
-                    .await?;
-                Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
-                    tx_id,
-                    fate: Fate::Accepted,
-                    global_time: None,
-                    durability: Some(DurabilityTier::Edge),
-                }]))
+                    .map_err(Error::from)?;
+                let (responses, publications, post_settlement_work) = outcome.into_parts();
+                let mut direct_responses = Vec::new();
+                for response in responses {
+                    if matches!(response, SyncMessage::FateUpdate { .. }) {
+                        route_edge_admission_fate(edge_fate_routes, tx_id, &response);
+                    } else {
+                        direct_responses.push(response);
+                    }
+                }
+                Ok(PublicationOutcome {
+                    value: direct_responses,
+                    publications,
+                    post_settlement_work,
+                })
             }
             SyncMessage::CommitUnit { tx, versions }
                 if tx.kind == TxKind::Mergeable
@@ -2960,9 +2972,18 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let edge_client_upload = matches!(
+                                &other,
+                                SyncMessage::CommitUnit { tx, .. } if tx.kind == TxKind::Mergeable
+                            ) && ingest_context.edge_authority
+                                && matches!(peer.role(), PeerRole::ClientLink { .. });
+                            let edge_upload = edge_client_upload.then(|| match &other {
+                                SyncMessage::CommitUnit { tx, .. } => (tx.tx_id, other.clone()),
+                                _ => unreachable!("edge upload was matched as a commit unit"),
+                            });
                             let local_upload = match &other {
                                 SyncMessage::CommitUnit { tx, .. } => {
-                                    Some((tx.tx_id, other.clone()))
+                                    (!edge_client_upload).then(|| (tx.tx_id, other.clone()))
                                 }
                                 _ => None,
                             };
@@ -2995,6 +3016,7 @@ where
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
+                            let now_ms = self.upload_retry_clock.borrow().now_ms();
                             let outcome = dispatch_admitted_subscriber_message(
                                 &self.node,
                                 peer,
@@ -3004,6 +3026,7 @@ where
                                 &self.edge_fate_routes,
                                 &self.local_fate_routes,
                                 &self.downstream_fates,
+                                now_ms,
                                 other,
                             )
                             .await?;
@@ -3034,6 +3057,28 @@ where
                                     response,
                                 )?;
                             }
+                            if let Some((tx_id, unit)) = edge_upload {
+                                let admitted = self
+                                    .node
+                                    .lock()
+                                    .await
+                                    .transaction_state(tx_id)
+                                    .await
+                                    .is_some_and(|(fate, _, durability)| {
+                                        fate == Fate::Accepted
+                                            && durability >= DurabilityTier::Edge
+                                    });
+                                if admitted {
+                                    let mut outbox = outbox.borrow_mut();
+                                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
+                                        outbox.push(PendingUpload {
+                                            tx_id,
+                                            unit: Some(unit),
+                                        });
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                    }
+                                }
+                            }
                             if let Some((tx_id, unit)) = local_upload {
                                 let mut outbox = outbox.borrow_mut();
                                 if outbox.push(PendingUpload {
@@ -3043,6 +3088,74 @@ where
                                     schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                 }
                             }
+                        }
+                    }
+                }
+                // A client upload arriving before its action-specific support
+                // view settles is retained by `PeerState`, not optimistically
+                // inserted into edge history.  Drive that state on every
+                // served-connection turn: the receipt/view may have settled
+                // immediately before or immediately after the original
+                // registration, and all pending commits must make fair
+                // progress without requiring unrelated inbound traffic.
+                if ingest_context.edge_authority
+                    && matches!(peer.role(), PeerRole::ClientLink { .. })
+                {
+                    let now_ms = self.upload_retry_clock.borrow().now_ms();
+                    let outcome = {
+                        let mut node = self.node.lock().await;
+                        peer.drain_deferred_edge_fates(&mut node, now_ms)
+                        .await
+                        .map_err(Error::from)?
+                    };
+                    let (responses, changed, published) =
+                        finish_peer_publication_outcome_with_refresh(
+                            &self.node,
+                            &self.subscriptions,
+                            &self.active_authority_view_receipts,
+                            outcome,
+                            false,
+                        )
+                        .await?;
+                    stats.subscription_events += changed;
+                    needs_subscription_refresh |= published;
+                    let admitted = responses
+                        .iter()
+                        .filter_map(|response| match response {
+                            SyncMessage::FateUpdate {
+                                tx_id,
+                                fate: Fate::Accepted,
+                                durability: Some(durability),
+                                ..
+                            } if *durability >= DurabilityTier::Edge => Some(*tx_id),
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>();
+                    for response in responses {
+                        if let SyncMessage::FateUpdate { tx_id, .. } = &response {
+                            route_edge_admission_fate(
+                                &self.edge_fate_routes,
+                                *tx_id,
+                                &response,
+                            );
+                        } else {
+                            send_with_sync_context(
+                                &self.node,
+                                peer,
+                                self.transport.as_mut(),
+                                response,
+                            )?;
+                        }
+                    }
+                    for tx_id in admitted {
+                        let unit = self.node.lock().await.commit_unit_for(tx_id).await?;
+                        let mut outbox = outbox.borrow_mut();
+                        if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
+                            outbox.push(PendingUpload {
+                                tx_id,
+                                unit: Some(unit),
+                            });
+                            schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                         }
                     }
                 }

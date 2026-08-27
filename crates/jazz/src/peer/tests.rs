@@ -1,5 +1,7 @@
 use super::*;
-use crate::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
+use crate::legacy_test_future::{
+    OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 
 use std::collections::BTreeMap;
 
@@ -855,11 +857,15 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let mut peer = PeerState::edge_client(writer);
 
     let outcome = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, 10)
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10)
         .expect("missing prepared seed claim must be a deferred empty support proof");
     let updates = edge.persist_and_settle_outcome(outcome).unwrap();
     assert!(updates.is_empty());
     assert_eq!(peer.deferred_edge_fate_count(), 1);
+    assert!(
+        edge.transaction_state(tx.tx_id).is_none(),
+        "a pending support proof must not admit a client commit into edge history"
+    );
 }
 
 fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Value> {

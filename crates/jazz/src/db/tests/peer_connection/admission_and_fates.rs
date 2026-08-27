@@ -504,6 +504,156 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     );
 }
 
+/// Edge client ingress uses the same action-specific authority proof as a
+/// terminal Core, but exposes only Edge durability until an admitted upstream
+/// later reports Global.  In particular, this exercises the production
+/// connection loop rather than calling `PeerState`'s focused proof helpers.
+#[test]
+fn edge_client_ingress_proves_actions_before_one_routed_edge_fate() {
+    let schema = owner_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, edge_transport, _client_sent, edge_sent) = duplex_with_taps();
+    let client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        alice,
+        test_provider_claims(alice),
+    );
+
+    let inserted = client
+        .insert(
+            "todos",
+            cells("edge-owned", false, alice),
+            Default::default(),
+        )
+        .unwrap();
+    let inserted_tx = inserted.mergeable_tx_id();
+    let sibling = client
+        .insert(
+            "todos",
+            cells("edge-owned-sibling", false, alice),
+            Default::default(),
+        )
+        .unwrap();
+    let sibling_tx = sibling.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+
+    let edge_acceptances = edge_sent
+        .borrow()
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                SyncMessage::FateUpdate {
+                    tx_id: candidate,
+                    fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Edge),
+                    ..
+                } if *candidate == inserted_tx || *candidate == sibling_tx
+            )
+        })
+        .count();
+    assert_eq!(
+        edge_acceptances, 2,
+        "each queued commit makes fair progress to one routed edge fate"
+    );
+    client.tick().unwrap();
+    assert_eq!(inserted.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        inserted.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+    assert_eq!(sibling.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        sibling.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+    assert!(
+        [inserted_tx, sibling_tx].into_iter().all(|tx_id| edge
+            .server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id)),
+        "only edge-admitted commits enter the Core upload outbox"
+    );
+
+    // A transport retry cannot re-publish the Edge acceptance.  The retained
+    // route is still needed for Core's later terminal fate, but remembers its
+    // per-client edge acknowledgement.
+    client_upstream
+        .borrow_mut()
+        .transport
+        .send(
+            client
+                .node
+                .node
+                .borrow_mut()
+                .commit_unit_for(inserted_tx)
+                .unwrap(),
+        )
+        .unwrap();
+    edge.tick().unwrap();
+    assert!(
+        edge_sent.borrow().is_empty(),
+        "a retransmit must not create a second edge acknowledgement"
+    );
+
+    // The exact update action includes the candidate patch. Alice is allowed
+    // by the old-row policy, but changing owner to Bob fails the update check;
+    // it produces one routed rejection instead of a synthetic Edge success.
+    let denied = client
+        .update(
+            "todos",
+            inserted.row_uuid(),
+            BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
+            Default::default(),
+        )
+        .unwrap();
+    let denied_tx = denied.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    let rejections = edge_sent
+        .borrow()
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                SyncMessage::FateUpdate {
+                    tx_id,
+                    fate: Fate::Rejected(_),
+                    ..
+                } if *tx_id == denied_tx
+            )
+        })
+        .count();
+    assert_eq!(
+        rejections, 1,
+        "denial is routed once through the edge route"
+    );
+    assert!(
+        !edge
+            .server
+            .edge_fate_routes
+            .borrow()
+            .contains_key(&denied_tx),
+        "a locally denied upload cannot leave a Core-fate route behind"
+    );
+    assert!(
+        !edge
+            .server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == denied_tx),
+        "a denied upload must not bypass edge authorization through Core replication"
+    );
+}
+
 #[test]
 fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let schema = schema();
@@ -546,6 +696,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
         vec![EdgeFateRoute {
             authority: Some(first.unwrap()),
             queue: Rc::downgrade(&queue),
+            edge_acknowledged: false,
         }],
     );
     assert!(edge.server.detach_connection(&a));
@@ -609,6 +760,7 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
             .map(|_| EdgeFateRoute {
                 authority: Some(selected),
                 queue: Rc::downgrade(&queue),
+                edge_acknowledged: false,
             })
             .collect(),
     );
@@ -785,10 +937,9 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
             edge.node()
                 .borrow_mut()
                 .transaction_state_settled(tx_id)
-                .unwrap()
-                .0,
-            Fate::Pending,
-            "a rejected fate from a different physical link must not alter edge state"
+                .unwrap(),
+            (Fate::Accepted, None, DurabilityTier::Edge),
+            "a rejected fate from a different physical link must not alter the edge-local admission"
         );
     }
     {
@@ -864,6 +1015,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         vec![EdgeFateRoute {
             authority: Some(selected),
             queue: Rc::downgrade(&downstream),
+            edge_acknowledged: false,
         }],
     );
     b_peer
