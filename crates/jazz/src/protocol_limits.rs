@@ -48,15 +48,18 @@ pub const MAX_SHAPE_AST_BYTES: usize = 64 * 1024;
 /// Maximum recursive policy-predicate nodes on one root-to-leaf path.
 ///
 /// Policy predicates are decoded with a bounded seed before a complete
-/// attacker-controlled tree exists. Sixty-four levels leave ample room for
-/// generated policies while keeping parser and cleanup stacks shallow.
-pub const MAX_POLICY_EXPRESSION_DEPTH: usize = 64;
+/// attacker-controlled tree exists. Keep this aligned with the executable
+/// `MAX_ROW_SET_NESTING_DEPTH` planning ceiling: valid generated policy shapes
+/// may reach that boundary before lowering.
+pub const MAX_POLICY_EXPRESSION_DEPTH: usize = 256;
 
 /// Maximum nodes in one recursively encoded policy expression.
 ///
 /// This is independent of encoded bytes: compact `All`/`Any` children can
-/// otherwise create large retained trees below the shape byte ceiling.
-pub const MAX_POLICY_EXPRESSION_NODES: usize = 4_096;
+/// otherwise create large retained trees below the shape byte ceiling. Keep
+/// this aligned with the established `MAX_CATALOGUE_COLLECTION_ITEMS` protocol
+/// tier rather than introducing a lower policy-only cardinality class.
+pub const MAX_POLICY_EXPRESSION_NODES: usize = 16_384;
 
 /// A named semantic limit crossed while decoding a recursive policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
