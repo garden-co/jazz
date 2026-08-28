@@ -54,6 +54,13 @@ function assertOpaqueRelaySurface(surface, declarations) {
   }
 }
 
+// Keep this declaration-aware rather than scanning broad source text: private
+// trusted admission code may use these words, while comments must neither trip
+// the receipt nor hide a JavaScript-visible declaration.
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
 function braceBody(source, opening) {
   const openingIndex = source.indexOf(opening);
   assert.notEqual(openingIndex, -1, `could not find ${opening}`);
@@ -72,32 +79,81 @@ function braceBody(source, opening) {
 
 function assertOpaqueJsRelaySurface(nativeSpec, relay) {
   const spec = braceBody(nativeSpec, "export interface Spec extends TurboModule");
-  const exportedFunctions = relay.match(/export\s+(?:async\s+)?function\s+[^{]+\{/g) ?? [];
+  const exportedFunctions =
+    stripComments(relay).match(/(?:^|\n)\s*export\s+(?:(?:async|declare)\s+)?(?:function|const|class)\s+[^;{]+(?:\{|=)/g) ?? [];
   assertOpaqueRelaySurface("NativeJazzRelay TurboModule", spec.split(";").filter(Boolean));
   assertOpaqueRelaySurface("relay TypeScript export", exportedFunctions);
 }
 
 function assertOpaqueAndroidRelaySurface(androidModule) {
   const module = braceBody(
-    androidModule,
+    stripComments(androidModule),
     "public class JazzRelayModule extends NativeJazzRelaySpec",
   );
-  const publicMethods = module.match(/@Override\s+public\s+[^{};]+\{/g) ?? [];
-  assertOpaqueRelaySurface("Android TurboModule", publicMethods);
+  const exportedMethods = [];
+  const declarations = /((?:@[A-Za-z_$][A-Za-z0-9_$.]*(?:\s*\([^{}]*\))?\s*)+)public\s+[^{};]+\([^{};]*\)\s*(?:throws\s+[^{}]+)?\{/g;
+  for (const match of module.matchAll(declarations)) {
+    // Generated TurboModule methods use @Override; handwritten React Native
+    // modules use @ReactMethod. Both are JavaScript-visible exports.
+    if (/@(?:Override|ReactMethod)\b/.test(match[1])) exportedMethods.push(match[0]);
+  }
+  assertOpaqueRelaySurface("Android JavaScript export", exportedMethods);
+}
+
+function macroDeclarations(source, macro) {
+  const declarations = [];
+  const token = `${macro}(`;
+  let from = 0;
+  while (true) {
+    const start = source.indexOf(token, from);
+    if (start === -1) return declarations;
+    let depth = 0;
+    let quote = null;
+    let escaped = false;
+    let closed = false;
+    for (let index = start + macro.length; index < source.length; index += 1) {
+      const character = source[index];
+      if (quote !== null) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === quote) quote = null;
+        continue;
+      }
+      if (character === '"' || character === "'") quote = character;
+      else if (character === "(") depth += 1;
+      else if (character === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          declarations.push(source.slice(start, index + 1));
+          from = index + 1;
+          closed = true;
+          break;
+        }
+      }
+    }
+    if (!closed) assert.fail(`unterminated ${macro} declaration`);
+  }
 }
 
 function assertOpaqueIosRelaySurface(iosRelay) {
-  const implementationStart = iosRelay.indexOf("@implementation JazzRelay");
+  const commentFreeRelay = stripComments(iosRelay);
+  const implementationStart = commentFreeRelay.indexOf("@implementation JazzRelay");
   assert.notEqual(implementationStart, -1, "could not find JazzRelay Objective-C implementation");
-  const trustedAdmissionStart = iosRelay.indexOf("@implementation JazzRelayTrustedAdmission");
+  const trustedAdmissionStart = commentFreeRelay.indexOf("@implementation JazzRelayTrustedAdmission");
   assert.notEqual(
     trustedAdmissionStart,
     -1,
     "could not separate trusted Objective-C admission from exported relay module",
   );
-  const relayModule = iosRelay.slice(implementationStart, trustedAdmissionStart);
+  const relayModule = commentFreeRelay.slice(implementationStart, trustedAdmissionStart);
   const exportedMethods = relayModule.match(/^-\s*\([^)]*\)\s*[^{]+\{/gm) ?? [];
-  assertOpaqueRelaySurface("iOS TurboModule", exportedMethods);
+  // Old-architecture modules may use these macros. They declare the
+  // JavaScript method even when no Objective-C signature is in this source.
+  exportedMethods.push(
+    ...macroDeclarations(relayModule, "RCT_EXPORT_METHOD"),
+    ...macroDeclarations(relayModule, "RCT_REMAP_METHOD"),
+  );
+  assertOpaqueRelaySurface("iOS JavaScript export", exportedMethods);
 }
 
 test("jazz-rn publishes an Expo config plugin for a New Architecture development build", () => {
@@ -319,6 +375,39 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
       ),
     /sqlitePath/,
     "a camel-case SQLite path parameter must not enter the Android TurboModule",
+  );
+  assert.throws(
+    () =>
+      assertOpaqueAndroidRelaySurface(
+        androidModule.replace(
+          "  @Override\n  public void execute",
+          "  @ReactMethod(isBlockingSynchronousMethod = true)\n  public void admitScope(String scope) {}\n\n  @Override\n  public void execute",
+        ),
+      ),
+    /admitScope/,
+    "a handwritten @ReactMethod must receive the same trusted-input receipt as generated methods",
+  );
+  assert.throws(
+    () =>
+      assertOpaqueIosRelaySurface(
+        iosRelay.replace(
+          "- (void)invalidate",
+          "RCT_EXPORT_METHOD(admitScope:(NSString *)scope)\n\n- (void)invalidate",
+        ),
+      ),
+    /admitScope/,
+    "an RCT_EXPORT_METHOD must not introduce trusted admission to the iOS JS surface",
+  );
+  assert.throws(
+    () =>
+      assertOpaqueIosRelaySurface(
+        iosRelay.replace(
+          "- (void)invalidate",
+          "RCT_REMAP_METHOD(revokeScope, revokeScope:(NSString *)scope)\n\n- (void)invalidate",
+        ),
+      ),
+    /revokeScope/,
+    "an RCT_REMAP_METHOD must not introduce trusted revocation to the iOS JS surface",
   );
   assert.match(androidBridge, /object JazzRelayTrustedAdmission/);
   assert.match(androidBridge, /TrustedRelayScopeConfig/);
