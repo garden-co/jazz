@@ -128,24 +128,41 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   try {
     // Hard-linking the fully-written receipt is atomic and unlike rename
     // never replaces an existing live or malformed lock on POSIX/Windows.
-    linkSync(staging, lockPath);
+    //
+    // A previous owner can unlink its receipt after `linkSync` reports
+    // EEXIST but before we read it. That is not an unowned receipt: it is a
+    // completed release, so retry the same atomic publish. In particular,
+    // direct WASM producers may hand the selected CI lock from one producer
+    // to the next without an intermediate coordinator. Any receipt we can
+    // still read remains fail-closed below.
+    for (;;) {
+      try {
+        linkSync(staging, lockPath);
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        const existing = readLockOwner(lockPath);
+        if (existing) {
+          if (!Number.isInteger(existing.pid) || existing.pid <= 0)
+            throw new Error(
+              "test-artifacts: lock has no usable owner metadata; refusing to delete it.",
+            );
+          throw lockError(lockPath, existing);
+        }
+        // The collision vanished before it could be inspected. Retry the
+        // atomic link rather than treating that absence as permission to
+        // remove or overwrite anything.
+      }
+    }
     try {
       rmSync(staging, { force: true });
     } catch (error) {
       throw lockFilesystemError("remove published lock receipt", error);
     }
   } catch (error) {
-    if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") {
-      removeQuietly(staging);
-      throw lockFilesystemError("publish lock receipt", error);
-    }
-    const existing = readLockOwner(lockPath);
-    if (!existing || !Number.isInteger(existing.pid) || existing.pid <= 0) {
-      removeQuietly(staging);
-      throw new Error("test-artifacts: lock has no usable owner metadata; refusing to delete it.");
-    }
     removeQuietly(staging);
-    throw lockError(lockPath, existing);
+    if (error.message?.startsWith("test-artifacts:")) throw error;
+    throw lockFilesystemError("publish lock receipt", error);
   }
   console.log(`test-artifacts: acquired artifact lock (pid ${owner.pid})`);
   let released = false;
