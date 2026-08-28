@@ -16,43 +16,43 @@ use crate::ivm::runtime::IvmRuntimeError;
 use crate::ivm::runtime::evaluation_session::EvaluationInputs;
 use crate::records::{EnumCase, EnumSchema, EnumValue, RecordDescriptor, Value, ValueType};
 
-const FORMAT_V2: u8 = 2;
-pub const FORMAT_VERSION: u8 = FORMAT_V2;
+const FORMAT_V1: u8 = 1;
+pub const FORMAT_VERSION: u8 = FORMAT_V1;
 
 /// The authoritative immutable-large-value codecs that this binary can read.
 ///
 /// The descriptor selects one of these codecs before any descriptor-guided
 /// traversal starts.  Keep an explicit case per persisted format: accepting a
-/// later format through the v2 codec (or vice versa) would turn a format bump
+/// later format through the v1 codec (or vice versa) would turn a format bump
 /// into an accidental, lossy migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LargeValueFormat {
-    V2,
+    V1,
 }
 
 impl LargeValueFormat {
     fn from_version(version: u8) -> Result<Self, Error> {
         match version {
-            FORMAT_V2 => Ok(Self::V2),
+            FORMAT_V1 => Ok(Self::V1),
             _ => Err(Error::UnsupportedFormat(version)),
         }
     }
 
     fn version(self) -> u8 {
         match self {
-            Self::V2 => FORMAT_V2,
+            Self::V1 => FORMAT_V1,
         }
     }
 
     fn encode_node(self, node: &ChunkNode) -> Result<Vec<u8>, Error> {
         match self {
-            Self::V2 => encode_node_v2(node),
+            Self::V1 => encode_node_v1(node),
         }
     }
 
     fn decode_node(self, encoded: &[u8]) -> Result<ChunkNode, Error> {
         let node = match self {
-            Self::V2 => decode_canonical_node_v2(encoded)?,
+            Self::V1 => decode_canonical_node_v1(encoded)?,
         };
         if node_format(&node) != self.version() {
             return Err(Error::UnsupportedFormat(node_format(&node)));
@@ -3359,11 +3359,11 @@ pub(crate) fn decode_node_untyped_authenticated(
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
-    // Durable metadata has no owner descriptor. V2's canonical record has a
+    // Durable metadata has no owner descriptor. V1's canonical record has a
     // fixed structural envelope, so decode it only to recover its committed
     // format and then dispatch that exact codec. No fallback or try-current
     // decoding is permitted here.
-    let node = decode_canonical_node_v2(encoded)?;
+    let node = decode_canonical_node_v1(encoded)?;
     LargeValueFormat::from_version(node_format(&node))?.decode_node(encoded)
 }
 
@@ -3372,9 +3372,9 @@ pub fn encode_node(node: &ChunkNode) -> Result<Vec<u8>, Error> {
     LargeValueFormat::from_version(node_format(node))?.encode_node(node)
 }
 
-/// The frozen v2 node codec. Future codecs remain separate functions selected
+/// The frozen v1 node codec. Future codecs remain separate functions selected
 /// by [`LargeValueFormat`], even if they initially share record machinery.
-fn encode_node_v2(node: &ChunkNode) -> Result<Vec<u8>, Error> {
+fn encode_node_v1(node: &ChunkNode) -> Result<Vec<u8>, Error> {
     let schema = chunk_node_schema();
     let value = match node {
         ChunkNode::Leaf {
@@ -3483,7 +3483,7 @@ fn chunk_node_schema() -> EnumSchema {
 /// Decode the authenticated chunk payload representation without interpreting
 /// its schema-derived logical kind. Exact canonical re-encoding rejects any
 /// alternate or trailing representation.
-fn decode_canonical_node_v2(encoded: &[u8]) -> Result<ChunkNode, Error> {
+fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
     if encoded.len() > MAX_ENCODED_NODE_BYTES {
         return Err(Error::MalformedNode);
     }
@@ -3553,7 +3553,7 @@ fn decode_canonical_node_v2(encoded: &[u8]) -> Result<ChunkNode, Error> {
         }
         _ => return Err(Error::MalformedNode),
     };
-    let canonical = encode_node_v2(&node)?;
+    let canonical = encode_node_v1(&node)?;
     if canonical != encoded {
         return Err(Error::MalformedNode);
     }
@@ -3566,7 +3566,7 @@ fn decode_canonical_node_v2(encoded: &[u8]) -> Result<ChunkNode, Error> {
 /// persisted descriptor selects the codec before node interpretation.
 #[cfg(test)]
 pub(crate) fn decode_canonical_node(encoded: &[u8]) -> Result<ChunkNode, Error> {
-    let node = decode_canonical_node_v2(encoded)?;
+    let node = decode_canonical_node_v1(encoded)?;
     LargeValueFormat::from_version(node_format(&node))?.decode_node(encoded)
 }
 
@@ -3701,7 +3701,7 @@ fn grouping_hash_from_logical(
 
 fn kind_format_hash_mask(format: u8, kind: LargeValueKind) -> ContentHash {
     hash_domain(
-        b"groove-large-logical-kind-format-v2",
+        b"groove-large-logical-kind-format-v1",
         &[format, large_value_kind_tag(kind)],
     )
 }
@@ -5132,9 +5132,9 @@ mod tests {
 
     // This is intentionally an internal physical-codec receipt. Public rows
     // only see logical primitives; the exact bytes here freeze the engine's
-    // descriptor-led v2 boundary and make a future codec addition explicit.
+    // descriptor-led v1 boundary and make a future codec addition explicit.
     #[test]
-    fn v2_codec_golden_bytes_decode_semantically_and_reject_alternates() {
+    fn v1_codec_golden_bytes_decode_semantically_and_reject_alternates() {
         fn hex(bytes: &[u8]) -> String {
             bytes.iter().map(|byte| format!("{byte:02x}")).collect()
         }
@@ -5142,24 +5142,24 @@ mod tests {
         let leaf = ChunkNode::Leaf {
             format: FORMAT_VERSION,
             kind: LargeValueKind::Bytes,
-            bytes: b"v2-fixture".to_vec(),
+            bytes: b"v1-fixture".to_vec(),
         };
         let node_bytes = encode_node(&leaf).unwrap();
         let node_hash = object_hash(&node_bytes);
         assert_eq!(
             hex(&node_bytes),
-            "00020076322d66697874757265",
-            "v2 node bytes are a reviewed storage fixture"
+            "00010076312d66697874757265",
+            "v1 node bytes are a reviewed storage fixture"
         );
         assert_eq!(
             hex(&node_hash.0),
-            "a8f6ec8e407e168b63923c3b2fa558d390672a0db53338497fd4257245918978",
-            "object hashes commit to the exact v2 node bytes"
+            "84e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e",
+            "object hashes commit to the exact v1 node bytes"
         );
         assert_eq!(
             hex(&node_logical_hash(&leaf).0),
-            "7ddfe3b3961b5d41459b122dd696fa07867c754d797939efd7b7e09c81a3bfbb",
-            "logical hashes bind the v2 format and semantic kind"
+            "357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da65",
+            "logical hashes bind the v1 format and semantic kind"
         );
         assert_eq!(
             decode_node_for_format(
@@ -5194,8 +5194,8 @@ mod tests {
         let descriptor_bytes = encode_large_value_ref(&value_ref).unwrap();
         assert_eq!(
             hex(&descriptor_bytes),
-            "00020a000000000000000000000000000000003a0000007e0000007ddfe3b3961b5d41459b122dd696fa07867c754d797939efd7b7e09c81a3bfbb24000000a8f6ec8e407e168b63923c3b2fa558d390672a0db53338497fd42572459189784444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065",
-            "v2 descriptor bytes are a reviewed storage fixture"
+            "00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065",
+            "v1 descriptor bytes are a reviewed storage fixture"
         );
         let decoded_ref = decode_large_value_ref(&descriptor_bytes).unwrap();
         assert_eq!(decoded_ref, value_ref);
@@ -5209,7 +5209,7 @@ mod tests {
         );
         assert_eq!(
             materialize_attempt(&decoded_ref, &mut inputs).unwrap(),
-            b"v2-fixture",
+            b"v1-fixture",
             "decoded fixture reaches the same logical scalar receipt"
         );
 
@@ -5217,7 +5217,7 @@ mod tests {
         let scalar_bytes = encode_stored_scalar(LargeValueKind::Bytes, &scalar).unwrap();
         assert_eq!(
             hex(&scalar_bytes),
-            "03020a000000000000000000000000000000003a0000007e0000007ddfe3b3961b5d41459b122dd696fa07867c754d797939efd7b7e09c81a3bfbb24000000a8f6ec8e407e168b63923c3b2fa558d390672a0db53338497fd42572459189784444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065",
+            "03010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065",
             "schema-known stored-scalar kind does not add a descriptor kind tag"
         );
         assert_eq!(
@@ -5271,15 +5271,15 @@ mod tests {
         );
 
         assert_eq!(
-            decode_node_for_format(3, LargeValueKind::Bytes, node_hash, &node_bytes),
-            Err(Error::UnsupportedFormat(3)),
+            decode_node_for_format(2, LargeValueKind::Bytes, node_hash, &node_bytes),
+            Err(Error::UnsupportedFormat(2)),
             "a descriptor never falls back to the current codec"
         );
 
         let text = ChunkNode::Leaf {
             format: FORMAT_VERSION,
             kind: LargeValueKind::String,
-            bytes: "v2-🙂".as_bytes().to_vec(),
+            bytes: "v1-🙂".as_bytes().to_vec(),
         };
         let json = ChunkNode::Leaf {
             format: FORMAT_VERSION,
@@ -5289,9 +5289,9 @@ mod tests {
         for (node, expected_bytes, expected_object_hash, expected_logical_hash, expected_metrics) in [
             (
                 text,
-                "00020176322df09f9982",
-                "678e46c71b86713680adea8f58bda0ead55aa464331f72dae2bc89c9de37382c",
-                "7c1bf3f4b3db7ef7f523bcfd24dd10dc421d41c248f1811ca1d35367f5a5d247",
+                "00010176312df09f9982",
+                "8ca733330fa66126ffe0096382780f11b272047aea7be36fc5c23b6f16d8680a",
+                "9e87a0d9054fae5cbe72f01ea5ee76cf97c0073ae4955797470365ab08952661",
                 NodeMetrics {
                     byte_length: 7,
                     utf16_length: Some(5),
@@ -5299,9 +5299,9 @@ mod tests {
             ),
             (
                 json,
-                "0002027b226e223a2d307d",
-                "b73917ac4decd2f0698b805c22cdb5f10ba1a16447f10221c15ca2d34d4c051e",
-                "b4f699c671ee5f343a5b14ebd2a1b0811118f056e5fee14e458ecea7bb345baf",
+                "0001027b226e223a2d307d",
+                "a9865ebcd28c3e1868f670948dd798c1ff5287c025efe5d26b344c261e628dcc",
+                "4be873c1509bff9e7e4a861e5e405c29088d67a49cd685ec82be6f4fb4532a28",
                 NodeMetrics {
                     byte_length: 8,
                     utf16_length: Some(8),
@@ -7496,12 +7496,12 @@ mod tests {
     }
 
     #[test]
-    fn candidate_format_one_nodes_fail_closed() {
-        // This local type is the exact candidate format-1 leaf shape. Keeping
-        // the receipt independent of the current enum ensures a future serde
-        // layout change cannot accidentally turn old content into a v2 node.
+    fn candidate_future_format_two_nodes_fail_closed() {
+        // This local type represents a hypothetical alternate format-2 leaf.
+        // Keeping the receipt independent of the current enum ensures a future
+        // serde layout cannot accidentally turn new content into a v1 node.
         #[derive(Serialize)]
-        enum CandidateFormatOneNode {
+        enum CandidateFutureFormatTwoNode {
             Leaf { format: u8, bytes: Vec<u8> },
         }
 
@@ -7512,7 +7512,8 @@ mod tests {
             vec![0, 1, 2, 3],
         ] {
             let encoded =
-                postcard::to_allocvec(&CandidateFormatOneNode::Leaf { format: 1, bytes }).unwrap();
+                postcard::to_allocvec(&CandidateFutureFormatTwoNode::Leaf { format: 2, bytes })
+                    .unwrap();
             let hash = object_hash(&encoded);
             for expected_kind in [
                 LargeValueKind::Bytes,
@@ -7521,7 +7522,7 @@ mod tests {
             ] {
                 assert!(
                     decode_node(expected_kind, hash, &encoded).is_err(),
-                    "format-1 leaf must fail closed as {expected_kind:?}"
+                    "future format-2 leaf must fail closed as {expected_kind:?}"
                 );
             }
         }
@@ -7610,14 +7611,14 @@ mod tests {
             kind: LargeValueKind::Bytes,
             bytes: shared.to_vec(),
         };
-        let candidate_old_node = ChunkNode::Leaf {
-            format: 1,
+        let candidate_future_node = ChunkNode::Leaf {
+            format: 2,
             kind: LargeValueKind::Bytes,
             bytes: shared.to_vec(),
         };
         assert_ne!(
             node_logical_hash(&current_node),
-            node_logical_hash(&candidate_old_node),
+            node_logical_hash(&candidate_future_node),
             "node format must participate in locator-independent identity"
         );
     }
