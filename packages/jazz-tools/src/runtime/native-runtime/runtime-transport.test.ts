@@ -11,7 +11,7 @@ import {
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
-import { type BatchId, type WriteReceipt } from "../client.js";
+import { type TxId, type WriteReceipt } from "../client.js";
 
 const previousWebSocket = globalThis.WebSocket;
 const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
@@ -24,9 +24,9 @@ async function waitForFakeWebSocketNegotiation(): Promise<void> {
   for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
 }
 
-async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+async function committedTxId(receipt: WriteReceipt): Promise<TxId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
-  return await receipt.batchId;
+  return await receipt.txId;
 }
 
 function deferred<T>() {
@@ -227,7 +227,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       return 0;
     };
     const write = {
-      batchId: "00000000000070008000000000000007",
+      txId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
       rowId: new Uint8Array(16),
       wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
@@ -263,7 +263,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000007",
     );
 
-    const wait = runtime.waitForTransaction(await committedBatchId(inserted), "edge");
+    const wait = runtime.waitForTransaction(await committedTxId(inserted), "edge");
     await Promise.resolve();
     await Promise.resolve();
     expect(transportTicks).toBe(1);
@@ -303,7 +303,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const subscriptions = [localSubscription, edgeSubscription, globalSubscription];
     let nativeMutationError: ((event: unknown) => void) | undefined;
     const write = {
-      batchId: "00000000000070008000000000000008",
+      txId: "00000000000070008000000000000008",
       payload: new Uint8Array(),
       rowId: new Uint8Array(16),
       wait: (tier: string) => (tier === "local" ? Promise.resolve() : remoteSettlement),
@@ -359,8 +359,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
       "00000000-0000-0000-0000-000000000008",
     );
-    const batchId = await committedBatchId(inserted);
-    await expect(runtime.waitForTransaction(batchId, "local")).resolves.toBeUndefined();
+    const txId = await committedTxId(inserted);
+    await expect(runtime.waitForTransaction(txId, "local")).resolves.toBeUndefined();
 
     const localHandle = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
@@ -379,8 +379,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.executeSubscription(localHandle, localUpdates);
     runtime.executeSubscription(edgeHandle, edgeUpdates);
     runtime.executeSubscription(globalHandle, globalUpdates);
-    const edgeWait = runtime.waitForTransaction(batchId, "edge");
-    const globalWait = runtime.waitForTransaction(batchId, "global");
+    const edgeWait = runtime.waitForTransaction(txId, "edge");
+    const globalWait = runtime.waitForTransaction(txId, "global");
     await Promise.resolve();
 
     runtime.reportRemoteServerTransportError(new Error("Protocol: terminal upstream failure"));
@@ -407,7 +407,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const remoteWaitsArmed = deferred<void>();
     let remoteWaits = 0;
     const write = {
-      batchId: "00000000000070008000000000000009",
+      txId: "00000000000070008000000000000009",
       payload: new Uint8Array(),
       rowId: new Uint8Array(16),
       wait: (tier: string) => {
@@ -441,9 +441,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
       "00000000-0000-0000-0000-000000000009",
     );
-    const batchId = await committedBatchId(inserted);
-    const edgeWait = runtime.waitForTransaction(batchId, "edge");
-    const globalWait = runtime.waitForTransaction(batchId, "global");
+    const txId = await committedTxId(inserted);
+    const edgeWait = runtime.waitForTransaction(txId, "edge");
+    const globalWait = runtime.waitForTransaction(txId, "global");
 
     // This event barrier proves both remote waits reached the terminal waiter
     // registration point before the failure and replacement race begins.
@@ -479,7 +479,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       return 0;
     };
     const write = {
-      batchId: "00000000000070008000000000000007",
+      txId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
       rowId: new Uint8Array(16),
       wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
@@ -516,7 +516,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000007",
     );
 
-    const wait = runtime.waitForTransaction(await committedBatchId(inserted), "edge");
+    const wait = runtime.waitForTransaction(await committedTxId(inserted), "edge");
     await Promise.resolve();
     await Promise.resolve();
     expect(transportTicks).toBe(1);
@@ -971,10 +971,7 @@ function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {
-    authority.bytes(
-      Uint8Array.from({ length: 16 }, () => 0x5e),
-      false,
-    );
+    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e));
     authority.u64(epoch);
   });
   return writer.finish();
@@ -1018,42 +1015,47 @@ function fakeDb<T extends object>(
   const implementation = db as T & {
     connectUpstream?(): Transport;
     tick?(): void | Promise<void>;
-    mergeableTx?(openBatchId: string): TxForTest;
-    mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
-    exclusiveTx?(openBatchId: string): TxForTest;
+    mergeableTx?(openTransactionId: string): TxForTest;
+    mergeableTxForIdentity?(openTransactionId: string, author: Uint8Array): TxForTest;
+    exclusiveTx?(openTransactionId: string): TxForTest;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
-  const attach = (openBatchId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
-    const batch = openBatches.get(openBatchId);
-    if (!batch || batch.kind !== kind) throw new Error(`unknown ${kind} batch ${openBatchId}`);
+  const attach = (openTransactionId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+    const batch = openBatches.get(openTransactionId);
+    if (!batch || batch.kind !== kind)
+      throw new Error(`unknown ${kind} batch ${openTransactionId}`);
     batch.tx ??=
       kind === "exclusive"
-        ? (implementation.exclusiveTx?.(openBatchId) ?? fakeTx())
+        ? (implementation.exclusiveTx?.(openTransactionId) ?? fakeTx())
         : batch.author && implementation.mergeableTxForIdentity
-          ? implementation.mergeableTxForIdentity(openBatchId, batch.author)
-          : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
+          ? implementation.mergeableTxForIdentity(openTransactionId, batch.author)
+          : (implementation.mergeableTx?.(openTransactionId) ?? fakeTx());
     return batch.tx;
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
-    beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
-      openBatches.set(openBatchId, { kind, author });
+    beginTransaction: (
+      openTransactionId: string,
+      kind: FakeOpenBatch["kind"],
+      author?: Uint8Array,
+    ) => {
+      openBatches.set(openTransactionId, { kind, author });
     },
-    attachMergeableTx: (openBatchId: string) => attach(openBatchId, "mergeable"),
-    attachExclusiveTx: (openBatchId: string) => attach(openBatchId, "exclusive"),
-    commitTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
-      openBatches.delete(openBatchId);
+    attachMergeableTx: (openTransactionId: string) => attach(openTransactionId, "mergeable"),
+    attachExclusiveTx: (openTransactionId: string) => attach(openTransactionId, "exclusive"),
+    commitTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
+      openBatches.delete(openTransactionId);
       return batch.tx?.commit() ?? fakeWrite();
     },
-    rollbackTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+    rollbackTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
       batch.tx?.rollback();
-      openBatches.delete(openBatchId);
+      openBatches.delete(openTransactionId);
     },
     ...db,
   };
@@ -1089,7 +1091,7 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
 
 function fakeWrite() {
   return {
-    batchId: "00000000000070008000000000000001",
+    txId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
     rowId: new Uint8Array(16),
     wait: async () => undefined,
