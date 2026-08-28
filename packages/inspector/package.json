@@ -11,7 +11,7 @@
     "build:embedded": "vite build --mode embedded",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts",
-    "test:browser": "playwright test --config playwright.config.ts"
+    "test:browser": "pnpm run build:embedded && playwright test --config playwright.config.ts"
   },
   "dependencies": {
     "@tanstack/react-table": "^8.21.3",

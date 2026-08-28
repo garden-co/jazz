@@ -1,5 +1,3 @@
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,18 +25,6 @@ function extOf(path: string): string {
 }
 
 test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", () => {
-  test.beforeAll(() => {
-    // The embedded entry is a separate Vite build. Build it on demand so
-    // `pnpm test:browser` works from a clean checkout; rebuild manually with
-    // `pnpm --filter inspector run build:embedded` to refresh the assets.
-    if (!existsSync(join(distEmbedded, "embedded.html"))) {
-      execFileSync("pnpm", ["run", "build:embedded"], {
-        cwd: packageRoot,
-        stdio: "inherit",
-      });
-    }
-  });
-
   test("embedded inspector discovers and switches across auth-session runtimes", async ({
     page,
   }) => {
