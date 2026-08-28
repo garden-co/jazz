@@ -15,6 +15,249 @@ fn is_retryable_upload_error(error: &Error) -> bool {
     )
 }
 
+/// Build the metadata half of consuming an incomplete upload. Callers that
+/// also install a staged receipt must use this as the first layer of a
+/// read-your-own-write overlay, so any root activation sees the decremented
+/// upload retainers rather than overwriting them with stale node metadata.
+async fn pending_large_value_upload_release_operations<S>(
+    storage: &S,
+    key: Vec<u8>,
+    upload: &crate::large_values::PendingLargeValueUpload,
+) -> Result<Vec<OwnedWriteOperation>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let mut operations = vec![OwnedWriteOperation::Delete {
+        cf: LARGE_VALUE_METADATA_CF.to_owned(),
+        key,
+    }];
+    for node_ref in &upload.chunks {
+        let node_key = large_value_node_key(node_ref)?;
+        let Some(encoded) = storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+            .await?
+        else {
+            continue;
+        };
+        let mut metadata = decode_large_value_node_references(&encoded)?;
+        metadata.upload_references =
+            metadata.upload_references.checked_sub(1).ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("upload reference count underflow".to_owned())
+            })?;
+        operations.push(OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: node_key,
+            value: encode_large_value_node_references(&metadata)?,
+        });
+        if metadata.references == 0 && metadata.upload_references == 0 {
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_reclaim_key(node_ref)?,
+                value: crate::large_values::encode_node_ref(node_ref).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode reclaim entry: {error}"
+                    ))
+                })?,
+            });
+        }
+    }
+    Ok(operations)
+}
+
+/// Return the staged-receipt metadata transition without committing it. This
+/// lets pending-upload promotion compose receipt registration and retainer
+/// release in one storage batch.
+async fn staged_large_value_registration_operations<S>(
+    storage: &S,
+    id: crate::large_values::StagedLargeValueId,
+    value_ref: crate::large_values::LargeValueRef,
+    accounting: crate::large_values::StagedLargeValueAccounting,
+) -> Result<
+    (
+        crate::large_values::StagedLargeValue,
+        Vec<OwnedWriteOperation>,
+    ),
+    Error,
+>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let staged_key = staged_large_value_key(id);
+    if let Some(encoded) = storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
+        .await?
+    {
+        let existing = decode_staged_large_value(&encoded)?;
+        if existing.value_ref == value_ref && existing.accounting == accounting {
+            return Ok((existing, Vec::new()));
+        }
+        return Err(Error::InvalidLargeValueMetadata(
+            "staged receipt id is already bound to a different descriptor".to_owned(),
+        ));
+    }
+    let staged = crate::large_values::StagedLargeValue {
+        id,
+        value_ref,
+        accounting,
+        created_at_ms: web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    };
+    let encoded = encode_staged_large_value(&staged)?;
+    let root_key = large_value_root_key(&staged.value_ref.root)?;
+    let mut references = match storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
+        .await?
+    {
+        Some(encoded) => decode_large_value_root_references(&encoded)?,
+        None => LargeValueRootReferences::default(),
+    };
+    let activate_root = references.durable == 0 && references.staged == 0;
+    if activate_root {
+        references.node_active = true;
+    }
+    references.staged = references
+        .staged
+        .checked_add(1)
+        .ok_or_else(|| Error::InvalidLargeValueMetadata("staged root count overflow".to_owned()))?;
+    let mut operations = vec![
+        OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: staged_key,
+            value: encoded,
+        },
+        OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: root_key,
+            value: encode_large_value_root_references(&references)?,
+        },
+    ];
+    if activate_root {
+        operations.extend(
+            large_value_node_transition_operations(
+                storage,
+                BTreeMap::new(),
+                vec![(staged.value_ref.root.clone(), 1)],
+                false,
+            )
+            .await?,
+        );
+    }
+    Ok((staged, operations))
+}
+
+async fn completed_large_value_upload<S>(
+    storage: &S,
+    upload_id: crate::large_values::StagedLargeValueId,
+    value_ref: &crate::large_values::LargeValueRef,
+) -> Result<Option<crate::large_values::StagedLargeValue>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let Some(encoded) = storage
+        .get(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            completed_large_value_upload_key(upload_id),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let completed = decode_pending_large_value_upload(&encoded)?;
+    if completed.id != upload_id || completed.descriptor.as_ref() != Some(value_ref) {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload is bound to a different descriptor".to_owned(),
+        ));
+    }
+    let receipt_id = completed.receipt_id.ok_or_else(|| {
+        Error::InvalidLargeValueMetadata("completed upload has no receipt id".to_owned())
+    })?;
+    let reverse = storage
+        .get(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            completed_large_value_receipt_key(receipt_id),
+        )
+        .await?
+        .ok_or_else(|| {
+            Error::InvalidLargeValueMetadata(
+                "completed upload has no receipt reverse binding".to_owned(),
+            )
+        })?;
+    if reverse != encoded {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload bindings disagree".to_owned(),
+        ));
+    }
+    let encoded = storage
+        .get(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            staged_large_value_key(receipt_id),
+        )
+        .await?
+        .ok_or_else(|| {
+            Error::InvalidLargeValueMetadata(
+                "completed upload points to a missing staged receipt".to_owned(),
+            )
+        })?;
+    let staged = decode_staged_large_value(&encoded)?;
+    if staged.id != receipt_id
+        || staged.value_ref != *value_ref
+        || staged.accounting != completed.accounting
+    {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload receipt does not match its binding".to_owned(),
+        ));
+    }
+    Ok(Some(staged))
+}
+
+pub(super) async fn completed_large_value_cleanup_operations<S>(
+    storage: &S,
+    receipt_id: crate::large_values::StagedLargeValueId,
+) -> Result<Vec<OwnedWriteOperation>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let receipt_key = completed_large_value_receipt_key(receipt_id);
+    let Some(encoded) = storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key.clone())
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    let completed = decode_pending_large_value_upload(&encoded)?;
+    if completed.receipt_id != Some(receipt_id) {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed receipt reverse binding is inconsistent".to_owned(),
+        ));
+    }
+    let upload_key = completed_large_value_upload_key(completed.id);
+    let forward = storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
+        .await?
+        .ok_or_else(|| {
+            Error::InvalidLargeValueMetadata("completed receipt has no upload binding".to_owned())
+        })?;
+    if forward != encoded {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload bindings disagree".to_owned(),
+        ));
+    }
+    Ok(vec![
+        OwnedWriteOperation::Delete {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: upload_key,
+        },
+        OwnedWriteOperation::Delete {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: receipt_key,
+        },
+    ])
+}
+
 impl Database {
     /// Open a schema-aware database over an ordered key/value store.
     ///
@@ -322,6 +565,17 @@ impl Database {
         pending_limit: Option<usize>,
     ) -> Result<bool, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
+        if self
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_upload_key(upload_id),
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
         // This must precede both chunk staging and metadata mutation. In
         // particular, a valid first child followed by a malformed second child
         // cannot strand the first in durable chunk storage.
@@ -493,14 +747,30 @@ impl Database {
         pending_limit: Option<usize>,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
-        self.stage_large_value_chunk_batch_with_presence_and_pending_limit(
-            upload_id,
-            value_ref.kind,
-            Vec::new(),
-            false,
-            pending_limit,
-        )
-        .await?;
+        if let Some(staged) =
+            completed_large_value_upload(&self.storage, upload_id, &value_ref).await?
+        {
+            return Ok(crate::large_values::LargeValueUploadProgress::Staged(
+                staged,
+            ));
+        }
+        let staged = self
+            .stage_large_value_chunk_batch_with_presence_and_pending_limit(
+                upload_id,
+                value_ref.kind,
+                Vec::new(),
+                false,
+                pending_limit,
+            )
+            .await?;
+        if !staged
+            && let Some(staged) =
+                completed_large_value_upload(&self.storage, upload_id, &value_ref).await?
+        {
+            return Ok(crate::large_values::LargeValueUploadProgress::Staged(
+                staged,
+            ));
+        }
         self.bind_pending_upload_descriptor(upload_id, &value_ref)
             .await?;
         self.large_value_upload_progress(upload_id, value_ref, false)
@@ -575,6 +845,13 @@ impl Database {
     ) -> Result<Option<crate::large_values::LargeValueUploadProgress>, Error> {
         const FRONTIER_LIMIT: usize = 64;
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
+        if let Some(staged) =
+            completed_large_value_upload(&self.storage, upload_id, &value_ref).await?
+        {
+            return Ok(Some(crate::large_values::LargeValueUploadProgress::Staged(
+                staged,
+            )));
+        }
         let requested = match crate::large_values::missing_upload_frontier(
             &value_ref,
             self.local_chunk_reader(),
@@ -668,6 +945,13 @@ impl Database {
             return Err(error);
         }
         if !staged? {
+            if let Some(staged) =
+                completed_large_value_upload(&self.storage, upload_id, &value_ref).await?
+            {
+                return Ok(Some(crate::large_values::LargeValueUploadProgress::Staged(
+                    staged,
+                )));
+            }
             return Ok(None);
         }
         self.bind_pending_upload_descriptor(upload_id, &value_ref)
@@ -823,6 +1107,11 @@ impl Database {
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<Option<crate::large_values::StagedLargeValue>, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
+        if let Some(staged) =
+            completed_large_value_upload(&self.storage, upload_id, &value_ref).await?
+        {
+            return Ok(Some(staged));
+        }
         let key = pending_large_value_upload_key(upload_id);
         let Some(encoded) = self
             .storage
@@ -857,16 +1146,16 @@ impl Database {
         })?;
         self.validate_completed_large_value(&value_ref).await?;
 
-        // Persist the exact descriptor before creating a receipt. A crash in
-        // the following receipt write is retryable only with this descriptor,
-        // never with another descriptor that happens to have reachable chunks.
+        // Persist the exact descriptor and retry receipt before promotion. A
+        // crash here remains retryable with this identity, never one minted
+        // for another reachable descriptor.
         let receipt_id = upload.receipt_id.unwrap_or_else(|| {
             crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes())
         });
+        let mut bound_upload = upload.clone();
+        bound_upload.descriptor = Some(value_ref.clone());
+        bound_upload.receipt_id = Some(receipt_id);
         if upload.descriptor.is_none() || upload.receipt_id.is_none() {
-            let mut bound_upload = upload.clone();
-            bound_upload.descriptor = Some(value_ref.clone());
-            bound_upload.receipt_id = Some(receipt_id);
             self.storage
                 .write_many(vec![OwnedWriteOperation::Set {
                     cf: LARGE_VALUE_METADATA_CF.to_owned(),
@@ -875,10 +1164,39 @@ impl Database {
                 }])
                 .await?;
         }
-        let staged = self
-            .register_staged_large_value_with_id(receipt_id, value_ref, upload.accounting)
+
+        // Publishing the receipt and consuming its journal are one durable
+        // transition.  In particular, never leave a registered receipt beside
+        // its upload retainers: a crash there used to permit a later retry to
+        // mint another receipt.
+        let release_operations =
+            pending_large_value_upload_release_operations(&self.storage, key, &upload).await?;
+        let promotion_state = RefCell::new(StagedWriteState::from(release_operations));
+        let promotion_overlay = StagedWriteOverlay::new(&self.storage, &promotion_state);
+        let (staged, registration_operations) = staged_large_value_registration_operations(
+            &promotion_overlay,
+            receipt_id,
+            value_ref,
+            upload.accounting,
+        )
+        .await?;
+        promotion_state.borrow_mut().extend(registration_operations);
+        let completed = encode_pending_large_value_upload(&bound_upload)?;
+        promotion_state.borrow_mut().extend([
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: completed_large_value_upload_key(upload_id),
+                value: completed.clone(),
+            },
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: completed_large_value_receipt_key(receipt_id),
+                value: completed,
+            },
+        ]);
+        self.storage
+            .write_many(promotion_state.into_inner().into_operations())
             .await?;
-        self.release_pending_large_value_upload(key, upload).await?;
         Ok(Some(staged))
     }
 
@@ -887,42 +1205,11 @@ impl Database {
         key: Vec<u8>,
         upload: crate::large_values::PendingLargeValueUpload,
     ) -> Result<(), Error> {
-        let mut operations = vec![OwnedWriteOperation::Delete {
-            cf: LARGE_VALUE_METADATA_CF.to_owned(),
-            key,
-        }];
-        for node_ref in upload.chunks {
-            let node_key = large_value_node_key(&node_ref)?;
-            let Some(encoded) = self
-                .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
-                .await?
-            else {
-                continue;
-            };
-            let mut metadata = decode_large_value_node_references(&encoded)?;
-            metadata.upload_references =
-                metadata.upload_references.checked_sub(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("upload reference count underflow".to_owned())
-                })?;
-            operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: node_key,
-                value: encode_large_value_node_references(&metadata)?,
-            });
-            if metadata.references == 0 && metadata.upload_references == 0 {
-                operations.push(OwnedWriteOperation::Set {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: large_value_reclaim_key(&node_ref)?,
-                    value: crate::large_values::encode_node_ref(&node_ref).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode reclaim entry: {error}"
-                        ))
-                    })?,
-                });
-            }
-        }
-        self.storage.write_many(operations).await?;
+        self.storage
+            .write_many(
+                pending_large_value_upload_release_operations(&self.storage, key, &upload).await?,
+            )
+            .await?;
         Ok(())
     }
 
@@ -964,82 +1251,6 @@ impl Database {
         let upload = decode_pending_large_value_upload(&encoded)?;
         self.release_pending_large_value_upload(key, upload).await?;
         Ok(true)
-    }
-
-    async fn register_staged_large_value_with_id(
-        &self,
-        id: crate::large_values::StagedLargeValueId,
-        value_ref: crate::large_values::LargeValueRef,
-        accounting: crate::large_values::StagedLargeValueAccounting,
-    ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let staged_key = staged_large_value_key(id);
-        if let Some(encoded) = self
-            .storage
-            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
-            .await?
-        {
-            let existing = decode_staged_large_value(&encoded)?;
-            if existing.value_ref == value_ref && existing.accounting == accounting {
-                return Ok(existing);
-            }
-            return Err(Error::InvalidLargeValueMetadata(
-                "staged receipt id is already bound to a different descriptor".to_owned(),
-            ));
-        }
-        let staged = crate::large_values::StagedLargeValue {
-            id,
-            value_ref,
-            accounting,
-            created_at_ms: web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
-        };
-        let encoded = encode_staged_large_value(&staged)?;
-        let root_key = large_value_root_key(&staged.value_ref.root)?;
-        let mut references = match self
-            .storage
-            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
-            .await?
-        {
-            Some(encoded) => decode_large_value_root_references(&encoded)?,
-            None => LargeValueRootReferences::default(),
-        };
-        let activate_root = references.durable == 0 && references.staged == 0;
-        if activate_root {
-            references.node_active = true;
-        }
-        references.staged = references.staged.checked_add(1).ok_or_else(|| {
-            Error::InvalidLargeValueMetadata("staged root count overflow".to_owned())
-        })?;
-        let references = encode_large_value_root_references(&references)?;
-        let mut operations = vec![
-            OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: staged_key,
-                value: encoded,
-            },
-            OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: root_key,
-                value: references,
-            },
-        ];
-        if activate_root {
-            operations.extend(
-                large_value_node_transition_operations(
-                    &self.storage,
-                    BTreeMap::new(),
-                    vec![(staged.value_ref.root.clone(), 1)],
-                    false,
-                )
-                .await?,
-            );
-        }
-        self.storage.write_many(operations).await?;
-        Ok(staged)
     }
 
     /// Return persisted opaque staging receipts for host rate/expiry policy.
@@ -1118,6 +1329,7 @@ impl Database {
                 .await?,
             );
         }
+        operations.extend(completed_large_value_cleanup_operations(&self.storage, id).await?);
         self.storage.write_many(operations).await?;
         Ok(true)
     }

@@ -793,8 +793,10 @@ async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survive
     // The malicious attempts must not poison a durable upload. Reopening also
     // proves that the unbound journal was not accidentally promoted.
     drop(database);
-    let mut reopened = Database::new(schema, storage).await.unwrap();
-    reopened.set_chunk_storage(chunks);
+    let mut reopened = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    reopened.set_chunk_storage(chunks.clone());
     let staged = reopened
         .finalize_large_value_upload(upload_id, prepared.value_ref)
         .await
@@ -814,6 +816,283 @@ async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survive
             .unwrap()
             .contains(&staged)
     );
+}
+
+// This facade-level crash receipt stays below Jazz's row mutation API because
+// it models a peer retry that loses the finalizer response after the metadata
+// batch commits. It directly inspects retainers because no public row can
+// observe the absence of the old, unsafe receipt-plus-upload overlap.
+#[futures_test::test]
+async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let upload_id = crate::large_values::StagedLargeValueId([0xa6; 16]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0xa5; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
+    )
+    .unwrap();
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    database
+        .stage_large_value_chunk_batch(
+            upload_id,
+            prepared.value_ref.kind,
+            prepared.staged_chunks.clone(),
+        )
+        .await
+        .unwrap();
+    let pending_key = pending_large_value_upload_key(upload_id);
+    let encoded = database
+        .storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), pending_key.clone())
+        .await
+        .unwrap()
+        .expect("staged upload journal");
+    let mut pending = decode_pending_large_value_upload(&encoded).unwrap();
+    let receipt_id = crate::large_values::StagedLargeValueId([0xa7; 16]);
+    pending.descriptor = Some(prepared.value_ref.clone());
+    pending.receipt_id = Some(receipt_id);
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: pending_key,
+            value: encode_pending_large_value_upload(&pending).unwrap(),
+        }])
+        .await
+        .unwrap();
+    drop(database);
+
+    // Simulate a crash after durable receipt binding but before promotion; the
+    // reopened finalizer is the protocol retry.
+    let mut reopened = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    reopened.set_chunk_storage(chunks.clone());
+    let receipt = reopened
+        .finalize_large_value_upload(upload_id, prepared.value_ref.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.id, receipt_id,
+        "retry promotes the receipt durably bound before the crash"
+    );
+    assert!(
+        reopened
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty(),
+        "receipt publication and journal release share one durable transition"
+    );
+    assert_eq!(
+        reopened.staged_large_values().await.unwrap(),
+        vec![receipt.clone()],
+        "the reopened retry must not duplicate the staged receipt"
+    );
+    for chunk in &prepared.staged_chunks {
+        let encoded = reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&chunk.node_ref).unwrap(),
+            )
+            .await
+            .unwrap()
+            .expect("promoted chunk metadata remains present");
+        assert_eq!(
+            decode_large_value_node_references(&encoded)
+                .unwrap()
+                .upload_references,
+            0,
+            "promotion cannot leak the pending upload retainer"
+        );
+    }
+
+    // Now lose the successful promotion response itself. Both finalizer
+    // surfaces must recover the exact receipt after reopen, while a descriptor
+    // mismatch fails closed instead of borrowing that claim.
+    drop(reopened);
+    let mut reopened = Database::new(schema, storage.clone()).await.unwrap();
+    reopened.set_chunk_storage(chunks);
+    assert_eq!(
+        reopened
+            .finalize_large_value_upload(upload_id, prepared.value_ref.clone())
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        reopened
+            .finalize_large_value_upload_if_current(upload_id, prepared.value_ref.clone())
+            .await
+            .unwrap(),
+        Some(receipt.clone())
+    );
+    let mut mismatched = prepared.value_ref.clone();
+    mismatched.byte_length += 1;
+    assert!(matches!(
+        reopened.finalize_large_value_upload(upload_id, mismatched).await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("different descriptor")
+    ));
+    assert_eq!(
+        reopened.staged_large_values().await.unwrap(),
+        vec![receipt.clone()],
+        "post-commit retries cannot mint a second receipt"
+    );
+
+    let mut accepted = reopened.open_batch();
+    accepted.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(prepared.value_ref)],
+    );
+    accepted.accept_large_value(receipt.id);
+    reopened.commit_batch(accepted).await.unwrap();
+    assert!(
+        reopened.staged_large_values().await.unwrap().is_empty(),
+        "the one receipt still closes through the ordinary accepted-row batch"
+    );
+    assert!(
+        reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_upload_key(upload_id),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "accepted receipt closure reclaims its upload idempotency binding"
+    );
+    assert!(
+        reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_receipt_key(receipt.id),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "accepted receipt closure reclaims its reverse binding"
+    );
+
+    let abandoned_upload = crate::large_values::StagedLargeValueId([0xb6; 16]);
+    let abandoned = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x5b; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
+    )
+    .unwrap();
+    reopened
+        .stage_large_value_chunk_batch(
+            abandoned_upload,
+            abandoned.value_ref.kind,
+            abandoned.staged_chunks,
+        )
+        .await
+        .unwrap();
+    let abandoned_receipt = reopened
+        .finalize_large_value_upload(abandoned_upload, abandoned.value_ref)
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .evict_staged_large_value(abandoned_receipt.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_upload_key(abandoned_upload),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "TTL eviction reclaims the abandoned upload binding with its receipt"
+    );
+    assert!(
+        reopened
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0,
+        "ordinary reclamation can collect the evicted receipt's chunks"
+    );
+}
+
+// This internal durability test plants a staged value whose embedded receipt
+// id disagrees with the metadata key selected by the completed-upload binding.
+// Public APIs cannot construct this persisted corruption directly.
+#[futures_test::test]
+async fn completed_upload_retry_rejects_substituted_receipt_id_after_reopen() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let upload_id = crate::large_values::StagedLargeValueId([0xc6; 16]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0xc5; crate::large_values::INLINE_VALUE_MAX_BYTES * 2],
+    )
+    .unwrap();
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    database
+        .stage_large_value_chunk_batch(upload_id, prepared.value_ref.kind, prepared.staged_chunks)
+        .await
+        .unwrap();
+    let receipt = database
+        .finalize_large_value_upload(upload_id, prepared.value_ref.clone())
+        .await
+        .unwrap();
+    let receipt_key = staged_large_value_key(receipt.id);
+    let mut substituted = receipt;
+    substituted.id = crate::large_values::StagedLargeValueId([0xc7; 16]);
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: receipt_key,
+            value: encode_staged_large_value(&substituted).unwrap(),
+        }])
+        .await
+        .unwrap();
+    drop(database);
+
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks);
+    assert!(matches!(
+        reopened
+            .finalize_large_value_upload(upload_id, prepared.value_ref)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("receipt does not match")
+    ));
 }
 
 #[futures_test::test]
@@ -2701,7 +2980,10 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
             panic!("a stale matching batch must observe the concurrently completed tree")
         }
     };
-    assert_ne!(first_claim.id, concurrent_claim.id);
+    assert_eq!(
+        first_claim, concurrent_claim,
+        "a stale concurrent completion retries the already-published claim"
+    );
     let second_claim = match database
         .begin_large_value_upload(prepared.value_ref)
         .await
@@ -2712,7 +2994,10 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
             panic!("the complete deduplicated tree needs no retransmission")
         }
     };
-    assert_ne!(first_claim.id, second_claim.id);
+    assert_eq!(
+        first_claim, second_claim,
+        "non-presence begin cannot recreate a completed upload before receipt closure"
+    );
 }
 
 #[futures_test::test]

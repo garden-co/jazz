@@ -56,6 +56,18 @@ fn pending_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -
     key
 }
 
+fn completed_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8> {
+    let mut key = b"completed-upload/".to_vec();
+    key.extend_from_slice(&id.0);
+    key
+}
+
+fn completed_large_value_receipt_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8> {
+    let mut key = b"completed-receipt/".to_vec();
+    key.extend_from_slice(&id.0);
+    key
+}
+
 fn large_value_root_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
     let mut key = b"root/".to_vec();
     key.extend(
