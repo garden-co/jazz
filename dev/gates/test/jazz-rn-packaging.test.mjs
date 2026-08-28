@@ -12,10 +12,7 @@ import { parse } from "yaml";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 const packageJson = JSON.parse(
-  await readFile(
-    new URL("../../../crates/jazz-rn/package.json", import.meta.url),
-    "utf8",
-  ),
+  await readFile(new URL("../../../crates/jazz-rn/package.json", import.meta.url), "utf8"),
 );
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
 
@@ -72,11 +69,7 @@ function assertExactNames(surface, actual, allowed) {
     [],
     `${surface} has unexpected JavaScript-facing name(s): ${unexpected.join(", ")}`,
   );
-  assert.deepEqual(
-    missing,
-    [],
-    `${surface} omits ABI name(s): ${missing.join(", ")}`,
-  );
+  assert.deepEqual(missing, [], `${surface} omits ABI name(s): ${missing.join(", ")}`);
 }
 
 function exportedStatements(surface, source) {
@@ -87,11 +80,7 @@ function exportedStatements(surface, source) {
     true,
     ts.ScriptKind.TSX,
   );
-  assert.deepEqual(
-    file.parseDiagnostics,
-    [],
-    `${surface} must be valid TypeScript`,
-  );
+  assert.deepEqual(file.parseDiagnostics, [], `${surface} must be valid TypeScript`);
   return file.statements.filter(
     (statement) =>
       ts.isExportAssignment(statement) ||
@@ -115,10 +104,7 @@ function exportedDeclarationName(statement) {
   ) {
     return statement.name?.text;
   }
-  if (
-    ts.isVariableStatement(statement) &&
-    statement.declarationList.declarations.length === 1
-  ) {
+  if (ts.isVariableStatement(statement) && statement.declarationList.declarations.length === 1) {
     const name = statement.declarationList.declarations[0].name;
     return ts.isIdentifier(name) ? name.text : undefined;
   }
@@ -130,11 +116,7 @@ function assertNamedRelayReexport(surface, statement, names, typeOnly) {
     ts.isExportDeclaration(statement),
     `${surface} may only re-export its fixed relay names`,
   );
-  assert.equal(
-    statement.isTypeOnly,
-    typeOnly,
-    `${surface} has the wrong type-only export`,
-  );
+  assert.equal(statement.isTypeOnly, typeOnly, `${surface} has the wrong type-only export`);
   assert.equal(
     statement.moduleSpecifier?.text,
     "./relay",
@@ -163,11 +145,7 @@ function assertExactNativeSpecMethod(member, name) {
   assert.ok(ts.isIdentifier(member.name));
   assert.equal(member.name.text, name);
   assert.equal(member.questionToken, undefined, `${name} must not be optional`);
-  assert.equal(
-    member.typeParameters,
-    undefined,
-    `${name} must not be generic`,
-  );
+  assert.equal(member.typeParameters, undefined, `${name} must not be generic`);
 
   if (name === "getAbiVersion") {
     assert.equal(member.parameters.length, 0, "getAbiVersion takes no arguments");
@@ -242,11 +220,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
   );
   assert.notEqual(specExports[1].isExportEquals, true);
 
-  assert.equal(
-    relayExports.length,
-    3,
-    "relay must expose exactly its fixed ABI declarations",
-  );
+  assert.equal(relayExports.length, 3, "relay must expose exactly its fixed ABI declarations");
   assert.ok(
     ts.isInterfaceDeclaration(relayExports[0]),
     "relay must export NativeRelayAbiRange as an interface",
@@ -262,10 +236,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     "relay must export NATIVE_RELAY_ABI as a const",
   );
   assert.equal(relayExports[1].declarationList.declarations.length, 1);
-  assert.equal(
-    relayExports[1].declarationList.declarations[0].name.getText(),
-    "NATIVE_RELAY_ABI",
-  );
+  assert.equal(relayExports[1].declarationList.declarations[0].name.getText(), "NATIVE_RELAY_ABI");
   assert.ok(
     ts.isFunctionDeclaration(relayExports[2]),
     "relay must export executeNativeRelayCommand as a function",
@@ -317,11 +288,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     nativeSpecMethods.size,
     "NativeJazzRelay TurboModule has exactly its two ABI methods",
   );
-  assertExactNames(
-    "NativeJazzRelay TurboModule",
-    new Set(membersByName.keys()),
-    nativeSpecMethods,
-  );
+  assertExactNames("NativeJazzRelay TurboModule", new Set(membersByName.keys()), nativeSpecMethods);
   for (const name of nativeSpecMethods) {
     assertExactNativeSpecMethod(membersByName.get(name), name);
   }
@@ -330,7 +297,6 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     /^\s*export\s+default\s+TurboModuleRegistry\.get<Spec>\('JazzRelay'\);\s*$/m,
     "NativeJazzRelay may only default-export its registry lookup",
   );
-
 }
 
 function assertOpaqueAndroidRelaySurface(androidModule) {
@@ -344,45 +310,31 @@ function assertOpaqueAndroidRelaySurface(androidModule) {
   for (const match of module.matchAll(declarations)) {
     // Generated TurboModule methods use @Override; handwritten React Native
     // modules use @ReactMethod, including its fully-qualified spelling.
-    if (
-      /(?:@Override\b|@[A-Za-z_$][A-Za-z0-9_$.]*\.ReactMethod\b|@ReactMethod\b)/.test(
-        match[1],
-      )
-    ) {
+    if (/(?:@Override\b|@[A-Za-z_$][A-Za-z0-9_$.]*\.ReactMethod\b|@ReactMethod\b)/.test(match[1])) {
       exportedMethods.add(match[2]);
     }
   }
-  assertExactNames(
-    "Android JavaScript export",
-    exportedMethods,
-    androidRelayMethods,
-  );
+  assertExactNames("Android JavaScript export", exportedMethods, androidRelayMethods);
 }
 
 function objcMethodNames(source) {
   return new Set(
-    [
-      ...source.matchAll(
-        /^[+-]\s*\([^)]*\)\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::|\{)/gm,
-      ),
-    ].map((match) => match[1]),
+    [...source.matchAll(/^[+-]\s*\([^)]*\)\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::|\{)/gm)].map(
+      (match) => match[1],
+    ),
   );
 }
 
 function objcImplementations(source) {
   const implementations = [];
-  const pattern =
-    /^\s*@implementation\s+([A-Za-z_$][A-Za-z0-9_$]*)(?:\s*\([^)]*\))?/gm;
+  const pattern = /^\s*@implementation\s+([A-Za-z_$][A-Za-z0-9_$]*)(?:\s*\([^)]*\))?/gm;
   let match;
   while ((match = pattern.exec(source)) !== null) {
     const end = /^\s*@end\b/m.exec(source.slice(pattern.lastIndex));
     assert.ok(end, `unterminated Objective-C implementation for ${match[1]}`);
     implementations.push({
       className: match[1],
-      source: source.slice(
-        match.index,
-        pattern.lastIndex + end.index + end[0].length,
-      ),
+      source: source.slice(match.index, pattern.lastIndex + end.index + end[0].length),
     });
     pattern.lastIndex += end.index + end[0].length;
   }
@@ -399,10 +351,7 @@ function assertOpaqueIosRelaySurface(iosRelay) {
   const relayImplementations = implementations.filter(
     (implementation) => implementation.className === "JazzRelay",
   );
-  assert.ok(
-    relayImplementations.length > 0,
-    "could not find JazzRelay Objective-C implementation",
-  );
+  assert.ok(relayImplementations.length > 0, "could not find JazzRelay Objective-C implementation");
   assert.ok(
     implementations.some(
       (implementation) => implementation.className === "JazzRelayTrustedAdmission",
@@ -413,11 +362,7 @@ function assertOpaqueIosRelaySurface(iosRelay) {
   // of them so no selector grows the generated ABI.
   const relayModule = relayImplementations.map((item) => item.source).join("\n");
   const exportedMethods = objcMethodNames(relayModule);
-  assertExactNames(
-    "iOS JazzRelay implementation",
-    exportedMethods,
-    iosRelaySelectors,
-  );
+  assertExactNames("iOS JazzRelay implementation", exportedMethods, iosRelaySelectors);
 }
 
 test("jazz-rn publishes an Expo config plugin for a New Architecture development build", () => {
@@ -428,16 +373,8 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   const configured = withJazzRn(original);
 
   assert.equal(configured.newArchEnabled, true);
-  assert.equal(
-    original.newArchEnabled,
-    undefined,
-    "plugin must not mutate Expo's input config",
-  );
-  assert.equal(
-    configured.ios,
-    original.ios,
-    "unrelated Expo configuration is preserved",
-  );
+  assert.equal(original.newArchEnabled, undefined, "plugin must not mutate Expo's input config");
+  assert.equal(configured.ios, original.ios, "unrelated Expo configuration is preserved");
   assert.equal(packageJson.exports["./app.plugin"], "./app.plugin.js");
   assert.equal(packageJson.files.includes("app.plugin.js"), true);
   assert.equal(packageJson.files.includes("scripts"), true);
@@ -447,10 +384,7 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
     "git+https://github.com/garden-co/jazz.git",
     "the published package must point install users at its maintained source repository",
   );
-  assert.equal(
-    packageJson.bugs.url,
-    "https://github.com/garden-co/jazz/issues",
-  );
+  assert.equal(packageJson.bugs.url, "https://github.com/garden-co/jazz/issues");
 });
 
 test("the canonical Expo scaffold really prebuilds both relay-only platforms", () => {
@@ -464,15 +398,11 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
     "Expo prebuild requires the example workspace dependencies. Run `pnpm install --frozen-lockfile` from the repository root, then rerun this gate.",
   );
   for (const script of ["verify:expo:android", "verify:expo:ios"]) {
-    execFileSync(
-      "pnpm",
-      ["--filter", "todo-client-localfirst-expo", "run", script],
-      {
-        cwd: root,
-        env: { ...process.env, CI: "1" },
-        stdio: "inherit",
-      },
-    );
+    execFileSync("pnpm", ["--filter", "todo-client-localfirst-expo", "run", script], {
+      cwd: root,
+      env: { ...process.env, CI: "1" },
+      stdio: "inherit",
+    });
   }
 
   const autolink = (platform) =>
@@ -490,10 +420,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
           platform,
         ],
         {
-          cwd: new URL(
-            "../../../examples/todo-client-localfirst-expo/",
-            import.meta.url,
-          ),
+          cwd: new URL("../../../examples/todo-client-localfirst-expo/", import.meta.url),
           encoding: "utf8",
         },
       ),
@@ -504,41 +431,16 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
     androidAutolink.dependencies["jazz-rn"].platforms.android.packageInstance,
     "new JazzRelayPackage()",
   );
-  assert.match(
-    iosAutolink.dependencies["jazz-rn"].platforms.ios.podspecPath,
-    /JazzRn\.podspec$/,
-  );
+  assert.match(iosAutolink.dependencies["jazz-rn"].platforms.ios.podspecPath, /JazzRn\.podspec$/);
 
-  const expoRoot = new URL(
-    "../../../examples/todo-client-localfirst-expo/",
-    import.meta.url,
-  );
-  const androidProperties = readFile(
-    new URL("android/gradle.properties", expoRoot),
-    "utf8",
-  );
-  const androidSettings = readFile(
-    new URL("android/settings.gradle", expoRoot),
-    "utf8",
-  );
-  const iosProperties = readFile(
-    new URL("ios/Podfile.properties.json", expoRoot),
-    "utf8",
-  );
+  const expoRoot = new URL("../../../examples/todo-client-localfirst-expo/", import.meta.url);
+  const androidProperties = readFile(new URL("android/gradle.properties", expoRoot), "utf8");
+  const androidSettings = readFile(new URL("android/settings.gradle", expoRoot), "utf8");
+  const iosProperties = readFile(new URL("ios/Podfile.properties.json", expoRoot), "utf8");
   const iosPodfile = readFile(new URL("ios/Podfile", expoRoot), "utf8");
 
-  return Promise.all([
-    androidProperties,
-    androidSettings,
-    iosProperties,
-    iosPodfile,
-  ]).then(
-    ([
-      androidPropertiesText,
-      androidSettingsText,
-      iosPropertiesText,
-      iosPodfileText,
-    ]) => {
+  return Promise.all([androidProperties, androidSettings, iosProperties, iosPodfile]).then(
+    ([androidPropertiesText, androidSettingsText, iosPropertiesText, iosPodfileText]) => {
       assert.match(androidPropertiesText, /^newArchEnabled=true$/m);
       assert.match(androidSettingsText, /expo-autolinking-settings/);
       assert.match(androidSettingsText, /autolinkLibrariesFromCommand/);
@@ -549,44 +451,24 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
 });
 
 test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
-  const [
-    podspec,
-    androidPackage,
-    androidBuild,
-    iosRelay,
-    packageRoot,
-    rootCargo,
-    legacyConfig,
-  ] = await Promise.all([
-    readFile(
-      new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL(
-        "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayPackage.kt",
-        import.meta.url,
+  const [podspec, androidPackage, androidBuild, iosRelay, packageRoot, rootCargo, legacyConfig] =
+    await Promise.all([
+      readFile(new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url), "utf8"),
+      readFile(
+        new URL(
+          "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayPackage.kt",
+          import.meta.url,
+        ),
+        "utf8",
       ),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url),
-      "utf8",
-    ),
-    readFile(new URL("../../../Cargo.toml", import.meta.url), "utf8"),
-    readFile(
-      new URL("../../../crates/jazz-rn/ubrn.config.yaml", import.meta.url),
-      "utf8",
-    ).catch(() => null),
-  ]);
+      readFile(new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../../../Cargo.toml", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/ubrn.config.yaml", import.meta.url), "utf8").catch(
+        () => null,
+      ),
+    ]);
 
   assert.match(podspec, /JazzNativeRelay\.xcframework/);
   assert.match(podspec, /https:\/\/github\.com\/garden-co\/jazz\.git/);
@@ -617,17 +499,8 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
     "utf8",
   );
   const [nativeSpec, relayIndex] = await Promise.all([
-    readFile(
-      new URL(
-        "../../../crates/jazz-rn/src/NativeJazzRelay.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url),
-      "utf8",
-    ),
+    readFile(new URL("../../../crates/jazz-rn/src/NativeJazzRelay.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
   ]);
   const codegenGate = await readFile(
     new URL("../../../crates/jazz-rn/scripts/test-codegen.sh", import.meta.url),
@@ -642,10 +515,7 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   );
 
   assert.equal(packageJson.exports["./relay"].source, "./src/relay.ts");
-  assert.equal(
-    packageJson.scripts["test:codegen"],
-    "bash scripts/test-codegen.sh",
-  );
+  assert.equal(packageJson.scripts["test:codegen"], "bash scripts/test-codegen.sh");
   assert.match(nativeSpec, /TurboModuleRegistry\.get<Spec>\('JazzRelay'\)/);
   assert.match(nativeSpec, /execute\(commandBase64: string\): Promise<string>/);
   assert.match(relay, /getAbiVersion\(\)/);
@@ -658,10 +528,7 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   assert.match(codegenGate, /class NativeJazzRelaySpec/);
   assert.match(androidRelay, /JazzRelayBridge/);
   assert.match(androidRelay, /package com\.jazzrn;/);
-  assert.match(
-    androidRelay,
-    /class JazzRelayModule extends NativeJazzRelaySpec/,
-  );
+  assert.match(androidRelay, /class JazzRelayModule extends NativeJazzRelaySpec/);
   assert.match(androidRelay, /double getAbiVersion\(\)/);
   assert.match(androidRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
 });
@@ -672,17 +539,8 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     "utf8",
   );
   const [nativeSpec, relayIndex] = await Promise.all([
-    readFile(
-      new URL(
-        "../../../crates/jazz-rn/src/NativeJazzRelay.ts",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url),
-      "utf8",
-    ),
+    readFile(new URL("../../../crates/jazz-rn/src/NativeJazzRelay.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
   ]);
   const androidBridge = await readFile(
     new URL(
@@ -703,10 +561,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     "utf8",
   );
   const header = await readFile(
-    new URL(
-      "../../../crates/jazz-native-relay/include/jazz_native_relay.h",
-      import.meta.url,
-    ),
+    new URL("../../../crates/jazz-native-relay/include/jazz_native_relay.h", import.meta.url),
     "utf8",
   );
 
@@ -716,10 +571,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   assert.throws(
     () =>
       assertExactTsRelaySurface(
-        nativeSpec.replace(
-          "getAbiVersion(): number;",
-          "getAuthScope(): string;",
-        ),
+        nativeSpec.replace("getAbiVersion(): number;", "getAuthScope(): string;"),
         relay,
         relayIndex,
       ),
@@ -741,11 +593,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   );
   assert.throws(
     () =>
-      assertExactTsRelaySurface(
-        nativeSpec,
-        `${relay}\nexport function configure() {}`,
-        relayIndex,
-      ),
+      assertExactTsRelaySurface(nativeSpec, `${relay}\nexport function configure() {}`, relayIndex),
     undefined,
     "an innocuous TypeScript helper must not enlarge the relay ABI",
   );
@@ -760,12 +608,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     "an alias re-export must not smuggle a new public relay name into the package",
   );
   assert.throws(
-    () =>
-      assertExactTsRelaySurface(
-        nativeSpec,
-        relay,
-        `${relayIndex}\nexport * from './relay';`,
-      ),
+    () => assertExactTsRelaySurface(nativeSpec, relay, `${relayIndex}\nexport * from './relay';`),
     undefined,
     "a star re-export must not automatically publish future relay helpers",
   );
@@ -823,11 +666,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   ]) {
     assert.throws(
       () =>
-        assertExactTsRelaySurface(
-          nativeSpec,
-          fixture.relay ?? relay,
-          fixture.index ?? relayIndex,
-        ),
+        assertExactTsRelaySurface(nativeSpec, fixture.relay ?? relay, fixture.index ?? relayIndex),
       undefined,
       `${fixture.name} must not enlarge the fixed relay ABI`,
     );
@@ -903,8 +742,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     },
   ]) {
     assert.throws(
-      () =>
-        assertOpaqueIosRelaySurface(`${iosRelay}\n${fixture.source}`),
+      () => assertOpaqueIosRelaySurface(`${iosRelay}\n${fixture.source}`),
       /legacy RCT/,
       `${fixture.name} must fail the raw iOS legacy macro ban`,
     );
@@ -923,10 +761,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   assert.throws(
     () =>
       assertOpaqueIosRelaySurface(
-        iosRelay.replace(
-          "- (void)invalidate",
-          "- (void)configure {}\n\n- (void)invalidate",
-        ),
+        iosRelay.replace("- (void)invalidate", "- (void)configure {}\n\n- (void)invalidate"),
       ),
     /configure/,
     "an arbitrary Objective-C method must not grow the sealed relay module",
@@ -949,10 +784,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
 
 test("relay artifact staging targets every Android ABI and iOS framework slice", async () => {
   const script = await readFile(
-    new URL(
-      "../../../crates/jazz-rn/scripts/build-relay-artifacts.sh",
-      import.meta.url,
-    ),
+    new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
     "utf8",
   );
 
@@ -960,10 +792,7 @@ test("relay artifact staging targets every Android ABI and iOS framework slice",
     packageJson.scripts["build:relay:android"],
     "bash scripts/build-relay-artifacts.sh android",
   );
-  assert.equal(
-    packageJson.scripts["build:relay:ios"],
-    "bash scripts/build-relay-artifacts.sh ios",
-  );
+  assert.equal(packageJson.scripts["build:relay:ios"], "bash scripts/build-relay-artifacts.sh ios");
   assert.match(script, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(script, /\[x86\]=i686-linux-android/);
@@ -990,10 +819,7 @@ test("a dry package includes every staged native relay artifact class", async ()
       types: undefined,
       exports: undefined,
     };
-    await writeFile(
-      join(directory, "package.json"),
-      `${JSON.stringify(manifest)}\n`,
-    );
+    await writeFile(join(directory, "package.json"), `${JSON.stringify(manifest)}\n`);
     for (const path of staged) {
       const destination = join(directory, path);
       await mkdir(dirname(destination), { recursive: true });
@@ -1027,10 +853,7 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
   const nativeRelayAbi = Number(
     /pub const NATIVE_RELAY_ABI_VERSION: u16 = (\d+);/.exec(
       readFileSync(
-        new URL(
-          "../../../crates/jazz-native-relay/src/lib.rs",
-          import.meta.url,
-        ),
+        new URL("../../../crates/jazz-native-relay/src/lib.rs", import.meta.url),
         "utf8",
       ),
     )?.[1],
@@ -1070,10 +893,7 @@ ${
     for (const file of files) {
       const destination = join(root, file);
       await mkdir(dirname(destination), { recursive: true });
-      await writeFile(
-        destination,
-        file === "Info.plist" ? info(true) : `fixture:${file}\n`,
-      );
+      await writeFile(destination, file === "Info.plist" ? info(true) : `fixture:${file}\n`);
     }
   };
   const writeManifest = async (root, destination, extra = {}) => {
@@ -1084,9 +904,7 @@ ${
       ).readdir(current, {
         withFileTypes: true,
       })) {
-        const nextRelative = relative
-          ? `${relative}/${entry.name}`
-          : entry.name;
+        const nextRelative = relative ? `${relative}/${entry.name}` : entry.name;
         const next = join(current, entry.name);
         if (entry.isDirectory()) await visit(next, nextRelative);
         else {
@@ -1118,23 +936,13 @@ ${
     await writeFile(
       join(packageRoot, "native/include/jazz_native_relay.h"),
       readFileSync(
-        new URL(
-          "../../../crates/jazz-native-relay/include/jazz_native_relay.h",
-          import.meta.url,
-        ),
+        new URL("../../../crates/jazz-native-relay/include/jazz_native_relay.h", import.meta.url),
       ),
     );
-    await writeManifest(
-      androidRoot,
-      join(packageRoot, "android/jazz-native-relay.manifest.json"),
-      {
-        toolchain: { cargoNdk: "4.1.2" },
-      },
-    );
-    await writeManifest(
-      iosRoot,
-      join(packageRoot, "ios/jazz-native-relay.manifest.json"),
-    );
+    await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
+      toolchain: { cargoNdk: "4.1.2" },
+    });
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
     const environment = {
       ...process.env,
       JAZZ_NATIVE_RELAY_SOURCE_REVISION: sourceRevision,
@@ -1151,18 +959,9 @@ ${
 
     const simulatorDirectory = join(iosRoot, "ios-arm64_x86_64-simulator");
     await rm(join(simulatorDirectory, "libjazz_native_relay.a"));
-    await writeFile(
-      join(simulatorDirectory, "libjazz_native_relay_simulator.a"),
-      "fixture\n",
-    );
-    await writeFile(
-      join(iosRoot, "Info.plist"),
-      info(true, "libjazz_native_relay_simulator.a"),
-    );
-    await writeManifest(
-      iosRoot,
-      join(packageRoot, "ios/jazz-native-relay.manifest.json"),
-    );
+    await writeFile(join(simulatorDirectory, "libjazz_native_relay_simulator.a"), "fixture\n");
+    await writeFile(join(iosRoot, "Info.plist"), info(true, "libjazz_native_relay_simulator.a"));
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
     assert.throws(
       () =>
         execFileSync(
@@ -1175,16 +974,10 @@ ${
     );
 
     await rm(join(simulatorDirectory, "libjazz_native_relay_simulator.a"));
-    await writeFile(
-      join(simulatorDirectory, "libjazz_native_relay.a"),
-      "fixture\n",
-    );
+    await writeFile(join(simulatorDirectory, "libjazz_native_relay.a"), "fixture\n");
 
     await writeFile(join(iosRoot, "Info.plist"), info(false));
-    await writeManifest(
-      iosRoot,
-      join(packageRoot, "ios/jazz-native-relay.manifest.json"),
-    );
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
     assert.throws(
       () =>
         execFileSync(
@@ -1240,54 +1033,30 @@ test("alpha verification preserves a reusable preview's sealed source commit acr
 });
 
 test("release, preview, and labeled platform gates seal and link the staged relay package", async () => {
-  const [
-    packageBuild,
-    alphaPublish,
-    previewBuild,
-    rnWorkflow,
-    artifactScript,
-    verifier,
-  ] = await Promise.all([
-    readFile(
-      new URL(
-        "../../../.github/workflows/build-jazz-packages.yml",
-        import.meta.url,
+  const [packageBuild, alphaPublish, previewBuild, rnWorkflow, artifactScript, verifier] =
+    await Promise.all([
+      readFile(
+        new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
+        "utf8",
       ),
-      "utf8",
-    ),
-    readFile(
-      new URL(
-        "../../../.github/workflows/publish-jazz-tools-alpha.yml",
-        import.meta.url,
+      readFile(
+        new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+        "utf8",
       ),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../.github/workflows/preview-build.yml", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL(
-        "../../../.github/workflows/rn-native-artifacts.yml",
-        import.meta.url,
+      readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+      readFile(
+        new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
+        "utf8",
       ),
-      "utf8",
-    ),
-    readFile(
-      new URL(
-        "../../../crates/jazz-rn/scripts/build-relay-artifacts.sh",
-        import.meta.url,
+      readFile(
+        new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
+        "utf8",
       ),
-      "utf8",
-    ),
-    readFile(
-      new URL(
-        "../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs",
-        import.meta.url,
+      readFile(
+        new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url),
+        "utf8",
       ),
-      "utf8",
-    ),
-  ]);
+    ]);
   const packageBuildWorkflow = parse(packageBuild);
   const previewBuildWorkflow = parse(previewBuild);
 
@@ -1299,10 +1068,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "the reusable package build must make RN release assembly an explicit opt-in",
   );
   assert.match(packageBuild, /if: inputs\.include_rn/);
-  assert.match(
-    packageBuild,
-    /assemble-jazz-rn:[\s\S]*always\(\)[\s\S]*inputs\.include_rn/,
-  );
+  assert.match(packageBuild, /assemble-jazz-rn:[\s\S]*always\(\)[\s\S]*inputs\.include_rn/);
   assert.match(
     packageBuild,
     /jazz_rn_artifact:[\s\S]*value: \$\{\{ jobs\.assemble-jazz-rn\.outputs\.artifact \}\}/,
@@ -1322,10 +1088,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     alphaPublish,
     /uses: \.\/\.github\/workflows\/build-jazz-packages\.yml[\s\S]*include_rn: true/,
   );
-  assert.match(
-    previewBuild,
-    /types: \[labeled, unlabeled, synchronize, reopened\]/,
-  );
+  assert.match(previewBuild, /types: \[labeled, unlabeled, synchronize, reopened\]/);
   assert.match(previewBuild, /'preview-build'/);
   assert.match(previewBuild, /'rn-preview-release'/);
   assert.match(previewBuild, /include_rn:[\s\S]*rn-preview-release/);
@@ -1350,14 +1113,11 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "inherit",
     "the reusable build is privileged and must remain behind its same-repository guard",
   );
-  assert.deepEqual(
-    previewBuildWorkflow.jobs["publish-pkg-pr-new"].permissions,
-    {
-      contents: "read",
-      "pull-requests": "write",
-      "id-token": "write",
-    },
-  );
+  assert.deepEqual(previewBuildWorkflow.jobs["publish-pkg-pr-new"].permissions, {
+    contents: "read",
+    "pull-requests": "write",
+    "id-token": "write",
+  });
   assert.match(previewBuild, /name: pkg-jazz-rn/);
   assert.match(previewBuild, /'\.\/crates\/jazz-rn'/);
   assert.doesNotMatch(
@@ -1378,10 +1138,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.throws(
     () =>
       assert.match(
-        regularPreviewPublish.replace(
-          "'./packages/create-jazz'",
-          "'./crates/jazz-rn'",
-        ),
+        regularPreviewPublish.replace("'./packages/create-jazz'", "'./crates/jazz-rn'"),
         /ordinary preview-build runs must neither download nor publish jazz-rn/,
       ),
     /ordinary preview-build runs must neither download nor publish jazz-rn/,
@@ -1389,9 +1146,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
 
   const previewMode = (labels, sameRepository) => ({
     runs:
-      sameRepository &&
-      (labels.includes("preview-build") ||
-        labels.includes("rn-preview-release")),
+      sameRepository && (labels.includes("preview-build") || labels.includes("rn-preview-release")),
     includesRn: labels.includes("rn-preview-release") && sameRepository,
   });
   assert.deepEqual(previewMode([], true), { runs: false, includesRn: false });
@@ -1411,20 +1166,14 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     runs: false,
     includesRn: false,
   });
-  assert.deepEqual(
-    previewMode(["preview-build", "rn-preview-release", "react-native"], false),
-    {
-      runs: false,
-      includesRn: false,
-    },
-  );
-  assert.deepEqual(
-    previewMode(["preview-build", "rn-preview-release", "react-native"], true),
-    {
-      runs: true,
-      includesRn: true,
-    },
-  );
+  assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"], false), {
+    runs: false,
+    includesRn: false,
+  });
+  assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"], true), {
+    runs: true,
+    includesRn: true,
+  });
   assert.deepEqual(previewBuildWorkflow.on.pull_request.types, [
     "labeled",
     "unlabeled",
@@ -1436,10 +1185,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     false,
     "the reusable package build defaults to its fast, non-RN path",
   );
-  assert.match(
-    previewBuildWorkflow.jobs.build.with.include_rn,
-    /rn-preview-release/,
-  );
+  assert.match(previewBuildWorkflow.jobs.build.with.include_rn, /rn-preview-release/);
   assert.match(rnWorkflow, /Android relay linked AAR/);
   assert.match(rnWorkflow, /:app:assembleDebug/);
   assert.match(rnWorkflow, /iOS relay linked app/);
@@ -1449,10 +1195,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(verifier, /JAZZ_NATIVE_RELAY_SOURCE_REVISION/);
   assert.match(verifier, /AvailableLibraries/);
   assert.match(verifier, /requiredRoles/);
-  assert.match(
-    packageBuild,
-    /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/,
-  );
+  assert.match(packageBuild, /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/);
   assert.match(packageBuild, /--package-root/);
   assert.match(verifier, /relay artifact inventory differs from its manifest/);
 });
