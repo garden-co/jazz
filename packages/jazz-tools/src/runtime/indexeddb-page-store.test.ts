@@ -194,6 +194,8 @@ describe("IndexedDbPageStore", () => {
       undefined,
       { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 99 },
       { ...INDEXEDDB_STORAGE_MANIFEST, pageChecksum: "none" },
+      { ...INDEXEDDB_STORAGE_MANIFEST, adapterFormatVersion: 2 },
+      { ...INDEXEDDB_STORAGE_MANIFEST, pageFormatVersion: 2 },
       { ...INDEXEDDB_STORAGE_MANIFEST, futureDecodeParameter: "unknown" },
     ]) {
       const name = databaseName();
@@ -254,10 +256,10 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
-  it("persists the Rust-owned v2 page fixture byte-for-byte", async () => {
+  it("persists the Rust-owned v1 page fixture byte-for-byte", async () => {
     const fixture = hexBytes(
       await readFile(
-        new URL("../../../../crates/idb-tree/fixtures/page-v2-leaf.hex", import.meta.url),
+        new URL("../../../../crates/idb-tree/fixtures/page-v1-leaf.hex", import.meta.url),
         "utf8",
       ),
     );

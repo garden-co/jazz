@@ -1,6 +1,11 @@
-/** Durable IndexedDB metadata/page-store epoch, independent of browser IDB's version. */
-export const INDEXEDDB_BTREE_FORMAT_VERSION = 2;
+/** Durable IndexedDB metadata/page-store format, independent of browser IDB's schema version. */
+export const INDEXEDDB_BTREE_FORMAT_VERSION = 1;
 export const INDEXEDDB_BTREE_FORMAT_MAGIC = "jazz-idb-tree";
+/**
+ * Browser IndexedDB's object-store schema generation. This remains 3 because
+ * it is a browser-managed database-schema number, not the Jazz page codec
+ * version; generation 3 is the schema that contains the epoch manifest store.
+ */
 export const INDEXEDDB_BTREE_DATABASE_VERSION = 3;
 
 // These names are part of the physical browser format. Do not rename them

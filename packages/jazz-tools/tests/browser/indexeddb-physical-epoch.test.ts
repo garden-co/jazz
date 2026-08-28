@@ -1,11 +1,11 @@
 /**
  * Real-browser physical epoch receipts for the raw IndexedDB page store.
  * This intentionally bypasses MemoryPageStore and the SharedWorker: it writes
- * the committed page-v2 fixture through the browser's own IndexedDB API, then
+ * the committed page-v1 fixture through the browser's own IndexedDB API, then
  * exercises the production adapter against that exact namespace.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import pageV2LeafHex from "../../../../crates/idb-tree/fixtures/page-v2-leaf.hex?raw";
+import pageV1LeafHex from "../../../../crates/idb-tree/fixtures/page-v1-leaf.hex?raw";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_FORMAT_MAGIC,
@@ -26,9 +26,9 @@ afterEach(async () => {
 });
 
 describe("IndexedDB physical epoch", () => {
-  it("opens a manually committed epoch-one page-v2 fixture read-only, writes current data, and reopens", async () => {
+  it("opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens", async () => {
     const name = databaseName();
-    const page = hexBytes(pageV2LeafHex);
+    const page = hexBytes(pageV1LeafHex);
     await installEpochOneFixture(name, INDEXEDDB_STORAGE_MANIFEST, page);
 
     let store = await IndexedDbPageStore.open(name);
@@ -53,6 +53,8 @@ describe("IndexedDB physical epoch", () => {
       undefined,
       { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 },
       { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds: ["unknown.codec"] },
+      { ...INDEXEDDB_STORAGE_MANIFEST, adapterFormatVersion: 2 },
+      { ...INDEXEDDB_STORAGE_MANIFEST, pageFormatVersion: 2 },
       { ...INDEXEDDB_STORAGE_MANIFEST, futureDecodeParameter: "unknown" },
     ]) {
       const name = databaseName();

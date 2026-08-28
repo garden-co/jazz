@@ -162,7 +162,7 @@ epoch-one manifest at its fixed `storage-manifest`/`epoch` location before the
 caller receives a page-store handle. It includes the epoch, adapter/page
 versions, sole `groove.ordered-kv.v1` codec ID, fixed 16 KiB page size, and
 `xxh3-64-le` page checksum identity. The browser physical-open receipt installs
-the committed page-v2 fixture by raw IndexedDB transaction, opens it read-only,
+the committed page-v1 fixture by raw IndexedDB transaction, opens it read-only,
 writes current data, reopens it, and proves corrupt/unknown manifests fail
 without changing pages.
 
@@ -395,21 +395,24 @@ database name; `pages`, `metadata`, and `storage-manifest` object-store names;
 and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
 caller receives a handle, `storage-manifest`/`epoch` must be the exact
 structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
-`2`, required codec IDs `[groove.ordered-kv.v1]`, page size `16384`, page
-checksum `xxh3-64-le`, page magic `IDBTREE\\0`, and page format `2`. Missing,
+`1`, required codec IDs `[groove.ordered-kv.v1]`, page size `16384`, page
+checksum `xxh3-64-le`, page magic `IDBTREE\\0`, and page format `1`. Missing,
 unknown, extra, or inconsistent fields fail closed before a mutation. Epoch-one
-starts at the settlement baseline: a version-2 database receives the new store
+starts at the settlement baseline: a browser schema-generation-2 database receives the new store
 but no manifest and is unsupported rather than adopted. `current` is a
-structured-clone record with magic `jazz-idb-tree`, format version `2`, fixed
+structured-clone record with magic `jazz-idb-tree`, format version `1`, fixed
 16 KiB page size, generation, nullable root page id, and next page id. Missing,
 malformed, or unknown magic/version metadata fails closed before a mutation; a
 new incompatible layout uses a new epoch instead of guessing at these bytes.
+The browser's IndexedDB schema generation is separately `3`: that number only
+selects the object-store layout containing `storage-manifest`, and is not a
+Jazz adapter, metadata, or page-codec version.
 Browser page ids are JavaScript safe integers, so root, child, and next ids are
 bounded to `0..=2^53-1`; exhaustion fails instead of rounding an identity. The
 stored page size is validated before page write or decode.
 
 The IndexedDB B-tree page body is adapter-private but durable. A page is exactly
-`"IDBTREE\\0" | version:u8(2) | xxh3_64(payload):u64le | payload`. The first
+`"IDBTREE\\0" | version:u8(1) | xxh3_64(payload):u64le | payload`. The first
 payload byte is a fixed page tag: leaf `0`, internal `1`, or overflow `2`. All
 collection and byte lengths are `u32le`; page ids and logical overflow lengths
 are `u64le`. The logical overflow length stays `u64` in memory until a host
