@@ -66,9 +66,10 @@ jobs:
     timeout-minutes: 45
     env:
       COCOAPODS_DISABLE_STATS: "true"
-      JAZZ_DEVICE_DERIVED_DATA: ${{ runner.temp }}/jazz-rn-device-derived-data
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select task-local build paths
+        run: echo "JAZZ_DEVICE_DERIVED_DATA=${RUNNER_TEMP}/jazz-rn-device-derived-data" >> "${GITHUB_ENV}"
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with: { version: 10.14.0 }
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
