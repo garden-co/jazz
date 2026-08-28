@@ -793,8 +793,10 @@ async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survive
     // The malicious attempts must not poison a durable upload. Reopening also
     // proves that the unbound journal was not accidentally promoted.
     drop(database);
-    let mut reopened = Database::new(schema, storage).await.unwrap();
-    reopened.set_chunk_storage(chunks);
+    let mut reopened = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    reopened.set_chunk_storage(chunks.clone());
     let staged = reopened
         .finalize_large_value_upload(upload_id, prepared.value_ref)
         .await
@@ -875,8 +877,10 @@ async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt(
 
     // Simulate a crash after durable receipt binding but before promotion; the
     // reopened finalizer is the protocol retry.
-    let mut reopened = Database::new(schema, storage).await.unwrap();
-    reopened.set_chunk_storage(chunks);
+    let mut reopened = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    reopened.set_chunk_storage(chunks.clone());
     let receipt = reopened
         .finalize_large_value_upload(upload_id, prepared.value_ref.clone())
         .await
@@ -917,6 +921,39 @@ async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt(
         );
     }
 
+    // Now lose the successful promotion response itself. Both finalizer
+    // surfaces must recover the exact receipt after reopen, while a descriptor
+    // mismatch fails closed instead of borrowing that claim.
+    drop(reopened);
+    let mut reopened = Database::new(schema, storage.clone()).await.unwrap();
+    reopened.set_chunk_storage(chunks);
+    assert_eq!(
+        reopened
+            .finalize_large_value_upload(upload_id, prepared.value_ref.clone())
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        reopened
+            .finalize_large_value_upload_if_current(upload_id, prepared.value_ref.clone())
+            .await
+            .unwrap(),
+        Some(receipt.clone())
+    );
+    let mut mismatched = prepared.value_ref.clone();
+    mismatched.byte_length += 1;
+    assert!(matches!(
+        reopened.finalize_large_value_upload(upload_id, mismatched).await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("different descriptor")
+    ));
+    assert_eq!(
+        reopened.staged_large_values().await.unwrap(),
+        vec![receipt.clone()],
+        "post-commit retries cannot mint a second receipt"
+    );
+
     let mut accepted = reopened.open_batch();
     accepted.insert(
         "objects",
@@ -927,6 +964,75 @@ async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt(
     assert!(
         reopened.staged_large_values().await.unwrap().is_empty(),
         "the one receipt still closes through the ordinary accepted-row batch"
+    );
+    assert!(
+        reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_upload_key(upload_id),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "accepted receipt closure reclaims its upload idempotency binding"
+    );
+    assert!(
+        reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_receipt_key(receipt.id),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "accepted receipt closure reclaims its reverse binding"
+    );
+
+    let abandoned_upload = crate::large_values::StagedLargeValueId([0xb6; 16]);
+    let abandoned = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x5b; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
+    )
+    .unwrap();
+    reopened
+        .stage_large_value_chunk_batch(
+            abandoned_upload,
+            abandoned.value_ref.kind,
+            abandoned.staged_chunks,
+        )
+        .await
+        .unwrap();
+    let abandoned_receipt = reopened
+        .finalize_large_value_upload(abandoned_upload, abandoned.value_ref)
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .evict_staged_large_value(abandoned_receipt.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                completed_large_value_upload_key(abandoned_upload),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "TTL eviction reclaims the abandoned upload binding with its receipt"
+    );
+    assert!(
+        reopened
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0,
+        "ordinary reclamation can collect the evicted receipt's chunks"
     );
 }
 
@@ -2815,7 +2921,10 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
             panic!("a stale matching batch must observe the concurrently completed tree")
         }
     };
-    assert_ne!(first_claim.id, concurrent_claim.id);
+    assert_eq!(
+        first_claim, concurrent_claim,
+        "a stale concurrent completion retries the already-published claim"
+    );
     let second_claim = match database
         .begin_large_value_upload(prepared.value_ref)
         .await
@@ -2826,7 +2935,10 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
             panic!("the complete deduplicated tree needs no retransmission")
         }
     };
-    assert_ne!(first_claim.id, second_claim.id);
+    assert_eq!(
+        first_claim, second_claim,
+        "non-presence begin cannot recreate a completed upload before receipt closure"
+    );
 }
 
 #[futures_test::test]

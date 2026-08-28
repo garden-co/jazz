@@ -165,6 +165,12 @@ publishes its one persisted receipt, and releases the pending upload retainers
 in one durable metadata transition. A retry after durable descriptor/receipt
 binding reuses that receipt; TTL is solely abandoned-staging protection, never
 a repair mechanism for a partially promoted claim.
+A completed upload-id binding remains durable for exactly the lifetime of its
+unaccepted receipt, so a lost promotion response and restart cannot turn retry
+into a new claim. Receipt consumption by an accepted row or explicit TTL
+eviction atomically removes both directions of that idempotency binding with
+the receipt; ordinary orphan reclamation may then collect nodes whose last
+retainer disappeared. Completion bindings are not independently TTL-expired.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
 version nor root reachability.
