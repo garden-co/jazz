@@ -2468,12 +2468,8 @@ function compileRules(
           ),
         };
         const previousIsAsymmetric = updateRuleAsymmetry.get(rule.table);
-        const isAsymmetric =
-          JSON.stringify(incoming.using) !== JSON.stringify(incoming.with_check);
-        if (
-          previousIsAsymmetric !== undefined &&
-          (previousIsAsymmetric || isAsymmetric)
-        ) {
+        const isAsymmetric = JSON.stringify(incoming.using) !== JSON.stringify(incoming.with_check);
+        if (previousIsAsymmetric !== undefined && (previousIsAsymmetric || isAsymmetric)) {
           throw new Error(
             `Multiple asymmetric update rules for table "${rule.table}" are unsupported because their USING and WITH CHECK clauses would be ORed independently. Combine the alternatives into one update rule, or use symmetric update rules.`,
           );
