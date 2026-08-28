@@ -326,21 +326,21 @@
       "boundary": "durable-storage",
       "profile": "jazz-root",
       "spec": {
-        "path": "crates/jazz/SPEC/8_sync_protocol.md",
-        "anchor": "### 8.4 Downstream: query-driven view updates"
+        "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
+        "anchor": "#### Durable settled-program-fact keys"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/tests/wire_fixtures.rs",
-        "anchor": "wire_message_frame_fixtures_decode_to_expected_messages"
+        "path": "crates/jazz/src/node/codec.rs",
+        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-        "anchor": "corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix"
+        "path": "crates/jazz/src/node/codec.rs",
+        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
       },
       "evidence": [
         {
           "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-          "anchor": "fast_known_state_fact_survives_storage_reopen"
+          "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
         }
       ]
     },
@@ -372,21 +372,21 @@
       "boundary": "durable-storage",
       "profile": "jazz-root",
       "spec": {
-        "path": "crates/jazz/SPEC/8_sync_protocol.md",
-        "anchor": "### 8.11 Known state: reconnect declarations and payload dedup"
+        "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
+        "anchor": "#### Durable settled-program-fact keys"
       },
       "semantic_fixture": {
         "path": "crates/jazz/src/node/tests/sync/known_state.rs",
         "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-        "anchor": "corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix"
+        "path": "crates/jazz/src/node/codec.rs",
+        "anchor": "nested_settled_result_values_are_canonical_groove_records_and_reject_corruption"
       },
       "evidence": [
         {
           "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-          "anchor": "fast_known_state_fact_survives_storage_reopen"
+          "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
         }
       ]
     },

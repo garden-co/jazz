@@ -1133,8 +1133,10 @@ fn fast_known_state_fact_survives_storage_reopen() {
 #[test]
 fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec() {
     // Internal storage-boundary coverage: applications cannot observe physical
-    // keys, while this verifies all delta modes survive through the same reopen
-    // path. Codec fixtures cover every fact variant separately.
+    // keys, while this verifies all delta modes -- including the nested
+    // descriptor/value payload used by aggregate synthetic members -- survive
+    // through the same reopen path. Codec fixtures cover every fact variant
+    // separately.
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
@@ -1170,10 +1172,48 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
     reader.apply_sync_message_settled(update(false, vec![], vec![added])).unwrap();
     assert!(reader.query.settled_program_facts[&key].is_empty());
     let rewritten = fact("rewrite");
-    reader.apply_sync_message_settled(update(true, vec![rewritten.clone()], vec![])).unwrap();
+    let payload_descriptor = groove::records::RecordDescriptor::new([(
+        "value",
+        groove::records::ValueType::String,
+    )]);
+    let synthetic_row = crate::node::codec::settled_result_value_storage_bytes(
+        &Value::String("group-a".to_owned()),
+        &groove::records::ValueType::String,
+    )
+    .unwrap();
+    let synthetic_replacement = crate::node::codec::settled_result_value_storage_bytes(
+        &Value::U64(1),
+        &groove::records::ValueType::U64,
+    )
+    .unwrap();
+    let nested_payload = crate::protocol::ProgramFactEntry::ResultPayload(
+        crate::protocol::ResultMemberPayloadEntry {
+            member: crate::protocol::ResultMemberEntry::Synthetic {
+                table: "totals".to_owned(),
+                row: synthetic_row,
+                replacement: crate::protocol::SyntheticReplacementToken::from_encoded_record(
+                    synthetic_replacement,
+                ),
+            },
+            descriptor: groove::records::encode_record_descriptor(&payload_descriptor).unwrap(),
+            record: payload_descriptor
+                .create(&[Value::String("payload".to_owned())])
+                .unwrap(),
+        },
+    );
+    reader
+        .apply_sync_message_settled(update(
+            true,
+            vec![rewritten.clone(), nested_payload.clone()],
+            vec![],
+        ))
+        .unwrap();
     drop(reader);
     let reopened = open_node_at(&reader_dir, schema());
-    assert_eq!(reopened.query.settled_program_facts[&key], BTreeSet::from([rewritten]));
+    assert_eq!(
+        reopened.query.settled_program_facts[&key],
+        BTreeSet::from([rewritten, nested_payload])
+    );
 }
 
 #[test]

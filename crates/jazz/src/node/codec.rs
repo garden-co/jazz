@@ -2750,6 +2750,7 @@ struct ResultMemberStorageLayout {
     occurrence: records::RecordDescriptor,
     union_arm: records::RecordDescriptor,
     real_row: records::RecordDescriptor,
+    settled_value: records::RecordDescriptor,
 }
 
 fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
@@ -2953,6 +2954,14 @@ fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
                 "member",
                 records::ValueType::Enum(Box::new(member_schema.clone())),
             )]);
+            // The descriptor and value payloads are each normal canonical
+            // Groove encodings. Keeping them as fields of a fixed record
+            // avoids smuggling a serde/postcard representation into a durable
+            // result-member key while retaining their dynamic type boundary.
+            let settled_value = records::RecordDescriptor::new([
+                ("descriptor", records::ValueType::Bytes),
+                ("value", records::ValueType::Bytes),
+            ]);
             ResultMemberStorageLayout {
                 member_envelope,
                 member_schema,
@@ -2961,6 +2970,7 @@ fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
                 occurrence,
                 union_arm,
                 real_row,
+                settled_value,
             }
         });
     &LAYOUT
@@ -3032,6 +3042,72 @@ fn decode_result_member_envelope(
         return Err(Error::InvalidStoredValue(context));
     }
     Ok(value.clone())
+}
+
+/// Encode one dynamically typed synthetic identity value as a fixed outer
+/// Groove record. The nested descriptor is itself a canonical Groove record
+/// descriptor, and the nested bytes are a record under that exact descriptor.
+/// There is deliberately no serde/postcard payload in settled keys.
+pub(super) fn settled_result_value_storage_bytes(
+    value: &Value,
+    value_type: &records::ValueType,
+) -> Result<Vec<u8>, Error> {
+    let value_descriptor = records::RecordDescriptor::new([("value", value_type.clone())]);
+    let descriptor = records::encode_record_descriptor(&value_descriptor)?;
+    let value = value_descriptor.create(std::slice::from_ref(value))?;
+    let layout = result_member_storage_layout();
+    let encoded = layout
+        .settled_value
+        .create(&[Value::Bytes(descriptor), Value::Bytes(value)])?;
+    if encoded.len() > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is too large",
+        ));
+    }
+    Ok(encoded)
+}
+
+fn validate_settled_result_value_storage_bytes(encoded: &[u8]) -> Result<(), Error> {
+    if encoded.len() > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is too large",
+        ));
+    }
+    let layout = result_member_storage_layout();
+    let values = layout.settled_value.bind(encoded).to_values()?;
+    if layout.settled_value.create(&values)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is not canonical",
+        ));
+    }
+    let [Value::Bytes(descriptor), Value::Bytes(value)] = values.as_slice() else {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is invalid",
+        ));
+    };
+    let descriptor = records::decode_record_descriptor(descriptor)?;
+    let [field] = descriptor.fields() else {
+        return Err(Error::InvalidStoredValue(
+            "settled result value descriptor is invalid",
+        ));
+    };
+    if field.name.as_deref() != Some("value") {
+        return Err(Error::InvalidStoredValue(
+            "settled result value descriptor is invalid",
+        ));
+    }
+    let decoded = descriptor.bind(value).to_values()?;
+    if descriptor.create(&decoded)? != *value {
+        return Err(Error::InvalidStoredValue(
+            "settled result value is not canonical",
+        ));
+    }
+    if settled_result_value_storage_bytes(&decoded[0], &field.value_type)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is not canonical",
+        ));
+    }
+    Ok(())
 }
 
 fn result_member_case_descriptor(
@@ -3429,6 +3505,8 @@ fn result_member_storage_value(member: &ResultMemberEntry) -> Result<records::En
             row,
             replacement,
         } => {
+            validate_settled_result_value_storage_bytes(row)?;
+            validate_settled_result_value_storage_bytes(replacement.encoded_record())?;
             let tag = RESULT_MEMBER_SYNTHETIC_TAG;
             let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
             let record = ResultMemberSyntheticStorageRecord::encode(
@@ -3764,6 +3842,28 @@ fn program_fact_put_tier(bytes: &mut Vec<u8>, value: DurabilityTier) {
     });
 }
 
+fn validate_result_member_payload_storage(payload: &ResultMemberPayloadEntry) -> Result<(), Error> {
+    let descriptor = records::decode_record_descriptor(&payload.descriptor)
+        .map_err(|_| Error::InvalidStoredValue("settled result payload descriptor is invalid"))?;
+    if descriptor.fields().iter().any(|field| field.name.is_none()) {
+        return Err(Error::InvalidStoredValue(
+            "settled result payload descriptor field must be named",
+        ));
+    }
+    let values = descriptor
+        .bind(&payload.record)
+        .to_values()
+        .map_err(|_| Error::InvalidStoredValue("settled result payload record is invalid"))?;
+    if descriptor.create(&values)? != payload.record
+        || records::encode_record_descriptor(&descriptor)? != payload.descriptor
+    {
+        return Err(Error::InvalidStoredValue(
+            "settled result payload encoding is not canonical",
+        ));
+    }
+    Ok(())
+}
+
 /// Explicit versioned canonical codec for settled-program-fact durable keys.
 /// Nested result-member values use their own Groove-record codec; no serde
 /// representation of `ProgramFactEntry` is durable.
@@ -3773,6 +3873,7 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
     bytes.push(PROGRAM_FACT_STORAGE_VERSION);
     match fact {
         ProgramFactEntry::ResultPayload(v) => {
+            validate_result_member_payload_storage(v)?;
             bytes.push(0);
             program_fact_put_member(&mut bytes, &v.member, 1)?;
             program_fact_put_bytes(&mut bytes, &v.descriptor)?;
@@ -5501,11 +5602,27 @@ mod result_member_storage_codec_tests {
         row
     }
 
+    fn settled_value(value: Value, value_type: records::ValueType) -> Vec<u8> {
+        settled_result_value_storage_bytes(&value, &value_type).unwrap()
+    }
+
+    fn result_payload(value: Value, value_type: records::ValueType) -> ResultMemberPayloadEntry {
+        let descriptor = records::RecordDescriptor::new([("value", value_type)]);
+        ResultMemberPayloadEntry {
+            member: fixture_member(),
+            descriptor: records::encode_record_descriptor(&descriptor).unwrap(),
+            record: descriptor.create(&[value]).unwrap(),
+        }
+    }
+
     fn fixture_member() -> ResultMemberEntry {
         ResultMemberEntry::Synthetic {
             table: "facts".to_owned(),
-            row: vec![0x11],
-            replacement: SyntheticReplacementToken::from_encoded_record(vec![0x12]),
+            row: settled_value(Value::U8(0x11), records::ValueType::U8),
+            replacement: SyntheticReplacementToken::from_encoded_record(settled_value(
+                Value::U8(0x12),
+                records::ValueType::U8,
+            )),
         }
     }
 
@@ -5530,8 +5647,7 @@ mod result_member_storage_codec_tests {
         let facts = vec![
             ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
                 member: member.clone(),
-                descriptor: vec![1],
-                record: vec![2],
+                ..result_payload(Value::U8(2), records::ValueType::U8)
             }),
             ProgramFactEntry::RelationEdge(RelationEdgeEntry {
                 path: "p".into(),
@@ -5645,17 +5761,17 @@ mod result_member_storage_codec_tests {
                 .map(|bytes| blake3::hash(bytes).to_hex().to_string())
                 .collect::<Vec<_>>(),
             [
-                "eaabad908cc2f66ff0a302dccfd8aacbf619a6b78098a4e22037c4c4befa90e2",
+                "fb01d1bbceee0c2e0ad7e77005cb9b73bb2d9203e4951ea8e045b9614a8c4051",
                 "fd88aa550022a04bc6775b5e997d15b8f4e75f9cb26f62b7cb6d9d9aac6c4212",
                 "cc05966da0ecfb3ddbbeb437c3f0466c9757211b4718e005ed98109d0d9e24b0",
                 "090b02e75b1028e4b732d2a1eb56da8d22cac67015ca4b223c3914b62338c753",
                 "85f2bab0a0f503066f669f9482b887b177e3a68cc1e6f7af69343d31795135c2",
                 "cbdf98c6f111efb8b9ffaae39160150cddd7f4ca4b10d7e211e8d23d59104584",
-                "2713fd886f4afc0760389640c4328ef461da65b9371335a71132b7f27dcd01c1",
+                "90b3bda57c07eeda03fc389e0287f93627085ab0dfc2db66ea30eea9d7352a44",
                 "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
-                "83a2dca82e25b669343ca731c45e9c7872681bd83b7c81180a5feceeb0e69b9e",
-                "eb80886502cf23a0fb3d8bf41679188e5a5f763214c444fa1c44eddc703dd48a",
-                "1a49359e08e4eb9956a55ba4523f511ba0a2b4d3e4edeec6c6399f42a369ba45",
+                "f19b832022c7623e85f35a321908882ac8d54d685ecdd7b892c041c217b467b9",
+                "0e3395f68049bf529f1e5014170d4aa5f55ac6d45daf6998e9f3376fefce4a47",
+                "67e1ab722ba171d14ab66f5fc31bc948344a75f936865330aebb222c10161be6",
                 "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",
                 "ceca71b78f841cf8ca9387c9cc0c616fd043a5ce5698fb7098c9c5d6a148ad8e",
                 "73b584cebffb48801a204b0c1e5d57e7b1dddc1c40180ffa5497d8981ad5d1b1",
@@ -5706,6 +5822,86 @@ mod result_member_storage_codec_tests {
         assert!(program_fact_from_storage_bytes(&noncanonical).is_err());
     }
 
+    #[test]
+    fn nested_settled_result_values_are_canonical_groove_records_and_reject_corruption() {
+        // This is intentionally an internal durable-boundary receipt: the
+        // descriptor and synthetic identity bytes are not application values,
+        // but they become part of persistent JPFK/JRME keys.  Pinning the
+        // complete enclosing bytes below makes an accidental return to a
+        // Rust-private serializer observable; these targeted corruptions prove
+        // the production readers fail before accepting a different spelling.
+        let descriptor = records::RecordDescriptor::new([
+            ("name", records::ValueType::String),
+            (
+                "labels",
+                records::ValueType::Array(Box::new(records::ValueType::String)),
+            ),
+            (
+                "optional_count",
+                records::ValueType::Nullable(Box::new(records::ValueType::U64)),
+            ),
+        ]);
+        let descriptor_bytes = records::encode_record_descriptor(&descriptor).unwrap();
+        assert_eq!(
+            blake3::hash(&descriptor_bytes).to_hex().as_str(),
+            "e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a"
+        );
+        let decoded_descriptor = records::decode_record_descriptor(&descriptor_bytes).unwrap();
+        assert_eq!(
+            records::encode_record_descriptor(&decoded_descriptor).unwrap(),
+            descriptor_bytes
+        );
+        let mut descriptor_trailing = descriptor_bytes.clone();
+        descriptor_trailing.push(0);
+        assert!(records::decode_record_descriptor(&descriptor_trailing).is_err());
+
+        let payload = ResultMemberPayloadEntry {
+            member: fixture_member(),
+            descriptor: descriptor_bytes.clone(),
+            record: descriptor
+                .create(&[
+                    Value::String("synth".to_owned()),
+                    Value::Array(vec![Value::String("a".to_owned())]),
+                    Value::Nullable(Some(Box::new(Value::U64(7)))),
+                ])
+                .unwrap(),
+        };
+        let encoded_fact =
+            program_fact_storage_bytes(&ProgramFactEntry::ResultPayload(payload.clone())).unwrap();
+        assert_eq!(
+            blake3::hash(&encoded_fact).to_hex().as_str(),
+            "266952cded111efe3209e4a478835693924f09c52d18b01293057d5307b2e3c8"
+        );
+        let descriptor_offset = encoded_fact
+            .windows(payload.descriptor.len())
+            .position(|window| window == payload.descriptor)
+            .expect("payload descriptor appears once in its durable fact");
+        let mut corrupt_descriptor = encoded_fact.clone();
+        corrupt_descriptor[descriptor_offset] ^= 1;
+        assert!(program_fact_from_storage_bytes(&corrupt_descriptor).is_err());
+
+        let replacement = settled_value(Value::U8(2), records::ValueType::U8);
+        let layout = result_member_storage_layout();
+        let synthetic = ResultMemberSyntheticStorageRecord::encode(
+            &result_member_case_descriptor(&layout.member_schema, RESULT_MEMBER_SYNTHETIC_TAG)
+                .unwrap(),
+            "facts".to_owned(),
+            vec![0],
+            replacement,
+        )
+        .unwrap()
+        .record()
+        .clone();
+        let encoded_member = encode_result_member_envelope(
+            RESULT_MEMBER_STORAGE_MAGIC,
+            RESULT_MEMBER_STORAGE_VERSION,
+            layout.member_envelope,
+            records::EnumValue::new(RESULT_MEMBER_SYNTHETIC_TAG, synthetic),
+        )
+        .unwrap();
+        assert!(result_member_from_storage_bytes(&encoded_member).is_err());
+    }
+
     // These stay internal because exact physical key bytes and malformed
     // engine-owned payloads cannot be observed through Jazz's public API.
     // The ordinary persisted/reopen behavior is covered by the known-state
@@ -5720,8 +5916,11 @@ mod result_member_storage_codec_tests {
             ResultMemberEntry::Row(ordinary_row()),
             ResultMemberEntry::Synthetic {
                 table: "totals".to_owned(),
-                row: vec![1, 2],
-                replacement: SyntheticReplacementToken::from_encoded_record(vec![3, 4]),
+                row: settled_value(Value::U16(0x0201), records::ValueType::U16),
+                replacement: SyntheticReplacementToken::from_encoded_record(settled_value(
+                    Value::U16(0x0403),
+                    records::ValueType::U16,
+                )),
             },
             ResultMemberEntry::PathTuple {
                 path: "owner".to_owned(),
@@ -5765,7 +5964,7 @@ mod result_member_storage_codec_tests {
                 .collect::<Vec<_>>(),
             [
                 "0e1d541c58211d93e04f7f53eff924c639ce7640989384430236be315222072b",
-                "ea51cdbe5077c2236ddb62f192dc50a5e9b9e5306d4d1ec8a5935b73cc016de6",
+                "ef1b7386b6f019471e6b96f2c233d1862b933301c107bc5347db2786a720660a",
                 "67b1049e3ab2654cac0076a2894e16f97667cee5bd9defa51f86dd4dd890fb49",
                 "64d9489980bb8678717621a02b7518748e019a2a55104cbb9a0614498d7ed01f",
             ]

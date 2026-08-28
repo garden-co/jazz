@@ -63,12 +63,16 @@ full-state rebuild or full-state diff on the maintained path.
 
 `INV-QUERY-36` — Every settled program fact durable key is exactly one
 versioned, canonical `JPFK` codec value. Its version and variant tags are
-permanent; nested result-member values use the corresponding canonical Groove
-record codec. Recovery MUST reject before mutating resident query state any
-legacy postcard payload, malformed or truncated value, unknown version/tag,
-trailing bytes, non-canonical representation, oversized field, or value beyond
-the codec nesting bound. There is no compatibility decode or on-open rewrite
-for the pre-freeze raw `ViewFactEntry` postcard keys. Add, remove, rewrite, and
+permanent. A `ResultPayload` carries its `RecordDescriptor` as one exact,
+ordinary canonical Groove record encoding and its row as a record under that
+descriptor; a synthetic result member likewise carries its dynamic row and
+replacement token as fixed Groove records containing the exact descriptor and
+value. These nested durable values never use a Rust-private serde/postcard
+encoding. Recovery MUST reject before mutating resident query state any legacy
+postcard payload, malformed or truncated value, unknown version/tag, trailing
+bytes, non-canonical representation, oversized field, or value beyond the
+codec nesting bound. There is no compatibility decode or on-open rewrite for
+the pre-freeze raw `ViewFactEntry` postcard keys. Add, remove, rewrite, and
 reopen all derive the same exact key bytes. Storage-freeze issue #2249.
 
 The high-level `Db` facade follows the same boundary for every live
