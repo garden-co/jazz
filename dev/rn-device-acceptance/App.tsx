@@ -1,10 +1,41 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-native";
 import { encodeResult } from "./src/protocol";
 import { scenarioPlan } from "./src/scenarios";
+import { admittedNativeRelay, deviceReceiptContext } from "./src/native-fixture";
+
+async function observeLinkedAbiAdmission() {
+  const { executor } = await admittedNativeRelay();
+  // Postcard RelayCommandRequest::Probe is the canonical one-byte tag 0.
+  const response = Uint8Array.from(globalThis.atob(await executor.execute("AA==")), (byte) =>
+    byte.charCodeAt(0),
+  );
+  if (response.length !== 2 || response[0] !== 0 || response[1] !== 3)
+    throw new Error("installed Jazz relay returned an unexpected ABI probe response");
+  return await deviceReceiptContext();
+}
 
 export default function App() {
   const [shown, setShown] = useState(false);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    void observeLinkedAbiAdmission()
+      .then((receipt) => {
+        const item = scenarioPlan.find((scenario) => scenario.scenario === "linked-abi-admission")!;
+        console.log(
+          encodeResult({
+            ...item,
+            receipt: { ...receipt, sequence: 1, observedAt: new Date().toISOString() },
+          }),
+        );
+        setShown(true);
+      })
+      .catch((reason: unknown) => {
+        const detail = reason instanceof Error ? reason.message : String(reason);
+        console.error("linked-abi-admission failed", detail);
+        setError(detail);
+      });
+  }, []);
   return (
     <SafeAreaView style={styles.page}>
       <ScrollView contentContainerStyle={styles.content}>
@@ -12,14 +43,7 @@ export default function App() {
         <Text style={styles.copy}>
           Development build only. Expo Go cannot contain the native relay.
         </Text>
-        <Pressable
-          testID="emit-scenario-plan"
-          style={styles.button}
-          onPress={() => {
-            scenarioPlan.forEach((item) => console.log(encodeResult(item)));
-            setShown(true);
-          }}
-        >
+        <Pressable testID="emit-scenario-plan" style={styles.button} onPress={() => setShown(true)}>
           <Text style={styles.buttonText}>Emit acceptance plan</Text>
         </Pressable>
         {shown &&
@@ -28,6 +52,7 @@ export default function App() {
               {item.scenario}: {item.state} — {item.detail}
             </Text>
           ))}
+        {error && <Text testID="scenario-error">linked-abi-admission: failed — {error}</Text>}
       </ScrollView>
     </SafeAreaView>
   );

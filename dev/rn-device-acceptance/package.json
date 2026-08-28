@@ -24,6 +24,7 @@
     "react-native": "0.81.5"
   },
   "devDependencies": {
+    "@expo/config-plugins": "~54.0.5",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "babel-preset-expo": "~54.0.10",

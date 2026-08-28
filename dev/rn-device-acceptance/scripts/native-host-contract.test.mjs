@@ -29,4 +29,7 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(registration, /class JazzDeviceFixturePackage : ReactPackage/);
   assert.match(registration, /listOf\(JazzDeviceFixtureModule\(context\)\)/);
   assert.match(host, /add\(JazzDeviceFixturePackage\(\)\)/);
+  assert.match(fixture, /Settings\.Secure\.ANDROID_ID/);
+  assert.match(fixture, /jazzDeviceRunNonce/);
+  assert.match(fixture, /jazzDeviceBuildFingerprint/);
 });
