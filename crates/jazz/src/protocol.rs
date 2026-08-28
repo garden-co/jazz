@@ -3678,18 +3678,6 @@ impl SchemaLineagePublication {
         publication
     }
 
-    /// Legacy fixture constructor.  It cannot safely author a descendant,
-    /// because it has no authority source manifest.  Runtime callers must use
-    /// [`Self::author_from_prior`] (or `NodeState::author_schema_lineage_publication`).
-    pub fn new(
-        schema: SchemaVersion,
-        lens: MigrationLens,
-        new_tables: impl IntoIterator<Item = impl Into<String>>,
-        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        Self::new_genesis_fixture(schema, lens, new_tables, dropped_tables)
-    }
-
     /// Return the content-addressed id implied by this payload.
     pub fn content_id(&self) -> SchemaLineagePublicationId {
         let mut bytes = Vec::new();
@@ -4438,7 +4426,7 @@ mod tests {
 
         let version = SchemaVersion::new(schema.clone());
         let lens = MigrationLens::new(version.id, version.id, Vec::new());
-        let publication = SchemaLineagePublication::new(
+        let publication = SchemaLineagePublication::new_genesis_fixture(
             version,
             lens,
             std::iter::empty::<String>(),

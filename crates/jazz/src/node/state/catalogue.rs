@@ -2,7 +2,11 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(crate) fn author_schema_lineage_publication(
+    /// Author a descendant lineage from this authority's active source
+    /// manifest. This is the only NodeState construction path for a
+    /// non-genesis publication: it preserves mapped physical UUIDs and mints
+    /// identities only for genuinely new entities.
+    pub fn author_schema_lineage_publication(
         &self,
         schema: SchemaVersion,
         lens: MigrationLens,

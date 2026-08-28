@@ -1435,7 +1435,9 @@ mod tests {
         evolved_snapshot.schemas.push(evolved.clone());
         evolved_snapshot.lineages.push((
             1,
-            jazz::protocol::SchemaLineagePublication::new(
+            jazz::protocol::SchemaLineagePublication::author_from_prior(
+                &base.schema,
+                &evolved_snapshot.genesis_physical_identities,
                 evolved.clone(),
                 jazz::protocol::MigrationLens::new(
                     base.id,
@@ -1451,7 +1453,8 @@ mod tests {
                 ),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
-            ),
+            )
+            .expect("snapshot fixture authors its descendant lineage"),
         ));
         evolved_snapshot.current_write_schema = jazz::protocol::CurrentWriteSchema {
             revision: 1,

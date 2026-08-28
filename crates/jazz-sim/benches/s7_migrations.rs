@@ -12,8 +12,7 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion,
-    SyncMessage, TableLens,
+    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
 };
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
@@ -123,16 +122,19 @@ fn publish_chain(
     // harness is the authority here, so it exercises the same trusted
     // catalogue ingress used by a core after the sequencer has ordered them.
     for (schema, lens) in schemas.iter().skip(1).zip(lenses) {
+        let publication = core
+            .author_schema_lineage_publication(
+                SchemaVersion::new(schema.clone()),
+                lens.clone(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .expect("benchmark authority authors descendant lineage");
         let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
             SyncMessage::PublishSchemaWithLens {
                 author: AuthorSubject::SYSTEM,
                 catalogue_seq: core.active_catalogue_seq() + 1,
-                publication: Box::new(SchemaLineagePublication::new(
-                    SchemaVersion::new(schema.clone()),
-                    lens.clone(),
-                    Vec::<String>::new(),
-                    Vec::<String>::new(),
-                )),
+                publication: Box::new(publication),
             },
         ))
         .unwrap();

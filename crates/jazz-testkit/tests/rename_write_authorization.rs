@@ -10,8 +10,7 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion,
-    SyncMessage, TableLens,
+    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
 };
 use jazz::row_input;
 use jazz::schema::JazzSchema;
@@ -223,17 +222,20 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     // Catalogue evolution is a trusted administrative lane, distinct from
     // the untrusted writer whose policy-scoped update we exercise below.
     let catalogue_seq = authority.active_catalogue_seq().saturating_add(1);
+    let publication = authority
+        .author_schema_lineage_publication(
+            v2.clone(),
+            lens.clone(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .expect("authority authors v2 rename lineage");
     block_on(async {
         let outcome = authority
             .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: AuthorSubject::SYSTEM,
                 catalogue_seq,
-                publication: Box::new(SchemaLineagePublication::new(
-                    v2.clone(),
-                    lens.clone(),
-                    Vec::<String>::new(),
-                    Vec::<String>::new(),
-                )),
+                publication: Box::new(publication),
             })
             .await?;
         authority.persist_and_settle_outcome(outcome).await

@@ -891,10 +891,13 @@ fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &St
 
 fn duplicate_schema_destination_lineage(
     base: &JazzSchema,
+    source_identities: &PhysicalIdentityManifest,
     original: &StagedSchemaLineage,
     catalogue_seq: u64,
 ) -> StagedSchemaLineage {
-    let duplicate_publication = SchemaLineagePublication::new(
+    let duplicate_publication = SchemaLineagePublication::author_from_prior(
+        base,
+        source_identities,
         original.publication.schema.clone(),
         MigrationLens::new(
             base.version_id(),
@@ -910,7 +913,8 @@ fn duplicate_schema_destination_lineage(
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    )
+    .expect("corruption fixture authors a valid competing descendant");
     assert_ne!(duplicate_publication.id, original.publication.id);
     StagedSchemaLineage {
         catalogue_seq,
@@ -1094,7 +1098,12 @@ fn reopen_rejects_duplicate_active_catalogue_targets() {
         .next()
         .unwrap()
         .clone();
-    let duplicate = duplicate_schema_destination_lineage(&base, &original, 2);
+    let duplicate = duplicate_schema_destination_lineage(
+        &base,
+        &receiver.catalogue.physical_mappings[&base.version_id()].identities,
+        &original,
+        2,
+    );
     write_active_lineage_record(&mut receiver, &duplicate);
     drop(receiver);
 
@@ -1119,7 +1128,12 @@ fn reopen_rejects_inactive_catalogue_target_already_active() {
         .next()
         .unwrap()
         .clone();
-    let duplicate = duplicate_schema_destination_lineage(&base, &original, 2);
+    let duplicate = duplicate_schema_destination_lineage(
+        &base,
+        &receiver.catalogue.physical_mappings[&base.version_id()].identities,
+        &original,
+        2,
+    );
     write_catalogue_record(
         &mut receiver,
         b"schema_lineage_staged",
@@ -1150,7 +1164,12 @@ fn reopen_rejects_duplicate_inactive_catalogue_targets() {
         .unwrap()
         .clone();
     first.catalogue_seq = 1;
-    let duplicate = duplicate_schema_destination_lineage(&base, &first, 2);
+    let duplicate = duplicate_schema_destination_lineage(
+        &base,
+        &receiver.catalogue.physical_mappings[&base.version_id()].identities,
+        &first,
+        2,
+    );
     delete_catalogue_record(
         &mut receiver,
         b"schema_lineage_active",

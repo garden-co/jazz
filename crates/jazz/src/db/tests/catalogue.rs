@@ -82,18 +82,21 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
             }],
         }],
     );
+    let publication = db
+        .author_schema_lineage_publication(
+            schema_version.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
     db.node
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                schema_version.clone(),
-                lens,
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+            publication: Box::new(publication),
         })
         .unwrap();
     db.node
@@ -206,18 +209,21 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
             }],
         }],
     );
+    let enum_publication = db
+        .author_schema_lineage_publication(
+            middle.clone(),
+            enum_lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
     db.node
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                middle.clone(),
-                enum_lens,
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+            publication: Box::new(enum_publication),
         })
         .unwrap();
     db.node
@@ -249,18 +255,21 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
             }],
         }],
     );
+    let column_publication = db
+        .author_schema_lineage_publication(
+            latest.clone(),
+            column_lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
     db.node
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 2,
-            publication: Box::new(SchemaLineagePublication::new(
-                latest.clone(),
-                column_lens,
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+            publication: Box::new(column_publication),
         })
         .unwrap();
     db.node
@@ -335,27 +344,27 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     let db = open_db(0xa0, AuthorSubject::SYSTEM, &structural);
     db.set_test_provider_claims(alice, test_provider_claims(alice));
     db.set_test_provider_claims(bob, test_provider_claims(bob));
-    db.publish_schema_with_lens(
-        1,
-        SchemaLineagePublication::new(
+    let owner_lens = MigrationLens::new(
+        structural.version_id(),
+        owner_payload.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    let owner_publication = db
+        .author_schema_lineage_publication(
             owner_payload.clone(),
-            MigrationLens::new(
-                structural.version_id(),
-                owner_payload.id,
-                vec![TableLens {
-                    source_table: "todos".to_owned(),
-                    target_table: "todos".to_owned(),
-                    ops: vec![LensOp::AddColumn {
-                        column: "body".to_owned(),
-                        default: Value::String(String::new()),
-                    }],
-                }],
-            ),
+            owner_lens,
             Vec::<String>::new(),
             Vec::<String>::new(),
-        ),
-    )
-    .unwrap();
+        )
+        .unwrap();
+    db.publish_schema_with_lens(1, owner_publication).unwrap();
     db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: owner_payload.id,
@@ -445,17 +454,15 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
             }],
         }],
     );
-    let lens_ack = core
-        .publish_schema_with_lens(
-            1,
-            SchemaLineagePublication::new(
-                schema_version.clone(),
-                lens.clone(),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            ),
+    let publication = core
+        .author_schema_lineage_publication(
+            schema_version.clone(),
+            lens.clone(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
         )
         .unwrap();
+    let lens_ack = core.publish_schema_with_lens(1, publication).unwrap();
     assert!(matches!(
         lens_ack.as_slice(),
         [SyncMessage::CatalogueAck(ack)]
@@ -478,6 +485,27 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
     let rows = core.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row);
+
+    // Preparing a descendant is pure local bookkeeping. Only the following
+    // trusted catalogue admission is privileged, so a client can never turn
+    // its locally authored UUIDs into an active authority publication.
+    let client_publication = client
+        .author_schema_lineage_publication(
+            schema_version.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    let unauthorized = client
+        .publish_schema_with_lens(1, client_publication)
+        .unwrap_err();
+    assert_eq!(unauthorized.code, ErrorCode::Protocol);
+    assert!(
+        unauthorized
+            .message
+            .contains("catalogue updates require a serving Node")
+    );
 
     let unauthorized = client.publish_schema(schema_version).unwrap_err();
     assert_eq!(unauthorized.code, ErrorCode::Protocol);

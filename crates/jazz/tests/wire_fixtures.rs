@@ -164,12 +164,20 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             ],
         }],
     );
-    let lineage_publication = SchemaLineagePublication::new(
+    // This is an isolated codec fixture rather than a live catalogue, but the
+    // non-genesis payload still starts from an explicit authority manifest so
+    // inherited identities cannot be minted by accident.
+    let lineage_source_identities =
+        jazz::protocol::PhysicalIdentityManifest::allocate(&lineage_source.schema);
+    let lineage_publication = SchemaLineagePublication::author_from_prior(
+        &lineage_source.schema,
+        &lineage_source_identities,
         lineage_target.clone(),
         lineage_lens,
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    )
+    .expect("wire fixture authors descendant lineage");
     let mut large_value = groove::large_values::prepare(
         groove::large_values::LargeValueKind::Bytes,
         &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
