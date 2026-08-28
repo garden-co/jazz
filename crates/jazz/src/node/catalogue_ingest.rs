@@ -7,6 +7,24 @@ struct PlannedCatalogueSnapshot {
     activated_lineages: Vec<StagedSchemaLineage>,
 }
 
+/// Authority manifests supply globally stable identities, while the integer
+/// entries in `tables` remain this node's private physical aliases.  Replacing
+/// a provisional genesis manifest with the authority's first manifest must
+/// not, by itself, tear down a live Groove runtime: its table layouts have not
+/// changed, and a subscription opened before bootstrap remains attached to
+/// that runtime.  Schema/alias layout changes still require the usual rebuild.
+fn physical_mapping_alias_layouts_equal(
+    left: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    right: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(schema, left)| {
+            right
+                .get(schema)
+                .is_some_and(|right| left.tables == right.tables)
+        })
+}
+
 fn next_schema_version_alias_in_catalogue(
     catalogue: &SchemaCatalogue,
 ) -> Result<SchemaVersionAlias, Error> {
@@ -55,7 +73,10 @@ where
         let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
             || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
             || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
-            || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
+            || !physical_mapping_alias_layouts_equal(
+                &self.catalogue.physical_mappings,
+                &plan.catalogue.physical_mappings,
+            )
             || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         let previous_genesis = catalogue_genesis(&previous_catalogue)?;

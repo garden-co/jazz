@@ -2089,7 +2089,9 @@ where
             };
             mappings
                 .iter()
-                .filter(|(schema, _)| **schema != candidate)
+                .filter(|(schema, _)| {
+                    **schema != candidate && !is_descendant(**schema)
+                })
                 .map(|(_, mapping)| mapping.identities.clone())
                 .chain(staged.values().filter(|lineage| {
                     lineage.publication.id != omit
