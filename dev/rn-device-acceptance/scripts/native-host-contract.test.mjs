@@ -103,6 +103,47 @@ test("dispatch device workflow uses hosted KVM while source jobs remain cheap", 
   assert.match(workflow, /did not boot within 180s/);
   assert.match(workflow, /tail -200 "\$cache\/emulator\.log"/);
   assert.match(workflow, /android-device-acceptance:[\s\S]*timeout-minutes: 45/);
+  assert.match(workflow, /scripts\/create-android-avd\.sh[\s\\]+jazz-device-acceptance-api35/);
+  assert.doesNotMatch(workflow, /yes no \| avdmanager/);
+});
+
+test("Android AVD creation supplies one default-safe answer and fails closed on a second prompt", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-avdmanager-"));
+  const transcript = path.join(directory, "transcript");
+  const avdmanager = path.join(directory, "avdmanager");
+  fs.writeFileSync(
+    avdmanager,
+    `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "create avd --force --name acceptance --package system-images;android-35;google_apis;x86_64" ]]
+IFS= read -r first
+[[ "$first" == no ]]
+if IFS= read -r second; then
+  printf 'unexpected extra answer: %s\\n' "$second" >&2
+  exit 1
+fi
+if [[ "\${JAZZ_AVD_REQUIRE_SECOND_PROMPT:-}" == 1 ]]; then
+  echo 'second prompt was left unanswered' >&2
+  exit 42
+fi
+printf '%s' "$first" > "$JAZZ_AVD_TRANSCRIPT"
+`,
+    { mode: 0o755 },
+  );
+  execFileSync("bash", [path.join(root, "scripts/create-android-avd.sh"), "acceptance", "system-images;android-35;google_apis;x86_64"], {
+    env: { ...process.env, JAZZ_DEVICE_AVDMANAGER: avdmanager, JAZZ_AVD_TRANSCRIPT: transcript },
+  });
+  assert.equal(fs.readFileSync(transcript, "utf8"), "no");
+  assert.throws(() =>
+    execFileSync("bash", [path.join(root, "scripts/create-android-avd.sh"), "acceptance", "system-images;android-35;google_apis;x86_64"], {
+      env: {
+        ...process.env,
+        JAZZ_DEVICE_AVDMANAGER: avdmanager,
+        JAZZ_AVD_TRANSCRIPT: transcript,
+        JAZZ_AVD_REQUIRE_SECOND_PROMPT: "1",
+      },
+    }),
+  );
 });
 
 test("checksum pin rejects a planted corrupt cache archive", () => {
