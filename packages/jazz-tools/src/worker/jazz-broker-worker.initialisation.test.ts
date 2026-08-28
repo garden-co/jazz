@@ -19,7 +19,16 @@ const mocks = vi.hoisted(() => {
   const openConfig = vi.fn(() => new Uint8Array());
   const telemetryDisposers: Mock[] = [];
   const pageStores: Array<{ close: Mock }> = [];
+  const browserDbs: Array<{ close: Mock; setRelayAuthoritySessionOwner: Mock }> = [];
   const runtimes: Array<Record<string, Mock>> = [];
+  const createBrowserDb = () => {
+    const db = {
+      close: vi.fn(async () => true),
+      setRelayAuthoritySessionOwner: vi.fn(),
+    };
+    browserDbs.push(db);
+    return db;
+  };
   const wasmModule = {
     WasmDb: {
       openBrowser,
@@ -38,7 +47,9 @@ const mocks = vi.hoisted(() => {
     openConfig,
     telemetryDisposers,
     pageStores,
+    browserDbs,
     runtimes,
+    createBrowserDb,
     wasmModule,
     reset() {
       loadWasmModule.mockReset().mockResolvedValue(wasmModule);
@@ -52,8 +63,8 @@ const mocks = vi.hoisted(() => {
         pageStores.push(pageStore);
         return pageStore;
       });
-      openBrowser.mockReset().mockResolvedValue({});
-      openBrowserWithSelfSignedProof.mockReset().mockResolvedValue({});
+      openBrowser.mockReset().mockImplementation(async () => createBrowserDb());
+      openBrowserWithSelfSignedProof.mockReset().mockImplementation(async () => createBrowserDb());
       fromDb.mockReset().mockImplementation(() => {
         const subscriber = {
           setAuxiliaryTraceEnabled: vi.fn(),
@@ -83,6 +94,7 @@ const mocks = vi.hoisted(() => {
       openConfig.mockClear();
       telemetryDisposers.length = 0;
       pageStores.length = 0;
+      browserDbs.length = 0;
       runtimes.length = 0;
     },
   };
@@ -413,10 +425,11 @@ describe("broker worker context initialization", () => {
       false,
       { selfSignedClientProof },
     );
+    expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
   });
 
   it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
-    const rawDb = { close: vi.fn(async () => true) };
+    const rawDb = mocks.createBrowserDb();
     mocks.openBrowser.mockResolvedValueOnce(rawDb);
     mocks.fromDb.mockImplementationOnce(() => {
       throw new Error("adapter construction failed");
@@ -445,14 +458,14 @@ describe("broker worker context initialization", () => {
   });
 
   it("shares one successful initialization between concurrent connections for the same key", async () => {
-    const browserDb = deferred<object>();
+    const browserDb = deferred<ReturnType<typeof mocks.createBrowserDb>>();
     mocks.openBrowser.mockReturnValueOnce(browserDb.promise);
     const initOptions = options("concurrent-success");
 
     const first = connect(initOptions, "first-tab");
     const second = connect(initOptions, "second-tab");
     await vi.waitFor(() => expect(mocks.openBrowser).toHaveBeenCalledOnce());
-    browserDb.resolve({});
+    browserDb.resolve(mocks.createBrowserDb());
 
     expect((await first).outcome).toEqual({ type: "runtime-ready" });
     expect((await second).outcome).toEqual({ type: "runtime-ready" });
@@ -460,6 +473,7 @@ describe("broker worker context initialization", () => {
     expect(mocks.installWasmTelemetry).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
+    expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
   });
 
