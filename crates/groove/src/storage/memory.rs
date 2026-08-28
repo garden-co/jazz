@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage,
-    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, key_codec,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, WriteManyOutcome,
+    key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -416,6 +417,20 @@ impl OrderedKvStorage for MemoryStorage {
                 }
             }
             Ok(())
+        })
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            // Memory validates every operation under the same mutex before
+            // changing its map, so an error is proven not to have committed.
+            match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::Uncommitted(error),
+            }
         })
     }
 

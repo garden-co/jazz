@@ -16,6 +16,7 @@ Invariant digest:
 - `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
 - `INV-STORAGE-30`: Application table and direct-record-store names MUST have one case-sensitive, collision-free namespace that excludes Groove's engine-owned names; every physical column-family ingress MUST reject embedded NUL and names beyond the portable UTF-8 byte bound before durable mutation.
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
+- `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -146,6 +147,19 @@ have left the batch unapplied from a failure that may have followed a durable
 commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
+
+**Commit receipts and cancellation.** A portable atomic-batch submission has
+three acknowledgement classes: `Committed`, `Uncommitted(error)`, and
+`PossiblyCommitted(error)` (`INV-STORAGE-32`). `Uncommitted` is permitted only
+when the adapter proves the error happened before its atomic commit boundary
+(for example, complete local validation before beginning a native write).
+An adapter that receives a native failure without that proof must report
+`PossiblyCommitted`, even if the backend normally makes the failure unlikely.
+Dropping/cancelling a submission future after it has begun produces no receipt;
+callers must treat that case as possibly committed. Dropping it before the
+first poll begins no attempt and is uncommitted. This is an acknowledgement
+classification, not a request to make asynchronous storage operations
+uncancellable.
 
 `put_if_absent` and `compare_and_delete` are atomic at the persistence scope
 (`INV-STORAGE-28`). A backend either serializes them across every concurrently
