@@ -1431,11 +1431,15 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
 }
 
 #[test]
-fn exists_rel_rejects_multiple_join_conditions_in_write_policy() {
+fn exists_rel_rejects_compound_joins_in_every_policy_context_before_lowering() {
     let column = |scope: &str, name: &str| PublicRelColumnRef {
         scope: Some(scope.to_owned()),
         column: name.to_owned(),
     };
+    // The unsupported compound equality is deliberately below a nested join
+    // with aliases. This verifies that admission walks the full relation tree
+    // before the lowering implementation can select (and silently retain only)
+    // the first equality.
     let policy = PublicPolicyExpr::ExistsRel {
         rel: PublicRelExpr::Filter {
             input: Box::new(PublicRelExpr::Join {
@@ -1443,27 +1447,31 @@ fn exists_rel_rejects_multiple_join_conditions_in_write_policy() {
                     table: "blocks".into(),
                     alias: Some("blocks".to_owned()),
                 }),
-                right: Box::new(PublicRelExpr::Filter {
-                    input: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
                         table: "members".into(),
-                        alias: Some("members".to_owned()),
+                        alias: Some("membership".to_owned()),
                     }),
-                    predicate: PublicRelPredicateExpr::Cmp {
-                        left: column("members", "subject"),
-                        op: PublicRelPredicateCmpOp::Eq,
-                        right: PublicRelValueRef::SessionRef(vec!["user_id".to_owned()]),
-                    },
+                    right: Box::new(PublicRelExpr::TableScan {
+                        table: "grants".into(),
+                        alias: Some("grant".to_owned()),
+                    }),
+                    on: vec![
+                        PublicRelJoinCondition {
+                            left: column("membership", "workspace"),
+                            right: column("grant", "workspace"),
+                        },
+                        PublicRelJoinCondition {
+                            left: column("membership", "subject"),
+                            right: column("grant", "subject"),
+                        },
+                    ],
+                    join_kind: PublicRelJoinKind::Inner,
                 }),
-                on: vec![
-                    PublicRelJoinCondition {
-                        left: column("blocks", "workspace"),
-                        right: column("members", "workspace"),
-                    },
-                    PublicRelJoinCondition {
-                        left: column("blocks", "owner"),
-                        right: column("members", "subject"),
-                    },
-                ],
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("membership", "workspace"),
+                }],
                 join_kind: PublicRelJoinKind::Inner,
             }),
             predicate: PublicRelPredicateExpr::Cmp {
@@ -1473,31 +1481,81 @@ fn exists_rel_rejects_multiple_join_conditions_in_write_policy() {
             },
         },
     };
-    let public = PublicSchemaBuilder::new()
-        .table(PublicTableSchemaBuilder::new("workspaces"))
-        .table(
-            PublicTableSchemaBuilder::new("members")
-                .fk_column("workspace", "workspaces")
-                .column("subject", PublicColumnType::Uuid),
-        )
-        .table(
-            PublicTableSchemaBuilder::new("blocks")
-                .fk_column("workspace", "workspaces")
-                .column("owner", PublicColumnType::Uuid),
-        )
-        .table(
-            PublicTableSchemaBuilder::new("tasks")
-                .fk_column("block", "blocks")
-                .policies(PublicTablePolicies::new().with_insert(policy)),
-        )
-        .build();
+    let schema_with = |policies: PublicTablePolicies| {
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("workspaces"))
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("grants")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("blocks")
+                    .fk_column("workspace", "workspaces")
+                    .column("owner", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .fk_column("block", "blocks")
+                    .policies(policies),
+            )
+            .build()
+    };
 
-    let error = crate::schema::JazzSchema::new(&public)
-        .expect_err("multiple join conditions must fail closed instead of dropping one");
-    assert_eq!(
-        error.to_string(),
-        "$.tasks.policies.insert.with_check: core schema ExistsRel joins support exactly one column equality"
-    );
+    // Read and each write clause use distinct schema-conversion paths. The
+    // boolean forms prove that compound joins cannot be hidden in And, Or, or
+    // Not before runtime policy evaluation.
+    for (context, policies, expected_path) in [
+        (
+            "read query",
+            PublicTablePolicies::new().with_select(PublicPolicyExpr::And(vec![
+                PublicPolicyExpr::True,
+                policy.clone(),
+            ])),
+            "policies.select.using.And[1]",
+        ),
+        (
+            "insert check",
+            PublicTablePolicies::new().with_insert(PublicPolicyExpr::Or(vec![
+                PublicPolicyExpr::False,
+                policy.clone(),
+            ])),
+            "policies.insert.with_check.Or[1]",
+        ),
+        (
+            "update using",
+            PublicTablePolicies::new().with_update(
+                Some(PublicPolicyExpr::Not(Box::new(policy.clone()))),
+                PublicPolicyExpr::True,
+            ),
+            "policies.update.using.Not",
+        ),
+        (
+            "update check",
+            PublicTablePolicies::new().with_update(None, policy.clone()),
+            "policies.update.with_check",
+        ),
+        (
+            "delete using",
+            PublicTablePolicies::new().with_delete(policy.clone()),
+            "policies.delete.using",
+        ),
+    ] {
+        let error = crate::schema::JazzSchema::new(&schema_with(policies))
+            .expect_err("compound equality must fail closed before runtime evaluation");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "$.tasks.{expected_path}: core schema ExistsRel joins support exactly one column equality"
+            ),
+            "{context} must reject the compound join at schema admission",
+        );
+    }
 }
 
 #[test]

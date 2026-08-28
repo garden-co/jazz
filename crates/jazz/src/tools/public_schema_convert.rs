@@ -932,6 +932,10 @@ fn convert_policy_with_native_select_inherits(
     expr: &PolicyExpr,
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
+    // Do this before choosing a lowering path. In particular, an ExistsRel
+    // nested below a boolean operator must not escape this validation merely
+    // because that operator is rejected by a later lowering stage.
+    validate_exists_rel_policy_join_conditions(table, path, expr)?;
     match expr {
         PolicyExpr::And(exprs) => {
             if !exprs.iter().any(is_core_policy_clause) {
@@ -1459,13 +1463,46 @@ fn validate_exists_rel_join_conditions(
     }
 }
 
+fn validate_exists_rel_policy_join_conditions(
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::ExistsRel { rel } => validate_exists_rel_join_conditions(table, path, rel),
+        PolicyExpr::And(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                validate_exists_rel_policy_join_conditions(
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    expr,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Or(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                validate_exists_rel_policy_join_conditions(
+                    table,
+                    &format!("{path}.Or[{index}]"),
+                    expr,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(expr) => {
+            validate_exists_rel_policy_join_conditions(table, &format!("{path}.Not"), expr)
+        }
+        _ => Ok(()),
+    }
+}
+
 fn append_exists_rel_policy_clause(
     table: &TableName,
     path: &str,
     mut query: Query,
     rel: &RelExpr,
 ) -> Result<Query, SchemaConversionError> {
-    validate_exists_rel_join_conditions(table, path, rel)?;
     let mut lowered = lower_exists_rel(table, path, rel)?;
     let correlation_index = lowered
         .filters
