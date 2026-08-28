@@ -4870,15 +4870,30 @@ mod tests {
         );
     }
 
-    /// The serde visitor must reject an oversized postcard byte blob while it
-    /// is still borrowed from the input. That prevents allocation or canonical
-    /// grammar parsing based on an attacker-controlled blob length.
+    /// The serde visitor must reject an oversized byte blob while it is still
+    /// borrowed from the input. This direct deserializer preserves the custom
+    /// error message that postcard's public error type intentionally erases.
     #[test]
-    fn postcard_migration_lens_rejects_oversized_borrowed_blob_before_parsing() {
+    fn migration_lens_borrowed_visitor_rejects_oversized_blob_before_parsing() {
+        let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
+        let error = <MigrationLens as serde::Deserialize>::deserialize(
+            serde::de::value::BorrowedBytesDeserializer::<serde::de::value::Error>::new(&oversized),
+        )
+        .expect_err("oversized borrowed blob must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "migration lens blob exceeds aggregate byte budget",
+            "the borrowed visitor must reject the declared blob before parsing"
+        );
+    }
+
+    /// The wire boundary must turn an oversized postcard byte blob into a
+    /// normal decode error rather than a panic.
+    #[test]
+    fn postcard_migration_lens_rejects_oversized_blob_without_panicking() {
         let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
         // `serialize_bytes` emits postcard's byte-blob length varint followed
-        // by this data. Its payload is intentionally not a lens marker: the
-        // budget error proves it never reaches the canonical parser.
+        // by this data. The payload is intentionally not a lens marker.
         let wire =
             postcard::to_allocvec(&PostcardByteBlob(&oversized)).expect("wrap oversized blob");
         let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
@@ -4886,14 +4901,7 @@ mod tests {
             decoded.is_ok(),
             "oversized lens wire must return an error, not panic"
         );
-        let error = decoded
-            .unwrap()
-            .expect_err("oversized blob must be rejected");
-        assert_eq!(
-            error,
-            postcard::Error::SerdeDeCustom,
-            "the borrowed visitor must reject the declared blob before parsing"
-        );
+        assert!(decoded.unwrap().is_err(), "oversized blob must be rejected");
     }
 
     #[test]
