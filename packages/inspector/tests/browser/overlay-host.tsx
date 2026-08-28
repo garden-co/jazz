@@ -22,18 +22,22 @@ function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const { db } = useJazzClient();
   // A real query: creates the host client (so getRuntimeSchema resolves) and
   // registers a public subscription the overlay's Subscriptions tab should display.
-  useAll(app.todos);
+  const { data: todos = [] } = useAll(app.todos.where({ title: "First seeded todo" }).limit(1), {
+    tier: "edge",
+  });
+  const primaryReady = todos.some((todo) => todo.title === "First seeded todo");
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
-    if (!secondaryReady) return;
+    if (!secondaryReady || !primaryReady) return;
     const iframeWindow = iframeRef.current?.contentWindow;
     if (!iframeWindow) return;
     // The real host-side installer: publishes the handle + pushes subscriptions.
     return installInspectorHost(db, iframeWindow, window.location.origin);
-  }, [db, secondaryReady]);
+  }, [db, primaryReady, secondaryReady]);
 
   if (!secondaryReady) return <p id="host-status">Starting secondary runtime...</p>;
+  if (!primaryReady) return <p id="host-status">Loading primary runtime data...</p>;
 
   return (
     <>
@@ -89,6 +93,7 @@ function HostApp() {
           appId: APP_ID,
           env: TEST_ENV,
           cookieSession: {
+            issuer: "https://inspector.test",
             user_id: "inspector-secondary-user",
             claims: { role: "inspector-test" },
             authMode: "external",
