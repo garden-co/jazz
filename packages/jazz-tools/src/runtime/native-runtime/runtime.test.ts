@@ -2888,13 +2888,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       expect(secondSettled).toBe(false);
       await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
-      expect(secondSettled).toBe(false);
-
-      // The populated global read performs one row-scoped edge refresh before
-      // publishing, which likewise requires coverage for its new attachment.
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
       await expect(second).resolves.toEqual([
         {
           table: "todos",
@@ -2902,7 +2895,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           values: [{ type: "Text", value: "committed while detached" }],
         },
       ]);
-      expect(attachmentCount).toBe(3);
+      // The new full attachment itself supplied both membership and the
+      // concrete row. Re-reading that settled outer scope must not manufacture
+      // a second exact-id authority attachment: it would be a distinct receipt
+      // with no extra authorization information and can self-await.
+      expect(attachmentCount).toBe(2);
     } finally {
       vi.useRealTimers();
     }

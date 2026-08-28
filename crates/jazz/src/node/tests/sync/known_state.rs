@@ -1179,8 +1179,10 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
 #[test]
 fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
     // Internal recovery-boundary coverage: force a valid persisted fact followed
-    // by a malformed durable key and verify recovery leaves the prior resident
-    // closure untouched rather than publishing a partially decoded prefix.
+    // by a malformed durable key and verify recovery clears the resident
+    // closure rather than publishing a partially decoded prefix. A failed
+    // durable recovery is fail-closed, not a request to preserve potentially
+    // stale state that was loaded before the corruption was detected.
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
@@ -1209,8 +1211,6 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
-    let expected_facts = reader.query.settled_program_facts.clone();
-    let expected_cursors = reader.query.settled_through_by_binding_view.clone();
     let corrupt_store = reader
         .database
         .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
@@ -1226,8 +1226,8 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
         ))
     .unwrap();
     assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());
-    assert_eq!(reader.query.settled_program_facts, expected_facts);
-    assert_eq!(reader.query.settled_through_by_binding_view, expected_cursors);
+    assert!(reader.query.settled_program_facts.is_empty());
+    assert!(reader.query.settled_through_by_binding_view.is_empty());
 }
 
 #[test]
