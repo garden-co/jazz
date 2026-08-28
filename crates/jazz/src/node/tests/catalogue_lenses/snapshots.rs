@@ -132,7 +132,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
         )
         .unwrap();
 
-    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base);
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base.clone());
     let subscription = receiver
         .subscribe_history("todos")
         .expect("subscribe before historical snapshot import");
@@ -141,6 +141,16 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
         .expect("initial history snapshot")
         .is_empty());
     let runtime_before_snapshot = receiver.groove_runtime_token();
+    let history_table = physical_history_table_name(
+        receiver
+            .physical_table_id_for_schema(base.version_id(), "todos")
+            .expect("base physical table"),
+    );
+    let history_registry_before = receiver
+        .database
+        .table_schema(&history_table)
+        .expect("base history registry")
+        .clone();
     let snapshot = authority.catalogue_snapshot().unwrap();
     assert!(matches!(
         receiver.apply_sync_message_settled(SyncMessage::CatalogueSnapshot(Box::new(snapshot.clone()))),
@@ -148,6 +158,56 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
             "catalogue snapshot requires a trusted upstream link"
         ))
     ));
+
+    // First fail after physical variants have been installed but before their
+    // projections.  The synchronizer itself must roll that prefix back.
+    receiver.set_catalogue_activation_failpoint(
+        CatalogueActivationFailpoint::AfterPhysicalRegistryRegistration,
+    );
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    assert_eq!(receiver.groove_runtime_token(), runtime_before_snapshot);
+    assert_eq!(receiver.active_catalogue_seq(), 0);
+    assert_eq!(receiver.catalogue_schemas().len(), 1);
+    assert_eq!(
+        receiver
+            .database
+            .table_schema(&history_table)
+            .expect("rolled-back history registry"),
+        &history_registry_before,
+        "partial variant registration must not leak a new runtime capability"
+    );
+
+    // Registration has already added the evolved physical variants and their
+    // projection cases by this point.  The activation receipt is still the
+    // visibility boundary: a failure immediately before it must restore the
+    // complete old registry, not merely the in-memory catalogue.
+    receiver.set_catalogue_activation_failpoint(
+        CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
+    );
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    assert_eq!(receiver.groove_runtime_token(), runtime_before_snapshot);
+    assert_eq!(receiver.active_catalogue_seq(), 0);
+    assert_eq!(receiver.catalogue_schemas().len(), 1);
+    assert_eq!(
+        receiver
+            .database
+            .table_schema(&history_table)
+            .expect("rolled-back history registry"),
+        &history_registry_before,
+        "activation failure restores the complete registry, not only catalogue metadata"
+    );
+    assert_eq!(
+        receiver.query_all_versions().expect("old history remains readable"),
+        Vec::new(),
+        "a failed snapshot leaves rows and their old registry interpretation untouched"
+    );
+
     receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
     assert_eq!(
         receiver.groove_runtime_token(),

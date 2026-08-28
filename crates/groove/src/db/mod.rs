@@ -1351,6 +1351,22 @@ pub struct Database {
     poisoned: bool,
 }
 
+/// An in-memory checkpoint of the schema-derived IVM registry.
+///
+/// Live schema admission is deliberately append-only on success, but callers
+/// which couple it to another activation boundary need a way to make the
+/// registry invisible until that boundary commits.  This checkpoint excludes
+/// storage, rows, publications, and chunk lifecycle state.  It does include
+/// the complete IVM runtime because variant descriptors and projection cases
+/// are spread throughout the runtime graph alongside live subscriptions.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RuntimeRegistryCheckpoint {
+    ivm_runtime: IvmRuntime,
+    stored_record_descriptors: BTreeMap<String, BTreeMap<u32, RecordDescriptor>>,
+    poisoned: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppliedBatchLifecycle {
     Applied,

@@ -948,6 +948,21 @@ where
     }
 
     pub(super) async fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
+        // A physical schema is a coupled registry: tables, variants, enum
+        // registries, indices, and projection cases all become observable by
+        // the same live runtime.  Do not leave a prefix behind if any later
+        // member fails validation.  Catalogue activation has an additional
+        // durable boundary and retains this checkpoint until its commit; this
+        // local boundary also protects callers which only need registration.
+        let checkpoint = self.database.runtime_registry_checkpoint();
+        let result = self.synchronize_physical_version_tables_inner().await;
+        if result.is_err() {
+            self.database.restore_runtime_registry(checkpoint);
+        }
+        result
+    }
+
+    async fn synchronize_physical_version_tables_inner(&mut self) -> Result<(), Error> {
         for desired in physical_version_storage_tables(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
@@ -998,6 +1013,13 @@ where
                     .register_table_index(&desired.name, index)
                     .await?;
             }
+        }
+        #[cfg(any(test, feature = "testing"))]
+        if self.catalogue_activation_failpoint
+            == Some(CatalogueActivationFailpoint::AfterPhysicalRegistryRegistration)
+        {
+            self.catalogue_activation_failpoint = None;
+            return Err(Error::CatalogueActivationFailed);
         }
         self.register_physical_history_variant_projections().await?;
         self.register_physical_current_variant_projections().await?;

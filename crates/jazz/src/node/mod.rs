@@ -1975,6 +1975,10 @@ struct CatalogueBootstrapReady {
 #[doc(hidden)]
 pub enum CatalogueActivationFailpoint {
     AfterStaged,
+    /// Fail after physical table/variant registration but before the coupled
+    /// projection registry is complete.  This proves registry synchronization
+    /// rolls its live in-memory mutations back as one unit.
+    AfterPhysicalRegistryRegistration,
     AfterRegistration,
     BeforeSnapshotActivationCommit,
 }

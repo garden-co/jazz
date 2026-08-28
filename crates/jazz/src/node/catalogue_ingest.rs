@@ -87,6 +87,18 @@ where
             !active_runtime_layouts_equal(&self.catalogue, &plan.catalogue);
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         let previous_genesis = catalogue_genesis(&previous_catalogue)?;
+        // Historical/import-only snapshot growth must not be visible through
+        // Groove until the catalogue records which explain that registry are
+        // durably activated.  In particular, projection registration mutates
+        // several coupled IVM maps; restoring just table schemas would leave
+        // an old live subscription reading a half-installed case.
+        //
+        // A read-layout change takes the deliberately separate rebuild path
+        // below.  Its replacement is already an all-or-nothing open, while
+        // retaining the existing runtime for history-only growth is exactly
+        // why this in-place checkpoint exists.
+        let runtime_registry_checkpoint =
+            (!runtime_semantics_changed).then(|| self.database.runtime_registry_checkpoint());
         // Snapshot replay can install widened mappings after a persistent edge
         // restart. Rebuild the live projection registry as part of that
         // semantic transition, not after client traffic begins. An identical
@@ -105,6 +117,9 @@ where
             // projections must be available before authored history or a
             // later write-schema pointer can be admitted.
             self.catalogue = previous_catalogue;
+            if let Some(checkpoint) = runtime_registry_checkpoint.clone() {
+                self.database.restore_runtime_registry(checkpoint);
+            }
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
         }
@@ -115,6 +130,9 @@ where
         {
             self.catalogue_activation_failpoint = None;
             self.catalogue = previous_catalogue;
+            if let Some(checkpoint) = runtime_registry_checkpoint.clone() {
+                self.database.restore_runtime_registry(checkpoint);
+            }
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
         }
@@ -206,6 +224,9 @@ where
         .await;
         if persistence.is_err() {
             self.catalogue = previous_catalogue;
+            if let Some(checkpoint) = runtime_registry_checkpoint {
+                self.database.restore_runtime_registry(checkpoint);
+            }
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);
         }
@@ -220,6 +241,12 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        // A trusted snapshot is a complete replacement of the authority
+        // catalogue. Once its registry and durable receipt have both crossed
+        // the activation boundary, it also proves that a transient earlier
+        // activation failure has been repaired; do not permanently reject
+        // ordinary data ingress after a successful retry.
+        self.catalogue_activation_failed = false;
         self.catalogue_bootstrap_state = CatalogueBootstrapState::Ready;
         self.catalogue_bootstrap_marker |= bootstrap_uninitialized;
         if runtime_semantics_changed {
