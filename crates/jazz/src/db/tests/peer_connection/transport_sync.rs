@@ -51,14 +51,10 @@ fn write_deletion_register(server: &CoreDb, table: &str, row: RowUuid, branch: B
     let node = server.node();
     let parents = {
         let mut state = node.borrow_mut();
-        let deletion =
-            block_on(state.local_deletion_winner_tx_id_in_branch(table, &branch, row)).unwrap();
-        let content = if deletion.is_none() {
-            block_on(state.local_content_winner_tx_id_in_branch(table, &branch, row)).unwrap()
-        } else {
-            None
-        };
-        deletion.or(content).into_iter().collect()
+        block_on(state.local_deletion_winner_tx_id_in_branch(table, &branch, row))
+            .unwrap()
+            .into_iter()
+            .collect()
     };
     let authored_columns = branch.values.keys().cloned().collect::<BTreeSet<_>>();
     let published = block_on(

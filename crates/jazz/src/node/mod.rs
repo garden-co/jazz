@@ -1678,7 +1678,13 @@ pub struct MergeableCommit {
     pub authored_columns: Option<BTreeSet<String>>,
     /// Deletion-register event, if any.
     pub deletion: Option<DeletionEvent>,
-    /// Parent content versions.
+    /// Exact prior versions of this same physical row and layer.
+    ///
+    /// Version parents describe only row-history ancestry: they are neither a
+    /// general transaction-dependency graph nor a way to express an observed
+    /// state precondition. In particular, content and deletion registers have
+    /// independent parent chains. A read/CAS precondition belongs to an
+    /// exclusive transaction's read set instead.
     pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
@@ -1792,7 +1798,7 @@ impl MergeableCommit {
         self
     }
 
-    /// Set parent content versions.
+    /// Set exact same-row/layer history parents.
     pub fn parents(mut self, parents: Vec<TxId>) -> Self {
         self.parents = parents;
         self

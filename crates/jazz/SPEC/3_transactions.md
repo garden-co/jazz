@@ -22,7 +22,7 @@ Invariant digest:
 - `INV-TX-3`: A commit unit whose `Transaction.n_total_writes` does not equal the delivered version count MUST be rejected by the fate authority as `RejectionReason::MalformedCommit(...)` and MUST NOT ingest version rows.
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as `Error::ConflictingCommitUnit`.
 - `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
-- `INV-TX-6`: A commit unit MUST be rejected with `RejectionReason::CausalityViolation` if its `tx_id.time` is less than or equal to any parent transaction's `tx_id.time`, and its versions MUST NOT enter history.
+- `INV-TX-6`: A commit unit MUST be rejected with `RejectionReason::CausalityViolation` if its `tx_id.time` is less than or equal to any same-row/layer history parent's `tx_id.time`, and its versions MUST NOT enter history.
 - `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
 - `INV-TX-8`: Rejection MUST cascade to known pending descendants and later arriving children of rejected ancestors as `RejectionReason::Cascade { root }`, preserving the original root transaction id.
 - `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
@@ -226,9 +226,15 @@ It decides only once all prerequisites are present; a
 duplicate parked unit parks only once (`INV-TX-5`).
 
 After prerequisites are present, the authority rejects units that violate
-causality or clock-skew limits. A unit whose `tx_id.time` is not strictly
-greater than every parent's time is rejected as `CausalityViolation`
-(`INV-TX-6`). A unit whose `physical_ms` is more than `SKEW_TOLERANCE_MS` (~30
+history causality or clock-skew limits. A version parent is an exact prior
+version of the same physical table, branch key, row, and content/deletion
+layer. It is not a general mergeable-transaction dependency or an observed
+state precondition: mergeable transactions carry no read set or arbitrary
+causal dependency graph. A caller that needs "only if I observed X" uses an
+exclusive transaction and its read set (§3.7).
+
+A unit whose `tx_id.time` is not strictly greater than every such history
+parent's time is rejected as `CausalityViolation` (`INV-TX-6`). A unit whose `physical_ms` is more than `SKEW_TOLERANCE_MS` (~30
 seconds) ahead of the authority's clock is rejected as
 `ClientClockTooFarAhead` (`INV-TX-7`). In both cases, no visible version rows
 remain. Write-policy authorization (ch. 7) and, for exclusive units, the

@@ -26,7 +26,8 @@ Invariant digest:
 - `INV-HIST-15`: Merge strategy behavior MUST be deterministic and grouping-insensitive over the parent/head set; write-time canonicalization remains validation and rejects loudly.
 - `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold the union of their raw parent-closures de-duplicated by version identity (LWW argmax; `Counter` sums per-`TxId` deltas so shared ancestors count once), so divergent merges converge to the single-merger-over-the-union result.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any parent transaction's txid.time, and its versions...
+- `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
+- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any same-row/layer history parent's txid.time, and its versions...
 
 ## Details
 
@@ -34,7 +35,10 @@ Invariant digest:
 
 A row's history is modeled as a directed acyclic graph of **row versions**. Each
 version is identified by the `TxId` that wrote it and names zero or more direct
-`parents` (ch. 2). Ordering is based on `TxId.time`, the HLC input, with the full
+`parents` (ch. 2). Every parent resolves to the same physical table, exact branch
+key, `RowUuid`, and content/deletion layer as its child (`INV-HIST-18`). Thus
+`parents` are history edges only: mergeable transactions have no general
+dependency graph, and content does not parent deletion or vice versa. Ordering is based on `TxId.time`, the HLC input, with the full
 sort key `(time, node)` used for deterministic tie-breaking.
 
 Causality is enforced at acceptance time. A causal child has a strictly greater

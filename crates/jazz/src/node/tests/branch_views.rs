@@ -571,7 +571,7 @@ fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
                 .cells(cells("sibling other branch")),
         ])
         .unwrap();
-    let valid_child = node
+    let _valid_child = node
         .commit_mergeable_settled(
             MergeableCommit::new("todos", target, 20)
                 .branch(branch_a.clone())
@@ -580,13 +580,12 @@ fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
         )
         .unwrap();
 
-    // Deletion and restore parents use the shared deletion history table, so
-    // retain the normal same-row/branch chain through both lifecycle layers.
+    // Content and deletion history are independent. The first deletion starts
+    // its own chain; the restore then continues that deletion-register chain.
     let deletion_parent = node
         .commit_mergeable_settled(
             MergeableCommit::new("todos", target, 30)
                 .branch(branch_a.clone())
-                .parents(vec![valid_child])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();

@@ -192,14 +192,14 @@ requires a read view or an exact branch key.
 Branch columns are ordinary values for query projection, reference traversal,
 and policy, but key-like coordinates for mutation. Every version must carry the
 complete canonical branch key. A patch cannot omit, inherit ambiguously, or change
-that coordinate, and a version parent must belong to the same branch key
-(`INV-BVIEW-3`, `INV-BVIEW-4`). An application move is an explicit atomic write to
+that coordinate, and a version parent must belong to the same branch key,
+physical table, row, and layer (`INV-BVIEW-3`, `INV-BVIEW-4`, `INV-HIST-18`). An application move is an explicit atomic write to
 the source and destination branch-local rows, not a cross-branch-key parent edge.
 
 Validation addresses an explicit version parent by its `(PhysicalTableId,
 RowUuid, TxId)` across both content and deletion history before comparing its
 `BranchKey`. Schema aliases resolve to the same physical table identity, and a
-missing parent remains a pending causal dependency. A cached parent lookup must
+missing parent remains a pending history prerequisite. A cached parent lookup must
 be row-addressable: unrelated rows from the same transaction, including
 same-table siblings, must not be materialized merely to validate a parent.
 

@@ -493,6 +493,31 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
 }
 
+/// A facade delete starts or extends only the deletion-register history.
+///
+/// alice writes content, then deletes it locally. The delete must not try to
+/// use that content version as a deletion-register parent: the two histories
+/// are independent and the first deletion therefore has no parent.
+#[test]
+fn delete_starts_a_deletion_history_without_parenting_content() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let row = row(0x9d);
+    let inserted = doctest_support::block_on(db.insert(
+        "todos",
+        doctest_support::todo_cells("draft", false),
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    doctest_support::block_on(inserted.wait(DurabilityTier::Local)).unwrap();
+
+    let deleted = db.delete("todos", row, Default::default()).unwrap();
+    doctest_support::block_on(deleted.wait(DurabilityTier::Local)).unwrap();
+    assert!(prepared_read(&db, &db.table("todos")).is_empty());
+}
+
 /// A policy-free partial update inherits its omitted cells directly from the
 /// physical winner; it must not prepare a serving query merely to prove
 /// unconditional read visibility.
