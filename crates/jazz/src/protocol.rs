@@ -4753,6 +4753,55 @@ mod tests {
         assert!(decode_canonical_lens_bytes(&byte_bomb).is_err());
     }
 
+    #[test]
+    fn postcard_migration_lens_wire_cannot_bypass_validated_constructor() {
+        let valid = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![TableLens {
+                source_table: "a".into(),
+                target_table: "b".into(),
+                ops: Vec::new(),
+            }],
+        )
+        .unwrap();
+        let wire = |id, tables| MigrationLensWire {
+            id,
+            source: schema_id(1),
+            target: schema_id(2),
+            table_lenses: tables,
+        };
+        let duplicate = wire(
+            valid.id,
+            vec![
+                TableLens {
+                    source_table: "a".into(),
+                    target_table: "b".into(),
+                    ops: Vec::new(),
+                },
+                TableLens {
+                    source_table: "a".into(),
+                    target_table: "c".into(),
+                    ops: Vec::new(),
+                },
+            ],
+        );
+        assert!(
+            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&duplicate).unwrap())
+                .is_err()
+        );
+        let wrong_id = wire(
+            MigrationLensId(uuid::Uuid::from_bytes([0x55; 16])),
+            valid.table_lenses.clone(),
+        );
+        assert!(
+            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&wrong_id).unwrap())
+                .is_err()
+        );
+        // Planted sensitivity: if Deserialize stopped routing through `new`,
+        // this duplicate-source wire would decode and later reach content_id.
+    }
+
     // This is intentionally an internal byte-level test: the durable physical
     // identity is not observable through the public row API, and a behavioral
     // round trip alone would not freeze the assigned version, tags, or widths.
