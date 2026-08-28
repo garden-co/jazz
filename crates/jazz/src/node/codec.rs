@@ -511,6 +511,7 @@ const PHYSICAL_MAPPING_VERSION: u8 = 1;
 /// and their vector order is the already-authoritative physical tag order.
 pub(super) fn encode_physical_mapping(mapping: &SchemaPhysicalMapping) -> Result<Vec<u8>, Error> {
     let mut payload = vec![PHYSICAL_MAPPING_VERSION];
+    encode_physical_identity_manifest(&mut payload, &mapping.identities)?;
     put_len(
         &mut payload,
         mapping.tables.len(),
@@ -555,6 +556,7 @@ pub(super) fn encode_physical_mapping(mapping: &SchemaPhysicalMapping) -> Result
 pub(super) fn decode_physical_mapping(payload: &[u8]) -> Result<SchemaPhysicalMapping, Error> {
     const CONTEXT: &str = "invalid physical mapping payload";
     let mut cursor = CataloguePayloadCursor::new(payload, PHYSICAL_MAPPING_VERSION, CONTEXT)?;
+    let identities = decode_physical_identity_manifest(&mut cursor)?;
     let table_count = cursor.u32()?;
     let mut tables = BTreeMap::new();
     let mut previous_table = None;
@@ -620,7 +622,85 @@ pub(super) fn decode_physical_mapping(payload: &[u8]) -> Result<SchemaPhysicalMa
         }
     }
     cursor.finish()?;
-    Ok(SchemaPhysicalMapping { tables })
+    Ok(SchemaPhysicalMapping { identities, tables })
+}
+
+fn encode_physical_identity_manifest(
+    payload: &mut Vec<u8>,
+    manifest: &PhysicalIdentityManifest,
+) -> Result<(), Error> {
+    put_len(
+        payload,
+        manifest.tables.len(),
+        "physical identity table count",
+    )?;
+    for (table_name, table) in &manifest.tables {
+        put_string(payload, table_name, "physical identity table name")?;
+        payload.extend_from_slice(table.id.0.as_bytes());
+        put_len(
+            payload,
+            table.columns.len(),
+            "physical identity column count",
+        )?;
+        for (column_name, column) in &table.columns {
+            put_string(payload, column_name, "physical identity column name")?;
+            payload.extend_from_slice(column.id.0.as_bytes());
+            put_len(
+                payload,
+                column.enum_variants.len(),
+                "physical identity enum occurrence count",
+            )?;
+            for (path, variants) in &column.enum_variants {
+                put_string(payload, path, "physical identity enum path")?;
+                put_len(payload, variants.len(), "physical identity enum case count")?;
+                for variant in variants {
+                    payload.extend_from_slice(variant.0.as_bytes());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_physical_identity_manifest(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<PhysicalIdentityManifest, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let table_count = cursor.u32()?;
+    let mut tables = BTreeMap::new();
+    let mut previous_table = None;
+    for _ in 0..table_count {
+        let table_name = cursor.string()?;
+        require_strictly_increasing(previous_table.as_deref(), &table_name, CONTEXT)?;
+        previous_table = Some(table_name.clone());
+        let id = crate::ids::GlobalPhysicalTableId(cursor.uuid()?);
+        let column_count = cursor.u32()?;
+        let mut columns = BTreeMap::new();
+        let mut previous_column = None;
+        for _ in 0..column_count {
+            let column_name = cursor.string()?;
+            require_strictly_increasing(previous_column.as_deref(), &column_name, CONTEXT)?;
+            previous_column = Some(column_name.clone());
+            let id = crate::ids::GlobalPhysicalColumnId(cursor.uuid()?);
+            let occurrence_count = cursor.u32()?;
+            let mut enum_variants = BTreeMap::new();
+            let mut previous_path = None;
+            for _ in 0..occurrence_count {
+                let path = cursor.string()?;
+                require_strictly_increasing(previous_path.as_deref(), &path, CONTEXT)?;
+                previous_path = Some(path.clone());
+                let case_count = cursor.u32()?;
+                let mut variants = Vec::new();
+                for _ in 0..case_count {
+                    variants.push(crate::ids::GlobalPhysicalEnumVariantId(cursor.uuid()?));
+                }
+                enum_variants.insert(path, variants);
+            }
+            columns.insert(column_name, PhysicalColumnIdentity { id, enum_variants });
+        }
+        tables.insert(table_name, PhysicalTableIdentity { id, columns });
+    }
+    Ok(PhysicalIdentityManifest { tables })
 }
 
 fn put_len(payload: &mut Vec<u8>, length: usize, context: &'static str) -> Result<(), Error> {
@@ -986,6 +1066,23 @@ mod catalogue_payload_tests {
             introducing_ordinal: ordinal,
         };
         SchemaPhysicalMapping {
+            identities: PhysicalIdentityManifest {
+                tables: BTreeMap::from([(
+                    "items".to_owned(),
+                    PhysicalTableIdentity {
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x71; 16])),
+                        columns: BTreeMap::from([(
+                            "state".to_owned(),
+                            PhysicalColumnIdentity {
+                                id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::from_bytes(
+                                    [0x72; 16],
+                                )),
+                                enum_variants: BTreeMap::new(),
+                            },
+                        )]),
+                    },
+                )]),
+            },
             tables: BTreeMap::from([(
                 "items".to_owned(),
                 TablePhysicalMapping {
@@ -1019,7 +1116,7 @@ mod catalogue_payload_tests {
     #[test]
     fn physical_mapping_payload_has_exact_typed_v1_fixture_and_round_trips() {
         let mapping = mapping_fixture();
-        let expected = [
+        let mut expected = [
             &[1, 1, 0, 0, 0, 5, 0, 0, 0][..],
             b"items",
             &[7, 0, 0, 0, 0, 0, 0, 0],
@@ -1046,6 +1143,17 @@ mod catalogue_payload_tests {
             &[3],
         ]
         .concat();
+        let identity_prefix = [
+            &[1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"items",
+            &[0x71; 16],
+            &[1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"state",
+            &[0x72; 16],
+            &[0, 0, 0, 0],
+        ]
+        .concat();
+        expected.splice(1..1, identity_prefix);
         let encoded = encode_physical_mapping(&mapping).unwrap();
         assert_eq!(encoded, expected);
         assert_eq!(decode_physical_mapping(&encoded).unwrap(), mapping);

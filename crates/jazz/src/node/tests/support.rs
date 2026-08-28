@@ -308,12 +308,12 @@ fn publish_schema_lineage<S>(
 where
     S: ReopenableStorage,
 {
-    let publication = SchemaLineagePublication::new(
+    let publication = core.author_schema_lineage_publication(
         schema,
         lens,
         new_tables.into_iter().map(Into::into),
         dropped_tables.into_iter().map(Into::into),
-    );
+    )?;
     let outcome = crate::db::block_on(core.apply_trusted_catalogue_message(
         SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,

@@ -175,6 +175,7 @@ where
             ));
         }
 
+        let genesis_physical_identities = snapshot.genesis_physical_identities;
         let mut schemas = BTreeMap::new();
         for schema in snapshot.schemas {
             if schema.id != schema.schema.version_id() {
@@ -247,6 +248,7 @@ where
                 let mut next_physical_column_id = 1;
                 let mapping = allocate_provisional_physical_mapping(
                     &genesis.schema,
+                    genesis_physical_identities.clone(),
                     &mut next_physical_table_id,
                     &mut next_physical_column_id,
                 )?;
@@ -286,6 +288,13 @@ where
             }
             let mapping = allocate_provisional_physical_mapping(
                 &schema.schema,
+                if schema.id == *genesis_id {
+                    genesis_physical_identities.clone()
+                } else {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "trusted catalogue snapshot schema has no identity publication",
+                    ));
+                },
                 &mut planned.next_physical_table_id,
                 &mut planned.next_physical_column_id,
             )?;
@@ -324,6 +333,20 @@ where
                     "trusted catalogue snapshot lineage source is missing",
                 ))?;
             Self::validate_migration_lens_between(&publication.lens, source, &publication.schema)?;
+            planned
+                .physical_mappings
+                .get(&publication.lens.source)
+                .ok_or(Error::InvalidCatalogueUpdate(
+                    "trusted catalogue snapshot source identities missing",
+                ))?
+                .identities
+                .validate_evolution_to(
+                    &source.schema,
+                    &publication.physical_identities,
+                    &publication.schema.schema,
+                    &publication.lens,
+                )
+                .map_err(Error::InvalidCatalogueUpdate)?;
             Self::validate_lineage_table_partition(
                 &source.schema,
                 &publication.schema.schema,
@@ -333,6 +356,7 @@ where
             )?;
             let fresh = allocate_provisional_physical_mapping(
                 &publication.schema.schema,
+                publication.physical_identities.clone(),
                 &mut planned.next_physical_table_id,
                 &mut planned.next_physical_column_id,
             )?;
@@ -384,8 +408,31 @@ where
         // snapshot arrives, so keep that schema's local storage identity and
         // reconcile the received lineage around it rather than orphaning the
         // pending rows by adopting a newly allocated alias/mapping.
-        if let Some((local_alias, local_mapping)) = local_schema_storage_anchor {
+        if let Some((local_alias, mut local_mapping)) = local_schema_storage_anchor {
             let anchor = planned.current_schema_version_id;
+            let authority_identities = planned
+                .physical_mappings
+                .get(&anchor)
+                .ok_or(Error::InvalidStoredValue(
+                    "snapshot authority mapping missing for local anchor",
+                ))?
+                .identities
+                .clone();
+            authority_identities
+                .validate_for_schema(
+                    &planned
+                        .catalogue_schemas
+                        .get(&anchor)
+                        .ok_or(Error::InvalidStoredValue(
+                            "snapshot authority schema missing for local anchor",
+                        ))?
+                        .schema,
+                )
+                .map_err(Error::InvalidCatalogueUpdate)?;
+            // Preserve only below-semantic-layer aliases. The authority
+            // manifest is the global identity source of truth and replaces
+            // any provisional UUIDs minted while the receiver was offline.
+            local_mapping.identities = authority_identities;
             planned.schema_version_aliases.insert(anchor, local_alias);
             planned.physical_mappings.insert(anchor, local_mapping);
 

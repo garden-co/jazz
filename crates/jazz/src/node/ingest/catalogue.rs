@@ -511,6 +511,22 @@ where
         } else {
             if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
                 Self::validate_migration_lens_between(lens, source, schema)?;
+                let source_identities = &self
+                    .catalogue
+                    .physical_mappings
+                    .get(&lens.source)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "source physical identity manifest missing",
+                    ))?
+                    .identities;
+                source_identities
+                    .validate_evolution_to(
+                        &source.schema,
+                        &publication.physical_identities,
+                        &schema.schema,
+                        lens,
+                    )
+                    .map_err(Error::InvalidCatalogueUpdate)?;
                 Self::validate_lineage_table_partition(
                     &source.schema,
                     &schema.schema,
@@ -625,6 +641,7 @@ where
             } else {
                 let fresh = allocate_provisional_physical_mapping(
                     &publication.schema.schema,
+                    publication.physical_identities.clone(),
                     &mut self.catalogue.next_physical_table_id,
                     &mut self.catalogue.next_physical_column_id,
                 )?;
@@ -1267,6 +1284,10 @@ where
                 "schema lineage publication id mismatch",
             ));
         }
+        publication
+            .physical_identities
+            .validate_for_schema(&publication.schema.schema)
+            .map_err(Error::InvalidCatalogueUpdate)?;
         if publication.schema.id != publication.schema.schema.version_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema id does not match schema payload",

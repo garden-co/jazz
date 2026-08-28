@@ -6,6 +6,23 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Allocate the immutable global physical identities for a proposed
+    /// lineage publication from this authority's active source manifest.
+    pub fn author_schema_lineage_publication(
+        &self,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<SchemaLineagePublication, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow()
+            .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)
+            .map_err(Into::into)
+    }
+
     /// Publish an immutable schema-version payload through the catalogue lane.
     pub async fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;

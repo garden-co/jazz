@@ -15,6 +15,26 @@ mod variant_case_tests {
 
     fn mapping(table_id: u64, columns: &[(&str, u64)]) -> SchemaPhysicalMapping {
         SchemaPhysicalMapping {
+            identities: PhysicalIdentityManifest {
+                tables: BTreeMap::from([(
+                    "entries".to_owned(),
+                    PhysicalTableIdentity {
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(table_id as u128 + 1)),
+                        columns: columns
+                            .iter()
+                            .map(|(name, id)| {
+                                (
+                                    name.to_string(),
+                                    PhysicalColumnIdentity {
+                                        id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::from_u128(*id as u128 + 100)),
+                                        enum_variants: BTreeMap::new(),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                )]),
+            },
             tables: BTreeMap::from([(
                 "entries".to_owned(),
                 TablePhysicalMapping {

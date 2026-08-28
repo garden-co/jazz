@@ -2,6 +2,39 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(crate) fn author_schema_lineage_publication(
+        &self,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<SchemaLineagePublication, Error> {
+        let source = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lens.source)
+            .ok_or(Error::InvalidCatalogueUpdate(
+                "schema lineage source is missing",
+            ))?;
+        let identities = &self
+            .catalogue
+            .physical_mappings
+            .get(&lens.source)
+            .ok_or(Error::InvalidCatalogueUpdate(
+                "schema lineage source identities are missing",
+            ))?
+            .identities;
+        SchemaLineagePublication::author_from_prior(
+            &source.schema,
+            identities,
+            schema,
+            lens,
+            new_tables,
+            dropped_tables,
+        )
+        .map_err(Error::InvalidCatalogueUpdate)
+    }
+
     async fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
@@ -166,7 +199,10 @@ self.database.finish_persistence(persisted)?;
                         },
                     );
                 }
-                SchemaPhysicalMapping { tables }
+                SchemaPhysicalMapping {
+                    identities: PhysicalIdentityManifest::allocate(&schema),
+                    tables,
+                }
             }
         };
         let alias = match self.catalogue.schema_version_aliases.get(&schema_version) {

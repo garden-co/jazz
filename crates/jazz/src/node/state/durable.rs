@@ -130,7 +130,15 @@ where
             .map(|lineage| (lineage.catalogue_seq, lineage.publication.clone()))
             .collect::<Vec<_>>();
         lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        let genesis_physical_identities = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .ok_or(Error::InvalidStoredValue("genesis physical mapping missing"))?
+            .identities
+            .clone();
         Ok(crate::protocol::CatalogueSnapshot {
+            genesis_physical_identities,
             schemas,
             lineages,
             current_write_schema: self.catalogue.current_write_schema,

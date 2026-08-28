@@ -76,9 +76,10 @@ register, current, ahead-current, and rejected-version tables per
 `PhysicalTableId`. The full Groove schema is therefore the fixed lowering plus
 the recovered physical lineages (ch. 2, `INV-DATA-20`).
 
-Wire identities remain UUIDs. Lowered storage may intern those identities into
-node-local `u64` aliases in `jazz_nodes`/`jazz_schema_versions`, but those
-aliases must never appear on the wire (ch. 2, `INV-LOWER-3`).
+Wire and catalogue semantic identities remain UUIDs. Lowered storage may intern
+node, schema, physical table, physical column, and enum-variant identities into
+node-local integer aliases, but those aliases must never appear on the wire,
+enter content identity, or decide cross-node equality (ch. 2, `INV-LOWER-3`).
 
 ### 14.2.1 Concurrent enum cases
 
@@ -86,40 +87,38 @@ Jazz explicitly permits concurrent schema versions. Therefore every compact enum
 discriminant in a wire row is an **authored ordinal**, qualified by the
 row's `SchemaVersionId`; it is not a global enum tag. For every physical enum
 occurrence, including a payload enum case and recursively inside its payload,
-the semantic identity of a case is its `GlobalCaseId`:
+the semantic identity of a case is its authority-allocated identity:
 
 ```text
-(introducing SchemaVersionId, introducing authored ordinal)
+GlobalPhysicalEnumVariantId(UUID)
 ```
 
-An inherited case retains the identity of the schema version that introduced it.
+An inherited case retains the UUID allocated by its introducing publication.
 For example, if a base schema declares `draft` and `published`, concurrent
 children A and B may both declare authored ordinal `2`, respectively `archived`
-and `snoozed`. They are distinct cases: `(A, 2)` and `(B, 2)`. A later merge
+and `snoozed`. They are distinct because the authority allocated distinct UUIDs. A later merge
 schema maps both into its own authored ordinal space. The physical column
 occurrence is part of every lookup of that identity; similarly named cases in
 different columns never share a registry.
 
-The catalogue supplies the evidence for the introducing schema and its lineage.
+The catalogue supplies the immutable UUID manifest and lineage evidence.
 Active catalogue subsets are dense prefixes: a receiver parks a later envelope
 until every earlier `CatalogueSeq` has activated. Thus a node interns cases in
 authoritative catalogue order, never arbitrary network receipt order, and that
 order remains append-only as its prefix grows. A node may assign durable dense
-local tags after resolving `GlobalCaseId`, but it must persist the
+local tags after resolving the global UUID, but it must persist the
 mapping and translate at the wire/storage and storage/projection boundaries.
-The compact wire representation remains `SchemaVersionId + authored ordinal`,
+The compact row representation remains `SchemaVersionId + authored ordinal`,
 because the row already carries the former; values which escape that row context
 (for example standalone parameters or caches) must carry equivalent schema or
 case context.
 
 For ordering, a node uses the target schema's current representable case view.
 Within that view an ancestrally earlier introduction MUST sort before a later
-introduction. Concurrent siblings have no ancestral order, so their order is the
-deterministic lexicographic order of their introducing `SchemaVersionId` followed
-by the introducing ordinal. This is a semantic tie-break, not local arrival order.
-It is optimized into the physical registry ordinal assigned by the authoritative
-catalogue prefix; a partial node must preserve that order for every case it can
-represent.
+introduction. Concurrent siblings have no ancestral order, so a target schema's
+authored view defines their presentation order. Neither that order nor the
+authored ordinal is identity. It is optimized into a node-local registry tag only
+after the permanent UUID has been resolved.
 
 Payload-enum projection preserves the selected payload record while remapping
 its case tag. Same-name cases from independent schemas are distinct identities;
@@ -139,13 +138,13 @@ parent; a required relation follows its explicit requirement semantics. Equality
 against a known case consequently treats an absent newer case as non-matching.
 
 _Further invariant._ `INV-LOWER-27` — local enum tags are only interned
-representations of schema-qualified case identities; simultaneous sibling ordinal
+representations of permanent global enum-variant UUIDs; simultaneous sibling ordinal
 allocations cannot alias one another.
 
 _Further invariant._ `INV-LOWER-29` — durable physical mappings use the
-versioned canonical binary codec described in ch. 10. Local physical ids are
-opaque storage handles, while every scalar, payload, and nested enum registry
-persists schema-qualified case identities in authoritative catalogue order;
+versioned canonical binary codec described in ch. 10. Local physical aliases are
+opaque storage handles, while every table, column, scalar, payload, and nested
+enum occurrence resolves a permanent authority-allocated UUID;
 recovery rejects malformed, non-canonical, trailing, or unknown-reference
 metadata rather than deriving identity from names, JSON map order, or arrival.
 

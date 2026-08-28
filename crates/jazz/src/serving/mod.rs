@@ -332,6 +332,23 @@ impl fmt::Debug for ServerSessionState {
 }
 
 impl ShellDb {
+    fn author_schema_lineage_publication(
+        &self,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
+    ) -> ShellResult<SchemaLineagePublication> {
+        match self {
+            Self::Memory(db) => db
+                .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)
+                .map_err(Into::into),
+        }
+    }
+
     fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         match self {
             Self::Memory(db) => db.set_tick_scheduler(scheduler),
@@ -1008,8 +1025,12 @@ impl InMemoryServerShell {
             }
             return Err(ShellError::MissingEvent("atomic schema lineage"));
         }
-        let publication =
-            SchemaLineagePublication::new(schema_version, lens, new_tables, dropped_tables);
+        let publication = self.db.author_schema_lineage_publication(
+            schema_version,
+            lens,
+            new_tables,
+            dropped_tables,
+        )?;
         let catalogue_seq = self.db.active_catalogue_seq().saturating_add(1);
         let acks = catalogue_acks_from_messages(
             self.db

@@ -8,6 +8,9 @@ pub(super) fn groove_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) struct SchemaPhysicalMapping {
+    /// Globally meaningful immutable identities authored by the catalogue
+    /// authority. The remaining u64 ids in this mapping are local aliases.
+    pub(super) identities: PhysicalIdentityManifest,
     pub(super) tables: BTreeMap<String, TablePhysicalMapping>,
 }
 

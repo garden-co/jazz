@@ -1869,6 +1869,7 @@ where
                 Some(mapping) => mapping.clone(),
                 None => allocate_provisional_physical_mapping(
                     &schema,
+                    PhysicalIdentityManifest::allocate(&schema),
                     &mut next_physical_table_id,
                     &mut next_physical_column_id,
                 )?,

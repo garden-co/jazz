@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ids::{PhysicalColumnId, PhysicalTableId};
+use crate::protocol::PhysicalIdentityManifest;
 use crate::schema::ColumnSchema;
 use groove::schema::{
     ColumnSchema as GrooveColumnSchema, IndexSchema as GrooveIndexSchema,

@@ -1,8 +1,12 @@
 pub(super) fn allocate_provisional_physical_mapping(
     schema: &JazzSchema,
+    identities: PhysicalIdentityManifest,
     next_table_id: &mut u64,
     next_column_id: &mut u64,
 ) -> Result<SchemaPhysicalMapping, Error> {
+    identities
+        .validate_for_schema(schema)
+        .map_err(Error::InvalidCatalogueUpdate)?;
     let mut tables = BTreeMap::new();
     for table in &schema.tables {
         let table_id = PhysicalTableId(*next_table_id);
@@ -30,7 +34,7 @@ pub(super) fn allocate_provisional_physical_mapping(
             },
         );
     }
-    Ok(SchemaPhysicalMapping { tables })
+    Ok(SchemaPhysicalMapping { identities, tables })
 }
 
 /// Allocate and retain the single hidden Groove row case for one Jazz layout.

@@ -1616,6 +1616,7 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
     let mut next_column_id = 100;
     let mapping = allocate_provisional_physical_mapping(
         &smuggled.schema,
+        PhysicalIdentityManifest::allocate(&smuggled.schema),
         &mut next_table_id,
         &mut next_column_id,
     )
@@ -1654,6 +1655,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     let mut edge = NodeState::new_catalogue_uninitialized(node(0xa1), storage)
         .expect("open explicit uninitialized edge");
     edge.apply_trusted_catalogue_snapshot_settled(crate::protocol::CatalogueSnapshot {
+        genesis_physical_identities: PhysicalIdentityManifest::allocate(&base),
         schemas: vec![SchemaVersion::new(base.clone())],
         lineages: Vec::new(),
         current_write_schema: CurrentWriteSchema {
@@ -1880,6 +1882,7 @@ fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
         Vec::<String>::new(),
     );
     crate::protocol::CatalogueSnapshot {
+        genesis_physical_identities: PhysicalIdentityManifest::allocate(&base),
         schemas: vec![SchemaVersion::new(base), evolved.clone()],
         lineages: vec![(1, publication)],
         current_write_schema: CurrentWriteSchema {

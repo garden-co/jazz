@@ -281,14 +281,35 @@ binary payload, not JSON or a Rust-layout serialization. It canonically orders
 logical table names, column names, registry column ids, nested occurrence paths,
 and variant fields; malformed UTF-8, duplicate/out-of-order keys, unknown format
 versions, truncation, and trailing bytes fail closed at catalogue recovery.
-The stored `PhysicalTableId` and `PhysicalColumnId` values remain opaque
-**node-local** storage handles: their numerical allocation order and the names
-used to find them are never wire or semantic identities. A schema-qualified enum
-case is instead `(introducing SchemaVersionId, introducing authored ordinal)`;
-the durable registry vector is its authoritative physical-tag order, validated
-against the recovered alias/catalogue prefix and never inferred from map order,
-local ordinal, or receipt arrival order. There is intentionally no legacy JSON
-reader or in-place migration for this pre-freeze format.
+Each immutable publication carries an authority-allocated
+`PhysicalIdentityManifest`. `GlobalPhysicalTableId`,
+`GlobalPhysicalColumnId`, and `GlobalPhysicalEnumVariantId` are permanent UUID
+identities. The authority constructs a publication from the active source
+publication plus the proposed schema and lens: mapped entities retain UUIDs and
+genuinely new tables, column epochs, and recursive enum variants receive fresh
+UUIDs. There is no separate allocation protocol. Names, documentation,
+structural paths, authored positions, and source order are lookup coordinates,
+never identity; same-shaped siblings therefore remain distinct. Canonical
+manifest bytes participate in the publication content id and travel in lineage
+publications, while the authority snapshot carries the genesis manifest.
+
+The stored `PhysicalTableId` and `PhysicalColumnId` `u64` values are only
+node-local compression aliases below the semantic layer. Nodes may allocate
+different aliases or receive publications in different network orders and must
+still converge on the same global UUID manifest. Before activation and before
+dependent rows can be decoded, Jazz rejects nil UUIDs, duplicate UUIDs, missing
+or extra descriptor coverage, and any mapped identity that changes across an
+evolution. Durable enum registry vectors bind local tags to permanent enum
+variant UUIDs; authored ordinals select entries in a schema but do not identify
+them. There is intentionally no legacy JSON reader or in-place migration for
+this pre-freeze format.
+
+This freeze covers authority allocation, publication/snapshot transport,
+durable physical-mapping encoding, and activation validation. The remaining
+#2037 server-catalogue work is operational ownership and rollout of this same
+publication contract; it may not introduce a second allocator or a node-local
+semantic identity. Lineage retention and compaction preserve the UUID manifest
+of every retained publication.
 
 Once activation begins, any registration or Active-marker failure puts the node
 in a fail-stop catalogue state: it must not continue serving against the
@@ -314,11 +335,13 @@ client self-declare `SYSTEM` authority.
 
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, aliases, and physical mappings survive node restart and
-are recovered before the full Groove database is constructed. Aliases and
-physical ids are node-local: when a client has already opened and written under
-a schema before receiving an authority snapshot, snapshot planning preserves
-that schema's local storage identity and reconciles its ancestors and descendants
-around the local anchor. Pending local rows therefore remain addressable.
+are recovered before the full Groove database is constructed. Aliases are
+node-local, while physical UUID identities are global and immutable. When a
+client has already opened and written under a schema before receiving an
+authority snapshot, snapshot planning preserves its local aliases, verifies and
+installs the authority UUID manifest, and reconciles ancestors and descendants
+around the local anchor. Pending local rows therefore remain addressable while
+cross-node semantic identity converges.
 
 ### 10.4 Writes: authored schema variants
 

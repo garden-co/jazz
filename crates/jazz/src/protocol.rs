@@ -538,6 +538,8 @@ pub enum PermissionAdvice {
 /// Ordered schema lineage metadata shipped ahead of authored row payloads.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CatalogueSnapshot {
+    /// Authority-issued permanent identities for the unique genesis schema.
+    pub genesis_physical_identities: PhysicalIdentityManifest,
     /// Every immutable schema payload known to the sender.
     pub schemas: Vec<SchemaVersion>,
     /// Active non-genesis lineage publications in catalogue order.
@@ -3173,9 +3175,484 @@ pub struct SchemaLineagePublication {
     pub new_tables: Vec<String>,
     /// Source tables intentionally absent from the target schema.
     pub dropped_tables: Vec<String>,
+    /// Authority-authored permanent physical identities. Names and structural
+    /// paths only locate the entity in this immutable descriptor; they are not
+    /// inputs to the UUID allocation.
+    pub physical_identities: PhysicalIdentityManifest,
+}
+
+/// Immutable globally meaningful physical identities for one published schema
+/// descriptor. UUIDs are allocated by the catalogue authority and replicated
+/// in the publication; receivers may choose unrelated local u64 aliases.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PhysicalIdentityManifest {
+    /// Logical table lookup metadata paired with authority-issued UUIDs.
+    pub tables: BTreeMap<String, PhysicalTableIdentity>,
+}
+
+/// One table's permanent physical identity and its child identities.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PhysicalTableIdentity {
+    /// Permanent table-lineage UUID.
+    pub id: crate::ids::GlobalPhysicalTableId,
+    /// Logical column lookup metadata paired with permanent UUIDs.
+    pub columns: BTreeMap<String, PhysicalColumnIdentity>,
+}
+
+/// One column epoch's permanent physical identity and enum occurrences.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PhysicalColumnIdentity {
+    /// Permanent column-epoch UUID.
+    pub id: crate::ids::GlobalPhysicalColumnId,
+    /// Structural occurrence path -> authored-case-position UUIDs. The path
+    /// and position are lookup coordinates only; the UUID is the identity.
+    pub enum_variants: BTreeMap<String, Vec<crate::ids::GlobalPhysicalEnumVariantId>>,
+}
+
+impl PhysicalIdentityManifest {
+    /// Canonical descriptor bytes used by publication content addressing.
+    /// BTreeMap iteration is lexical and UUIDs are encoded as raw bytes, so
+    /// JSON object ordering and display spellings cannot affect identity.
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        put_len(&mut bytes, self.tables.len());
+        for (table_name, table) in &self.tables {
+            put_str(&mut bytes, table_name);
+            bytes.extend_from_slice(table.id.0.as_bytes());
+            put_len(&mut bytes, table.columns.len());
+            for (column_name, column) in &table.columns {
+                put_str(&mut bytes, column_name);
+                bytes.extend_from_slice(column.id.0.as_bytes());
+                put_len(&mut bytes, column.enum_variants.len());
+                for (path, variants) in &column.enum_variants {
+                    put_str(&mut bytes, path);
+                    put_len(&mut bytes, variants.len());
+                    for variant in variants {
+                        bytes.extend_from_slice(variant.0.as_bytes());
+                    }
+                }
+            }
+        }
+        bytes
+    }
+
+    /// Allocate independent UUIDs once at authority publication. Iteration
+    /// order cannot affect an already serialized manifest; it only enumerates
+    /// descriptor occurrences while minting it.
+    pub fn allocate(schema: &JazzSchema) -> Self {
+        let tables = schema
+            .tables
+            .iter()
+            .map(|table| {
+                let columns = table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        let mut enum_variants = BTreeMap::new();
+                        collect_enum_variant_ids(&column.column_type, "root", &mut enum_variants);
+                        (
+                            column.name.clone(),
+                            PhysicalColumnIdentity {
+                                id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4()),
+                                enum_variants,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    table.name.clone(),
+                    PhysicalTableIdentity {
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::new_v4()),
+                        columns,
+                    },
+                )
+            })
+            .collect();
+        Self { tables }
+    }
+
+    /// Verify this publication's authority-issued manifest completely covers
+    /// the compiled descriptor and cannot collapse two semantic entities onto
+    /// one UUID. Display names and paths are lookup coordinates only.
+    pub fn validate_for_schema(&self, schema: &JazzSchema) -> Result<(), &'static str> {
+        if self.tables.len() != schema.tables.len() {
+            return Err("physical identity manifest table coverage mismatch");
+        }
+        let mut seen = BTreeSet::new();
+        for table in &schema.tables {
+            let table_identity = self
+                .tables
+                .get(&table.name)
+                .ok_or("physical identity manifest table missing")?;
+            if table_identity.id.0.is_nil() || !seen.insert(table_identity.id.0) {
+                return Err("physical identity manifest UUID collision");
+            }
+            if table_identity.columns.len() != table.columns.len() {
+                return Err("physical identity manifest column coverage mismatch");
+            }
+            for column in &table.columns {
+                let column_identity = table_identity
+                    .columns
+                    .get(&column.name)
+                    .ok_or("physical identity manifest column missing")?;
+                if column_identity.id.0.is_nil() || !seen.insert(column_identity.id.0) {
+                    return Err("physical identity manifest UUID collision");
+                }
+                let mut occurrences = BTreeMap::new();
+                collect_enum_variant_counts(&column.column_type, "root", &mut occurrences);
+                if column_identity.enum_variants.len() != occurrences.len() {
+                    return Err("physical identity manifest enum coverage mismatch");
+                }
+                for (path, count) in occurrences {
+                    let variants = column_identity
+                        .enum_variants
+                        .get(&path)
+                        .ok_or("physical identity manifest enum occurrence missing")?;
+                    if variants.len() != count {
+                        return Err("physical identity manifest enum case coverage mismatch");
+                    }
+                    for variant in variants {
+                        if variant.0.is_nil() || !seen.insert(variant.0) {
+                            return Err("physical identity manifest UUID collision");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn evolve(
+        &self,
+        source: &JazzSchema,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        new_tables: &BTreeSet<String>,
+    ) -> Result<Self, &'static str> {
+        self.validate_for_schema(source)?;
+        let mut tables = BTreeMap::new();
+        for target_table in &target.tables {
+            if new_tables.contains(&target_table.name) {
+                tables.insert(
+                    target_table.name.clone(),
+                    allocate_table_identity(target_table),
+                );
+                continue;
+            }
+            let table_lens = lens
+                .table_lenses
+                .iter()
+                .find(|table| table.target_table == target_table.name)
+                .ok_or("physical identity lineage target table missing")?;
+            let source_table = source
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or("physical identity lineage source table missing")?;
+            let mut identity = self
+                .tables
+                .get(&table_lens.source_table)
+                .cloned()
+                .ok_or("physical identity lineage source identity missing")?;
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameColumn { from, to } => {
+                        let column = identity
+                            .columns
+                            .remove(from)
+                            .ok_or("physical identity renamed column missing")?;
+                        identity.columns.insert(to.clone(), column);
+                    }
+                    LensOp::CopyColumn { to, .. } | LensOp::AddColumn { column: to, .. } => {
+                        let target_column = target_table
+                            .columns
+                            .iter()
+                            .find(|column| column.name == *to)
+                            .ok_or("physical identity added column missing")?;
+                        identity
+                            .columns
+                            .insert(to.clone(), allocate_column_identity(target_column));
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        identity.columns.remove(column);
+                    }
+                    LensOp::RenameTable { .. }
+                    | LensOp::TransformColumn { .. }
+                    | LensOp::RejectSourceDelta { .. } => {}
+                }
+            }
+            identity.columns.retain(|name, _| {
+                target_table
+                    .columns
+                    .iter()
+                    .any(|column| column.name == *name)
+            });
+            for target_column in &target_table.columns {
+                let column = identity
+                    .columns
+                    .entry(target_column.name.clone())
+                    .or_insert_with(|| allocate_column_identity(target_column));
+                reconcile_enum_variant_identities(column, &target_column.column_type);
+            }
+            // The source descriptor is used above to validate the lineage
+            // coordinate rather than to derive any UUID.
+            let _ = source_table;
+            tables.insert(target_table.name.clone(), identity);
+        }
+        let evolved = Self { tables };
+        evolved.validate_for_schema(target)?;
+        Ok(evolved)
+    }
+
+    /// Validate that a target manifest preserves every mapped permanent UUID.
+    /// Fresh UUID values are unconstrained except by target-wide uniqueness.
+    pub fn validate_evolution_to(
+        &self,
+        source: &JazzSchema,
+        target_manifest: &Self,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+    ) -> Result<(), &'static str> {
+        self.validate_for_schema(source)?;
+        target_manifest.validate_for_schema(target)?;
+        for table_lens in &lens.table_lenses {
+            let source_table = self
+                .tables
+                .get(&table_lens.source_table)
+                .ok_or("physical identity source table missing")?;
+            let target_table = target_manifest
+                .tables
+                .get(&table_lens.target_table)
+                .ok_or("physical identity target table missing")?;
+            if source_table.id != target_table.id {
+                return Err("physical table identity changed across lineage");
+            }
+            let mut inherited = source_table
+                .columns
+                .iter()
+                .map(|(name, identity)| (name.clone(), identity))
+                .collect::<BTreeMap<_, _>>();
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameColumn { from, to } => {
+                        if let Some(identity) = inherited.remove(from) {
+                            inherited.insert(to.clone(), identity);
+                        }
+                    }
+                    LensOp::CopyColumn { to, .. } | LensOp::AddColumn { column: to, .. } => {
+                        inherited.remove(to);
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        inherited.remove(column);
+                    }
+                    LensOp::RenameTable { .. }
+                    | LensOp::TransformColumn { .. }
+                    | LensOp::RejectSourceDelta { .. } => {}
+                }
+            }
+            for (target_name, source_column) in inherited {
+                let target_column = target_table
+                    .columns
+                    .get(&target_name)
+                    .ok_or("physical identity inherited column missing")?;
+                if source_column.id != target_column.id {
+                    return Err("physical column identity changed across lineage");
+                }
+                for (path, source_variants) in &source_column.enum_variants {
+                    let Some(target_variants) = target_column.enum_variants.get(path) else {
+                        continue;
+                    };
+                    let shared = source_variants.len().min(target_variants.len());
+                    if source_variants[..shared] != target_variants[..shared] {
+                        return Err("physical enum identity changed across lineage");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn allocate_table_identity(table: &crate::schema::TableSchema) -> PhysicalTableIdentity {
+    PhysicalTableIdentity {
+        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::new_v4()),
+        columns: table
+            .columns
+            .iter()
+            .map(|column| (column.name.clone(), allocate_column_identity(column)))
+            .collect(),
+    }
+}
+
+fn allocate_column_identity(column: &crate::schema::ColumnSchema) -> PhysicalColumnIdentity {
+    let mut enum_variants = BTreeMap::new();
+    collect_enum_variant_ids(&column.column_type, "root", &mut enum_variants);
+    PhysicalColumnIdentity {
+        id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4()),
+        enum_variants,
+    }
+}
+
+fn reconcile_enum_variant_identities(
+    column: &mut PhysicalColumnIdentity,
+    target: &groove::records::ValueType,
+) {
+    let mut counts = BTreeMap::new();
+    collect_enum_variant_counts(target, "root", &mut counts);
+    column
+        .enum_variants
+        .retain(|path, _| counts.contains_key(path));
+    for (path, count) in counts {
+        let variants = column.enum_variants.entry(path).or_default();
+        variants.truncate(count);
+        variants.extend(
+            (variants.len()..count)
+                .map(|_| crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::new_v4())),
+        );
+    }
+}
+
+fn collect_enum_variant_ids(
+    value_type: &groove::records::ValueType,
+    path: &str,
+    output: &mut BTreeMap<String, Vec<crate::ids::GlobalPhysicalEnumVariantId>>,
+) {
+    use groove::records::ValueType;
+    match value_type {
+        ValueType::EnumTag(schema) => {
+            output.insert(
+                path.to_owned(),
+                schema
+                    .variants
+                    .iter()
+                    .map(|_| crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::new_v4()))
+                    .collect(),
+            );
+        }
+        ValueType::Enum(schema) => {
+            output.insert(
+                path.to_owned(),
+                schema
+                    .cases
+                    .iter()
+                    .map(|_| crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::new_v4()))
+                    .collect(),
+            );
+            for (ordinal, case) in schema.cases.iter().enumerate() {
+                collect_enum_variant_ids(
+                    &ValueType::Record(Box::new(case.payload.clone())),
+                    &format!("{path}/case/{ordinal}"),
+                    output,
+                );
+            }
+        }
+        ValueType::Nullable(inner) => {
+            collect_enum_variant_ids(inner, &format!("{path}/nullable"), output)
+        }
+        ValueType::Array(inner) => {
+            collect_enum_variant_ids(inner, &format!("{path}/array"), output)
+        }
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_enum_variant_ids(value, &format!("{path}/tuple/{index}"), output);
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                if let Some(name) = &field.name {
+                    collect_enum_variant_ids(
+                        &field.value_type,
+                        &format!("{path}/record/{name}"),
+                        output,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_enum_variant_counts(
+    value_type: &groove::records::ValueType,
+    path: &str,
+    output: &mut BTreeMap<String, usize>,
+) {
+    use groove::records::ValueType;
+    match value_type {
+        ValueType::EnumTag(schema) => {
+            output.insert(path.to_owned(), schema.variants.len());
+        }
+        ValueType::Enum(schema) => {
+            output.insert(path.to_owned(), schema.cases.len());
+            for (ordinal, case) in schema.cases.iter().enumerate() {
+                collect_enum_variant_counts(
+                    &ValueType::Record(Box::new(case.payload.clone())),
+                    &format!("{path}/case/{ordinal}"),
+                    output,
+                );
+            }
+        }
+        ValueType::Nullable(inner) => {
+            collect_enum_variant_counts(inner, &format!("{path}/nullable"), output)
+        }
+        ValueType::Array(inner) => {
+            collect_enum_variant_counts(inner, &format!("{path}/array"), output)
+        }
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_enum_variant_counts(value, &format!("{path}/tuple/{index}"), output);
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                if let Some(name) = &field.name {
+                    collect_enum_variant_counts(
+                        &field.value_type,
+                        &format!("{path}/record/{name}"),
+                        output,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 impl SchemaLineagePublication {
+    /// Construct an immutable publication at the catalogue authority. Mapped
+    /// entities inherit UUIDs from the source manifest; genuinely new table,
+    /// column, and enum identities are minted exactly once here.
+    pub fn author_from_prior(
+        source_schema: &JazzSchema,
+        source_identities: &PhysicalIdentityManifest,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, &'static str> {
+        let new_tables = new_tables.into_iter().map(Into::into).collect::<Vec<_>>();
+        let dropped_tables = dropped_tables
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let physical_identities = source_identities.evolve(
+            source_schema,
+            &schema.schema,
+            &lens,
+            &new_tables.iter().cloned().collect(),
+        )?;
+        let mut publication = Self {
+            id: SchemaLineagePublicationId(uuid::Uuid::nil()),
+            schema,
+            lens,
+            new_tables,
+            dropped_tables,
+            physical_identities,
+        };
+        publication.id = publication.content_id();
+        Ok(publication)
+    }
+
     /// Construct an atomic schema-lineage publication payload.
     pub fn new(
         schema: SchemaVersion,
@@ -3183,12 +3660,14 @@ impl SchemaLineagePublication {
         new_tables: impl IntoIterator<Item = impl Into<String>>,
         dropped_tables: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        let physical_identities = PhysicalIdentityManifest::allocate(&schema.schema);
         let mut publication = Self {
             id: SchemaLineagePublicationId(uuid::Uuid::nil()),
             schema,
             lens,
             new_tables: new_tables.into_iter().map(Into::into).collect(),
             dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
+            physical_identities,
         };
         publication.id = publication.content_id();
         publication
@@ -3218,6 +3697,7 @@ impl SchemaLineagePublication {
         for table in dropped_tables {
             put_str(&mut bytes, &table);
         }
+        put_bytes(&mut bytes, &self.physical_identities.canonical_bytes());
         SchemaLineagePublicationId(uuid::Uuid::new_v5(
             &SCHEMA_LINEAGE_PUBLICATION_NAMESPACE,
             &bytes,
@@ -3918,6 +4398,55 @@ mod tests {
         let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
         assert_eq!(decoded.schema.public_schema(), &source);
         assert_eq!(decoded.schema.tables().len(), 1);
+    }
+
+    #[test]
+    fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions() {
+        // This is an internal descriptor test: permanent physical UUIDs are
+        // catalogue metadata, not public row values. The same-shaped text
+        // columns demonstrate why names/order cannot be used as identity.
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("left", PublicColumnType::Text)
+                    .column("right", PublicColumnType::Text),
+            )
+            .build();
+        let schema = crate::schema::JazzSchema::new(&source).unwrap();
+        let manifest = PhysicalIdentityManifest::allocate(&schema);
+        manifest.validate_for_schema(&schema).unwrap();
+        let round_trip: PhysicalIdentityManifest =
+            serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(round_trip, manifest);
+
+        let version = SchemaVersion::new(schema.clone());
+        let lens = MigrationLens::new(version.id, version.id, Vec::new());
+        let publication = SchemaLineagePublication::new(
+            version,
+            lens,
+            std::iter::empty::<String>(),
+            std::iter::empty::<String>(),
+        );
+        let mut changed_identity = publication.clone();
+        changed_identity
+            .physical_identities
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("left")
+            .unwrap()
+            .id = crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4());
+        assert_ne!(publication.id, changed_identity.content_id());
+
+        let mut collision = manifest.clone();
+        let table = collision.tables.get_mut("items").unwrap();
+        let left = table.columns["left"].id;
+        table.columns.get_mut("right").unwrap().id = left;
+        assert_eq!(
+            collision.validate_for_schema(&schema),
+            Err("physical identity manifest UUID collision")
+        );
     }
 
     #[test]
