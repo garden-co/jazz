@@ -357,7 +357,14 @@ mod tests {
             content: b"catalogue-row".to_vec(),
         };
         {
-            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&path, &["default"]).unwrap();
+            let storage =
+                jazz_storage_rocksdb::RocksDbStorage::open_with_durability_and_codec_profile(
+                    &path,
+                    &["default"],
+                    jazz_storage_rocksdb::Durability::WalNoSync,
+                    &catalogue_storage_codec_profile().unwrap(),
+                )
+                .unwrap();
             jazz::db::block_on(storage.set(
                 "default".to_owned(),
                 CatalogueKvStorage::entry_key(valid_id),

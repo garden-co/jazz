@@ -1792,8 +1792,7 @@ mod tests {
             "startup error retains the nested-codec failure context: {error}"
         );
 
-        let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-            .expect("failed startup releases the catalogue RocksDB lock");
+        let storage = open_raw_catalogue_storage(&catalogue_path);
         jazz::db::block_on(storage.delete(
             "default".to_owned(),
             crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
