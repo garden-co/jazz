@@ -1114,7 +1114,7 @@ fn cancelled_one_shot_query_discards_ephemeral_graph_and_hydration_state() {
 }
 
 #[test]
-fn cancelled_persistence_does_not_undo_an_applied_batch() {
+fn cancelled_started_persistence_poisoned_database_cannot_retry_or_roll_back() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
     let subscription =
@@ -1166,17 +1166,43 @@ fn cancelled_persistence_does_not_undo_an_applied_batch() {
     drop(persistence);
 
     assert!(subscription.try_recv().is_err());
-    assert_eq!(
-        block_on(database.query_graph(GraphBuilder::table("albums")))
-            .unwrap()
-            .deltas
-            .len(),
-        1
-    );
-
     control.resume();
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        block_on(database.query_graph(GraphBuilder::table("albums"))),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    drop(applied);
+}
+
+#[test]
+fn possibly_committed_receipt_poisoned_database_before_settlement() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    let applied = block_on(database.apply_batch(batch)).unwrap();
+
+    // YieldingStorage's injected error has no backend proof that the native
+    // atomic boundary was not crossed, so the portable default classifies it
+    // as PossiblyCommitted.
+    control.fail_next(TestStorageOperation::WriteMany);
     let persisted = block_on(applied.persist());
-    database.finish_persistence(persisted).unwrap();
+
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        database.finish_persistence(persisted),
+        Err(DatabaseError::Storage(_))
+    ));
 }
 
 #[test]
@@ -1333,13 +1359,8 @@ fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended()
     );
     assert_eq!(database.durable_publication_frontier(), None);
 
-    drop(persistence);
-    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
-    assert_eq!(rows.deltas.len(), 1);
-    assert_eq!(database.durable_publication_frontier(), None);
-
     control.resume_operation(TestStorageOperation::WriteMany);
-    let persistence = block_on(published.persist());
+    let persistence = block_on(persistence);
     assert_eq!(
         database.finish_persistence(persistence).unwrap(),
         PublicationId(1)

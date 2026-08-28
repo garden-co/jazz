@@ -161,6 +161,16 @@ first poll begins no attempt and is uncommitted. This is an acknowledgement
 classification, not a request to make asynchronous storage operations
 uncancellable.
 
+Groove's resident-publication lifecycle applies that distinction directly. A
+cancelled persistence future may return its publication to `Applied` only while
+it is still waiting for its ordered turn and has not started the storage
+submission. Once submission starts, cancellation permanently marks the
+database unusable. An explicit `PossiblyCommitted` result does the same before
+the host settles its receipt, so holding or dropping that receipt cannot expose
+a retry window. A proven `Uncommitted` result is the only result for which an
+implementation may retry or roll back; conservatively poisoning instead
+remains valid when the higher layer has no complete rollback operation.
+
 `put_if_absent` and `compare_and_delete` are atomic at the persistence scope
 (`INV-STORAGE-28`). A backend either serializes them across every concurrently
 open handle (IDB and SQLite), shares one primitive boundary across clones

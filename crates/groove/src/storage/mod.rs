@@ -548,6 +548,13 @@ where
         self.as_ref().write_many(operations)
     }
 
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        self.as_ref().write_many_outcome(operations)
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.as_ref().column_family_names()
     }
@@ -601,6 +608,13 @@ where
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         S::write_many(*self, operations)
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        S::write_many_outcome(*self, operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -884,6 +898,25 @@ impl LayoutStorage {
         let strip_len = 4 + logical_prefix.len();
         (mapping.physical_cf.to_owned(), physical_prefix, strip_len)
     }
+
+    fn physical_operations(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> Vec<OwnedWriteOperation> {
+        operations
+            .into_iter()
+            .map(|operation| match operation {
+                OwnedWriteOperation::Set { cf, key, value } => {
+                    let (cf, key) = self.physical_key(&cf, &key);
+                    OwnedWriteOperation::Set { cf, key, value }
+                }
+                OwnedWriteOperation::Delete { cf, key } => {
+                    let (cf, key) = self.physical_key(&cf, &key);
+                    OwnedWriteOperation::Delete { cf, key }
+                }
+            })
+            .collect()
+    }
 }
 
 impl OrderedKvStorage for LayoutStorage {
@@ -1023,27 +1056,15 @@ impl OrderedKvStorage for LayoutStorage {
         &self,
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
-        let translated = operations
-            .into_iter()
-            .map(|operation| match operation {
-                OwnedWriteOperation::Set { cf, key, value } => {
-                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-                    OwnedWriteOperation::Set {
-                        cf: physical_cf,
-                        key: physical_key,
-                        value,
-                    }
-                }
-                OwnedWriteOperation::Delete { cf, key } => {
-                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-                    OwnedWriteOperation::Delete {
-                        cf: physical_cf,
-                        key: physical_key,
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        self.inner.write_many(translated)
+        self.inner.write_many(self.physical_operations(operations))
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        self.inner
+            .write_many_outcome(self.physical_operations(operations))
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -1181,6 +1202,13 @@ impl OrderedKvStorage for BoxedStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.write_many(operations)
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        self.inner.write_many_outcome(operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -2733,6 +2761,25 @@ mod tests {
             WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(!outcome.may_have_committed());
+    }
+
+    #[futures_test::test]
+    async fn layout_storage_preserves_backend_commit_classification() {
+        let storage = LayoutStorage::new(
+            MemoryStorage::new(&["records"]).expect("valid memory storage families"),
+            StorageLayout::Identity,
+        )
+        .await
+        .unwrap();
+
+        let outcome = storage
+            .write_many_outcome(vec![OwnedWriteOperation::set("missing", b"key", b"value")])
+            .await;
+
+        assert!(matches!(
+            outcome,
+            WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
+        ));
     }
 
     #[futures_test::test]
