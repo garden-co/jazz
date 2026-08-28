@@ -91,7 +91,19 @@ where
         // restart. Rebuild the live projection registry as part of that
         // semantic transition, not after client traffic begins. An identical
         // trusted prefix is idempotent and must retain maintained/query state.
-        if runtime_semantics_changed && self.rebuild_database_slot().await.is_err() {
+        if runtime_semantics_changed {
+            if self.rebuild_database_slot().await.is_err() {
+                self.catalogue = previous_catalogue;
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+        } else if self.synchronize_physical_version_tables().await.is_err() {
+            // A snapshot may extend historical or write-schema variants while
+            // leaving the local read layout unchanged.  Those variants are
+            // not a reason to replace the live runtime (and disconnect its
+            // subscriptions), but their physical columns, indices and
+            // projections must be available before authored history or a
+            // later write-schema pointer can be admitted.
             self.catalogue = previous_catalogue;
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);

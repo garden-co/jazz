@@ -133,6 +133,14 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
         .unwrap();
 
     let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base);
+    let subscription = receiver
+        .subscribe_history("todos")
+        .expect("subscribe before historical snapshot import");
+    assert!(subscription
+        .recv()
+        .expect("initial history snapshot")
+        .is_empty());
+    let runtime_before_snapshot = receiver.groove_runtime_token();
     let snapshot = authority.catalogue_snapshot().unwrap();
     assert!(matches!(
         receiver.apply_sync_message_settled(SyncMessage::CatalogueSnapshot(Box::new(snapshot.clone()))),
@@ -141,8 +149,23 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
         ))
     ));
     receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    assert_eq!(
+        receiver.groove_runtime_token(),
+        runtime_before_snapshot,
+        "a historical/write-schema import extends the live physical registry in place"
+    );
     assert_eq!(receiver.current_write_schema().unwrap().schema, evolved.id);
     receiver.apply_sync_message_settled(authored).unwrap();
+    assert_eq!(
+        subscription
+            .recv()
+            .expect("the pre-import history stream receives the new authored variant")
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .count(),
+        1,
+        "the in-place registry extension preserves the existing subscription"
+    );
     let versions = receiver.query_all_versions().unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(
