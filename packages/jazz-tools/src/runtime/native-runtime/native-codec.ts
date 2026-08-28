@@ -717,40 +717,38 @@ export class PostcardReader {
   constructor(private readonly bytesValue: Uint8Array) {}
 
   u64(): number {
-    let result = 0;
-    let shift = 0;
-    while (true) {
-      const byte = this.readByte();
-      result += (byte & 0x7f) * 2 ** shift;
-      if ((byte & 0x80) === 0) return result;
-      shift += 7;
+    const value = this.readCanonicalU64();
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`postcard u64 exceeds Number.MAX_SAFE_INTEGER: ${value}`);
     }
+    return Number(value);
   }
 
   u64BigInt(): bigint {
-    let result = 0n;
-    let shift = 0n;
-    while (true) {
-      const byte = this.readByte();
-      result += BigInt(byte & 0x7f) << shift;
-      if (result > 0xffff_ffff_ffff_ffffn) throw new Error("postcard u64 overflow");
-      if ((byte & 0x80) === 0) return result;
-      shift += 7n;
-      if (shift >= 64n) throw new Error("postcard u64 overflow");
-    }
+    return this.readCanonicalU64();
   }
 
   i64(): bigint {
+    const result = this.readCanonicalU64();
+    return (result & 1n) === 0n ? result >> 1n : -((result + 1n) >> 1n);
+  }
+
+  private readCanonicalU64(): bigint {
     let result = 0n;
-    let shift = 0n;
-    while (true) {
+    for (let byteIndex = 0; byteIndex < 10; byteIndex += 1) {
       const byte = this.readByte();
-      result += BigInt(byte & 0x7f) << shift;
+      const payload = BigInt(byte & 0x7f);
+      if (byteIndex === 9 && payload > 1n) throw new Error("postcard u64 overflow");
+
+      result |= payload << BigInt(byteIndex * 7);
       if ((byte & 0x80) === 0) {
-        return (result & 1n) === 0n ? result >> 1n : -((result + 1n) >> 1n);
+        if (byteIndex !== 0 && result < 1n << BigInt(byteIndex * 7)) {
+          throw new Error("postcard u64 is not minimally encoded");
+        }
+        return result;
       }
-      shift += 7n;
     }
+    throw new Error("postcard u64 overflow");
   }
 
   string(): string {

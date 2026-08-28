@@ -388,21 +388,23 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     Ok(message)
 }
 
-/// Decode one postcard value only when it consumes the complete input.
+/// Decode one canonical postcard value only when it consumes the complete input.
 ///
 /// Postcard's `from_bytes` intentionally leaves an unread suffix invisible to
 /// callers. A Jazz wire frame and its semantic payload are each exactly one
 /// value, so accepting such a suffix would give one physical frame two
-/// interpretations at adjacent protocol seams.
+/// interpretations at adjacent protocol seams. Postcard itself also accepts
+/// alternate overlong varint spellings, while the frozen wire contract admits
+/// only the encoder's shortest spelling.
 fn decode_postcard_exact<'a, T>(bytes: &'a [u8]) -> Result<T, postcard::Error>
 where
-    T: Deserialize<'a>,
+    T: Deserialize<'a> + Serialize,
 {
     let (value, remainder) = take_from_bytes(bytes)?;
-    if remainder.is_empty() {
-        Ok(value)
-    } else {
+    if !remainder.is_empty() || to_allocvec(&value)? != bytes {
         Err(postcard::Error::DeserializeBadEncoding)
+    } else {
+        Ok(value)
     }
 }
 
@@ -874,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_wire_decoders_reject_trailing_bytes() {
+    fn canonical_wire_decoders_reject_suffixes_and_overlong_varints() {
         let frame = WireFrame::Error(WireError::new(
             WireErrorCode::Backpressure,
             WireRetry::Later,
@@ -890,6 +892,19 @@ mod tests {
             decode_frame(&frame_bytes),
             Err(postcard::Error::DeserializeBadEncoding),
             "a physical frame is exactly one postcard value"
+        );
+
+        let canonical_frame = encode_frame(&frame).expect("frame encodes");
+        assert_eq!(canonical_frame[0], 2, "WireFrame::Error is tag 2");
+        let nonminimal_frame = [vec![0x82, 0], canonical_frame[1..].to_vec()].concat();
+        assert!(
+            postcard::from_bytes::<WireFrame>(&nonminimal_frame).is_ok(),
+            "planted sensitivity: postcard accepts the overlong 02 -> 82 00 tag"
+        );
+        assert_eq!(
+            decode_frame(&nonminimal_frame),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "the frozen frame codec admits only canonical varints"
         );
 
         let message = SyncMessage::FateUpdate {
@@ -908,6 +923,19 @@ mod tests {
             decode_sync_message(&payload),
             Err(postcard::Error::DeserializeBadEncoding),
             "a logical payload is exactly one postcard value"
+        );
+
+        let canonical_payload = encode_sync_message(&message).expect("message encodes");
+        assert_eq!(canonical_payload[0], 4, "FateUpdate is tag 4");
+        let nonminimal_payload = [vec![0x84, 0], canonical_payload[1..].to_vec()].concat();
+        assert!(
+            postcard::from_bytes::<SyncMessage>(&nonminimal_payload).is_ok(),
+            "planted sensitivity: postcard accepts the overlong SyncMessage tag"
+        );
+        assert_eq!(
+            decode_sync_message(&nonminimal_payload),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "the frozen semantic codec admits only canonical varints"
         );
     }
 

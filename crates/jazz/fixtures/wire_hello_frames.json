@@ -47,6 +47,17 @@
       "frame_base64": "AA4O9QMBARBeXl5eXl5eXl5eXl5eXl5erAI="
     },
     {
+      "name": "core_with_max_u64_authority_epoch",
+      "min_protocol_version": 14,
+      "max_protocol_version": 14,
+      "features": 0,
+      "role": 1,
+      "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "authority_epoch": "18446744073709551615",
+      "frame_hex": "000e0e000101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5effffffffffffffffff01",
+      "frame_base64": "AA4OAAEBEF5eXl5eXl5eXl5eXl5eXl7///////////8B"
+    },
+    {
       "name": "edge_without_authority",
       "min_protocol_version": 14,
       "max_protocol_version": 14,

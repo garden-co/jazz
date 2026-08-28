@@ -90,9 +90,16 @@ struct HelloFixture {
     features: u64,
     role: u64,
     authority_node_hex: Option<String>,
-    authority_epoch: Option<u64>,
+    authority_epoch: Option<FixtureU64>,
     frame_hex: String,
     frame_base64: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum FixtureU64 {
+    Number(u64),
+    Decimal(String),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -654,18 +661,18 @@ fn fixture_manifest() -> Manifest {
 
 fn hello_fixture_manifest() -> HelloManifest {
     let cases = [
-        ("client_without_authority", WirePeerRole::Client, 0, false),
+        ("client_without_authority", WirePeerRole::Client, 0, None),
         (
             "client_with_authority",
             WirePeerRole::Client,
             FEATURE_SYNC_MESSAGE_PAYLOAD,
-            true,
+            Some(300),
         ),
         (
             "core_without_authority",
             WirePeerRole::Core,
             FEATURE_STRUCTURED_ERRORS,
-            false,
+            None,
         ),
         (
             "core_with_authority",
@@ -677,40 +684,45 @@ fn hello_fixture_manifest() -> HelloManifest {
                 | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
                 | FEATURE_AUTHORIZATION_SCOPE_VIEWS
                 | FEATURE_AUXILIARY_CHUNKS,
-            true,
+            Some(300),
+        ),
+        (
+            "core_with_max_u64_authority_epoch",
+            WirePeerRole::Core,
+            0,
+            Some(u64::MAX),
         ),
         (
             "edge_without_authority",
             WirePeerRole::Edge,
             FEATURE_MESSAGE_FRAGMENTATION,
-            false,
+            None,
         ),
         (
             "edge_with_authority",
             WirePeerRole::Edge,
             FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
-            true,
+            Some(300),
         ),
         (
             "relay_without_authority",
             WirePeerRole::Relay,
             FEATURE_AUTHORIZATION_SCOPE_VIEWS,
-            false,
+            None,
         ),
         (
             "relay_with_authority",
             WirePeerRole::Relay,
             FEATURE_AUXILIARY_CHUNKS | FEATURE_PAYLOAD_LZ4,
-            true,
+            Some(300),
         ),
     ];
     let authority_node = NodeUuid::from_bytes([0x5e; 16]);
-    let authority_epoch = 300;
     let fixtures = cases
         .into_iter()
-        .map(|(name, role, features, with_authority)| {
+        .map(|(name, role, features, authority_epoch)| {
             let mut hello = WireHello::current(role, features);
-            if with_authority {
+            if let Some(authority_epoch) = authority_epoch {
                 hello = hello.with_authority(authority_node, authority_epoch);
             }
             let frame_bytes =
@@ -726,8 +738,14 @@ fn hello_fixture_manifest() -> HelloManifest {
                     WirePeerRole::Edge => 2,
                     WirePeerRole::Relay => 3,
                 },
-                authority_node_hex: with_authority.then(|| hex(authority_node.as_bytes())),
-                authority_epoch: with_authority.then_some(authority_epoch),
+                authority_node_hex: authority_epoch.map(|_| hex(authority_node.as_bytes())),
+                authority_epoch: authority_epoch.map(|epoch| {
+                    if epoch == u64::MAX {
+                        FixtureU64::Decimal(epoch.to_string())
+                    } else {
+                        FixtureU64::Number(epoch)
+                    }
+                }),
                 frame_hex: hex(&frame_bytes),
                 frame_base64: base64(&frame_bytes),
             }
@@ -779,9 +797,13 @@ fn wire_hello_frame_fixtures_decode_exactly() {
                 .map(|authority| hex(authority.node.as_bytes())),
             fixture.authority_node_hex
         );
+        let expected_epoch = fixture.authority_epoch.map(|epoch| match epoch {
+            FixtureU64::Number(epoch) => epoch,
+            FixtureU64::Decimal(epoch) => epoch.parse().expect("authority epoch fits u64"),
+        });
         assert_eq!(
             hello.authority.map(|authority| authority.epoch),
-            fixture.authority_epoch
+            expected_epoch
         );
         assert_eq!(
             encode_frame(&WireFrame::Hello(hello)).expect("Hello fixture frame re-encodes"),
