@@ -1188,7 +1188,11 @@ mod tests {
         };
 
         for message in [ordinary, scope_view] {
-            let encoded = encode_sync_message(&message).expect("encode malformed fixture");
+            // Hostile peers are not constrained by the semantic encoder.  Use
+            // postcard directly to construct the malformed bytes so this
+            // exercises receive-side validation rather than merely proving
+            // the guarded sender rejects its own invalid value.
+            let encoded = to_allocvec(&message).expect("serialize malformed fixture bytes");
             assert!(
                 decode_sync_message(&encoded).is_err(),
                 "malformed runs must be rejected at either view-update seam"
@@ -1238,7 +1242,10 @@ mod tests {
 
     fn encode_then_decode_run(run: VersionBundleRun) -> Result<SyncMessage, postcard::Error> {
         let message = view_update_with_carriers(vec![VersionCarrier::Run(run)]);
-        decode_sync_message(&encode_sync_message(&message).unwrap())
+        // Deliberately bypass `encode_sync_message`: this helper is used only
+        // for receiver-boundary tests of malformed data which a remote peer
+        // can serialize without our sender-side guard.
+        decode_sync_message(&to_allocvec(&message).unwrap())
     }
 
     fn view_update_with_carriers(version_carriers: Vec<VersionCarrier>) -> SyncMessage {

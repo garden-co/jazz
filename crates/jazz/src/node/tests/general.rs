@@ -1829,6 +1829,35 @@ fn remote_history_rejects_noncanonical_parent_order_before_parking() {
     let later = TxId::new(TxTime::from(20), node(0x01));
     let earlier = TxId::new(TxTime::from(10), node(0x01));
 
+    // `VersionRecord::from_cells` is an authoring helper and deliberately
+    // canonicalizes its parent set. A remote peer can instead construct the
+    // physical wire record directly, so make the malformed spelling below
+    // that guarded helper and prove authority ingress rejects it before it
+    // can become a parked missing-parent edge.
+    let canonical = version_record(
+        row(0x76),
+        vec![later, earlier],
+        title_cells("must reject before parking"),
+        None,
+    );
+    let mut values = (0..canonical.record().descriptor().fields().len())
+        .map(|index| canonical.record().get_idx(index).unwrap())
+        .collect::<Vec<_>>();
+    values[1] = Value::Array(
+        [later, earlier]
+            .into_iter()
+            .map(|parent| Value::Tuple(vec![Value::U64(parent.time.0), Value::Uuid(parent.node.0)]))
+            .collect(),
+    );
+    let raw = canonical.record().descriptor().create(&values).unwrap();
+    let malformed = VersionRecord::new(
+        canonical.table(),
+        canonical.schema_version(),
+        OwnedRecord::new(raw, *canonical.record().descriptor()),
+    );
+    assert!(canonical.validate_receipt().is_ok());
+    assert!(malformed.validate_receipt().is_err());
+
     core.ingest_commit_unit_settled(
         Transaction {
             tx_id,
@@ -1843,21 +1872,18 @@ fn remote_history_rejects_noncanonical_parent_order_before_parking() {
             user_metadata_json: None,
             contribution_merge: None,
         },
-        vec![version_record(
-            row(0x76),
-            vec![later, earlier],
-            title_cells("must reject before parking"),
-            None,
-        )],
+        vec![malformed],
         u64::MAX - SKEW_TOLERANCE_MS,
     )
     .unwrap();
 
+    let fate = core.transaction_record(tx_id).unwrap().fate;
     assert!(matches!(
-        core.transaction_record(tx_id).unwrap().fate,
+        fate,
         Fate::Rejected(RejectionReason::MalformedCommit(ref detail))
-            if detail == "row version parents must be sorted and unique"
+            if detail == "malformed version receipt"
     ));
+    assert_eq!(core.sync_metrics().parked_orphans, 0);
 }
 
 #[test]
