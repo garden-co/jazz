@@ -179,6 +179,17 @@ new operations against the durable state it finds. Reopen does not classify the
 abandoned submission retroactively and MUST NOT replay it as a retry; it only
 restores the state for which storage has a definite durable receipt.
 
+**Worked cancellation/reopen receipt.** Suppose durable state contains row A.
+The live database makes row B resident, begins B's atomic submission, and its
+host drops that persistence future. The live instance is poisoned: it may not
+read, write, retry B, or report B as locally durable. After discarding that
+instance, reopening the same backend observes A and whatever byte state the
+backend definitively contains; it does not synthesize another attempt for B.
+The reopened instance may write a new row C normally. In the controlled
+pre-write cancellation receipt, reopening therefore observes A, not B, and
+then persists C; a backend that had actually committed B is still safe because
+the former instance never retries or rolls back B.
+
 `put_if_absent` and `compare_and_delete` are atomic at the persistence scope
 (`INV-STORAGE-28`). A backend either serializes them across every concurrently
 open handle (IDB and SQLite), shares one primitive boundary across clones
