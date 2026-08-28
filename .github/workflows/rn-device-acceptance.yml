@@ -179,7 +179,7 @@ jobs:
         run: |
           cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk" ANDROID_HOME="$cache/sdk"
-          export PATH="$cache/cargo/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
+          export PATH="$cache/cargo/bin:$cache/sdk/cmdline-tools/latest/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
           export ANDROID_AVD_HOME="$cache/avd"
           [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance requires readable/writable /dev/kvm after the KVM access step" >&2; exit 1; }
           yes no | avdmanager create avd --force --name jazz-device-acceptance-api35 --package 'system-images;android-35;google_apis;x86_64'

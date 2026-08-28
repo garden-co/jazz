@@ -89,6 +89,10 @@ test("dispatch device workflow uses hosted KVM while source jobs remain cheap", 
   assert.match(workflow, /android-source-scaffold:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404/);
   assert.match(workflow, /ios-source-scaffold:[\s\S]*runs-on: blacksmith-6vcpu-macos-15/);
   assert.match(workflow, /\[\[ -r \/dev\/kvm && -w \/dev\/kvm \]\]/);
+  assert.match(
+    workflow,
+    /PATH="\$cache\/cargo\/bin:\$cache\/sdk\/cmdline-tools\/latest\/bin:\$cache\/sdk\/platform-tools:\$cache\/sdk\/emulator:\$PATH"/,
+  );
   assert.match(workflow, /did not boot within 180s/);
   assert.match(workflow, /tail -200 "\$cache\/emulator\.log"/);
   assert.match(workflow, /android-device-acceptance:[\s\S]*timeout-minutes: 45/);
