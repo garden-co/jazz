@@ -615,8 +615,8 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
                 settled_through,
                 defer_settlement: false,
                 reset_result_set,
-                version_carriers: Vec::new(),
-                version_bundles: bundles,
+                version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                    .expect("malformed receipts remain representable as carriers"),
                 peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                 authorization_progress: None,
                 opening_pending: false,
