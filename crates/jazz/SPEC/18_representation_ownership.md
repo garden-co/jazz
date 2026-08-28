@@ -67,6 +67,11 @@ a prefix of a larger carrier (`INV-WIRE-1`). A transport that needs several
 payloads supplies separate byte slices; it does not concatenate them.
 Postcard strings use strict UTF-8 decoding; malformed text is malformed input,
 not a replacement-character-compatible spelling.
+Every binding `u64` uses its shortest base-128 spelling; redundant
+continuations, overlong encodings, and values beyond `u64` are malformed. The
+v1 binding fields are exposed as JavaScript numbers, so their TypeScript reader
+MUST reject a decoded value above `Number.MAX_SAFE_INTEGER` rather than losing
+index or count precision.
 
 The v1 relation snapshot field order is `root_count, rows`; each row batch is
 `table, descriptor, rows`; and each row is `row_id, deleted, raw`. The v1

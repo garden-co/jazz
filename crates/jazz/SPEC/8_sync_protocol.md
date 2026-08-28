@@ -98,6 +98,12 @@ trailing byte; concatenation belongs only to the documented WebSocket
 `Vec<Vec<u8>>` batch carrier. In particular, a binding MUST NOT hand a byte
 suffix from one frame to the semantic decoder, and a semantic decoder MUST NOT
 silently leave a suffix for its caller (`INV-WIRE-1`).
+Every postcard `u64`, including an enum discriminant or length prefix, MUST use
+its shortest base-128 spelling. A redundant continuation byte, more than ten
+bytes, or a tenth-byte payload above `1` is malformed rather than a compatible
+alternate encoding. TypeScript decoders that expose a `u64` as a JavaScript
+`number` MUST reject values above `Number.MAX_SAFE_INTEGER`; only fields kept
+as `bigint` may retain the full `u64` domain.
 The TypeScript WebSocket carrier MUST consume the entire outer batch and the
 entire known `Hello`, `Message`, or `Error` frame whenever it parses or
 classifies that frame; reading only the enum tag is not frame acceptance.
@@ -137,7 +143,9 @@ envelope or fragment MUST NOT declare a bit outside that intersection. Feature
 masks are postcard `u64` values and MUST be decoded and compared across all 64
 bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.
 Any unsupported low or high bit, including `1<<32`, rejects the Hello before
-its accepted mask is converted to a narrower runtime type. Exactly
+its accepted mask is converted to a narrower runtime type. The feature mask
+and authority epoch remain `bigint` through wire decoding, so canonical values
+through `2^64-1` are representable without a JavaScript number conversion. Exactly
 one compression bit may be active on an envelope; when both codecs are
 negotiated, an outbound v14 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one

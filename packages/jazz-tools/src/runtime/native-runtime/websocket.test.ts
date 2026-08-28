@@ -477,7 +477,9 @@ describe("websocket frame carrier", () => {
     writer.u64(staleEpoch);
     const encodedEpoch = writer.finish();
     expect(new PostcardReader(encodedEpoch).u64BigInt()).toBe(staleEpoch);
-    expect(BigInt(new PostcardReader(encodedEpoch).u64())).not.toBe(staleEpoch);
+    expect(() => new PostcardReader(encodedEpoch).u64()).toThrow(
+      "postcard u64 exceeds Number.MAX_SAFE_INTEGER",
+    );
   });
 
   it("does not send or deliver semantic frames before the server hello", async () => {
@@ -574,6 +576,11 @@ describe("websocket frame carrier", () => {
     expect(new PostcardReader(suffixed).u64()).toBe(2);
     expect(() => isWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
     expect(() => decodeWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
+
+    expect(encoded[0]).toBe(2);
+    const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
+    expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+    expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
@@ -661,7 +668,7 @@ type RustWireHelloFixtureManifest = {
     features: number;
     role: number;
     authority_node_hex: string | null;
-    authority_epoch: number | null;
+    authority_epoch: number | string | null;
     frame_hex: string;
   }>;
 };

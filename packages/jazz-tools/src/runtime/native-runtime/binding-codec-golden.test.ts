@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import type { NativeTerminalOperation } from "../../drivers/types.js";
-import { PostcardReader } from "./native-codec.js";
+import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
@@ -108,7 +108,50 @@ describe("binding codec golden contract", () => {
 
     expect(() => new PostcardReader(Uint8Array.from([1, 0xff])).string()).toThrow();
   });
+
+  it("rejects alternate and unsafe number u64 spellings while retaining canonical full-width bigint", () => {
+    const maxSafe = Number.MAX_SAFE_INTEGER;
+    for (const rootCount of [maxSafe - 1, maxSafe]) {
+      expect(
+        readNativeRelationSubscriptionSnapshot(
+          new PostcardReader(encodeEmptyRelationSnapshot(rootCount)),
+        ).rootCount,
+      ).toBe(rootCount);
+    }
+
+    expect(() =>
+      readNativeRelationSubscriptionSnapshot(
+        new PostcardReader(encodeEmptyRelationSnapshot(BigInt(maxSafe) + 1n)),
+      ),
+    ).toThrow("postcard u64 exceeds Number.MAX_SAFE_INTEGER");
+
+    const maxU64 = (1n << 64n) - 1n;
+    const maxU64Writer = new PostcardWriter();
+    maxU64Writer.u64(maxU64);
+    const maxU64Bytes = maxU64Writer.finish();
+    expect(maxU64Bytes).toEqual(Uint8Array.from([...Array(9).fill(0xff), 0x01]));
+    const maxU64Reader = new PostcardReader(maxU64Bytes);
+    expect(maxU64Reader.u64BigInt()).toBe(maxU64);
+    expect(maxU64Reader.done()).toBe(true);
+
+    expect(() => new PostcardReader(Uint8Array.from([0x82, 0x00])).u64()).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() =>
+      new PostcardReader(Uint8Array.from([...Array(9).fill(0x80), 0x02])).u64BigInt(),
+    ).toThrow("postcard u64 overflow");
+    expect(() =>
+      new PostcardReader(Uint8Array.from([...Array(9).fill(0x80), 0x00])).u64BigInt(),
+    ).toThrow("postcard u64 is not minimally encoded");
+  });
 });
+
+function encodeEmptyRelationSnapshot(rootCount: number | bigint): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(rootCount);
+  writer.vec(() => {}, 0);
+  return writer.finish();
+}
 
 function bindingCodecGoldenFixture(): BindingCodecGoldenFixture {
   return JSON.parse(
