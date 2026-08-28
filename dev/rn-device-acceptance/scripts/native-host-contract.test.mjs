@@ -50,6 +50,12 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
   assert.doesNotMatch(fixture, /JazzNativeRelay\/JazzRelay\.h/);
 });
 
+test("device fixture does not import internal jazz-tools relay-frame types", () => {
+  const fixture = read("src/native-fixture.ts");
+  assert.doesNotMatch(fixture, /NativeRelay(?:Capability|Executor)/);
+  assert.match(fixture, /execute: typeof executeNativeRelayCommand/);
+});
+
 test("Android bootstrap rejects corrupt pinned archives before extraction", () => {
   const bootstrap = read("scripts/bootstrap-android.sh");
   assert.match(bootstrap, /verify-pinned-archive\.sh/);
@@ -58,6 +64,19 @@ test("Android bootstrap rejects corrupt pinned archives before extraction", () =
   assert.match(bootstrap, /commandlinetools-linux-13114758_latest\.zip/);
   assert.match(bootstrap, /android-ndk-r27b-linux\.zip/);
   assert.match(bootstrap, /33e16af1a6bbabe12cad54b2117085c07eab7e4fa67cdd831805f0e94fd826c1/);
+  assert.match(bootstrap, /\.jazz-pinned-sha256/);
+  assert.match(bootstrap, /cargo-ndk" --version/);
+});
+
+test("dispatch workflow fails clearly without KVM and bounds emulator boot", () => {
+  const workflow = fs.readFileSync(
+    path.join(root, "../../.github/workflows/rn-device-acceptance.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /\[\[ -r \/dev\/kvm && -w \/dev\/kvm \]\]/);
+  assert.match(workflow, /did not boot within 180s/);
+  assert.match(workflow, /tail -200 "\$cache\/emulator\.log"/);
+  assert.match(workflow, /android-device-acceptance:[\s\S]*timeout-minutes: 45/);
 });
 
 test("checksum pin rejects a planted corrupt cache archive", () => {
