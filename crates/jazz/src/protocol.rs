@@ -635,13 +635,7 @@ fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBund
 
 fn validate_version_records(versions: &[VersionRecord]) -> Result<(), VersionBundleRunError> {
     for version in versions {
-        let parents = version.parents();
-        if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(VersionBundleRunError::NonCanonicalParents {
-                table: version.table().to_owned(),
-                row_uuid: version.row_uuid(),
-            });
-        }
+        version.validate_receipt()?;
     }
     Ok(())
 }
@@ -719,6 +713,101 @@ pub struct VersionRecord {
 }
 
 impl VersionRecord {
+    /// Validate the complete immutable receipt without using infallible accessors.
+    ///
+    /// This is the shared inbound/outbound codec boundary. `OwnedRecord`
+    /// deliberately permits deferred decoding, so callers must pass through
+    /// here before treating a deserialized record as trusted.
+    pub(crate) fn validate_receipt(&self) -> Result<(), VersionBundleRunError> {
+        let malformed = || VersionBundleRunError::MalformedVersionRecord {
+            table: self.table().to_owned(),
+        };
+        let fields = self.record.descriptor().fields();
+        let fixed_names = [
+            "row_uuid",
+            "parents",
+            "created_by",
+            "created_at",
+            "updated_by",
+            "updated_at",
+            "_deletion",
+        ];
+        if fields.len() < fixed_names.len()
+            || fields
+                .iter()
+                .zip(fixed_names)
+                .any(|(field, expected)| field.name.as_deref() != Some(expected))
+            || fields[WireRowRecord::USER_CELLS..].iter().any(|field| {
+                !field
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("user_"))
+            })
+        {
+            return Err(malformed());
+        }
+        let borrowed = self.record.borrowed();
+        let row_uuid = RowUuid(
+            borrowed
+                .get_uuid(WireRowRecord::FIELD_ROW_UUID_IDX)
+                .map_err(|_| malformed())?,
+        );
+        let parents = tx_ids_from_value(
+            borrowed
+                .get_idx(WireRowRecord::FIELD_PARENTS_IDX)
+                .map_err(|_| malformed())?,
+        )
+        .map_err(|_| malformed())?;
+        for index in [
+            WireRowRecord::FIELD_CREATED_BY_IDX,
+            WireRowRecord::FIELD_UPDATED_BY_IDX,
+        ] {
+            let encoded = borrowed.get_str(index).map_err(|_| malformed())?;
+            let author = AuthorSubject::from_canonical(encoded).map_err(|_| malformed())?;
+            if author.canonical().as_bytes() != encoded.as_bytes() {
+                return Err(malformed());
+            }
+        }
+        borrowed
+            .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
+            .map_err(|_| malformed())?;
+        borrowed
+            .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
+            .map_err(|_| malformed())?;
+        deletion_from_value(
+            borrowed
+                .get_idx(WireRowRecord::FIELD__DELETION_IDX)
+                .map_err(|_| malformed())?,
+        )
+        .map_err(|_| malformed())?;
+        let typed = WireRowRecord::new(self.record.clone());
+        for index in 0..fields.len() - WireRowRecord::USER_CELLS {
+            typed.cell(index).map_err(|_| malformed())?;
+        }
+
+        // Decode every descriptor field, then reproduce the record. Besides
+        // validating user cells, equality proves that no trailing or alternate
+        // Groove spelling survived deferred `OwnedRecord` construction.
+        let values = (0..fields.len())
+            .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let canonical = self
+            .record
+            .descriptor()
+            .create(&values)
+            .map_err(|_| malformed())?;
+        if canonical.as_slice() != self.record.raw() {
+            return Err(malformed());
+        }
+        if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(VersionBundleRunError::NonCanonicalParents {
+                table: self.table().to_owned(),
+                row_uuid,
+            });
+        }
+        Ok(())
+    }
+
     /// Construct a wire version record from encoded bytes and the table schema.
     pub fn new(
         table: impl Into<String>,
@@ -1402,6 +1491,11 @@ impl VersionBundleRunOverride {
 /// Validation failures for malformed packed version-bundle runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VersionBundleRunError {
+    /// A deferred Groove record failed structural or canonical validation.
+    MalformedVersionRecord {
+        /// Table declared by the enclosing version.
+        table: String,
+    },
     /// Runs must carry at least one body.
     EmptyRun,
     /// The declared body count did not match the actual body vector length.
@@ -1442,6 +1536,9 @@ pub enum VersionBundleRunError {
 impl std::fmt::Display for VersionBundleRunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::MalformedVersionRecord { table } => {
+                write!(f, "version for {table} has malformed record bytes")
+            }
             Self::EmptyRun => write!(f, "version-bundle run has no bodies"),
             Self::BodyCountMismatch { declared, actual } => write!(
                 f,
@@ -3654,6 +3751,112 @@ mod tests {
             versions: vec![noncanonical],
         };
         assert!(message.validate_version_carriers().is_err());
+        assert!(crate::wire::encode_sync_message(&message).is_err());
+
+        // Hostile peers do not use our guarded encoder. Their postcard bytes
+        // must fail closed without reaching the infallible public accessors.
+        let remote = postcard::to_allocvec(&message).unwrap();
+        let decoded = std::panic::catch_unwind(|| crate::wire::decode_sync_message(&remote));
+        assert!(decoded.is_ok(), "malformed remote receipt must not panic");
+        assert!(decoded.unwrap().is_err());
+
+        let mut trailing_raw = version.record().raw().to_vec();
+        trailing_raw.push(0xa5);
+        let trailing_record = VersionRecord::new(
+            "todos",
+            schema_id(0x44),
+            OwnedRecord::new(trailing_raw, table.wire_record_descriptor()),
+        );
+        let trailing_message = SyncMessage::CommitUnit {
+            tx: match &message {
+                SyncMessage::CommitUnit { tx, .. } => tx.clone(),
+                _ => unreachable!(),
+            },
+            versions: vec![trailing_record],
+        };
+        let remote = postcard::to_allocvec(&trailing_message).unwrap();
+        assert!(crate::wire::decode_sync_message(&remote).is_err());
+
+        let make_record = |descriptor: RecordDescriptor, values: Vec<Value>| {
+            VersionRecord::new(
+                "todos",
+                schema_id(0x44),
+                OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+            )
+        };
+        let base_values = || {
+            vec![
+                Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
+                Value::Array(vec![tx_id_value(low), tx_id_value(high)]),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(7),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(8),
+                Value::Nullable(None),
+                Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
+            ]
+        };
+        let malformed_message = |version| SyncMessage::CommitUnit {
+            tx: Transaction {
+                tx_id: high,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: author,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            versions: vec![version],
+        };
+
+        let mut noncanonical_author = base_values();
+        noncanonical_author[2] = Value::String(r#"[ "issuer", "subject" ]"#.to_owned());
+        let message = malformed_message(make_record(
+            table.wire_record_descriptor(),
+            noncanonical_author,
+        ));
+        assert!(crate::wire::encode_sync_message(&message).is_err());
+        let remote = postcard::to_allocvec(&message).unwrap();
+        assert!(crate::wire::decode_sync_message(&remote).is_err());
+
+        // Correctly encoded values under structurally wrong UUID/deletion
+        // descriptors are still malformed immutable receipts.
+        for (field, replacement, value) in [
+            (0, ValueType::Bytes, Value::Bytes(vec![0x55; 16])),
+            (6, ValueType::U64, Value::U64(0)),
+        ] {
+            let fields = table
+                .wire_record_descriptor()
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(index, descriptor_field)| {
+                    (
+                        descriptor_field.name.clone().unwrap(),
+                        if index == field {
+                            replacement.clone()
+                        } else {
+                            descriptor_field.value_type.clone()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let descriptor = RecordDescriptor::new(fields);
+            let mut values = base_values();
+            values[field] = value;
+            let message = malformed_message(make_record(descriptor, values));
+            let remote = postcard::to_allocvec(&message).unwrap();
+            assert!(crate::wire::decode_sync_message(&remote).is_err());
+        }
+
+        // A valid immutable receipt is closed under the guarded codec.
+        let valid = malformed_message(version);
+        let bytes = crate::wire::encode_sync_message(&valid).unwrap();
+        assert_eq!(crate::wire::decode_sync_message(&bytes).unwrap(), valid);
     }
 
     #[test]

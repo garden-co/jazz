@@ -352,6 +352,9 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
 
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
+    message
+        .validate_version_carriers()
+        .map_err(|_| postcard::Error::SerdeSerCustom)?;
     to_allocvec(message)
 }
 

@@ -321,11 +321,21 @@ accepted versions update global-current state, while pending/rejected versions
 never become a global winner.
 
 **Receipt envelope.** Semantic `SyncMessage` and `WireFrame` values serialize
-with postcard in declaration/variant order. A decoder must validate the
-semantic carrier shape and then re-encode to require byte-for-byte equality.
+with postcard in declaration/variant order. Both sender and receiver must run
+the same fully fallible `VersionRecord` validator before postcard encoding or
+before any infallible semantic accessor. That validator decodes the UUID,
+parent tuple array, both canonical authors, both timestamps, deletion tag, and
+every declared user field; it recreates the complete Groove record and requires
+exact raw-byte equality (including full consumption). `created_by` and
+`updated_by` must equal the bytes returned by `AuthorSubject::canonical`, not
+merely parse to the same JSON value. Outbound immutable records are rejected,
+not repaired; sorting/deduplication is permitted only at birth in
+`VersionRecord::encode`. A decoder then re-encodes the semantic carrier to
+require byte-for-byte postcard equality.
 Consequently it rejects trailing bytes, overlong/alternate varints, invalid
-discriminants, non-canonical authors, unsorted or duplicate parents, and malformed
-carrier runs before storage/replay. The hard-coded accepted/global fate receipt
+discriminants, malformed UUID/deletion/parent shapes, non-canonical authors,
+unsorted or duplicate parents, and malformed carrier runs before storage/replay,
+and none of these failures may panic. The hard-coded accepted/global fate receipt
 in `wire::tests::transaction_fate_receipt_has_one_canonical_postcard_spelling`
 is both semantic-to-bytes and independent bytes-to-semantic coverage; the test's
 durability-tag mutation is a planted sensitivity check. Reopen and replay
