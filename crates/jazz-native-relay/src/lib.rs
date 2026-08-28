@@ -6,7 +6,7 @@
 //! Swift, and Kotlin bindings put their ABI-specific command codecs above this
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -1447,7 +1447,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
     } else {
         unsafe { std::slice::from_raw_parts(request, request_len) }
     };
-    let command = match postcard::from_bytes::<ForegroundDbCommandRequest>(request) {
+    let command = match decode_foreground_command(request) {
         Ok(command) => command,
         Err(_) => return JazzNativeRelayStatus::InvalidCommand,
     };
@@ -2346,6 +2346,28 @@ fn foreground_command_error(
     }
 }
 
+/// Decode exactly one foreground command. Unlike `postcard::from_bytes`, this
+/// rejects a syntactically valid command followed by ignored suffix bytes: the
+/// byte ABI is one-command-per-call and must have one canonical spelling.
+fn decode_foreground_command(bytes: &[u8]) -> Result<ForegroundDbCommandRequest, RelayError> {
+    let (command, trailing) = postcard::take_from_bytes(bytes)
+        .map_err(|error| RelayError::ForegroundCommand(format!("decode command: {error}")))?;
+    if !trailing.is_empty() {
+        return Err(RelayError::ForegroundCommand(
+            "foreground command has trailing bytes".to_owned(),
+        ));
+    }
+    let canonical = postcard::to_allocvec(&command).map_err(|error| {
+        RelayError::ForegroundCommand(format!("encode canonical foreground command: {error}"))
+    })?;
+    if canonical != bytes {
+        return Err(RelayError::ForegroundCommand(
+            "foreground command is not canonically encoded".to_owned(),
+        ));
+    }
+    Ok(command)
+}
+
 struct RelayWorker {
     persistent: Db<SqliteStorage>,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
@@ -2883,17 +2905,37 @@ impl RelayWorker {
 /// foreground ABI deliberately shares this compact descriptor-plus-bytes
 /// representation; it does not invent a React-Native row/value object shape.
 fn decode_foreground_cells(bytes: &[u8]) -> Result<jazz::db::RowCells, RelayError> {
-    let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
-        .map_err(|error| RelayError::ForegroundCommand(format!("decode cells: {error}")))?;
+    let ((descriptor, raw), trailing): ((RecordDescriptor, Vec<u8>), _) =
+        postcard::take_from_bytes(bytes)
+            .map_err(|error| RelayError::ForegroundCommand(format!("decode cells: {error}")))?;
+    if !trailing.is_empty() {
+        return Err(RelayError::ForegroundCommand(
+            "encoded cells have trailing bytes".to_owned(),
+        ));
+    }
+    let canonical = postcard::to_allocvec(&(&descriptor, &raw)).map_err(|error| {
+        RelayError::ForegroundCommand(format!("encode canonical cells: {error}"))
+    })?;
+    if canonical != bytes {
+        return Err(RelayError::ForegroundCommand(
+            "encoded cells are not canonically encoded".to_owned(),
+        ));
+    }
     let record = BorrowedRecord::new(&raw, &descriptor);
     let values = record
         .to_values()
         .map_err(|error| RelayError::ForegroundCommand(format!("decode cell record: {error}")))?;
     let mut cells = jazz::db::RowCells::new();
+    let mut names = BTreeSet::new();
     for (field, value) in descriptor.fields().iter().zip(values) {
         let name = field.name.clone().ok_or_else(|| {
             RelayError::ForegroundCommand("encoded cells must use named fields".to_owned())
         })?;
+        if !names.insert(name.clone()) {
+            return Err(RelayError::ForegroundCommand(format!(
+                "encoded cells contain duplicate field {name}"
+            )));
+        }
         cells.insert(name, value);
     }
     Ok(cells)
@@ -3207,6 +3249,32 @@ mod tests {
             .create(&[Value::String(title.to_owned())])
             .expect("fixture title record is valid");
         postcard::to_allocvec(&(descriptor, raw)).expect("fixture cells encode")
+    }
+
+    #[test]
+    fn foreground_cell_and_command_decoders_require_one_canonical_envelope() {
+        // Internal ABI-boundary receipt: the JSI adapter only transports
+        // bytes, so the Rust decoder owns exact-envelope and duplicate-field
+        // rejection. A duplicate must not silently become last-write-wins in
+        // the `RowCells` map.
+        let duplicate =
+            RecordDescriptor::new([("title", ValueType::String), ("title", ValueType::String)]);
+        let raw = duplicate
+            .create(&[
+                Value::String("first".to_owned()),
+                Value::String("second".to_owned()),
+            ])
+            .unwrap();
+        let mut cells = postcard::to_allocvec(&(duplicate, raw)).unwrap();
+        assert!(decode_foreground_cells(&cells).is_err());
+
+        cells.push(0);
+        assert!(decode_foreground_cells(&cells).is_err());
+
+        let mut command = postcard::to_allocvec(&ForegroundDbCommandRequest::Probe).unwrap();
+        command.push(0);
+        assert!(decode_foreground_command(&command).is_err());
+        assert!(decode_foreground_command(&[0x80, 0]).is_err());
     }
 
     fn config(path: PathBuf, auth_scope: Option<&str>) -> RelayOpenConfig {
