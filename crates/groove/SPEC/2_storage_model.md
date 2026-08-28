@@ -520,12 +520,23 @@ order-preserving member encodings: integer tuple members are big-endian, `Bool`
 is `0|1`, `Uuid` is raw bytes, enum values are their `u8` discriminants, and
 nested fixed-width tuple/nullable members recurse (`INV-STORAGE-9`).
 
+A record decoder MUST consume exactly the descriptor-defined record span: a
+truncated fixed field, offset table, or variable payload; an out-of-range or
+non-monotonic offset; a trailing byte in a fixed-only record; an invalid scalar;
+or a non-canonical nested record is invalid, not an alternate representation.
+
 **Nullable values** (`INV-STORAGE-10`): a fixed-width null is flag `0` plus a
 zero-filled reserved width; a variable-width null is the flag byte alone.
 
+A present value has flag `1`; no other flag is valid. The reserved bytes of a
+fixed-width null MUST be zero, so there is exactly one byte representation of
+null for each declared type.
+
 **Arrays** (`INV-STORAGE-11`): fixed-width arrays concatenate elements with no
-count; variable-width arrays encode `count: u32`, offsets for all but the last
-element, then the payloads.
+count; variable-width arrays encode `count: u32` little-endian, offsets for all
+but the last element, then payloads. Array offsets are little-endian absolute
+positions from the beginning of that array payload. Zero elements encode as the
+four-byte zero count with no payload; an empty fixed-width array encodes empty.
 
 ### 2.8 Primary key encoding (normative reference)
 
@@ -540,6 +551,27 @@ key-column declaration order, so it orders by the first key column, then the
 second, and so on. Valid key types are the integer widths, `Bool`, `String`,
 `Bytes`, and `Uuid`; `F64`, arrays, record-valued types (including recursively
 nested records), and nullable values are not valid key parts.
+
+The epoch-1 tags are frozen: `U8=00`, `U16=01`, `U32=02`, `U64=03`,
+`I64=0d`, `I32=0e`, `Bool=05`, `String=06`, `Bytes=07`, `Uuid=0a`, and
+fixed-width `Tuple=0b`. Signed integer payloads flip their sign bit before
+big-endian emission. A direct record-store key may use only the supported
+declared key types and fixed tuples thereof. Every key decoder is type-directed
+and MUST consume the entire key: unknown/wrong tags, truncated payloads,
+`Bool` payloads other than `00|01`, malformed NUL escapes, invalid UTF-8
+strings, and trailing bytes are rejected. These primary-key bytes are also the
+suffix bytes of a non-unique durable index (`INV-STORAGE-22`).
+
+**Ordered index parts.** Durable index logical keys use the same tags and
+payloads, extended only for indexable values: `F64=04` uses the IEEE bits with
+the positive-sign flip / negative-bit inversion transform; `Nullable(None)=08`
+and `Nullable(Some(x))=09` followed by the recursively encoded `x`; and a
+tuple is `0b` followed by its parts. `String` and `Bytes` use `00 ff` for an
+embedded NUL and `00 00` terminator. Arrays, records, payload enums, and large
+values are not index key parts. Non-unique keys append exactly `ff` followed by
+the complete typed primary-key bytes; unique keys append nothing. Index decoders
+MUST reject malformed or trailing logical-key bytes rather than accepting a
+prefix as a key.
 
 ### 2.9 Canonical row storage
 

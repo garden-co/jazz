@@ -41,6 +41,87 @@ mod schema;
 mod subscriptions;
 mod support;
 
+// These are intentionally internal codec assertions: durable key bytes are the
+// storage boundary below Groove's public row API, so a public API round-trip
+// could not distinguish a coordinated encoder/decoder regression from a stable
+// persisted format. The fixtures below keep hard-coded epoch-1 bytes on both
+// sides of that boundary.
+#[test]
+fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
+    use super::encoding::{
+        decode_index_key_part, decode_primary_key_part, encode_index_prefix_part,
+        encode_primary_key_part,
+    };
+
+    let uuid = uuid::Uuid::from_bytes([0x10; 16]);
+    let primary_values = [
+        Value::U16(0x1234),
+        Value::Bool(true),
+        Value::String("a\0b".to_owned()),
+        Value::Uuid(uuid),
+    ];
+    let frozen_primary = [
+        0x01, 0x12, 0x34, 0x05, 0x01, 0x06, b'a', 0x00, 0xff, b'b', 0x00, 0x00, 0x0a, 0x10, 0x10,
+        0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+    ];
+
+    let mut encoded = Vec::new();
+    for value in &primary_values {
+        encode_primary_key_part(&mut encoded, value).unwrap();
+    }
+    assert_eq!(encoded, frozen_primary);
+
+    let mut remaining = frozen_primary.as_slice();
+    for value_type in [
+        ValueType::U16,
+        ValueType::Bool,
+        ValueType::String,
+        ValueType::Uuid,
+    ] {
+        let decoded = decode_primary_key_part(&mut remaining, &value_type).unwrap();
+        assert_eq!(
+            decoded,
+            primary_values[match value_type {
+                ValueType::U16 => 0,
+                ValueType::Bool => 1,
+                ValueType::String => 2,
+                ValueType::Uuid => 3,
+                _ => unreachable!("fixture declares only primary-key types"),
+            }]
+        );
+    }
+    assert!(remaining.is_empty());
+
+    let nullable_string = ColumnType::Nullable(Box::new(ColumnType::String));
+    let frozen_index_part = [0x09, 0x06, b'a', 0x00, 0xff, b'b', 0x00, 0x00];
+    let mut encoded_index = Vec::new();
+    encode_index_prefix_part(
+        &mut encoded_index,
+        &Value::Nullable(Some(Box::new(Value::String("a\0b".to_owned())))),
+        &nullable_string,
+    )
+    .unwrap();
+    assert_eq!(encoded_index, frozen_index_part);
+    let mut remaining = frozen_index_part.as_slice();
+    assert_eq!(
+        decode_index_key_part(&mut remaining, &nullable_string, "fixture").unwrap(),
+        Value::Nullable(Some(Box::new(Value::String("a\0b".to_owned()))))
+    );
+    assert!(remaining.is_empty());
+
+    let mut malformed_escape = &[0x06, b'a', 0x00, 0x01][..];
+    assert!(decode_primary_key_part(&mut malformed_escape, &ValueType::String).is_err());
+    let mut trailing = &[0x05, 0x01, 0xff][..];
+    assert_eq!(
+        decode_primary_key_part(&mut trailing, &ValueType::Bool).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        !trailing.is_empty(),
+        "callers must reject a decoded key with trailing bytes"
+    );
+}
+
 #[test]
 fn large_value_metadata_keys_use_the_canonical_node_ref_record() {
     let node_ref = crate::large_values::NodeRef {

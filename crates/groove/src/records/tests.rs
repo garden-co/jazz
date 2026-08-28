@@ -1124,6 +1124,81 @@ fn encodes_record_offsets_relative_to_record_start() {
     assert_eq!(record, expected);
 }
 
+// These deliberately use literals on both sides of the codec boundary. They
+// are storage-format fixtures, not a round-trip oracle: the decoder assertion
+// must keep detecting an encoder change, and the encoder assertion must keep
+// detecting a decoder-only widening.
+fn epoch_1_record_fixture_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("id", ValueType::U16),
+        ("maybe", ValueType::Nullable(Box::new(ValueType::U8))),
+        (
+            "pair",
+            ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
+        ),
+        ("aliases", ValueType::Array(Box::new(ValueType::String))),
+    ])
+}
+
+const EPOCH_1_RECORD_FIXTURE: &[u8] = &[
+    0x34, 0x12, // id: little-endian U16
+    0x00, 0x00, // fixed nullable U8: null flag + canonical zero payload
+    0xab, 0xcd, 0x01, // tuple U16 (big-endian) + Bool
+    0x0e, 0x00, 0x00, 0x00, // first variable field ends at record byte 14
+    0x02, b'h', b'i', // String primitive scalar: length + payload
+    0x02, 0x00, 0x00, 0x00, // variable array count
+    0x0a, 0x00, 0x00, 0x00, // first array item ends at array-relative byte 10
+    0x02, b'a', 0x02, b'b', b'c',
+];
+
+#[test]
+fn epoch_1_record_fixture_encodes_to_frozen_bytes() {
+    let values = vec![
+        Value::String("hi".to_owned()),
+        Value::U16(0x1234),
+        Value::Nullable(None),
+        Value::Tuple(vec![Value::U16(0xabcd), Value::Bool(true)]),
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bc".to_owned()),
+        ]),
+    ];
+    assert_eq!(
+        epoch_1_record_fixture_descriptor().create(&values).unwrap(),
+        EPOCH_1_RECORD_FIXTURE
+    );
+}
+
+#[test]
+fn epoch_1_record_fixture_decodes_hard_coded_bytes_and_rejects_noncanonical_forms() {
+    let descriptor = epoch_1_record_fixture_descriptor();
+    let expected = vec![
+        Value::String("hi".to_owned()),
+        Value::U16(0x1234),
+        Value::Nullable(None),
+        Value::Tuple(vec![Value::U16(0xabcd), Value::Bool(true)]),
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bc".to_owned()),
+        ]),
+    ];
+    assert_eq!(
+        descriptor.bind(EPOCH_1_RECORD_FIXTURE).to_values().unwrap(),
+        expected
+    );
+
+    let mut noncanonical_null = EPOCH_1_RECORD_FIXTURE.to_vec();
+    noncanonical_null[3] = 1;
+    assert!(descriptor.bind(&noncanonical_null).to_values().is_err());
+    assert!(
+        descriptor
+            .bind(&EPOCH_1_RECORD_FIXTURE[..10])
+            .to_values()
+            .is_err()
+    );
+}
+
 #[test]
 fn encodes_fixed_size_arrays_without_count() {
     let descriptor = descriptor([ValueType::Array(Box::new(ValueType::U16))]);
