@@ -36,7 +36,7 @@ The relay is a normal non-history-complete `Db`:
   query.
 
 The scope key has no token material. Trusted platform code derives an opaque
-`auth_scope` only after authentication and admits the complete scope config to
+non-empty `auth_scope` only after authentication and admits the complete scope config to
 the native host: auth scope, SQLite path, schema, persistent `DbIdentity`, and
 validated session claims. JavaScript receives only an opaque random 256-bit
 admission capability

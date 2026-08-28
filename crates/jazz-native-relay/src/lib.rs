@@ -958,6 +958,15 @@ impl RelayScope {
                 )));
             }
         }
+        if self
+            .auth_scope
+            .as_deref()
+            .is_some_and(|auth_scope| auth_scope.trim().is_empty())
+        {
+            return Err(RelayError::InvalidScope(
+                "auth scope must not be empty when supplied".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -2381,39 +2390,109 @@ mod tests {
     fn trusted_admission_rejects_conflicting_scope_before_open() {
         let directory = tempfile::tempdir().unwrap();
         let mut host = NativeRelayHost::default();
-        let admission =
-            |sqlite_path: &str, claims: BTreeMap<String, Value>| RelayScopeAdmissionRequest {
+        let admission = |sqlite_path: &str,
+                         schema_json: String,
+                         identity: DbIdentity,
+                         claims: BTreeMap<String, Value>| {
+            RelayScopeAdmissionRequest {
                 scope: RelayScopeRequest {
                     app_namespace: "trusted-host".to_owned(),
                     storage_namespace: "primary".to_owned(),
                     auth_scope: Some("opaque-validated-subject".to_owned()),
                 },
                 sqlite_path: sqlite_path.to_owned(),
-                schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
-                identity: DbIdentity {
-                    node: NodeUuid::from_bytes([0xa1; 16]),
-                    author: AuthorSubject::for_test_bytes([0xa2; 16]),
-                },
+                schema_json,
+                identity,
                 claims,
-            };
+            }
+        };
         let primary = directory
             .path()
             .join("primary.sqlite")
             .display()
             .to_string();
-        host.admit_scope(admission(&primary, BTreeMap::new()))
-            .unwrap();
-        let other = directory.path().join("other.sqlite").display().to_string();
-        assert_eq!(
-            host.admit_scope(admission(&other, BTreeMap::new())),
-            Err(JazzNativeRelayStatus::LifecycleFailure),
-            "a scope cannot mint a second capability with different trusted storage"
-        );
-        assert_eq!(
-            host.admitted_scopes.len(),
-            1,
-            "failed admission must not leave a usable capability"
-        );
+        let schema_json = serde_json::to_string(schema().public_schema()).unwrap();
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa2; 16]),
+        };
+        let claims = BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]);
+        host.admit_scope(admission(
+            &primary,
+            schema_json.clone(),
+            identity,
+            claims.clone(),
+        ))
+        .unwrap();
+
+        let other_path = directory.path().join("other.sqlite").display().to_string();
+        let other_schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("other").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let other_identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xb1; 16]),
+            author: AuthorSubject::for_test_bytes([0xb2; 16]),
+        };
+        for (label, request) in [
+            (
+                "SQLite path",
+                admission(&other_path, schema_json.clone(), identity, claims.clone()),
+            ),
+            (
+                "schema",
+                admission(
+                    &primary,
+                    serde_json::to_string(other_schema.public_schema()).unwrap(),
+                    identity,
+                    claims.clone(),
+                ),
+            ),
+            (
+                "durable identity",
+                admission(
+                    &primary,
+                    schema_json.clone(),
+                    other_identity,
+                    claims.clone(),
+                ),
+            ),
+            (
+                "validated claims",
+                admission(
+                    &primary,
+                    schema_json.clone(),
+                    identity,
+                    BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                host.admit_scope(request),
+                Err(JazzNativeRelayStatus::LifecycleFailure),
+                "a scope cannot mint a second capability with changed trusted {label}"
+            );
+            assert_eq!(
+                host.admitted_scopes.len(),
+                1,
+                "failed {label} admission must not leave a usable capability"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_scope_rejects_an_empty_authenticated_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut relay = config(directory.path().join("empty-auth.sqlite"), Some("   "));
+
+        assert!(matches!(relay.validate(), Err(RelayError::InvalidScope(_))));
+
+        relay.scope.auth_scope = None;
+        relay
+            .validate()
+            .expect("unauthenticated scopes remain an explicit host choice");
     }
 
     #[test]
