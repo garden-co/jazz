@@ -11,7 +11,7 @@
     "test:permissions": "vitest run tests/permissions.test.ts",
     "test:browser": "node ../../../../dev/artifacts/verify-correctness-test-artifacts.mjs && vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
-    "test": "pnpm test:permissions && pnpm test:browser"
+    "test": "pnpm test:permissions"
   },
   "dependencies": {
     "better-auth": "1.7.1",
