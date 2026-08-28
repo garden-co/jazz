@@ -1824,7 +1824,7 @@ mod tests {
         let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell
-                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
+                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id())
                 .await
                 .expect("inspect runtime catalogue before lens"),
             (false, false),
@@ -2075,7 +2075,7 @@ mod tests {
         let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell
-                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
+                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id())
                 .await
                 .expect("inspect runtime catalogue before lens"),
             (false, false),
@@ -2124,7 +2124,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
         assert_eq!(
             runtime_shell
-                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
+                .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id())
                 .await
                 .expect("inspect runtime catalogue after lens"),
             (true, true),

@@ -109,6 +109,7 @@ fn rename_lens(v1: &SchemaVersion, v2: &SchemaVersion) -> MigrationLens {
             }],
         }],
     )
+    .expect("rename fixture lens is valid")
 }
 
 fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
