@@ -184,6 +184,19 @@ where
                 ],
             );
         }
+        // `rebuild_database_slot` above has already registered and persisted
+        // the V2 branch-prefixed current indexes for this exact catalogue
+        // plan. Commit the layout marker in the same durable activation batch
+        // as a dynamic edge's authority genesis/pointer, rather than leaving
+        // an uninitialized edge with any local catalogue residue.
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::U64(codec::CatalogueRecordKind::CurrentIndexLayout.key()),
+                Value::Uuid(uuid::Uuid::nil()),
+                Value::Bytes(codec::encode_catalogue_branch_prefixed_current_indexes()),
+            ],
+        );
         for schema in plan.catalogue.catalogue_schemas.values() {
             batch.update(
                 "jazz_catalogue",

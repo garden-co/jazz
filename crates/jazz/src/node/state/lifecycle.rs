@@ -673,6 +673,7 @@ where
         node.synchronize_physical_version_tables_with_current_index_layout(current_index_layout)
             .await?;
         if current_index_layout == PhysicalCurrentIndexLayout::BranchPrefixV2
+            && catalogue_bootstrap_state == CatalogueBootstrapState::Ready
             && !branch_prefixed_current_indexes
         {
             // Advance the marker only after V2 registration has completed and

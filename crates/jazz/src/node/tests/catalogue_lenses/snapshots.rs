@@ -1678,6 +1678,30 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
     assert_eq!(edge.current_write_schema().unwrap(), snapshot.current_write_schema);
     assert_eq!(edge.active_catalogue_seq(), 1);
     assert_eq!(edge.catalogue_schemas().len(), 2);
+    assert!(
+        edge.database
+            .primary_key_scan_raw("jazz_catalogue", &[])
+            .expect("scan activated durable catalogue")
+            .iter()
+            .any(|raw| {
+                let record = raw.record();
+                record
+                    .get_u64(crate::node::codec::CatalogueRowRecord::FIELD_KIND_IDX)
+                    .is_ok_and(|kind| {
+                        kind == crate::node::codec::CatalogueRecordKind::CurrentIndexLayout.key()
+                    })
+                    && record
+                        .get_uuid(crate::node::codec::CatalogueRowRecord::FIELD_ID_IDX)
+                        .is_ok_and(|id| id == uuid::Uuid::nil())
+                    && record
+                        .get_bytes(crate::node::codec::CatalogueRowRecord::FIELD_PAYLOAD_IDX)
+                        .is_ok_and(|payload| {
+                            payload
+                                == crate::node::codec::encode_catalogue_branch_prefixed_current_indexes()
+                        })
+            }),
+        "trusted bootstrap persists the V2 layout marker only with its complete authority catalogue"
+    );
 
     drop(edge);
     let cfs = empty_schema.column_families();
