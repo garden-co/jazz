@@ -7,6 +7,7 @@ import type {
 } from "../../drivers/types.js";
 import { isProvenanceMagicColumn } from "../../magic-columns.js";
 import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
+import { exactSignedI64 } from "./exact-integer.js";
 
 const textDecoder = new TextDecoder();
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -1568,11 +1569,7 @@ function expectSignedI32(value: Value): number {
 
 function expectSignedI64(value: Value): bigint {
   if (value.type !== "BigInt") throw new Error("expected BigInt value");
-  const integer = BigInt(value.value);
-  if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
-    throw new Error("BigInt value must be a signed 64-bit integer");
-  }
-  return integer;
+  return exactSignedI64(value.value, "BigInt value");
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {

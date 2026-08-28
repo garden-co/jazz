@@ -12,6 +12,7 @@ import {
   writeDescriptor,
   writeValueType,
 } from "./native-row-codec.js";
+import { exactSignedI64 } from "./exact-integer.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -637,13 +638,7 @@ export class PostcardWriter {
   }
 
   i64(value: bigint | number): void {
-    if (typeof value === "number" && !Number.isSafeInteger(value)) {
-      throw new Error(`i64 must be a safe integer when passed as a number, got ${value}`);
-    }
-    const bigintValue = BigInt(value);
-    if (bigintValue < -(1n << 63n) || bigintValue > (1n << 63n) - 1n) {
-      throw new Error(`i64 out of range: ${bigintValue}`);
-    }
+    const bigintValue = exactSignedI64(value, "i64");
     const encoded = bigintValue < 0n ? (-bigintValue << 1n) - 1n : bigintValue << 1n;
     this.u64Big(encoded);
   }

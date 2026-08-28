@@ -514,6 +514,38 @@ describe("native row codec", () => {
     }
   });
 
+  it("requires exact numeric BigInt values while preserving signed i64 boundaries", () => {
+    const bigintColumn = [
+      { name: "value", column_type: { type: "BigInt" as const }, nullable: false },
+    ];
+    const minI64 = -(1n << 63n);
+    const maxI64 = (1n << 63n) - 1n;
+
+    for (const value of [
+      -Number.MAX_SAFE_INTEGER,
+      -(Number.MAX_SAFE_INTEGER - 1),
+      Number.MAX_SAFE_INTEGER - 1,
+      Number.MAX_SAFE_INTEGER,
+      minI64,
+      maxI64,
+    ]) {
+      const encoded = encodeNativeRowValues(bigintColumn, [{ type: "BigInt", value }]);
+      expect(decodeNativeRowValues(bigintColumn, encoded)).toEqual([
+        { type: "BigInt", value: BigInt(value) },
+      ]);
+    }
+
+    const maxSafePlusOne = Number.MAX_SAFE_INTEGER + 1;
+    // This source literal is rounded by JavaScript before it reaches the codec.
+    const roundedUnsafeNegative = -9_007_199_254_740_993;
+    expect(roundedUnsafeNegative).toBe(-9_007_199_254_740_992);
+    for (const value of [maxSafePlusOne, roundedUnsafeNegative]) {
+      expect(() => encodeNativeRowValues(bigintColumn, [{ type: "BigInt", value }])).toThrow(
+        "BigInt value must be a safe integer when passed as a number",
+      );
+    }
+  });
+
   it("decodes sparse terminal carriers without leaking their presence tag", () => {
     const columns = [
       {
