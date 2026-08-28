@@ -313,4 +313,27 @@ mod tests {
         catalogue.close().unwrap();
         catalogue.close().unwrap();
     }
+
+    // This intentionally uses the raw ordered-KV adapter because the
+    // malformed durable key is rejected before a public catalogue object can
+    // be constructed or queried.
+    #[test]
+    fn catalogue_storage_rejects_malformed_entry_key_without_publishing_entries() {
+        let storage = BoxedStorage::new(
+            jazz::groove::storage::MemoryStorage::new(&[CatalogueKvStorage::COLUMN_FAMILY])
+                .expect("valid test storage"),
+        );
+        jazz::db::block_on(storage.set(
+            CatalogueKvStorage::COLUMN_FAMILY.to_owned(),
+            b"cat:not-a-uuid".to_vec(),
+            b"unreachable-row".to_vec(),
+        ))
+        .expect("raw corrupt fixture writes");
+
+        let error = scan_entries(&storage).expect_err("malformed key must not become an entry");
+        assert_eq!(
+            error.to_string(),
+            "IO error: catalogue key uuid: invalid character: found `n` at 1"
+        );
+    }
 }
