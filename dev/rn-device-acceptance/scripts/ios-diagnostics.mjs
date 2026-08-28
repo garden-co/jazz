@@ -23,3 +23,12 @@ export const sanitizedCommandFailure = (error) => {
       : "unknown";
   return `command failed (exit ${status})`;
 };
+
+const acceptanceBundleId = "dev.jazz.rndeviceacceptance";
+
+/** `simctl launch` returns `<bundle id>: <positive pid>` on success. */
+export const parseLaunchProcessId = (value) => {
+  const match = new RegExp(`^${acceptanceBundleId}: ([1-9]\\d*)$`).exec(value.trim());
+  if (!match) throw new Error("simctl launch returned an unexpected bundle/process id");
+  return Number(match[1]);
+};
