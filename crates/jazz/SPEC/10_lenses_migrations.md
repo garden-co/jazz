@@ -110,6 +110,29 @@ the catalogue storage settlement tracked by
 [#2037](https://github.com/garden-co/jazz/issues/2037) and
 [#1779](https://github.com/garden-co/jazz/issues/1779).
 
+#### Node-local protocol lineage payloads
+
+The node-owned `lens`, `schema_lineage_staged`, and
+`schema_lineage_pending` catalogue records are restart-authoritative protocol
+facts. Epoch 1 stores them in separately versioned, exact-consumed canonical
+binary payloads: a lens is `v1 | canonical MigrationLens bytes`; a lineage
+publication binds its ID, canonical schema envelope, canonical protocol lens,
+sorted new/dropped table names, and permanent physical-identity manifest; a
+staged receipt additionally carries its catalogue sequence, node-local schema
+alias, and canonical physical mapping, while a pending receipt carries its
+sequence and publication. Counts and byte lengths are checked before decoding
+their bodies; unknown versions, unordered/duplicate names, malformed nested
+records, trailing bytes, or a content ID/canonical re-encoding mismatch reject
+reopen before resident state changes. The former naked serde JSON has no
+compatibility decoder in this experimental storage epoch.
+
+The protocol `MigrationLens` is intentionally distinct from the server schema
+editor's `LensTransform`. A protocol lens describes a published source/target
+table lineage and includes copy, transform, reverse-default, and
+source-rejection operations; the server editor includes draft operation state
+and table-schema edit operations. They share low-level canonical primitives
+where appropriate but are not converted or encoded as each other.
+
 #### Server `cat:` recovery entries
 
 The server-local catalogue is also restart authority. Its only epoch-1 key is

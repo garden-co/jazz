@@ -4001,7 +4001,7 @@ impl MigrationLens {
     }
 }
 
-fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
+pub(crate) fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, "jazz-migration-lens-v1");
     bytes.extend_from_slice(lens.source.as_bytes());
@@ -4016,6 +4016,161 @@ fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
         }
     }
     bytes
+}
+
+/// Decode the sole canonical protocol-lens grammar used for durable Jazz
+/// catalogue publications. This is intentionally distinct from the server's
+/// schema-editor `LensTransform`: the two carry different operations and must
+/// never be lossily converted into one another.
+pub(crate) fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens, &'static str> {
+    let mut c = ProtocolCodecCursor { bytes, offset: 0 };
+    if c.string()? != "jazz-migration-lens-v1" {
+        return Err("invalid migration lens marker");
+    }
+    let source = SchemaVersionId(c.uuid()?);
+    let target = SchemaVersionId(c.uuid()?);
+    let mut table_lenses = Vec::new();
+    for _ in 0..c.count()? {
+        let source_table = c.string()?;
+        let target_table = c.string()?;
+        let mut ops = Vec::new();
+        for _ in 0..c.count()? {
+            ops.push(c.lens_op()?);
+        }
+        table_lenses.push(TableLens {
+            source_table,
+            target_table,
+            ops,
+        });
+    }
+    c.finish()?;
+    let lens = MigrationLens::new(source, target, table_lenses);
+    if canonical_lens_bytes(&lens) != bytes {
+        return Err("noncanonical migration lens");
+    }
+    Ok(lens)
+}
+
+struct ProtocolCodecCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+impl<'a> ProtocolCodecCursor<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+        let e = self
+            .offset
+            .checked_add(n)
+            .ok_or("truncated protocol codec")?;
+        let out = self
+            .bytes
+            .get(self.offset..e)
+            .ok_or("truncated protocol codec")?;
+        self.offset = e;
+        Ok(out)
+    }
+    fn u8(&mut self) -> Result<u8, &'static str> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Result<u64, &'static str> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn i32(&mut self) -> Result<i32, &'static str> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn i64(&mut self) -> Result<i64, &'static str> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn uuid(&mut self) -> Result<uuid::Uuid, &'static str> {
+        Ok(uuid::Uuid::from_bytes(self.take(16)?.try_into().unwrap()))
+    }
+    fn count(&mut self) -> Result<u32, &'static str> {
+        self.u32()
+    }
+    fn bytes(&mut self) -> Result<Vec<u8>, &'static str> {
+        let n = self.u32()? as usize;
+        Ok(self.take(n)?.to_vec())
+    }
+    fn string(&mut self) -> Result<String, &'static str> {
+        String::from_utf8(self.bytes()?).map_err(|_| "invalid protocol utf8")
+    }
+    fn value(&mut self) -> Result<Value, &'static str> {
+        Ok(match self.u8()? {
+            0 => Value::U8(self.u8()?),
+            1 => Value::U16(u16::from_le_bytes(self.take(2)?.try_into().unwrap())),
+            2 => Value::U32(self.u32()?),
+            3 => Value::U64(self.u64()?),
+            4 => Value::F64(f64::from_bits(self.u64()?)),
+            5 => Value::Bool(match self.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err("invalid protocol bool"),
+            }),
+            6 => Value::String(self.string()?),
+            7 => Value::Bytes(self.bytes()?),
+            8 => Value::Uuid(self.uuid()?),
+            9 => Value::EnumTag(self.u8()?),
+            10 => Value::Tuple(self.values()?),
+            11 => Value::Array(self.values()?),
+            12 => match self.u8()? {
+                0 => Value::Nullable(None),
+                1 => Value::Nullable(Some(Box::new(self.value()?))),
+                _ => return Err("invalid protocol nullable"),
+            },
+            13 => Value::I64(self.i64()?),
+            14 => Value::I32(self.i32()?),
+            15 => return Err("large default values are not supported in migration lenses"),
+            _ => return Err("invalid protocol value tag"),
+        })
+    }
+    fn values(&mut self) -> Result<Vec<Value>, &'static str> {
+        let mut v = Vec::new();
+        for _ in 0..self.count()? {
+            v.push(self.value()?)
+        }
+        Ok(v)
+    }
+    fn lens_op(&mut self) -> Result<LensOp, &'static str> {
+        Ok(match self.u8()? {
+            0 => LensOp::RenameTable {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            1 => LensOp::RenameColumn {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            2 => LensOp::CopyColumn {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            3 => LensOp::AddColumn {
+                column: self.string()?,
+                default: self.value()?,
+            },
+            4 => LensOp::DropColumn {
+                column: self.string()?,
+                backwards_default: self.value()?,
+            },
+            5 => LensOp::TransformColumn {
+                column: self.string()?,
+                transform: self.string()?,
+            },
+            6 => LensOp::RejectSourceDelta {
+                reason: self.string()?,
+            },
+            _ => return Err("invalid migration lens op"),
+        })
+    }
+    fn finish(self) -> Result<(), &'static str> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err("trailing protocol codec bytes")
+        }
+    }
 }
 
 fn put_lens_op(bytes: &mut Vec<u8>, op: &LensOp) {

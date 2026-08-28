@@ -1064,7 +1064,7 @@ fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &St
         node,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(staged).unwrap(),
     );
     write_catalogue_record(
         node,

@@ -123,7 +123,7 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::SchemaLineageStaged => {
-                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                    let staged = codec::decode_catalogue_staged_lineage(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if staged.publication.id.0
@@ -1572,7 +1572,7 @@ where
                     catalogue_schemas.insert(schema_version.id, schema_version);
                 }
                 codec::CatalogueRecordKind::Lens => {
-                    let lens: MigrationLens = serde_json::from_slice(
+                    let lens = codec::decode_catalogue_lens(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if lens.id
@@ -1586,7 +1586,7 @@ where
                     catalogue_lenses.insert(lens.id, lens);
                 }
                 codec::CatalogueRecordKind::SchemaLineageStaged => {
-                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                    let staged = codec::decode_catalogue_staged_lineage(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if staged.publication.id.0
@@ -1600,7 +1600,7 @@ where
                     staged_lineages_by_id.insert(staged.publication.id, staged);
                 }
                 codec::CatalogueRecordKind::SchemaLineagePending => {
-                    let pending: PendingSchemaLineage = serde_json::from_slice(
+                    let pending = codec::decode_catalogue_pending_lineage(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if pending.publication.id.0

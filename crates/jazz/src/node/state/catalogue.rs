@@ -797,7 +797,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
-                Value::Bytes(serde_json::to_vec(staged)?),
+                Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
@@ -816,7 +816,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
                 Value::Uuid(pending.publication.id.0),
-                Value::Bytes(serde_json::to_vec(pending)?),
+                Value::Bytes(codec::encode_catalogue_pending_lineage(pending)?),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
@@ -873,7 +873,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
-                Value::Bytes(serde_json::to_vec(staged)?),
+                Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
             ],
         );
         batch.update(
@@ -889,7 +889,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
-                Value::Bytes(serde_json::to_vec(lens)?),
+                Value::Bytes(codec::encode_catalogue_lens(lens)),
             ],
         );
         Self::write_schema_version_mapping_to_batch(
@@ -924,7 +924,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
-                Value::Bytes(serde_json::to_vec(lens)?),
+                Value::Bytes(codec::encode_catalogue_lens(lens)),
             ],
         );
         if let Some(mapping) = mapping {

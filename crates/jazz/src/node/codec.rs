@@ -499,6 +499,9 @@ const CATALOGUE_SCHEMA_VERSION: u8 = 1;
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
+const CATALOGUE_PROTOCOL_PUBLICATION_VERSION: u8 = 1;
+const CATALOGUE_STAGED_LINEAGE_VERSION: u8 = 1;
+const CATALOGUE_PENDING_LINEAGE_VERSION: u8 = 1;
 // This is deliberately independent of the catalogue-record payload versions:
 // physical mappings live in the fixed `jazz_schema_versions` carrier rather
 // than in `jazz_catalogue`.
@@ -974,6 +977,196 @@ pub(super) fn decode_catalogue_lineage_activation(
     let catalogue_seq = cursor.u64()?;
     cursor.finish()?;
     Ok(SchemaLineageActivation { id, catalogue_seq })
+}
+
+/// The protocol lens has a dedicated canonical grammar because it is a durable
+/// sync/publication fact.  It is deliberately not the jazz-server schema
+/// editor's `LensTransform`: those types have different operations.
+pub(super) fn encode_catalogue_lens(lens: &MigrationLens) -> Vec<u8> {
+    let mut payload = vec![1];
+    payload.extend_from_slice(&crate::protocol::canonical_lens_bytes(lens));
+    payload
+}
+
+pub(super) fn decode_catalogue_lens(payload: &[u8]) -> Result<MigrationLens, Error> {
+    let bytes = payload
+        .strip_prefix(&[1])
+        .ok_or(Error::InvalidStoredValue("invalid catalogue lens payload"))?;
+    crate::protocol::decode_canonical_lens_bytes(bytes)
+        .map_err(|_| Error::InvalidStoredValue("invalid catalogue lens payload"))
+}
+
+fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Result<Vec<u8>, Error> {
+    let schema = encode_catalogue_schema(&publication.schema)?;
+    let lens = encode_catalogue_lens(&publication.lens);
+    let mut payload = vec![CATALOGUE_PROTOCOL_PUBLICATION_VERSION];
+    payload.extend_from_slice(publication.id.0.as_bytes());
+    put_len(
+        &mut payload,
+        schema.len(),
+        "catalogue publication schema length",
+    )?;
+    payload.extend_from_slice(&schema);
+    put_len(
+        &mut payload,
+        lens.len(),
+        "catalogue publication lens length",
+    )?;
+    payload.extend_from_slice(&lens);
+    let mut new_tables = publication.new_tables.clone();
+    new_tables.sort();
+    if new_tables.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::InvalidStoredValue(
+            "catalogue publication duplicate new table",
+        ));
+    }
+    put_len(
+        &mut payload,
+        new_tables.len(),
+        "catalogue publication new table count",
+    )?;
+    for table in new_tables {
+        put_string(&mut payload, &table, "catalogue publication table")?;
+    }
+    let mut dropped_tables = publication.dropped_tables.clone();
+    dropped_tables.sort();
+    if dropped_tables.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::InvalidStoredValue(
+            "catalogue publication duplicate dropped table",
+        ));
+    }
+    put_len(
+        &mut payload,
+        dropped_tables.len(),
+        "catalogue publication dropped table count",
+    )?;
+    for table in dropped_tables {
+        put_string(&mut payload, &table, "catalogue publication table")?;
+    }
+    encode_physical_identity_manifest(&mut payload, &publication.physical_identities)?;
+    Ok(payload)
+}
+
+fn decode_catalogue_publication(payload: &[u8]) -> Result<SchemaLineagePublication, Error> {
+    const CONTEXT: &str = "invalid catalogue protocol publication";
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, CATALOGUE_PROTOCOL_PUBLICATION_VERSION, CONTEXT)?;
+    let id = SchemaLineagePublicationId(cursor.uuid()?);
+    let schema = decode_catalogue_schema(cursor.sized_bytes()?)?;
+    let lens = decode_catalogue_lens(cursor.sized_bytes()?)?;
+    let new_tables = decode_sorted_strings(&mut cursor, CONTEXT)?;
+    let dropped_tables = decode_sorted_strings(&mut cursor, CONTEXT)?;
+    let physical_identities = decode_physical_identity_manifest(&mut cursor)?;
+    cursor.finish()?;
+    let publication = SchemaLineagePublication {
+        id,
+        schema,
+        lens,
+        new_tables,
+        dropped_tables,
+        physical_identities,
+    };
+    if publication.id != publication.content_id()
+        || encode_catalogue_publication(&publication)? != payload
+    {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    Ok(publication)
+}
+
+fn decode_sorted_strings(
+    cursor: &mut CataloguePayloadCursor<'_>,
+    context: &'static str,
+) -> Result<Vec<String>, Error> {
+    let mut values = Vec::new();
+    let mut previous = None;
+    for _ in 0..cursor.u32()? {
+        let value = cursor.string()?;
+        require_strictly_increasing(previous.as_deref(), &value, context)?;
+        previous = Some(value.clone());
+        values.push(value);
+    }
+    Ok(values)
+}
+
+pub(super) fn encode_catalogue_staged_lineage(
+    staged: &StagedSchemaLineage,
+) -> Result<Vec<u8>, Error> {
+    let publication = encode_catalogue_publication(&staged.publication)?;
+    let mapping = encode_physical_mapping(&staged.mapping)?;
+    let mut payload = vec![CATALOGUE_STAGED_LINEAGE_VERSION];
+    payload.extend_from_slice(&staged.catalogue_seq.to_le_bytes());
+    put_len(
+        &mut payload,
+        publication.len(),
+        "staged catalogue publication length",
+    )?;
+    payload.extend_from_slice(&publication);
+    payload.extend_from_slice(&staged.alias.0.to_le_bytes());
+    put_len(
+        &mut payload,
+        mapping.len(),
+        "staged catalogue mapping length",
+    )?;
+    payload.extend_from_slice(&mapping);
+    Ok(payload)
+}
+
+pub(super) fn decode_catalogue_staged_lineage(
+    payload: &[u8],
+) -> Result<StagedSchemaLineage, Error> {
+    const CONTEXT: &str = "invalid staged catalogue lineage";
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, CATALOGUE_STAGED_LINEAGE_VERSION, CONTEXT)?;
+    let catalogue_seq = cursor.u64()?;
+    let publication = decode_catalogue_publication(cursor.sized_bytes()?)?;
+    let alias = SchemaVersionAlias(cursor.u64()?);
+    let mapping = decode_physical_mapping(cursor.sized_bytes()?)?;
+    cursor.finish()?;
+    let staged = StagedSchemaLineage {
+        catalogue_seq,
+        publication,
+        alias,
+        mapping,
+    };
+    if encode_catalogue_staged_lineage(&staged)? != payload {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    Ok(staged)
+}
+
+pub(super) fn encode_catalogue_pending_lineage(
+    pending: &PendingSchemaLineage,
+) -> Result<Vec<u8>, Error> {
+    let publication = encode_catalogue_publication(&pending.publication)?;
+    let mut payload = vec![CATALOGUE_PENDING_LINEAGE_VERSION];
+    payload.extend_from_slice(&pending.catalogue_seq.to_le_bytes());
+    put_len(
+        &mut payload,
+        publication.len(),
+        "pending catalogue publication length",
+    )?;
+    payload.extend_from_slice(&publication);
+    Ok(payload)
+}
+
+pub(super) fn decode_catalogue_pending_lineage(
+    payload: &[u8],
+) -> Result<PendingSchemaLineage, Error> {
+    const CONTEXT: &str = "invalid pending catalogue lineage";
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, CATALOGUE_PENDING_LINEAGE_VERSION, CONTEXT)?;
+    let catalogue_seq = cursor.u64()?;
+    let publication = decode_catalogue_publication(cursor.sized_bytes()?)?;
+    cursor.finish()?;
+    let pending = PendingSchemaLineage {
+        catalogue_seq,
+        publication,
+    };
+    if encode_catalogue_pending_lineage(&pending)? != payload {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    Ok(pending)
 }
 
 struct CataloguePayloadCursor<'a> {
