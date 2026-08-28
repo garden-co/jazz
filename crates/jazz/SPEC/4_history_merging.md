@@ -175,7 +175,10 @@ admission rather than leaving a `Bytes` field to a codec-specific fallback.
 This inventory names encoding families, not user tables or individual values.
 Ordinary scalar/record representation remains Groove's one typed record codec;
 a distinct durable root composes this base with its own root-local codec family
-before opening. Adding a new Jazz-owned durable byte family requires a new
+before opening. The server catalogue-entry family's metadata object is encoded
+as compact JSON with keys in lexicographic order; decoding rejects alternate
+spellings, including reordered keys, whitespace, and duplicate keys, before the
+entry is admitted. Adding a new Jazz-owned durable byte family requires a new
 storage epoch, golden fixtures, and an explicit decoder/migration decision.
 
 ### 4.4 Deletion as a separate layer
