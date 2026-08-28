@@ -72,18 +72,27 @@ fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
 #[test]
 fn cancelled_started_deferred_persistence_poison_requires_reopen() {
     let schema = schema();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x51; 16]),
+        author: AuthorSubject::for_test_bytes([0x61; 16]),
+    };
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let (storage, control) = TestStorage::controlled(&family_refs);
+    let storage_for_reopen = storage.clone();
     let db = block_on(Db::open(DbConfig::new(
-        schema,
+        schema.clone(),
         storage,
-        DbIdentity {
-            node: NodeUuid::from_bytes([0x51; 16]),
-            author: AuthorSubject::for_test_bytes([0x61; 16]),
-        },
+        identity.clone(),
     )))
     .expect("open test database");
+    let durable_seed = block_on(db.insert(
+        "todos",
+        row! { title: "durable before cancellation" },
+        Default::default(),
+    ))
+    .expect("seed durable row");
+    block_on(durable_seed.wait(DurabilityTier::Local)).expect("seed is locally durable");
     db.set_deferred_local_persistence(true);
 
     control.pause_on(TestStorageOperation::WriteMany);
@@ -92,7 +101,7 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
 
     let query = db.prepare_query(&db.table("todos")).expect("prepare query");
     let rows = block_on(db.all(&query, ReadOpts::default())).expect("read resident rows");
-    assert_eq!(rows.len(), 1, "the write is immediately query-visible");
+    assert_eq!(rows.len(), 2, "the write is immediately query-visible");
     assert!(
         block_on(db.insert(
             "todos",
@@ -110,8 +119,9 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
     assert!(
         block_on(db.all(&query, ReadOpts::default()))
             .expect("read resident deletion")
-            .is_empty(),
-        "the deletion is immediately query-visible",
+            .len()
+            == 1,
+        "the deletion removes only the resident row before persistence",
     );
     block_on(db.restore(
         "todos",
@@ -124,12 +134,23 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
         block_on(db.all(&query, ReadOpts::default()))
             .expect("read resident restoration")
             .len(),
-        1,
+        2,
         "the restoration is immediately query-visible",
     );
-    assert!(
-        block_on(write.wait(DurabilityTier::Local)).is_err(),
-        "local durability must not be reported before persistence settles"
+    // `None` is the facade's synchronous/resident acknowledgement tier; this
+    // build has no separate `Sync` enum member.
+    assert_eq!(
+        block_on(write.wait(DurabilityTier::None)).expect("sync resident acknowledgement"),
+        write.mergeable_tx_id()
+    );
+    let error = match block_on(write.wait(DurabilityTier::Local)) {
+        Ok(_) => panic!("local durability must not be reported before persistence settles"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    assert_eq!(
+        error.message, "write has not reached requested tier Local",
+        "the write is resident/synchronous but has not crossed local durability"
     );
 
     let mut tick = Box::pin(db.tick());
@@ -161,4 +182,38 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
         error.message.contains("poisoned"),
         "the public error must identify the fail-closed local database state: {error}"
     );
+
+    // The poison belongs to this live instance; it is not a durable marker.
+    // Resume the test backend, discard the abandoned facade, and reopen from
+    // the same bytes. The abandoned resident publication is never retried.
+    control.resume_operation(TestStorageOperation::WriteMany);
+    drop(db);
+    let reopened = block_on(Db::open(DbConfig::new(
+        schema,
+        storage_for_reopen,
+        identity,
+    )))
+    .expect("fresh facade may reopen after an ambiguous in-flight write");
+    let reopened_query = reopened
+        .prepare_query(&reopened.table("todos"))
+        .expect("prepare reopened query");
+    let durable_rows = block_on(reopened.all(&reopened_query, ReadOpts::default()))
+        .expect("reopened facade reads existing durable state");
+    assert_eq!(durable_rows.len(), 1);
+    assert_eq!(durable_rows[0].row_uuid(), durable_seed.row_uuid());
+    let fresh = block_on(reopened.insert(
+        "todos",
+        row! { title: "fresh after reopen" },
+        Default::default(),
+    ))
+    .expect("fresh write is usable after reopen");
+    block_on(fresh.wait(DurabilityTier::Local)).expect("fresh write is locally durable");
+    let rows = block_on(reopened.all(&reopened_query, ReadOpts::default()))
+        .expect("fresh facade reads durable state");
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .any(|row| row.row_uuid() == durable_seed.row_uuid())
+    );
+    assert!(rows.iter().any(|row| row.row_uuid() == fresh.row_uuid()));
 }

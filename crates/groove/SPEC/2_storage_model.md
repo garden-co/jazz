@@ -173,6 +173,12 @@ a retry window. A proven `Uncommitted` result is the only result for which an
 implementation may retry or roll back; conservatively poisoning instead
 remains valid when the higher layer has no complete rollback operation.
 
+This poison is instance-local, not a durable marker. Discarding the poisoned
+`Database` and reopening the backend creates a fresh instance that may make
+new operations against the durable state it finds. Reopen does not classify the
+abandoned submission retroactively and MUST NOT replay it as a retry; it only
+restores the state for which storage has a definite durable receipt.
+
 `put_if_absent` and `compare_and_delete` are atomic at the persistence scope
 (`INV-STORAGE-28`). A backend either serializes them across every concurrently
 open handle (IDB and SQLite), shares one primitive boundary across clones
