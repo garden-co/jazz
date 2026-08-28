@@ -816,6 +816,120 @@ async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survive
     );
 }
 
+// This facade-level crash receipt stays below Jazz's row mutation API because
+// it models a peer retry that loses the finalizer response after the metadata
+// batch commits. It directly inspects retainers because no public row can
+// observe the absence of the old, unsafe receipt-plus-upload overlap.
+#[futures_test::test]
+async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let upload_id = crate::large_values::StagedLargeValueId([0xa6; 16]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0xa5; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
+    )
+    .unwrap();
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    database
+        .stage_large_value_chunk_batch(
+            upload_id,
+            prepared.value_ref.kind,
+            prepared.staged_chunks.clone(),
+        )
+        .await
+        .unwrap();
+    let pending_key = pending_large_value_upload_key(upload_id);
+    let encoded = database
+        .storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), pending_key.clone())
+        .await
+        .unwrap()
+        .expect("staged upload journal");
+    let mut pending = decode_pending_large_value_upload(&encoded).unwrap();
+    let receipt_id = crate::large_values::StagedLargeValueId([0xa7; 16]);
+    pending.descriptor = Some(prepared.value_ref.clone());
+    pending.receipt_id = Some(receipt_id);
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: pending_key,
+            value: encode_pending_large_value_upload(&pending).unwrap(),
+        }])
+        .await
+        .unwrap();
+    drop(database);
+
+    // Simulate a crash after durable receipt binding but before promotion; the
+    // reopened finalizer is the protocol retry.
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks);
+    let receipt = reopened
+        .finalize_large_value_upload(upload_id, prepared.value_ref.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.id, receipt_id,
+        "retry promotes the receipt durably bound before the crash"
+    );
+    assert!(
+        reopened
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty(),
+        "receipt publication and journal release share one durable transition"
+    );
+    assert_eq!(
+        reopened.staged_large_values().await.unwrap(),
+        vec![receipt.clone()],
+        "the reopened retry must not duplicate the staged receipt"
+    );
+    for chunk in &prepared.staged_chunks {
+        let encoded = reopened
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&chunk.node_ref).unwrap(),
+            )
+            .await
+            .unwrap()
+            .expect("promoted chunk metadata remains present");
+        assert_eq!(
+            decode_large_value_node_references(&encoded)
+                .unwrap()
+                .upload_references,
+            0,
+            "promotion cannot leak the pending upload retainer"
+        );
+    }
+
+    let mut accepted = reopened.open_batch();
+    accepted.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(prepared.value_ref)],
+    );
+    accepted.accept_large_value(receipt.id);
+    reopened.commit_batch(accepted).await.unwrap();
+    assert!(
+        reopened.staged_large_values().await.unwrap().is_empty(),
+        "the one receipt still closes through the ordinary accepted-row batch"
+    );
+}
+
 #[futures_test::test]
 async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail() {
     let schema = DatabaseSchema::new([TableSchema::new(

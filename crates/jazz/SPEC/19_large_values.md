@@ -159,8 +159,12 @@ and Groove can validate the bounded tree/descriptor. Finalization itself is
 that admission boundary: regardless of prior staging call order, it validates
 the complete authenticated reachable tree, canonically replays the edit tail
 against that immutable base (including source-derived text coordinates and
-whole-value-only JSON replacement), validates the final logical scalar, and binds
-the pending upload to the exact canonical descriptor before issuing a receipt.
+whole-value-only JSON replacement), validates the final logical scalar, and
+atomically binds the pending upload to the exact canonical descriptor,
+publishes its one persisted receipt, and releases the pending upload retainers
+in one durable metadata transition. A retry after durable descriptor/receipt
+binding reuses that receipt; TTL is solely abandoned-staging protection, never
+a repair mechanism for a partially promoted claim.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
 version nor root reachability.
