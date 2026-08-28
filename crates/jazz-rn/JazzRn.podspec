@@ -26,6 +26,12 @@ Pod::Spec.new do |s|
   s.source       = { :git => "https://github.com/garden-co/jazz.git", :tag => "#{s.version}" }
 
   s.source_files = "ios/**/*.{h,m,mm,swift}", "ios/generated/**/*.{h,m,mm}"
+  # Consumer code may import only this stable host-facing surface. The
+  # TurboModule protocol is generated into React-Codegen for this pod target;
+  # it must remain an implementation detail instead of leaking through a
+  # public header that an application compiles without that generated path.
+  s.public_header_files = "ios/JazzRelay.h"
+  s.private_header_files = "ios/JazzRelayModule.h"
   # The staged header is the source-of-truth ABI declaration shared with the
   # Android package. Keep this path when the legacy RN dependency branch below
   # adds its own headers: assigning pod_target_xcconfig twice would otherwise

@@ -80,3 +80,25 @@ for source in \
     exit 1
   fi
 done
+
+# React-Codegen makes JazzRelaySpec.h visible while compiling the JazzRn pod,
+# not to an application that imports <JazzRn/JazzRelay.h>. Keep that generated
+# protocol behind the pod's private header so a normal public import cannot
+# fail before the consumer reaches any Jazz code.
+public_header="$root/ios/JazzRelay.h"
+private_header="$root/ios/JazzRelayModule.h"
+podspec="$root/JazzRn.podspec"
+if rg -q '#import "JazzRelaySpec\.h"|NativeJazzRelaySpec|@interface JazzRelay[[:space:]]*:' "$public_header"; then
+  echo "JazzRn public header leaks the pod-target-only JazzRelay generated spec" >&2
+  exit 1
+fi
+if ! rg -q '#import "JazzRelaySpec\.h"' "$private_header" \
+  || ! rg -q '@interface JazzRelay : NSObject <NativeJazzRelaySpec>' "$private_header"; then
+  echo "JazzRn private TurboModule header no longer owns the generated spec contract" >&2
+  exit 1
+fi
+if ! rg -q 's\.public_header_files = "ios/JazzRelay\.h"' "$podspec" \
+  || ! rg -q 's\.private_header_files = "ios/JazzRelayModule\.h"' "$podspec"; then
+  echo "JazzRn podspec does not publish only the generated-header-free host surface" >&2
+  exit 1
+fi
