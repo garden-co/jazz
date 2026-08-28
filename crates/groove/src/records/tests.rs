@@ -1152,6 +1152,130 @@ const EPOCH_1_RECORD_FIXTURE: &[u8] = &[
     0x02, b'a', 0x02, b'b', b'c',
 ];
 
+// Scalar and envelope goldens deliberately keep both sides of the codec
+// boundary literal.  Do not derive these bytes through `create` in the decoder
+// assertion: this is the epoch-1 receipt for record values.
+const EPOCH_1_SCALAR_RECORD_FIXTURE: &[u8] = &[
+    0xaa, // U8
+    0x34, 0x12, // U16 little-endian
+    0x78, 0x56, 0x34, 0x12, // U32 little-endian
+    0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // U64 little-endian
+    0xfe, 0xff, 0xff, 0xff, // I32(-2) little-endian
+    0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // I64(-3) little-endian
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xff, // F64(-infinity)
+    0x01, // Bool(true)
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+    0x0f, // Uuid raw bytes
+    0x00, 0x00, 0x00, // Nullable(U16)::None, including zero reservation
+];
+
+fn epoch_1_scalar_record_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("u8", ValueType::U8),
+        ("u16", ValueType::U16),
+        ("u32", ValueType::U32),
+        ("u64", ValueType::U64),
+        ("i32", ValueType::I32),
+        ("i64", ValueType::I64),
+        ("f64", ValueType::F64),
+        ("bool", ValueType::Bool),
+        ("uuid", ValueType::Uuid),
+        ("none", ValueType::Nullable(Box::new(ValueType::U16))),
+    ])
+}
+
+#[test]
+fn epoch_1_scalar_record_fixture_is_exact_and_rejects_nan_and_noncanonical_null() {
+    let descriptor = epoch_1_scalar_record_descriptor();
+    let values = vec![
+        Value::U8(0xaa),
+        Value::U16(0x1234),
+        Value::U32(0x1234_5678),
+        Value::U64(0x0102_0304_0506_0708),
+        Value::I32(-2),
+        Value::I64(-3),
+        Value::F64(f64::NEG_INFINITY),
+        Value::Bool(true),
+        Value::Uuid(uuid::Uuid::from_bytes([
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        ])),
+        Value::Nullable(None),
+    ];
+    assert_eq!(
+        descriptor.create(&values).unwrap(),
+        EPOCH_1_SCALAR_RECORD_FIXTURE
+    );
+    assert_eq!(
+        descriptor
+            .bind(EPOCH_1_SCALAR_RECORD_FIXTURE)
+            .to_values()
+            .unwrap(),
+        values
+    );
+
+    let mut noncanonical_null = EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec();
+    *noncanonical_null.last_mut().unwrap() = 1;
+    assert!(descriptor.bind(&noncanonical_null).to_values().is_err());
+
+    let mut nan = EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec();
+    // F64 starts after 1 + 2 + 4 + 8 + 4 + 8 bytes.
+    nan[27..35].copy_from_slice(&f64::NAN.to_le_bytes());
+    assert!(descriptor.bind(&nan).to_values().is_err());
+}
+
+#[test]
+fn epoch_1_variable_scalar_array_and_payload_enum_goldens_are_exact_and_fail_closed() {
+    let case = RecordDescriptor::new([("code", ValueType::U8)]);
+    let enum_schema = EnumSchema::new(
+        "event",
+        [
+            EnumCase::new("unused", RecordDescriptor::default()),
+            EnumCase::new("message", case),
+        ],
+    )
+    .unwrap();
+    let descriptor = RecordDescriptor::new([
+        ("text", ValueType::String),
+        ("bytes", ValueType::Bytes),
+        (
+            "maybe_text",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        ("words", ValueType::Array(Box::new(ValueType::String))),
+        ("event", ValueType::Enum(Box::new(enum_schema))),
+    ]);
+    let values = vec![
+        Value::String("hi".to_owned()),
+        Value::Bytes(vec![0, 0xff]),
+        Value::Nullable(Some(Box::new(Value::String("ok".to_owned())))),
+        Value::Array(vec![
+            Value::String("a".to_owned()),
+            Value::String("bc".to_owned()),
+        ]),
+        Value::Enum(EnumValue::create(1, case, &[Value::U8(0x7e)]).unwrap()),
+    ];
+    // Four record offsets, then StoredScalar primitive arms (02), array offsets,
+    // and the canonical payload-enum tag 1 as a one-byte u32 varint.
+    let frozen: &[u8] = &[
+        0x13, 0, 0, 0, 0x16, 0, 0, 0, 0x1a, 0, 0, 0, 0x27, 0, 0, 0, 0x02, b'h', b'i', 0x02, 0x00,
+        0xff, 0x01, 0x02, b'o', b'k', 0x02, 0, 0, 0, 0x0a, 0, 0, 0, 0x02, b'a', 0x02, b'b', b'c',
+        0x01, 0x7e,
+    ];
+    assert_eq!(descriptor.create(&values).unwrap(), frozen);
+    assert_eq!(descriptor.bind(frozen).to_values().unwrap(), values);
+
+    let mut noncanonical_tag = frozen.to_vec();
+    let tag = noncanonical_tag.len() - 2;
+    noncanonical_tag.splice(tag..tag + 1, [0x81, 0x00]);
+    assert!(descriptor.bind(&noncanonical_tag).to_values().is_err());
+    assert!(
+        descriptor
+            .bind(&frozen[..frozen.len() - 1])
+            .to_values()
+            .is_err()
+    );
+}
+
 #[test]
 fn epoch_1_record_fixture_encodes_to_frozen_bytes() {
     let values = vec![

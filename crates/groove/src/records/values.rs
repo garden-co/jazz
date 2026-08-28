@@ -977,7 +977,14 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::U64 => Ok(Value::U64(u64::from_le_bytes(read_exact::<8>(bytes)?))),
         ValueType::I32 => Ok(Value::I32(i32::from_le_bytes(read_exact::<4>(bytes)?))),
         ValueType::I64 => Ok(Value::I64(i64::from_le_bytes(read_exact::<8>(bytes)?))),
-        ValueType::F64 => Ok(Value::F64(f64::from_le_bytes(read_exact::<8>(bytes)?))),
+        ValueType::F64 => {
+            let value = f64::from_le_bytes(read_exact::<8>(bytes)?);
+            if value.is_nan() {
+                Err(Error::InvalidF64NaN)
+            } else {
+                Ok(Value::F64(value))
+            }
+        }
         ValueType::Bool => match read_exact::<1>(bytes)?[0] {
             0 => Ok(Value::Bool(false)),
             1 => Ok(Value::Bool(true)),

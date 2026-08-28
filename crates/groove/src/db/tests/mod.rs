@@ -133,6 +133,40 @@ fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
         Value::F64(f64::INFINITY)
     );
     assert!(positive_infinity.is_empty());
+
+    // The ordered F64 transform is a separate persisted format from record
+    // values. These literal receipts pin its boundary order, including signed
+    // zero and infinities; NaNs are deliberately outside the format.
+    let f64_receipts: &[(f64, [u8; 9])] = &[
+        (
+            f64::NEG_INFINITY,
+            [0x04, 0x00, 0x0f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (-0.0, [0x04, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        (0.0, [0x04, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        (
+            f64::INFINITY,
+            [0x04, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ),
+    ];
+    let mut previous = None;
+    for (value, receipt) in f64_receipts {
+        let mut actual = Vec::new();
+        encode_index_prefix_part(&mut actual, &Value::F64(*value), &ColumnType::F64).unwrap();
+        assert_eq!(actual, receipt);
+        let mut remaining = receipt.as_slice();
+        let decoded =
+            decode_index_key_part(&mut remaining, &ColumnType::F64, "f64 receipt").unwrap();
+        assert_eq!(decoded, Value::F64(*value));
+        assert!(remaining.is_empty());
+        if let Some(previous) = previous {
+            assert!(
+                previous < *receipt,
+                "frozen receipt order must be lexicographic"
+            );
+        }
+        previous = Some(*receipt);
+    }
 }
 
 #[test]

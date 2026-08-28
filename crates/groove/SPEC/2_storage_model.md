@@ -17,6 +17,7 @@ Invariant digest:
 - `INV-STORAGE-30`: Application table and direct-record-store names MUST have one case-sensitive, collision-free namespace that excludes Groove's engine-owned names; every physical column-family ingress MUST reject embedded NUL and names beyond the portable UTF-8 byte bound before durable mutation.
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
 - `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
+- `INV-STORAGE-33`: A payload `EnumValue` MUST persist its declaration-order `u32` case tag as a minimal little-endian base-128 varint followed immediately by the selected case's canonical record payload; unknown, truncated, overflowing, and non-minimal tags are invalid.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -54,6 +55,17 @@ canonical bounded `u32` case tag and that case's record payload. Tags are dense 
 declaration order; appending a case is compatible, while changing an existing case,
 its tag, or payload descriptor is not. Scalar enum columns use the same declaration
 and registry rules with zero-payload cases, encoded as their compact discriminant.
+
+**Payload-enum wire envelope (epoch 1).** The selected case tag is the minimal
+unsigned little-endian base-128 (`LEB128`) representation of its `u32` declaration
+index, followed immediately by that case's canonical record payload. Thus tags
+`0..=127` have one byte, `128` begins `80 01`, and no length, version, or alternate
+tag encoding is present. The decoder rejects an empty or unterminated tag, a fifth
+byte whose payload exceeds `0x0f`, a non-minimal multi-byte spelling, an unknown
+case tag, or any payload that is not canonical for the selected case. This envelope
+is permanent at the Groove storage boundary: adding a new case is compatible, but
+renumbering/reordering cases, changing an existing payload descriptor, or adding a
+migration/dual-read path is outside this format cut.
 
 Groove's standalone registry model deliberately has no distributed-schema
 semantics: its discriminant is meaningful only together with the descriptor that
@@ -524,6 +536,10 @@ A record decoder MUST consume exactly the descriptor-defined record span: a
 truncated fixed field, offset table, or variable payload; an out-of-range or
 non-monotonic offset; a trailing byte in a fixed-only record; an invalid scalar;
 or a non-canonical nested record is invalid, not an alternate representation.
+
+`F64` record values use their IEEE-754 bits little-endian; positive and negative
+infinity are valid, while every NaN bit pattern is invalid on both encode and decode.
+Ordered-index `F64` uses the separately specified order transform in §2.8.
 
 **Nullable values** (`INV-STORAGE-10`): a fixed-width null is flag `0` plus a
 zero-filled reserved width; a variable-width null is the flag byte alone.
