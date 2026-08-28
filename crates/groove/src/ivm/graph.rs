@@ -2352,6 +2352,42 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_top_by_unorderable_tie_fields() {
+        let input = RecordDescriptor::new([
+            ("rank", ValueType::U64),
+            ("tie", ValueType::Array(Box::new(ValueType::U64))),
+        ]);
+        let descriptor = NodeDescriptor::new(
+            OpType::TopBy(TopByOp {
+                group_fields: Vec::new(),
+                group_field_indices: Vec::new(),
+                order_fields: vec![TopByOrderField {
+                    field: "rank".to_owned(),
+                    direction: TopByDirection::Asc,
+                }],
+                tie_fields: vec!["tie".to_owned()],
+                // `sort_field_indices` is deliberately the concatenation of
+                // order and tie fields. Validate every member, not only the
+                // user-visible order prefix, because both are compared by the
+                // runtime's TopBy key.
+                sort_field_indices: vec![0, 1],
+                sort_directions: vec![TopByDirection::Asc, TopByDirection::Asc],
+                offset: 0,
+                limit: TopByLimit::Finite(1),
+            }),
+            [NodeId(1)],
+            input,
+        );
+
+        assert_eq!(
+            descriptor.validate(&[NodeOutput::Arrangement(ArrangementDescriptor {
+                records: input,
+            })]),
+            Err(GraphValidationError::TopBySortFieldMustBeOrderable),
+        );
+    }
+
+    #[test]
     fn validation_rejects_union_inputs_with_different_outputs() {
         let descriptor = NodeDescriptor::new(OpType::Union, [NodeId(1), NodeId(2)], output());
 
