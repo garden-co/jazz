@@ -69,28 +69,19 @@ rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
 
 #### Epoch-pinned catalogue kernel
 
-The first bytes needed to open a database cannot themselves depend on an
-application descriptor. Jazz therefore freezes one deliberately tiny
-catalogue kernel per storage epoch. It contains only the typed records needed
-to discover immutable schema descriptors, migration lenses, local alias
-mappings, staged/active lineage receipts, and the current-write pointer. Its
-record kind is a permanent unsigned numeric discriminator, not a user-visible
-string and not an extensible Rust enum: `genesis = 0`, `schema = 1`, `lens =
-2`, `schema_lineage_staged = 3`, `schema_lineage_pending = 4`,
-`schema_lineage_active = 5`, `write_pointer_pending = 6`, and
-`bootstrap_ready = 7`. An unknown kernel kind, malformed field, duplicate
-identity, or incomplete receipt is corruption and fails closed before decode,
-activation, or mutation. Adding a kernel case requires a new storage epoch.
+`jazz_catalogue.kind` is stored as a `U64` and forms the composite primary key
+`(kind, id)` with the record UUID. The current storage epoch permanently maps
+`genesis = 0`, `schema = 1`, `lens = 2`, `schema_lineage_staged = 3`,
+`schema_lineage_pending = 4`, `schema_lineage_active = 5`,
+`write_pointer_pending = 6`, and `bootstrap_ready = 7`. Discovery and reopen
+reject every other numeric kind rather than guessing how to decode it.
 
-That exception is intentionally narrow. The catalogue does **not** become a
-second place to hard-code Jazz internals: all other Jazz system tables live in
-a reserved system namespace and are described, activated, and recovered by the
-same descriptor machinery as application tables. This epoch slice freezes only
-the closed `jazz_catalogue.kind` discriminator and its primary-key role. The
-schema-descriptor identity model, physical table/column/enum identities,
-storage-local mappings, and canonical payload codecs remain separate storage
-settlement work; this section makes no claim about their final encoding or
-whether declaration order and names participate in descriptor identity.
+This freezes only that numeric discriminator and primary-key layout. It does
+not freeze the catalogue payload codecs, schema-descriptor identity model,
+physical identity allocation, or catalogue lifecycle guarantees. Those remain
+part of the catalogue storage settlement tracked by
+[#2037](https://github.com/garden-co/jazz/issues/2037) and
+[#1779](https://github.com/garden-co/jazz/issues/1779).
 
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue
