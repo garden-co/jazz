@@ -1353,6 +1353,10 @@ function isDefinedMigration(value: unknown): value is DefinedMigration {
 async function bundleToPrivateTempFile(
   filePath: string,
 ): Promise<{ outFile: string; tempDir: string }> {
+  // A migration is executable local source.  Keep the same project-storage
+  // boundary as snapshots and publication journals: do not follow a replaced
+  // migration entry while preparing the private bundle.
+  await assertNoSymlinkComponents(filePath);
   const sourceDir = dirname(resolve(filePath));
   const tempDir = await mkdtemp(join(sourceDir, ".jazz-bundle-"));
   const outFile = join(tempDir, "migration.mjs");
@@ -1533,6 +1537,11 @@ async function resolveRemoteHistoricalSchema(
  * only if the schema transition does not require row transformations.
  */
 export async function pushMigration(options: PushMigrationOptions): Promise<PushMigrationResult> {
+  // `push` reads executable migration source as well as the snapshot/create
+  // commands' durable files.  Initialize the common storage boundary first so
+  // it cannot silently follow a symlinked migrations directory.
+  const storage = new MigrationStorage(options.migrationsDir);
+  await storage.initialize();
   const { hashes } = await fetchSchemaHashes(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
@@ -1656,6 +1665,7 @@ async function hasLocalMigrationFiles(migrationsDir: string): Promise<boolean> {
     return false;
   }
 
+  await assertNoSymlinkComponents(migrationsDir);
   return (await readdir(migrationsDir)).some((fileName) => fileName.endsWith(".ts"));
 }
 

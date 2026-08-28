@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build as esbuild, type BuildOptions } from "esbuild";
@@ -533,6 +533,69 @@ export default s.defineMigration({
         operations: [{ type: "rename", column: "email", value: "email_address" }],
       },
     ]);
+  });
+
+  it("pushMigration refuses a symlinked executable migration before publication", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+    const fromHash = "c".repeat(64);
+    const toHash = "d".repeat(64);
+    const migrationName = `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`;
+    const outsideMigration = join(root, "outside-migration.ts");
+    await writeFile(outsideMigration, "export default {};\n");
+    await symlink(outsideMigration, join(migrationsDir, migrationName), "file");
+
+    let publicationAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+        }
+        if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          publicationAttempts++;
+          return new Response("unexpected", { status: 500 });
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+
+    const { pushMigration } = await import("./catalogue-project.js");
+    await expect(
+      pushMigration({
+        appId: APP_ID,
+        serverUrl: SERVER_URL,
+        adminSecret: ADMIN_SECRET,
+        migrationsDir,
+        fromHash,
+        toHash,
+      }),
+    ).rejects.toThrow("Migration path must not contain a symlink or junction");
+    expect(publicationAttempts).toBe(0);
+  });
+
+  it("pushMigration refuses a symlinked migrations directory before contacting the server", async () => {
+    const { root } = await createWorkspace();
+    const outsideMigrations = join(root, "outside-migrations");
+    const migrationsDir = join(root, "migrations");
+    await mkdir(outsideMigrations, { recursive: true });
+    await symlink(outsideMigrations, migrationsDir, "dir");
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { pushMigration } = await import("./catalogue-project.js");
+    await expect(
+      pushMigration({
+        appId: APP_ID,
+        serverUrl: SERVER_URL,
+        adminSecret: ADMIN_SECRET,
+        migrationsDir,
+        fromHash: "c".repeat(64),
+        toHash: "d".repeat(64),
+      }),
+    ).rejects.toThrow("Migration path must not contain a symlink or junction");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it.each(["hash", "witness"] as const)(
