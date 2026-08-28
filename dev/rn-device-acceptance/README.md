@@ -30,6 +30,7 @@ export JAVA_HOME="$JAZZ_DEVICE_TOOLCACHE/jdk"
 export ANDROID_SDK_ROOT="$JAZZ_DEVICE_TOOLCACHE/sdk"
 export PATH="$JAZZ_DEVICE_TOOLCACHE/cargo/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
 JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2 pnpm --filter jazz-rn build:relay:android
+export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)"
 JAZZ_DEVICE_APK="$PWD/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk" \
   NODE_ENV=production pnpm --filter rn-device-acceptance device:android
 ```
@@ -39,4 +40,12 @@ Android API/build tools 36, cargo-ndk 4.1.2, and (with `--emulator`) the API 35
 Google APIs x86_64 image. The cache is ignored and never needs system Java,
 Android SDK, adb, or a global cargo-ndk installation. `device:android` compares
 the fixture's immutable `Build.FINGERPRINT` with adb's `ro.build.fingerprint`;
-app-scoped Android IDs and adb transport serials are intentionally not used.
+it also rejects a staged relay unless its manifest names the supplied source
+revision and exactly the arm64-v8a, armeabi-v7a, x86, and x86_64 static-library
+slices with matching hashes. The receipt's artifact fingerprint is SHA-256
+computed by trusted Android code from its installed `applicationInfo.sourceDir`;
+the driver independently hashes that same package-manager path after install.
+Neither is a host-supplied intent echo. App-scoped Android IDs and adb transport
+serials are intentionally not used. Bootstrap checks pinned SHA-256 values for
+the Temurin, Android command-line-tools, and NDK archives and fails closed on a
+corrupt pre-existing cache archive.
