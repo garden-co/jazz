@@ -1,11 +1,16 @@
 const MAX_DIAGNOSTIC_BYTES = 16 * 1024;
 const MAX_DIAGNOSTIC_LINES = 120;
 
-export const boundedDiagnostic = (value) => {
-  const lines = String(value).split("\n").slice(0, MAX_DIAGNOSTIC_LINES);
+export const boundedDiagnostic = (value, { tail = false } = {}) => {
+  const allLines = String(value).split("\n");
+  const lines = tail ? allLines.slice(-MAX_DIAGNOSTIC_LINES) : allLines.slice(0, MAX_DIAGNOSTIC_LINES);
   const text = lines.join("\n");
   if (Buffer.byteLength(text) <= MAX_DIAGNOSTIC_BYTES) return text;
-  return `${Buffer.from(text).subarray(0, MAX_DIAGNOSTIC_BYTES).toString("utf8")}\n[diagnostic truncated]`;
+  const bytes = Buffer.from(text);
+  const bounded = tail
+    ? bytes.subarray(Math.max(0, bytes.length - MAX_DIAGNOSTIC_BYTES)).toString("utf8")
+    : bytes.subarray(0, MAX_DIAGNOSTIC_BYTES).toString("utf8");
+  return `${tail ? "[diagnostic truncated]\n" : ""}${bounded}${tail ? "" : "\n[diagnostic truncated]"}`;
 };
 
 export const relevantAppLogs = (value, processName) =>
@@ -14,6 +19,7 @@ export const relevantAppLogs = (value, processName) =>
       .split("\n")
       .filter((line) => line.includes(processName))
       .join("\n"),
+    { tail: true },
   );
 
 export const sanitizedCommandFailure = (error) => {

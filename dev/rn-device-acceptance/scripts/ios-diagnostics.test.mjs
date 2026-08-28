@@ -7,6 +7,13 @@ import {
   sanitizedCommandFailure,
 } from "./ios-diagnostics.mjs";
 
+test("bounded diagnostics retain the newest stage when callers request a tail", () => {
+  const lines = Array.from({ length: 130 }, (_, index) => `stage-${index}`).join("\n");
+  const output = boundedDiagnostic(lines, { tail: true });
+  assert.doesNotMatch(output, /stage-0/);
+  assert.match(output, /stage-129/);
+});
+
 test("iOS diagnostics exclude unrelated logs and cap oversized app output", () => {
   const output = [
     "2026 unrelated-process sensitive-looking-token=do-not-report",
@@ -17,7 +24,8 @@ test("iOS diagnostics exclude unrelated logs and cap oversized app output", () =
   ].join("\n");
   const diagnostic = relevantAppLogs(output, "JazzRNdeviceacceptance");
   assert.doesNotMatch(diagnostic, /sensitive-looking-token/);
-  assert.match(diagnostic, /JazzRNdeviceacceptance line 0/);
+  assert.doesNotMatch(diagnostic, /JazzRNdeviceacceptance line 0/);
+  assert.match(diagnostic, /JazzRNdeviceacceptance line 199/);
   assert.ok(diagnostic.split("\n").length <= 120);
   assert.ok(Buffer.byteLength(boundedDiagnostic("x".repeat(20_000))) <= 16 * 1024 + 32);
 });
