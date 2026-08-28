@@ -1305,6 +1305,88 @@ mod catalogue_payload_tests {
         }
     }
 
+    fn staged_fixture() -> StagedSchemaLineage {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let lens = MigrationLens::new(schema.id, schema.id, Vec::new());
+        let publication = SchemaLineagePublication::new_genesis_fixture(
+            schema,
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        );
+        StagedSchemaLineage {
+            catalogue_seq: 7,
+            publication,
+            alias: SchemaVersionAlias(3),
+            mapping: SchemaPhysicalMapping {
+                identities: PhysicalIdentityManifest {
+                    tables: BTreeMap::new(),
+                },
+                tables: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn staged_and_pending_lineage_payloads_are_exact_versioned_and_fail_closed() {
+        let staged = staged_fixture();
+        let exact = encode_catalogue_staged_lineage(&staged).unwrap();
+        assert_eq!(&exact[..9], &[1, 7, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            decode_catalogue_staged_lineage(&exact)
+                .unwrap()
+                .catalogue_seq,
+            7
+        );
+        let pending = PendingSchemaLineage {
+            catalogue_seq: 8,
+            publication: staged.publication.clone(),
+        };
+        let pending_exact = encode_catalogue_pending_lineage(&pending).unwrap();
+        assert_eq!(&pending_exact[..9], &[1, 8, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            decode_catalogue_pending_lineage(&pending_exact).unwrap(),
+            pending
+        );
+        for malformed in [
+            vec![],
+            vec![2],
+            exact[..exact.len() - 1].to_vec(),
+            [exact.clone(), vec![0]].concat(),
+            {
+                let mut future = exact.clone();
+                future[0] = 2;
+                future
+            },
+            {
+                let mut huge = exact[..13].to_vec();
+                huge[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+                huge
+            },
+            // Planted: changing the stored publication ID must fail before
+            // a lineage can become resident.
+            {
+                let mut wrong = exact.clone();
+                wrong[13] ^= 1;
+                wrong
+            },
+        ] {
+            assert!(decode_catalogue_staged_lineage(&malformed).is_err());
+        }
+        for malformed in [
+            vec![],
+            pending_exact[..pending_exact.len() - 1].to_vec(),
+            [pending_exact.clone(), vec![0]].concat(),
+            {
+                let mut x = pending_exact.clone();
+                x[0] = 2;
+                x
+            },
+        ] {
+            assert!(decode_catalogue_pending_lineage(&malformed).is_err());
+        }
+    }
+
     #[test]
     fn physical_mapping_payload_has_exact_typed_v1_fixture_and_round_trips() {
         let mapping = mapping_fixture();
