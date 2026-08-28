@@ -2029,6 +2029,7 @@ dependencies = [
  "jazz-benchmark-guard",
  "jazz-compression",
  "jazz-storage-rocksdb",
+ "jazz-storage-sqlite",
  "jazz-testkit",
  "jsonschema",
  "jsonwebtoken",
