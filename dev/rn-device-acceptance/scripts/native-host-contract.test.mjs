@@ -55,3 +55,17 @@ test("checksum pin rejects a planted corrupt cache archive", () => {
     execFileSync("bash", [path.join(root, "scripts/verify-pinned-archive.sh"), archive, "0".repeat(64)]),
   );
 });
+
+test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", () => {
+  const fixture = read("native/ios/JazzDeviceFixture.mm");
+  assert.match(fixture, /RCT_REMAP_METHOD\(linkedAbi/);
+  assert.match(fixture, /JazzRelayTrustedAdmission admitScopeJSON/);
+  assert.match(fixture, /RCT_REMAP_METHOD\(acceptanceRunMetadata/);
+  for (const key of [
+    "-JazzDeviceRunNonce",
+    "-JazzDeviceBuildFingerprint",
+    "-JazzDeviceDeviceIdentifier",
+  ]) {
+    assert.match(fixture, new RegExp(key));
+  }
+});

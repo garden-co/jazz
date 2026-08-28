@@ -2,16 +2,17 @@
 
 This is the first-party **Expo development-build / bare-host** acceptance app for the native relay. It is intentionally not an Expo Go test: native relay code and the trusted fixture must be compiled into the Android APK or iOS simulator app.
 
-The app has one durable native relay and a scenario plan requiring two UI runtimes. It emits newline-delimited `JAZZ_DEVICE_RESULT {json}` protocol messages. A `passed` state is rejected by the protocol unless it includes platform, device, build, and observation-time evidence. Current scenarios are all `todo`; the UI only emits that truthful plan and does not claim a device receipt.
+The app has one durable native relay and a scenario plan requiring two UI runtimes. It emits newline-delimited `JAZZ_DEVICE_RESULT {json}` protocol messages automatically on launch. A `passed` state is rejected by the protocol unless it includes platform, device, build, and observation-time evidence. The linked ABI plus trusted-native-admission probe is the sole implemented receipt; every multi-peer or durable scenario remains truthful `todo`, so the full acceptance gate correctly remains red.
 
 ## Trusted fixture boundary
 
-`native/android/JazzDeviceFixtureModule.kt` and `native/ios/JazzDeviceFixture.mm` admit a scope entirely in trusted platform code. The relay's opaque 32-byte capability is the only value permitted into JavaScript. The templates use build-time test-only fixture placeholders; they must never be populated by Metro variables, intents, a remote config service, or an OTA update. `src/native-fixture.ts` is the narrow JS consumer.
+`native/android/JazzDeviceFixtureModule.kt` and `native/ios/JazzDeviceFixture.mm` admit a scope entirely in trusted platform code. The relay's opaque 32-byte capability is the only value permitted into JavaScript. The iOS fixture uses fixed non-secret test material and reads the launch nonce, build fingerprint, and simulator UDID only from native process arguments; they must never be populated by Metro variables, intents, a remote config service, or an OTA update. `src/native-fixture.ts` is the narrow JS consumer.
 
-The Expo config plugin copies and registers the Android template during prebuild; its public placeholder `BuildConfig` values make that host compile-shaped without embedding credentials. A real device job must replace only its non-secret test fixture material after staging a matching relay artifact. iOS registration and both platform build receipts remain TODO; this source scaffold is not device acceptance.
+The Expo config plugin copies and registers the Android template during prebuild; its public placeholder `BuildConfig` values make that host compile-shaped without embedding credentials. The iOS Blacksmith job stages the XCFramework, prebuilds, installs pods, registers the fixture, builds, installs, and launches the simulator app. It is a real device receipt gate, but is intentionally incomplete until every TODO scenario is implemented.
 
 ## Current acceptance plan
 
+- `linked-abi-trusted-admission`: automatic iOS receipt that verifies the embedded ABI and receives a 32-byte capability from the trusted native admission boundary.
 - `local-write-subscription`: UI-A write observed by UI-B through one relay.
 - `reconnect` and `reopen`: connection recovery and durable process/app relaunch.
 - `scope-isolation` and `logout-auth-switch`: separate scope visibility and revocation before replacement.
