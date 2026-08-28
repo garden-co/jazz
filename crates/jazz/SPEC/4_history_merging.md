@@ -161,11 +161,12 @@ guessed as the new untagged array (`INV-HIST-19`; Groove storage §2).
 ### Durable codec profile
 
 Every persistent Jazz root supplies one closed epoch-one codec profile when it
-opens its ordered-KV adapter. It contains Groove's generic ordered-KV codec and
-the Jazz-owned byte families for branch keys; catalogue schemas, mappings,
-lineages, bootstrap receipts, lenses, activations, and write pointers; and
-persisted result-member, result-row-source, and program-fact keys. The profile
-is sorted, pinned by the adapter manifest,
+opens its ordered-KV adapter. It contains Groove's mandatory base codecs:
+generic ordered-KV, V1 large-value descriptor/immutable-node envelopes, and
+the ordered-chunk-storage install-receipt wrapper; plus the Jazz-owned byte
+families for branch keys; catalogue schemas, mappings, lineages, bootstrap
+receipts, lenses, activations, and write pointers; and persisted
+result-member, result-row-source, and program-fact keys. The profile is sorted, pinned by the adapter manifest,
 and checked before any ordinary record is decoded or mutated. Groove carries
 these identifiers as opaque metadata: it does not import or interpret Jazz
 schemas. A missing, duplicate, substituted, or future ID therefore fails open
