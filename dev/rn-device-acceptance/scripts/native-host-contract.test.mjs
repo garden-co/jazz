@@ -107,7 +107,8 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
     "simctl launch did not return an app process id",
     "get_app_container",
     "launchctl",
-    "recent app/device logs",
+    "recent app logs \\(capped\\)",
+    'process == "JazzRNdeviceacceptance"',
   ]) {
     assert.match(driver, new RegExp(detail));
   }
