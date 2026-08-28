@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundedDiagnostic, relevantAppLogs, sanitizedCommandFailure } from "./ios-diagnostics.mjs";
+import {
+  boundedDiagnostic,
+  parseLaunchProcessId,
+  relevantAppLogs,
+  sanitizedCommandFailure,
+} from "./ios-diagnostics.mjs";
 
 test("iOS diagnostics exclude unrelated logs and cap oversized app output", () => {
   const output = [
@@ -21,4 +26,16 @@ test("iOS diagnostics do not echo raw command errors", () => {
   const diagnostic = sanitizedCommandFailure({ status: 70, message: "secret simulator output" });
   assert.equal(diagnostic, "command failed (exit 70)");
   assert.doesNotMatch(diagnostic, /secret/);
+});
+
+test("iOS launch parser accepts only the expected bundle and positive sole PID", () => {
+  assert.equal(parseLaunchProcessId("dev.jazz.rndeviceacceptance: 4999"), 4999);
+  for (const malformed of [
+    "other.bundle: 4999",
+    "dev.jazz.rndeviceacceptance: 0",
+    "dev.jazz.rndeviceacceptance: 4999\nunexpected text",
+    "4999",
+  ]) {
+    assert.throws(() => parseLaunchProcessId(malformed), /unexpected bundle\/process id/);
+  }
 });

@@ -2,7 +2,12 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { assertDeviceReceipt } from "./device-driver.mjs";
-import { boundedDiagnostic, relevantAppLogs, sanitizedCommandFailure } from "./ios-diagnostics.mjs";
+import {
+  boundedDiagnostic,
+  parseLaunchProcessId,
+  relevantAppLogs,
+  sanitizedCommandFailure,
+} from "./ios-diagnostics.mjs";
 import { scenarioPlan } from "../src/scenarios.ts";
 
 const udid = process.env.IOS_SIMULATOR_UDID;
@@ -36,8 +41,7 @@ const launchResult = simctl([
   "-JazzDeviceDeviceIdentifier",
   udid,
 ]).trim();
-if (!/^\d+$/.test(launchResult))
-  throw new Error(`simctl launch did not return an app process id: ${launchResult}`);
+const launchPid = parseLaunchProcessId(launchResult);
 const receiptOutput = () =>
   simctl([
     "spawn",
@@ -61,7 +65,7 @@ const expected = {
 };
 const diagnostics = () =>
   [
-    `simctl launch PID: ${launchResult}`,
+    `simctl launch PID: ${launchPid}`,
     `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
     `launchd app state:\n${trySimctl(["spawn", udid, "launchctl", "print", "gui/501"])}`,
     `recent app logs (capped):\n${relevantAppLogs(

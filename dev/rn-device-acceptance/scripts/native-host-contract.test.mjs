@@ -123,7 +123,7 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   assert.match(workflow, /-configuration Release -sdk iphonesimulator/);
   assert.match(workflow, /Release-iphonesimulator\/JazzRNdeviceacceptance\.app/);
   for (const detail of [
-    "simctl launch did not return an app process id",
+    "parseLaunchProcessId",
     "get_app_container",
     "launchctl",
     "recent app logs \\(capped\\)",
