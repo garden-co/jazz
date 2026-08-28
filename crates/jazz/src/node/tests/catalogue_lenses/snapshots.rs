@@ -606,6 +606,33 @@ let persisted = crate::db::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
+/// This is intentionally an internal storage-boundary test: only a direct
+/// durable-row mutation can prove malformed kernel bytes fail before open
+/// returns a resident `NodeState`.
+#[test]
+fn catalogue_kernel_payload_corruption_rejects_reopen_before_resident_mutation() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa5), base.clone());
+    let durable_schema = SchemaVersion::new(base.clone());
+    let mut payload = codec::encode_catalogue_schema(&durable_schema).unwrap();
+    payload.push(0);
+    write_catalogue_record(
+        &mut node_state,
+        b"schema",
+        durable_schema.id.0,
+        payload,
+    );
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa5), base, storage)),
+        Err(Error::InvalidStoredValue("invalid catalogue schema payload"))
+    ));
+}
+
 fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id: uuid::Uuid) {
     let mut batch = node.database.open_batch();
     batch.delete(
@@ -756,11 +783,10 @@ fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &St
         node,
         b"schema_lineage_active",
         staged.publication.id.0,
-        serde_json::to_vec(&SchemaLineageActivation {
+        codec::encode_catalogue_lineage_activation(SchemaLineageActivation {
             id: staged.publication.id,
             catalogue_seq: staged.catalogue_seq,
-        })
-        .unwrap(),
+        }),
     );
 }
 
@@ -1394,12 +1420,11 @@ fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
         &mut edge,
         b"bootstrap_ready",
         schema().version_id().0,
-        serde_json::to_vec(&CatalogueBootstrapReady {
+        codec::encode_catalogue_bootstrap_ready(&CatalogueBootstrapReady {
             genesis: schema().version_id(),
             current_write_schema: snapshot.current_write_schema,
             active_catalogue_seq: 0,
-        })
-        .unwrap(),
+        }),
     );
     drop(edge);
 
@@ -1445,7 +1470,7 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
         &mut edge,
         b"schema",
         smuggled.id.0,
-        serde_json::to_vec(&smuggled).unwrap(),
+        codec::encode_catalogue_schema(&smuggled).unwrap(),
     );
     write_schema_mapping_record(&mut edge, SchemaVersionAlias(99), smuggled.id, &mapping);
     drop(edge);

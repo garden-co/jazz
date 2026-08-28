@@ -2030,7 +2030,7 @@ struct PendingSchemaLineage {
     publication: SchemaLineagePublication,
 }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct SchemaLineageActivation {
     id: SchemaLineagePublicationId,
     catalogue_seq: u64,

@@ -482,10 +482,289 @@ impl records::RecordField for CatalogueRecordKind {
     const COLUMN_KIND: records::FieldKind = records::FieldKind::U64;
 }
 
+// The catalogue table is the fixed, bootstrap-only Groove kernel.  Its
+// payloads deliberately do not use serde/postcard: those formats make the
+// durable bytes depend on Rust field layout and accept trailing data in some
+// configurations.  Every payload below starts with its own permanent format
+// version and consumes exactly its input.
+const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
+const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
+const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
+
+pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>, Error> {
+    let public_schema = serde_json::to_vec(schema.schema.public_schema())
+        .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))?;
+    let length = u32::try_from(public_schema.len())
+        .map_err(|_| Error::InvalidStoredValue("catalogue public schema payload too large"))?;
+    let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
+    payload.push(CATALOGUE_SCHEMA_VERSION);
+    payload.extend_from_slice(schema.id.0.as_bytes());
+    payload.extend_from_slice(&length.to_le_bytes());
+    payload.extend_from_slice(&public_schema);
+    Ok(payload)
+}
+
+pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_SCHEMA_VERSION,
+        "invalid catalogue schema payload",
+    )?;
+    let id = SchemaVersionId(cursor.uuid()?);
+    let public_schema = cursor.sized_bytes()?;
+    cursor.finish()?;
+    let schema = crate::tools::public_schema_convert::decode_public_schema_json(public_schema)
+        .map_err(|_| Error::InvalidStoredValue("invalid catalogue schema public schema"))?;
+    if schema.version_id() != id {
+        return Err(Error::InvalidStoredValue(
+            "catalogue schema content id mismatch",
+        ));
+    }
+    Ok(SchemaVersion { id, schema })
+}
+
+pub(super) fn encode_catalogue_bootstrap_ready(ready: &CatalogueBootstrapReady) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 16 + 8 + 16 + 8);
+    payload.push(CATALOGUE_BOOTSTRAP_READY_VERSION);
+    payload.extend_from_slice(ready.genesis.0.as_bytes());
+    payload.extend_from_slice(&ready.current_write_schema.revision.to_le_bytes());
+    payload.extend_from_slice(ready.current_write_schema.schema.0.as_bytes());
+    payload.extend_from_slice(&ready.active_catalogue_seq.to_le_bytes());
+    payload
+}
+
+pub(super) fn decode_catalogue_bootstrap_ready(
+    payload: &[u8],
+) -> Result<CatalogueBootstrapReady, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_BOOTSTRAP_READY_VERSION,
+        "invalid catalogue bootstrap receipt payload",
+    )?;
+    let genesis = SchemaVersionId(cursor.uuid()?);
+    let revision = cursor.u64()?;
+    let schema = SchemaVersionId(cursor.uuid()?);
+    let active_catalogue_seq = cursor.u64()?;
+    cursor.finish()?;
+    Ok(CatalogueBootstrapReady {
+        genesis,
+        current_write_schema: CurrentWriteSchema { revision, schema },
+        active_catalogue_seq,
+    })
+}
+
+pub(super) fn encode_catalogue_write_pointer(pointer: CurrentWriteSchema) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 8 + 16);
+    payload.push(CATALOGUE_WRITE_POINTER_VERSION);
+    payload.extend_from_slice(&pointer.revision.to_le_bytes());
+    payload.extend_from_slice(pointer.schema.0.as_bytes());
+    payload
+}
+
+pub(super) fn decode_catalogue_write_pointer(payload: &[u8]) -> Result<CurrentWriteSchema, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_WRITE_POINTER_VERSION,
+        "invalid catalogue write-pointer payload",
+    )?;
+    let revision = cursor.u64()?;
+    let schema = SchemaVersionId(cursor.uuid()?);
+    cursor.finish()?;
+    Ok(CurrentWriteSchema { revision, schema })
+}
+
+pub(super) fn encode_catalogue_lineage_activation(activation: SchemaLineageActivation) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 16 + 8);
+    payload.push(CATALOGUE_LINEAGE_ACTIVATION_VERSION);
+    payload.extend_from_slice(activation.id.0.as_bytes());
+    payload.extend_from_slice(&activation.catalogue_seq.to_le_bytes());
+    payload
+}
+
+pub(super) fn decode_catalogue_lineage_activation(
+    payload: &[u8],
+) -> Result<SchemaLineageActivation, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_LINEAGE_ACTIVATION_VERSION,
+        "invalid catalogue lineage activation payload",
+    )?;
+    let id = SchemaLineagePublicationId(cursor.uuid()?);
+    let catalogue_seq = cursor.u64()?;
+    cursor.finish()?;
+    Ok(SchemaLineageActivation { id, catalogue_seq })
+}
+
+struct CataloguePayloadCursor<'a> {
+    payload: &'a [u8],
+    offset: usize,
+    context: &'static str,
+}
+
+impl<'a> CataloguePayloadCursor<'a> {
+    fn new(payload: &'a [u8], version: u8, context: &'static str) -> Result<Self, Error> {
+        if payload.first().copied() != Some(version) {
+            return Err(Error::InvalidStoredValue(context));
+        }
+        Ok(Self {
+            payload,
+            offset: 1,
+            context,
+        })
+    }
+
+    fn bytes(&mut self, length: usize) -> Result<&'a [u8], Error> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(Error::InvalidStoredValue(self.context))?;
+        let bytes = self
+            .payload
+            .get(self.offset..end)
+            .ok_or(Error::InvalidStoredValue(self.context))?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn uuid(&mut self) -> Result<uuid::Uuid, Error> {
+        let bytes: [u8; 16] = self.bytes(16)?.try_into().expect("exact UUID width");
+        Ok(uuid::Uuid::from_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, Error> {
+        let bytes: [u8; 8] = self.bytes(8)?.try_into().expect("exact u64 width");
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn sized_bytes(&mut self) -> Result<&'a [u8], Error> {
+        let bytes: [u8; 4] = self.bytes(4)?.try_into().expect("exact u32 width");
+        self.bytes(u32::from_le_bytes(bytes) as usize)
+    }
+
+    fn finish(self) -> Result<(), Error> {
+        if self.offset == self.payload.len() {
+            Ok(())
+        } else {
+            Err(Error::InvalidStoredValue(self.context))
+        }
+    }
+}
+
 groove::define_record! {
     pub(super) struct CataloguePointerRowRecord {
         0 => revision: u64,
         1 => schema: SchemaVersionId,
+    }
+}
+
+#[cfg(test)]
+mod catalogue_payload_tests {
+    use super::*;
+
+    fn schema_id(value: u128) -> SchemaVersionId {
+        SchemaVersionId(uuid::Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn catalogue_bootstrap_and_receipt_payloads_have_exact_v1_golden_bytes() {
+        let genesis = schema_id(0x00112233445566778899aabbccddeeff);
+        let current = schema_id(0xffeeddccbbaa99887766554433221100);
+        let ready = CatalogueBootstrapReady {
+            genesis,
+            current_write_schema: CurrentWriteSchema {
+                revision: 0x0102_0304_0506_0708,
+                schema: current,
+            },
+            active_catalogue_seq: 0x1112_1314_1516_1718,
+        };
+        assert_eq!(
+            encode_catalogue_bootstrap_ready(&ready),
+            vec![
+                1, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                0xdd, 0xee, 0xff, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0xff, 0xee, 0xdd,
+                0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x18,
+                0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
+            ]
+        );
+        assert_eq!(
+            decode_catalogue_bootstrap_ready(&encode_catalogue_bootstrap_ready(&ready)).unwrap(),
+            ready
+        );
+
+        let pointer = ready.current_write_schema;
+        assert_eq!(
+            encode_catalogue_write_pointer(pointer),
+            vec![
+                1, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0xff, 0xee, 0xdd, 0xcc, 0xbb,
+                0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+            ]
+        );
+        assert_eq!(
+            decode_catalogue_write_pointer(&encode_catalogue_write_pointer(pointer)).unwrap(),
+            pointer
+        );
+
+        let activation = SchemaLineageActivation {
+            id: SchemaLineagePublicationId(uuid::Uuid::from_u128(
+                0x102030405060708090a0b0c0d0e0f000,
+            )),
+            catalogue_seq: 9,
+        };
+        assert_eq!(
+            encode_catalogue_lineage_activation(activation),
+            vec![
+                1, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0,
+                0xe0, 0xf0, 0x00, 9, 0, 0, 0, 0, 0, 0, 0,
+            ]
+        );
+        assert_eq!(
+            decode_catalogue_lineage_activation(&encode_catalogue_lineage_activation(activation))
+                .unwrap(),
+            activation
+        );
+    }
+
+    #[test]
+    fn catalogue_schema_payload_is_versioned_and_round_trips_public_schema() {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let encoded = encode_catalogue_schema(&schema).unwrap();
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
+        assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
+        assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
+    }
+
+    #[test]
+    fn catalogue_kernel_payloads_reject_unknown_truncated_and_trailing_bytes() {
+        let pointer = CurrentWriteSchema {
+            revision: 7,
+            schema: schema_id(8),
+        };
+        let valid = encode_catalogue_write_pointer(pointer);
+        for malformed in [
+            vec![],
+            vec![2],
+            valid[..valid.len() - 1].to_vec(),
+            [valid.clone(), vec![0]].concat(),
+        ] {
+            assert!(
+                decode_catalogue_write_pointer(&malformed).is_err(),
+                "{malformed:?}"
+            );
+        }
+
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let valid = encode_catalogue_schema(&schema).unwrap();
+        for malformed in [
+            vec![2],
+            valid[..valid.len() - 1].to_vec(),
+            [valid.clone(), vec![0]].concat(),
+        ] {
+            assert!(
+                decode_catalogue_schema(&malformed).is_err(),
+                "{malformed:?}"
+            );
+        }
     }
 }
 

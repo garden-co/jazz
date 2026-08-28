@@ -89,7 +89,7 @@ where
                 vec![
                     Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
                     Value::Uuid(ready.genesis.0),
-                    Value::Bytes(serde_json::to_vec(&ready)?),
+                    Value::Bytes(codec::encode_catalogue_bootstrap_ready(&ready)),
                 ],
             );
         }
@@ -99,7 +99,7 @@ where
                 vec![
                     Value::U64(codec::CatalogueRecordKind::Schema.key()),
                     Value::Uuid(schema.id.0),
-                    Value::Bytes(serde_json::to_vec(schema)?),
+                    Value::Bytes(codec::encode_catalogue_schema(schema)?),
                 ],
             );
         }

@@ -86,6 +86,24 @@ string and not an extensible Rust enum: `genesis = 0`, `schema = 1`, `lens =
 identity, or incomplete receipt is corruption and fails closed before decode,
 activation, or mutation. Adding a kernel case requires a new storage epoch.
 
+The kernel payloads that establish recovery state have their own explicit,
+versioned binary layouts; they are not authoritative JSON. In this epoch,
+`schema` is `[v1, schema_uuid, public_schema_json_len:u32-le,
+public_schema_json]`, `bootstrap_ready` is `[v1, genesis_uuid,
+pointer_revision:u64-le, pointer_schema_uuid, active_catalogue_seq:u64-le]`,
+and the pending write-pointer and active-lineage receipts are likewise fixed
+`v1` UUID/integer tuples. A decoder accepts exactly one known version and
+must consume the entire payload before it returns a value to catalogue
+recovery; it does not fall back to the former JSON bytes.
+
+For example, a bootstrap receipt whose genesis UUID begins `00112233…`, whose
+pointer revision is `0x0102030405060708`, and whose active sequence is
+`0x1112131415161718` begins with `01 00 11 22 33 … 08 07 06 05 04 03 02 01`.
+Appending even one byte, truncating it, or changing `01` to an unknown version
+rejects reopen before resident catalogue state is replaced. This freezes only
+the envelope and receipt representations; physical mappings, enum registries,
+and full lineage/lens payloads remain separate catalogue work.
+
 That exception is intentionally narrow. The catalogue does **not** become a
 second place to hard-code Jazz internals: all other Jazz system tables live in
 a reserved system namespace and are described, activated, and recovered by the
