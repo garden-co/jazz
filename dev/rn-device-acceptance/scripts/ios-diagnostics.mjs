@@ -3,7 +3,9 @@ const MAX_DIAGNOSTIC_LINES = 120;
 
 export const boundedDiagnostic = (value, { tail = false } = {}) => {
   const allLines = String(value).split("\n");
-  const lines = tail ? allLines.slice(-MAX_DIAGNOSTIC_LINES) : allLines.slice(0, MAX_DIAGNOSTIC_LINES);
+  const lines = tail
+    ? allLines.slice(-MAX_DIAGNOSTIC_LINES)
+    : allLines.slice(0, MAX_DIAGNOSTIC_LINES);
   const text = lines.join("\n");
   if (Buffer.byteLength(text) <= MAX_DIAGNOSTIC_BYTES) return text;
   const bytes = Buffer.from(text);
