@@ -201,7 +201,7 @@ fn validate_registry_with_profiles(
         "jazz.history-version-current.v1",
         "jazz.contribution-provenance.v1",
         "jazz.merge-heads.v1",
-        "jazz.idb-page.v2",
+        "jazz.idb-page.v1",
         "jazz.wire-frame.v1",
         "jazz.binding-abi.v1",
         "jazz.local-auth-secret.v1",

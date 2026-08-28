@@ -481,24 +481,24 @@
       ]
     },
     {
-      "id": "jazz.idb-page.v2",
+      "id": "jazz.idb-page.v1",
       "boundary": "durable-storage",
       "spec": {
         "path": "crates/groove/SPEC/2_storage_model.md",
         "anchor": "### IndexedDB page-store physical format"
       },
       "semantic_fixture": {
-        "path": "crates/idb-tree/fixtures/page-v2-leaf.hex",
+        "path": "crates/idb-tree/fixtures/page-v1-leaf.hex",
         "anchor": "49444254524545"
       },
       "rejection_receipt": {
         "path": "crates/idb-tree/src/page.rs",
-        "anchor": "page_v2_decoder_rejects_noncanonical_or_malformed_payloads"
+        "anchor": "page_v1_decoder_rejects_noncanonical_or_malformed_payloads"
       },
       "evidence": [
         {
           "path": "packages/jazz-tools/tests/browser/indexeddb-physical-epoch.test.ts",
-          "anchor": "opens a manually committed epoch-one page-v2 fixture read-only, writes current data, and reopens"
+          "anchor": "opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens"
         }
       ]
     },

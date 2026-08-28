@@ -489,6 +489,27 @@ where
         } else {
             if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
                 Self::validate_migration_lens_between(lens, source, schema)?;
+                let identity_history = self.physical_identity_history_for_candidate(
+                    publication.schema.id,
+                    Some(publication.id),
+                );
+                let source_identities = &self
+                    .catalogue
+                    .physical_mappings
+                    .get(&lens.source)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "source physical identity manifest missing",
+                    ))?
+                    .identities;
+                source_identities
+                    .validate_evolution_to_with_history(
+                        &source.schema,
+                        &publication.physical_identities,
+                        &schema.schema,
+                        lens,
+                        identity_history,
+                    )
+                    .map_err(Error::InvalidCatalogueUpdate)?;
                 Self::validate_lineage_table_partition(
                     &source.schema,
                     &schema.schema,
@@ -578,6 +599,27 @@ where
                     &publication.new_tables,
                     &publication.dropped_tables,
                 )
+            })
+            .and_then(|()| {
+                let identity_history = self.physical_identity_history_for_candidate(
+                    publication.schema.id,
+                    Some(publication.id),
+                );
+                self.catalogue
+                    .physical_mappings
+                    .get(&publication.lens.source)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "source physical identity manifest missing",
+                    ))?
+                    .identities
+                    .validate_evolution_to_with_history(
+                        &source.schema,
+                        &publication.physical_identities,
+                        &publication.schema.schema,
+                        &publication.lens,
+                        identity_history,
+                    )
+                    .map_err(Error::InvalidCatalogueUpdate)
             });
             if validation.is_err() {
                 self.remove_pending_schema_lineage(next, publication.id)
@@ -1246,6 +1288,10 @@ where
                 "schema lineage publication id mismatch",
             ));
         }
+        publication
+            .physical_identities
+            .validate_for_schema(&publication.schema.schema)
+            .map_err(Error::InvalidCatalogueUpdate)?;
         if publication.schema.id != publication.schema.schema.version_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema id does not match schema payload",
