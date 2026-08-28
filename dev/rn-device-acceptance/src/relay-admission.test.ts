@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { proveAdmittedRelay } from "./relay-admission.ts";
+import {
+  proveAdmittedRelay,
+  proveAuthScopeSwitch,
+  proveLogoutRevocation,
+} from "./relay-admission.ts";
 
 const bytes = (encoded: string) => Uint8Array.from(atob(encoded), (value) => value.charCodeAt(0));
 const admitted = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
@@ -69,4 +73,87 @@ test("a capability that native admission did not install cannot reach Probe", as
     commands.map((command) => command[0]),
     [1],
   );
+});
+
+test("admission proof preserves the primary failure when cleanup also fails", async () => {
+  await assert.rejects(
+    () =>
+      proveAdmittedRelay(
+        {
+          async execute(command) {
+            const decoded = bytes(command);
+            if (decoded[0] === 1) return "AQk=";
+            if (decoded[0] === 2) return "Agc=";
+            if (decoded[0] === 0) throw new Error("ABI probe failed");
+            throw new Error("cleanup failed");
+          },
+        },
+        admitted,
+      ),
+    /ABI probe failed/,
+  );
+});
+
+test("trusted logout removes old capability and aliases before a fresh admission", async () => {
+  const original = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const replacement = Uint8Array.from({ length: 32 }, (_, index) => 64 - index);
+  let revoked = false;
+  const executor = {
+    async execute(command: string) {
+      const decoded = bytes(command);
+      if (decoded[0] === 1) {
+        if (revoked && decoded.slice(3).every((byte, index) => byte === original[index]))
+          throw new Error("revoked capability");
+        return revoked ? "AQo=" : "AQk="; // Opened { relay: 9|10 }
+      }
+      if (decoded[0] === 2) {
+        if (revoked && decoded[1] === 9) throw new Error("removed relay alias");
+        return revoked ? "Agg=" : "Agc="; // Attached { client: 7|8 }
+      }
+      if (decoded[0] === 3 && decoded[1] === 7) return revoked ? "AwA=" : "AwE="; // Closed { false|true }
+      if (decoded[0] === 3 && decoded[1] === 8) return "AwE=";
+      if (decoded[0] === 0) return "AAM="; // Probe { abi: 3 }
+      if (decoded[0] === 4 && decoded[1] === 9) return "AwE=";
+      if (decoded[0] === 4 && decoded[1] === 10) return "AwE=";
+      throw new Error("unexpected command");
+    },
+  };
+  await proveLogoutRevocation(
+    { executor, capability: original },
+    async () => {
+      revoked = true;
+    },
+    async () => ({ executor, capability: replacement }),
+  );
+});
+
+test("trusted auth switching rejects scope A before scope B can attach", async () => {
+  const scopeA = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const scopeB = Uint8Array.from({ length: 32 }, (_, index) => 128 + index);
+  let switched = false;
+  const executor = {
+    async execute(command: string) {
+      const decoded = bytes(command);
+      if (decoded[0] === 1) {
+        if (switched && decoded.slice(3).every((byte, index) => byte === scopeA[index]))
+          throw new Error("scope A was revoked");
+        return switched ? "AQo=" : "AQk=";
+      }
+      if (decoded[0] === 2) {
+        if (switched && decoded[1] === 9) throw new Error("scope A relay was removed");
+        return switched ? "Agg=" : "Agc=";
+      }
+      if (decoded[0] === 3 && decoded[1] === 7) return switched ? "AwA=" : "AwE=";
+      if (decoded[0] === 3 && decoded[1] === 8) return "AwE=";
+      if (decoded[0] === 0) return "AAM=";
+      if (decoded[0] === 4 && (decoded[1] === 9 || decoded[1] === 10)) return "AwE=";
+      throw new Error("unexpected command");
+    },
+  };
+  const replacement = await proveAuthScopeSwitch({ executor, capability: scopeA }, async () => {
+    switched = true;
+    return { executor, capability: scopeB };
+  });
+  assert.equal(switched, true);
+  assert.deepEqual(replacement.capability, scopeB);
 });
