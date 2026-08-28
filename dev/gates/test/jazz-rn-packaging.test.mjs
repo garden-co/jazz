@@ -365,6 +365,37 @@ function assertOpaqueIosRelaySurface(iosRelay) {
   assertExactNames("iOS JazzRelay implementation", exportedMethods, iosRelaySelectors);
 }
 
+function legacyRelayHeaderSearchPaths(podspec) {
+  const stagedHeader = /^\s*relay_header_search_path\s*=\s*"([^"]+)"$/m.exec(podspec)?.[1];
+  assert.equal(
+    stagedHeader,
+    "$(PODS_TARGET_SRCROOT)/native/include",
+    "the staged relay ABI header must have one exact package-relative search path",
+  );
+
+  const initialConfig =
+    /s\.pod_target_xcconfig\s*=\s*\{\s*"HEADER_SEARCH_PATHS"\s*=>\s*relay_header_search_path\s*\}/m.test(
+      podspec,
+    );
+  assert.ok(
+    initialConfig,
+    "the vendored XCFramework branch must install the staged relay header before the legacy branch runs",
+  );
+
+  const legacyAssignment =
+    /current_header_paths\s*=\s*s\.pod_target_xcconfig&\.fetch\("HEADER_SEARCH_PATHS", ""\) \|\| ""[\s\S]*?"HEADER_SEARCH_PATHS"\s*=>\s*"#\{current_header_paths\} \\\"\$\(PODS_ROOT\)\/boost\\\""/m.test(
+      podspec,
+    );
+  assert.ok(
+    legacyAssignment,
+    "the legacy RN branch must extend its existing header paths rather than replace them",
+  );
+
+  // This is the exact value CocoaPods obtains for the staged-artifact path in
+  // the legacy branch: the prior value, followed by the legacy Boost include.
+  return `${stagedHeader} \"$(PODS_ROOT)/boost\"`;
+}
+
 test("jazz-rn publishes an Expo config plugin for a New Architecture development build", () => {
   const original = {
     name: "example",
@@ -471,12 +502,21 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
     ]);
 
   assert.match(podspec, /JazzNativeRelay\.xcframework/);
-  assert.match(podspec, /relay_header_search_path/);
-  assert.match(podspec, /current_header_paths/);
-  assert.match(
-    podspec,
-    /HEADER_SEARCH_PATHS" => "#\{current_header_paths\} \\\"\$\(PODS_ROOT\)\/boost\\\""/,
-    "the legacy RN pod branch must retain the staged relay ABI header path",
+  assert.equal(
+    legacyRelayHeaderSearchPaths(podspec),
+    '$(PODS_TARGET_SRCROOT)/native/include "$(PODS_ROOT)/boost"',
+    "the legacy RN pod branch must retain the exact staged relay ABI header path",
+  );
+  assert.throws(
+    () =>
+      legacyRelayHeaderSearchPaths(
+        podspec.replace(
+          "$(PODS_TARGET_SRCROOT)/native/include",
+          "$(PODS_TARGET_SRCROOT)/native/not-the-relay-header",
+        ),
+      ),
+    /exact package-relative search path/,
+    "the receipt must fail if the legacy branch retains a different staged-header path",
   );
   assert.match(podspec, /https:\/\/github\.com\/garden-co\/jazz\.git/);
   assert.doesNotMatch(podspec, /https:\/\/https:\/\//);

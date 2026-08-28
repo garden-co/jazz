@@ -30,6 +30,7 @@ pre-commit:
         # This package owns its Prettier policy (single quotes); root oxfmt
         # otherwise rewrites it to its incompatible default.
         - "crates/jazz-rn/react-native.config.js"
+        - "crates/jazz-rn/src/**"
       run: pnpm exec oxfmt --ignore-path .oxfmtignore {staged_files}
       stage_fixed: true
     oxlint:

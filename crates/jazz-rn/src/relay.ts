@@ -34,6 +34,11 @@ export async function executeNativeRelayCommand(
 ): Promise<string> {
   const relay = requireNativeRelay();
   const nativeAbi = relay.getAbiVersion();
+  if (nativeAbi === 0) {
+    throw new Error(
+      'Jazz native relay is unavailable: this native build contains only the source fallback (ABI 0), not the Jazz relay artifact. Install a matching native development or release build.'
+    );
+  }
   if (
     nativeAbi < NATIVE_RELAY_ABI.minimum ||
     nativeAbi > NATIVE_RELAY_ABI.maximum
