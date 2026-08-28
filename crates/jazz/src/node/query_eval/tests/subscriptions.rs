@@ -99,6 +99,59 @@ fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
 }
 
 #[test]
+fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_source() {
+    let (_dir, mut node) = open_node();
+    let shape = Query::from("issues")
+        .validate(&node.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let ordinary_direct = node
+        .client_settled_binding_view_key_for_query(
+            &shape,
+            &binding,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        )
+        .expect("durable direct Edge reads use their upstream Global source");
+    let expected_ordinary = BindingViewKey::new(
+        shape.shape_id(),
+        binding.binding_id(),
+        RegisterShapeOptions::default().read_view_key(),
+    );
+    assert_eq!(ordinary_direct, expected_ordinary);
+
+    node.set_relay_authority_session_owner();
+    assert_eq!(
+        node.client_settled_binding_view_key_for_query(
+            &shape,
+            &binding,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        ),
+        Some(expected_ordinary),
+        "marking a worker must not retag ordinary direct Edge settlement",
+    );
+    let relay_authority =
+        node.relay_authority_session_binding_view_key(&shape, &binding, &ReadViewSpec::default());
+    assert_ne!(relay_authority, ordinary_direct);
+    assert_eq!(
+        relay_authority,
+        BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            RegisterShapeOptions {
+                tier: DurabilityTier::Global,
+                binding_source: BindingSource::RelayAuthoritySession,
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
+        ),
+        "only the relay publication path uses the distinct authority ingress key",
+    );
+}
+
+#[test]
 fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
     let schema = owner_policy_schema();
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());

@@ -2455,6 +2455,17 @@ impl WasmDb {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = setRelayAuthoritySessionOwner)]
+    pub fn set_relay_authority_session_owner(&self) -> Result<(), JsValue> {
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.set_relay_authority_session_owner(),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.set_relay_authority_session_owner(),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = connectUpstream)]
     pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();

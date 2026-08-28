@@ -598,6 +598,7 @@ where
                     tier: settled_tier,
                     read_view: opts.read_view.clone(),
                     propagate_upstream: remote_propagate_upstream,
+                    ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
             };

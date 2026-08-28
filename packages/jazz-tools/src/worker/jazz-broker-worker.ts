@@ -210,6 +210,12 @@ async function initialize(context: RuntimeContext): Promise<void> {
       false,
       { selfSignedClientProof: proof },
     );
+    if (!unownedDb?.setRelayAuthoritySessionOwner) {
+      throw new Error(
+        "Browser worker artifact does not support relay authority-session bindings; rebuild the matching Jazz WASM artifact",
+      );
+    }
+    unownedDb.setRelayAuthoritySessionOwner();
     context.runtime = runtime;
     unownedDb = null;
     context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));

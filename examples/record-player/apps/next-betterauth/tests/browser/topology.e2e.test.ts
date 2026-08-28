@@ -1206,12 +1206,12 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 ),
               ]);
 
-              // This is deliberately a policy-scoped exact-id Edge read.
-              // The browser worker must source it from the editor's Global
-              // authorization receipt, not re-evaluate its cached row as a
-              // trusted relay. The revocation check below proves that the
-              // same receipt is not retained after its supporting invitation
-              // is deleted.
+              // This production schema keeps permissions separate from row
+              // declarations. A standalone policy-scoped exact-id Edge read
+              // must forward and settle as a fresh relay authority session;
+              // it must not fall back to Local or reuse ordinary Global.
+              // The revocation check below proves that its Edge membership is
+              // withdrawn even while Local can retain the materialized body.
               const authorizedExactChild = await waitForQuery(
                 editor,
                 app.playlist_entries.where({ id: belowWindowEntryId }),

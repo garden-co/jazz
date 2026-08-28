@@ -578,6 +578,10 @@ pub struct NodeState<S> {
     /// runtime uses `None` because its in-memory preview is not durable until
     /// the dedicated worker acknowledges persistence.
     authored_commit_durability: DurabilityTier,
+    /// This process is the durable browser relay that owns upstream Edge
+    /// authority sessions for a non-durable client. This is process-local
+    /// topology, never schema policy or persisted state.
+    relay_authority_session_owner: bool,
     /// Resident transactions whose Groove persistence receipt has not settled.
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.

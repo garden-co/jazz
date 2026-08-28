@@ -589,6 +589,7 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
+            relay_authority_session_owner: false,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
             ahead_current_keys: FxHashSet::default(),
@@ -705,6 +706,17 @@ where
 
     pub(crate) fn set_non_durable_client(&mut self) {
         self.authored_commit_durability = DurabilityTier::None;
+    }
+
+    /// Mark this process as the durable half of a browser client/worker relay.
+    /// The marker only selects an internal upstream binding identity for Edge
+    /// coverage; it is neither persisted nor an authorization policy input.
+    pub(crate) fn set_relay_authority_session_owner(&mut self) {
+        self.relay_authority_session_owner = true;
+    }
+
+    pub(crate) fn is_relay_authority_session_owner(&self) -> bool {
+        self.relay_authority_session_owner
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.

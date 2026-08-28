@@ -48,10 +48,11 @@ use super::query_engine::{
 };
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
-    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
-    ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
-    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
+    BindingSource, BindingViewKey, KnownStateCompleteness, KnownStateDeclaration,
+    PermissionAdviceAction, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec,
+    RegisterShapeOptions, RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry,
+    ResultRowLayer, RowVersionRef, RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe,
+    SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -1476,35 +1477,16 @@ where
             .map(|view| view.key)
     }
 
-    fn is_policy_scoped_exact_id_query(
-        &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-    ) -> Result<bool, Error> {
-        let table = self.table_in_schema(&shape.query().table, shape.schema_version())?;
-        Ok(table.has_any_policy()
-            && root_literal_equalities(shape.query(), binding)?.contains_key("id"))
-    }
-
-    /// Decide whether a relay's Edge child must be evaluated from its Global
-    /// membership receipt rather than from the relay's raw local rows.
-    ///
-    /// Nonzero windows need this because their absolute offset is otherwise
-    /// applied twice. A policy-scoped exact-id read needs it for the inverse
-    /// reason: its local row body can outlive the Global authorization receipt
-    /// that made the row visible. Without a matching receipt, re-evaluating
-    /// that cached row as the relay's trusted identity would resurrect access
-    /// after revocation. Ordinary zero-offset Edge reads remain local so an
-    /// unfated Edge member is still publishable before upstream settlement.
+    /// Every relay Edge child consumes a relay-owned upstream authority
+    /// session. It must never seed membership from the relay's Local overlay:
+    /// a cached exact row can otherwise outlive the authority update that
+    /// revoked it.
     pub(crate) fn relay_edge_query_requires_authority_source(
         &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
+        _shape: &ValidatedQuery,
+        _binding: &Binding,
     ) -> Result<bool, Error> {
-        if shape.query().offset != 0 {
-            return Ok(true);
-        }
-        self.is_policy_scoped_exact_id_query(shape, binding)
+        Ok(self.is_relay_authority_session_owner())
     }
 
     fn client_settled_binding_view_for_query(
@@ -1534,8 +1516,10 @@ where
             binding.binding_id(),
             RegisterShapeOptions {
                 // A non-durable browser-side runtime consumes the worker
-                // relay's Edge handoff rather than the worker's Global
-                // upstream coverage.
+                // relay's Edge handoff. Ordinary durable clients retain the
+                // Global source their upstream coverage actually populated.
+                // The relay-only authority source is selected explicitly by
+                // `open_seeded_relay_edge_subscription_view` below.
                 tier: if self.authored_commit_durability == DurabilityTier::None {
                     settled_tier
                 } else {
@@ -3000,12 +2984,8 @@ where
         ),
         Error,
     > {
-        let settled_binding_view = self.client_settled_binding_view_key_for_query(
-            shape,
-            binding,
-            DurabilityTier::Edge,
-            read_view,
-        );
+        let settled_binding_view =
+            Some(self.relay_authority_session_binding_view_key(shape, binding, read_view));
         self.open_seeded_maintained_subscription_view_in_authorization_mode(
             shape,
             binding,
@@ -3017,6 +2997,29 @@ where
             PreparedClaimBindingMode::Strict,
         )
         .await
+    }
+
+    /// The non-public source identity owned by a durable browser relay for a
+    /// downstream Edge handoff.  Only the relay publication path asks for
+    /// this key; ordinary client reads continue using their normal upstream
+    /// Global/Edge coverage identity.
+    pub(crate) fn relay_authority_session_binding_view_key(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        read_view: &ReadViewSpec,
+    ) -> BindingViewKey {
+        BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            RegisterShapeOptions {
+                tier: DurabilityTier::Global,
+                read_view: read_view.clone(),
+                binding_source: BindingSource::RelayAuthoritySession,
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
+        )
     }
 
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an

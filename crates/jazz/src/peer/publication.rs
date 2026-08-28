@@ -898,10 +898,8 @@ impl PeerState {
             && node.relay_edge_query_requires_authority_source(shape, binding)?;
         let opened = match purpose {
             // A local relay's Edge child is the browser half of a durable
-            // worker receipt. Selected queries must reuse the worker's
-            // authority-selected Global membership: a window would otherwise
-            // apply its offset twice, and a policy-scoped exact-id read could
-            // otherwise re-authorize a revoked cached row as SYSTEM.
+            // worker receipt. Every Edge query consumes its matching
+            // relay-owned authority session rather than Local rows.
             RehydratePurpose::Query if relay_edge_requires_authority_source => {
                 node.open_seeded_relay_edge_subscription_view(shape, binding, self.identity(), read_view)
                     .await
@@ -926,18 +924,8 @@ impl PeerState {
                 )
                 .await,
         };
-        let source_binding_view = relay_edge_requires_authority_source.then(|| {
-                crate::protocol::BindingViewKey::new(
-                    shape.shape_id(),
-                    binding.binding_id(),
-                    RegisterShapeOptions {
-                        tier: DurabilityTier::Global,
-                        read_view: read_view.clone(),
-                        ..RegisterShapeOptions::default()
-                    }
-                    .read_view_key(),
-                )
-            });
+        let source_binding_view = relay_edge_requires_authority_source
+            .then(|| node.relay_authority_session_binding_view_key(shape, binding, read_view));
         let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
             match opened {
             Ok(opened) => opened,

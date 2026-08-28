@@ -188,6 +188,7 @@ type NativeDb = {
     opts: unknown,
   ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
+  setRelayAuthoritySessionOwner?(): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
@@ -1763,9 +1764,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // so. The settled membership from the worker is the authorization
     // boundary; lowering it to Local here would re-scan cached rows that a
     // fresh remote receipt had just removed.
-    const exactEdgeAuthorityRead = this.isPolicyScopedExactEdgeRead(coreQueryJson, tier);
-    const authorityTier = exactEdgeAuthorityRead ? "global" : tier;
-    const opts = readOptions(authorityTier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
@@ -1787,7 +1786,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
-    const attachment = await this.attachQueryIfNeeded(authorityTier, optionsJson, query, session);
+    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
     if (this.closed) return [];
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
@@ -1823,13 +1822,8 @@ export class NativeRuntimeAdapter implements Runtime {
       const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
       let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
-      if (
-        !exactEdgeAuthorityRead &&
-        !pendingTx &&
-        (tier === "edge" || tier === "global") &&
-        rowStates.length > 0
-      ) {
-        await this.refreshRowsFromEdge(session, rowStates);
+      if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
+        await this.refreshRowsFromEdge(session, query, opts);
         if (this.closed) return [];
         rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
         rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
@@ -2427,37 +2421,15 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private async refreshRowsFromEdge(
     session: RuntimeSession | null,
-    rows: RowState[],
+    query: PreparedQuery,
+    opts: unknown,
   ): Promise<void> {
-    if (!this.hasUpstream() || rows.length === 0) return;
-    const seen = new Set<string>();
-    for (const row of rows) {
-      const key = rowKey(row.table, row.id);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const queryJson = JSON.stringify({
-        table: row.table,
-        conditions: [{ column: "id", op: "eq", value: row.id }],
-        array_subqueries: [],
-      });
-      const query = this.prepareQuery(queryJson);
-      let authorityAttachment: unknown;
-      try {
-        // Row-body refreshes turn an already-authorized Edge result into an
-        // exact-id request. A browser relay cannot use its local materialized
-        // row as that request's authority: first acquire its matching Global
-        // receipt, then hydrate from that receipt while the broad Edge query
-        // continues to own the result membership returned to the caller.
-        authorityAttachment = await this.attachQueryIfNeeded("global", null, query, session);
-        if (this.closed) return;
-        const opts = readOptions("global", false, null);
-        await this.readRowsForHostAsync(query, opts, session?.identity);
-      } finally {
-        if (authorityAttachment !== undefined && !this.closed) {
-          this.db.detachQuery?.(authorityAttachment);
-        }
-      }
-    }
+    if (!this.hasUpstream()) return;
+    // The outer Edge attachment owns both membership and concrete
+    // occurrences. Reusing that prepared query materializes only its
+    // delivered versions; a nested exact-id request creates a second scope
+    // and can circularly await its own authority receipt.
+    await this.readRowsForHostAsync(query, opts, session?.identity);
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
@@ -2473,29 +2445,6 @@ export class NativeRuntimeAdapter implements Runtime {
       this.preparedQueries.set(key, query);
     }
     return query;
-  }
-
-  /**
-   * A browser relay may only answer a policy-scoped exact Edge request from
-   * the matching authority membership. Route that one-shot through Global
-   * coverage directly: opening an Edge child first would await the very
-   * Global receipt that only this request can schedule.
-   */
-  private isPolicyScopedExactEdgeRead(queryJson: string, tier: string | null | undefined): boolean {
-    if (tier !== "edge") return false;
-    try {
-      const query = JSON.parse(queryJson) as {
-        table?: unknown;
-        conditions?: Array<{ column?: unknown; op?: unknown }>;
-      };
-      if (typeof query.table !== "string" || !this.table(query.table).policies) return false;
-      return (
-        query.conditions?.some((condition) => condition.column === "id" && condition.op === "eq") ??
-        false
-      );
-    } catch {
-      return false;
-    }
   }
 
   private async attachQueryIfNeeded(

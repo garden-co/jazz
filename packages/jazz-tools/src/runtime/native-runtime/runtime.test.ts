@@ -2497,7 +2497,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(detached).toEqual([]);
   });
 
-  it("hydrates broad Edge members through an exact Global receipt, never a local fallback", async () => {
+  it("hydrates broad Edge members through its attached Edge receipt, never a nested exact read", async () => {
     const attachments: unknown[] = [];
     const readOptions: unknown[] = [];
     const detached: unknown[] = [];
@@ -2544,20 +2544,14 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
 
-    expect(attachments).toEqual([{ tier: "edge" }, { tier: "global" }]);
-    expect(readOptions).toEqual([{ tier: "edge" }, { tier: "global" }, { tier: "edge" }]);
-    expect(detached).toEqual([{ tier: "global" }, { tier: "edge" }]);
+    expect(attachments).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "edge" }, { tier: "edge" }, { tier: "edge" }]);
+    expect(detached).toEqual([{ tier: "edge" }]);
   });
 
-  it("opens a policy-scoped exact Edge read from its Global authority receipt", async () => {
+  it("forwards a standalone exact Edge read as a fresh Edge authority request", async () => {
     const attachments: unknown[] = [];
     const readOptions: unknown[] = [];
-    const policySchema: WasmSchema = {
-      todos: {
-        ...testSchema.todos,
-        policies: { select: { using: { type: "True" } } },
-      },
-    };
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -2580,7 +2574,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           throw new Error("not used");
         },
       } as never,
-      policySchema,
+      testSchema,
       new Uint8Array(16),
       TEST_RUNTIME_AUTHOR,
       1,
@@ -2599,8 +2593,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     ).resolves.toEqual([]);
 
-    expect(attachments).toEqual([{ tier: "global" }]);
-    expect(readOptions).toEqual([{ tier: "global" }]);
+    expect(attachments).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "edge" }]);
   });
 
   it("ignores the removed propagate read option", async () => {

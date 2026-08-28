@@ -1599,10 +1599,11 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     }
 }
 
-/// A fresh browser main thread receives the worker's authority-owned reset as
-/// a complete relation snapshot. This is intentionally an internal topology
-/// test: only the public `Db` facade can model the non-durable main/runtime
-/// worker/core boundary used by the browser bridge.
+/// A fresh (including reopened) browser main thread receives the worker's
+/// authority-owned reset as a complete relation snapshot in the same relay
+/// turn that applies it. This is intentionally an internal topology test:
+/// only the public `Db` facade can model the non-durable main/runtime worker/
+/// core boundary used by the browser bridge.
 #[test]
 fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let schema = included_relation_schema();
@@ -1611,6 +1612,9 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let worker = open_db(0x2f, alice, &schema);
     let core = open_core(0x3f, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner();
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
 
     let seeder = open_db(0x20, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
@@ -1669,15 +1673,26 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
         "fresh remote coverage must withhold its provisional local snapshot"
     );
 
+    let mut authority_update_scheduled = false;
     for _ in 0..4 {
         main_thread.tick().expect("register worker coverage");
         worker.tick().expect("forward authority coverage");
         core.tick().expect("serve authority relation snapshot");
+        let schedules_before = scheduler.calls.get();
         worker.tick().expect("relay authority relation snapshot");
+        authority_update_scheduled |= scheduler.calls.get() > schedules_before;
         main_thread
             .tick()
             .expect("apply authority relation snapshot");
     }
+
+    assert!(
+        authority_update_scheduled,
+        "applying the authority view must schedule the relay post-receive serve pass",
+    );
+    main_thread
+        .tick()
+        .expect("apply relayed authority relation snapshot");
 
     let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
     assert!(
