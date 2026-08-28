@@ -194,6 +194,7 @@ describe("IndexedDbPageStore", () => {
       undefined,
       { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 99 },
       { ...INDEXEDDB_STORAGE_MANIFEST, pageChecksum: "none" },
+      { ...INDEXEDDB_STORAGE_MANIFEST, futureDecodeParameter: "unknown" },
     ]) {
       const name = databaseName();
       await installRawEpochOneFixture(name, manifest);
