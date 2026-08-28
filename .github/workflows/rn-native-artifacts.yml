@@ -50,7 +50,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-cache: "true"
-          rust-cache-key: rn-artifacts-android-${{ env.JAZZ_RN_CARGO_NDK_VERSION }}-ndk-27.1.12297006-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/jazz/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
+          rust-cache-key: rn-artifacts-android-${{ env.JAZZ_RN_CARGO_NDK_VERSION }}-ndk-27.1.12297006-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/idb-tree/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
           rust-cache-bin: "true"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -89,7 +89,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-cache: "true"
-          rust-cache-key: rn-artifacts-ios-macos-15-xcode-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/jazz/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
+          rust-cache-key: rn-artifacts-ios-macos-15-xcode-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/idb-tree/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1

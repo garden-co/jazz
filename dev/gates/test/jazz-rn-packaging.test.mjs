@@ -906,14 +906,29 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       ),
     )?.[1],
   );
-  const nativeSourceFingerprint = createHash("sha256")
-    .update(execFileSync("git", [
-      "ls-tree", "-r", "--full-tree", "HEAD", "--",
-      "Cargo.lock", "Cargo.toml", "crates/groove", "crates/jazz",
-      "crates/jazz-native-relay", "crates/jazz-storage-sqlite",
+  const nativeSourceInventory = execFileSync(
+    "git",
+    [
+      "ls-tree",
+      "-r",
+      "--full-tree",
+      "HEAD",
+      "--",
+      "Cargo.lock",
+      "Cargo.toml",
+      "crates/groove",
+      "crates/idb-tree",
+      "crates/jazz",
+      "crates/jazz-compression",
+      "crates/jazz-native-relay",
+      "crates/jazz-storage-sqlite",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
-    ], { cwd: sourceRoot, encoding: "utf8" }))
-    .digest("hex");
+    ],
+    { cwd: sourceRoot, encoding: "utf8" },
+  );
+  const fingerprintNativeSource = (inventory) =>
+    createHash("sha256").update(inventory).digest("hex");
+  const nativeSourceFingerprint = fingerprintNativeSource(nativeSourceInventory);
   const verifier = new URL(
     "../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs",
     import.meta.url,
@@ -1013,19 +1028,38 @@ ${
       },
     );
 
-    await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
-      toolchain: { cargoNdk: "4.1.2" },
-      nativeSourceFingerprint: "0".repeat(64),
-    });
-    assert.throws(
-      () => execFileSync(
-        process.execPath,
-        [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
-        { env: environment, stdio: "pipe" },
-      ),
-      /native source fingerprint/,
-      "a sealed archive built from a different native source fingerprint is not releasable",
-    );
+    for (const transitiveInput of ["crates/idb-tree/", "crates/jazz-compression/"]) {
+      const entry = nativeSourceInventory
+        .split("\n")
+        .find((line) => line.includes(transitiveInput));
+      assert.ok(entry, `native source inventory must contain ${transitiveInput}`);
+      const staleFingerprint = fingerprintNativeSource(
+        nativeSourceInventory.replace(entry, `${entry} planted-change`),
+      );
+      assert.notEqual(
+        staleFingerprint,
+        nativeSourceFingerprint,
+        `a ${transitiveInput} source change must change the native fingerprint`,
+      );
+      await writeManifest(
+        androidRoot,
+        join(packageRoot, "android/jazz-native-relay.manifest.json"),
+        {
+          toolchain: { cargoNdk: "4.1.2" },
+          nativeSourceFingerprint: staleFingerprint,
+        },
+      );
+      assert.throws(
+        () =>
+          execFileSync(
+            process.execPath,
+            [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+            { env: environment, stdio: "pipe" },
+          ),
+        /native source fingerprint/,
+        `a sealed archive built before a ${transitiveInput} source change is not releasable`,
+      );
+    }
     await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
       toolchain: { cargoNdk: "4.1.2" },
     });
@@ -1268,6 +1302,21 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(verifier, /JAZZ_NATIVE_RELAY_SOURCE_REVISION/);
   assert.match(verifier, /AvailableLibraries/);
   assert.match(verifier, /requiredRoles/);
+  for (const nativeInput of [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/groove",
+    "crates/idb-tree",
+    "crates/jazz",
+    "crates/jazz-compression",
+    "crates/jazz-native-relay",
+    "crates/jazz-storage-sqlite",
+  ]) {
+    assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);
+    assert.ok(verifier.includes(nativeInput), `artifact verifier omits ${nativeInput}`);
+    assert.ok(packageBuild.includes(nativeInput), `release cache key omits ${nativeInput}`);
+    assert.ok(rnWorkflow.includes(nativeInput), `native workflow receipt omits ${nativeInput}`);
+  }
   assert.match(packageBuild, /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/);
   assert.match(packageBuild, /--package-root/);
   assert.match(verifier, /relay artifact inventory differs from its manifest/);

@@ -26,8 +26,8 @@ const source = execFileSync(
   "git",
   [
     "-C", root, "ls-tree", "-r", "--full-tree", "HEAD", "--",
-    "Cargo.lock", "Cargo.toml", "crates/groove", "crates/jazz",
-    "crates/jazz-native-relay", "crates/jazz-storage-sqlite",
+    "Cargo.lock", "Cargo.toml", "crates/groove", "crates/idb-tree",
+    "crates/jazz", "crates/jazz-compression", "crates/jazz-native-relay", "crates/jazz-storage-sqlite",
     "crates/jazz-rn/scripts/build-relay-artifacts.sh",
   ],
 );
