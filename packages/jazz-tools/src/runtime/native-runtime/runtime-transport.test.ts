@@ -935,10 +935,7 @@ function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {
-    authority.bytes(
-      Uint8Array.from({ length: 16 }, () => 0x5e),
-      false,
-    );
+    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e));
     authority.u64(epoch);
   });
   return writer.finish();

@@ -101,6 +101,13 @@ silently leave a suffix for its caller (`INV-WIRE-1`).
 The TypeScript WebSocket carrier MUST consume the entire outer batch and the
 entire known `Hello`, `Message`, or `Error` frame whenever it parses or
 classifies that frame; reading only the enum tag is not frame acceptance.
+Within `WireHello.authority`, `WireAuthorityEndpoint.node` is the postcard
+sequence representation of `NodeUuid`: a canonical length prefix of `16`
+followed by exactly sixteen UUID bytes, then the postcard `u64` authority
+epoch. It is not a bare fixed-width UUID. A carrier MUST consume this complete
+optional endpoint before applying the exact-frame EOF check. Omitting the
+sequence length, accepting a valid Hello plus a suffix, or treating a genuine
+endpoint byte as a suffix is malformed framing, not version compatibility.
 
 Postcard enum ordinals are wire data. The v14 baseline freezes these permanent
 discriminants (decimal):
@@ -141,12 +148,16 @@ then verifies that digest before decompression or semantic decode. The resource
 limits and expiry/deduplication rules are normative in
 `SPEC/13_transport_message_fragmentation.md`.
 
-The v14 frozen corpus is `crates/jazz/fixtures/wire_message_frames.json`:
+The v14 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
+`crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
 reads every transport envelope through its production postcard reader, rejects
 a suffix on every corpus frame, and round-trips each through the exact batch
-carrier. Its
+carrier. The Hello corpus crosses every frozen peer role with both absent and
+present authority endpoints and one- and multi-byte feature masks; supported
+Core cases additionally pass through the production TypeScript WebSocket
+negotiation path. Its
 binding companion, `binding_codec_golden.json`, covers NAPI/WASM's shared
 Rust-produced relation-snapshot and subscription-delta byte ABI, consumed by
 the production TypeScript decoder. These corpora are compatibility evidence,

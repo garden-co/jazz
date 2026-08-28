@@ -28,14 +28,21 @@ use jazz::tools::{
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    FEATURE_AUTHORIZATION_SCOPE_RECEIPTS, FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+    FEATURE_AUXILIARY_CHUNKS, FEATURE_MESSAGE_FRAGMENTATION, FEATURE_PAYLOAD_LZ4,
+    FEATURE_PAYLOAD_ZSTD, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
+    WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, WireHello, WirePeerRole, decode_sync_message,
+    encode_frame, encode_sync_message,
 };
 use serde::{Deserialize, Serialize};
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/wire_message_frames.json"
+);
+const HELLO_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/wire_hello_frames.json"
 );
 const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -66,6 +73,26 @@ struct Fixture {
     frame_hex: String,
     frame_base64: String,
     payload_hex: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HelloManifest {
+    fixture_set: &'static str,
+    codec: &'static str,
+    fixtures: Vec<HelloFixture>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HelloFixture {
+    name: &'static str,
+    min_protocol_version: u16,
+    max_protocol_version: u16,
+    features: u64,
+    role: u64,
+    authority_node_hex: Option<String>,
+    authority_epoch: Option<u64>,
+    frame_hex: String,
+    frame_base64: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -622,6 +649,150 @@ fn fixture_manifest() -> Manifest {
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
         fixtures,
+    }
+}
+
+fn hello_fixture_manifest() -> HelloManifest {
+    let cases = [
+        ("client_without_authority", WirePeerRole::Client, 0, false),
+        (
+            "client_with_authority",
+            WirePeerRole::Client,
+            FEATURE_SYNC_MESSAGE_PAYLOAD,
+            true,
+        ),
+        (
+            "core_without_authority",
+            WirePeerRole::Core,
+            FEATURE_STRUCTURED_ERRORS,
+            false,
+        ),
+        (
+            "core_with_authority",
+            WirePeerRole::Core,
+            FEATURE_SYNC_MESSAGE_PAYLOAD
+                | FEATURE_STRUCTURED_ERRORS
+                | FEATURE_PAYLOAD_ZSTD
+                | FEATURE_MESSAGE_FRAGMENTATION
+                | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | FEATURE_AUTHORIZATION_SCOPE_VIEWS
+                | FEATURE_AUXILIARY_CHUNKS,
+            true,
+        ),
+        (
+            "edge_without_authority",
+            WirePeerRole::Edge,
+            FEATURE_MESSAGE_FRAGMENTATION,
+            false,
+        ),
+        (
+            "edge_with_authority",
+            WirePeerRole::Edge,
+            FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+            true,
+        ),
+        (
+            "relay_without_authority",
+            WirePeerRole::Relay,
+            FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+            false,
+        ),
+        (
+            "relay_with_authority",
+            WirePeerRole::Relay,
+            FEATURE_AUXILIARY_CHUNKS | FEATURE_PAYLOAD_LZ4,
+            true,
+        ),
+    ];
+    let authority_node = NodeUuid::from_bytes([0x5e; 16]);
+    let authority_epoch = 300;
+    let fixtures = cases
+        .into_iter()
+        .map(|(name, role, features, with_authority)| {
+            let mut hello = WireHello::current(role, features);
+            if with_authority {
+                hello = hello.with_authority(authority_node, authority_epoch);
+            }
+            let frame_bytes =
+                encode_frame(&WireFrame::Hello(hello)).expect("hello fixture frame encodes");
+            HelloFixture {
+                name,
+                min_protocol_version: WIRE_PROTOCOL_VERSION,
+                max_protocol_version: WIRE_PROTOCOL_VERSION,
+                features,
+                role: match role {
+                    WirePeerRole::Client => 0,
+                    WirePeerRole::Core => 1,
+                    WirePeerRole::Edge => 2,
+                    WirePeerRole::Relay => 3,
+                },
+                authority_node_hex: with_authority.then(|| hex(authority_node.as_bytes())),
+                authority_epoch: with_authority.then_some(authority_epoch),
+                frame_hex: hex(&frame_bytes),
+                frame_base64: base64(&frame_bytes),
+            }
+        })
+        .collect();
+
+    HelloManifest {
+        fixture_set: "jazz-wire-hello-frames-v14",
+        codec: "postcard WireFrame::Hello(WireHello)",
+        fixtures,
+    }
+}
+
+#[test]
+fn wire_hello_frame_fixtures_are_current() {
+    let actual = serde_json::to_string_pretty(&hello_fixture_manifest())
+        .expect("hello fixture manifest serializes")
+        + "\n";
+
+    if std::env::var_os("JAZZ_UPDATE_WIRE_FIXTURES").is_some() {
+        std::fs::write(HELLO_FIXTURE_PATH, actual).expect("hello fixture manifest writes");
+        return;
+    }
+
+    let expected = include_str!("../fixtures/wire_hello_frames.json");
+    assert_eq!(actual, expected, "wire Hello fixtures changed");
+}
+
+#[test]
+fn wire_hello_frame_fixtures_decode_exactly() {
+    let fixture_manifest: HelloManifest =
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
+            .expect("wire Hello fixture manifest deserializes");
+    for fixture in fixture_manifest.fixtures {
+        let frame_bytes = parse_hex(&fixture.frame_hex);
+        assert_eq!(base64(&frame_bytes), fixture.frame_base64);
+        let WireFrame::Hello(hello) =
+            jazz::wire::decode_frame(&frame_bytes).expect("hello fixture frame decodes")
+        else {
+            panic!("expected Hello fixture {}", fixture.name);
+        };
+        assert_eq!(hello.min_protocol_version, fixture.min_protocol_version);
+        assert_eq!(hello.max_protocol_version, fixture.max_protocol_version);
+        assert_eq!(hello.features, fixture.features);
+        assert_eq!(hello.role as u64, fixture.role);
+        assert_eq!(
+            hello
+                .authority
+                .map(|authority| hex(authority.node.as_bytes())),
+            fixture.authority_node_hex
+        );
+        assert_eq!(
+            hello.authority.map(|authority| authority.epoch),
+            fixture.authority_epoch
+        );
+        assert_eq!(
+            encode_frame(&WireFrame::Hello(hello)).expect("Hello fixture frame re-encodes"),
+            frame_bytes,
+            "{}: semantic Hello re-encodes to its frozen exact bytes",
+            fixture.name
+        );
+
+        let mut suffixed = frame_bytes;
+        suffixed.push(0);
+        assert!(jazz::wire::decode_frame(&suffixed).is_err());
     }
 }
 
