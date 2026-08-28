@@ -514,7 +514,7 @@ fn rocksdb_manifest() -> Result<StorageEpochManifest, Error> {
     StorageEpochManifest::epoch_1(
         "rocksdb",
         3,
-        ["groove.ordered-kv.v1"],
+        StorageEpochManifest::epoch_1_authoritative_codecs(),
         BTreeMap::from([
             (
                 "internal-cf".to_owned(),

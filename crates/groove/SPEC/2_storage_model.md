@@ -116,7 +116,11 @@ ordinary ordered-KV data plane. Before creating a table, column family, page,
 or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
-IDs, and sorted decode-relevant adapter parameters. Missing, truncated,
+IDs, and sorted decode-relevant adapter parameters. The epoch-1 payload registry
+is `groove.ordered-kv.v1`; the manifest envelope is the root boundary rather
+than an entry in its own registry. Adding an authoritative opaque byte payload
+requires a stable ID, a corpus entry, and a new epoch rather than an
+adapter-local postcard/`Bytes` exception. Missing, truncated,
 noncanonical, corrupt, unknown, or inconsistent manifests fail closed before
 any mutation (`INV-STORAGE-31`).
 

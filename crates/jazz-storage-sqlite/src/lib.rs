@@ -444,7 +444,7 @@ fn sqlite_manifest() -> Result<StorageEpochManifest, Error> {
     StorageEpochManifest::epoch_1(
         "sqlite",
         1,
-        ["groove.ordered-kv.v1"],
+        StorageEpochManifest::epoch_1_authoritative_codecs(),
         BTreeMap::from([
             (
                 "application-id".to_owned(),
