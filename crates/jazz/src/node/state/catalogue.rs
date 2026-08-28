@@ -70,6 +70,12 @@ self.database.finish_persistence(persisted)?;
             .get_mut(&schema_version)
             .ok_or(Error::InvalidStoredValue("physical mapping missing"))?;
         for table in &schema.tables {
+            let table_identities = mapping
+                .identities
+                .tables
+                .get(&table.name)
+                .ok_or(Error::InvalidStoredValue("physical table identities missing"))?
+                .clone();
             let Some(physical) = mapping.tables.get_mut(&table.name) else {
                 continue;
             };
@@ -80,17 +86,11 @@ self.database.finish_persistence(persisted)?;
                 let Some(id) = physical.columns.get(&column.name).copied() else {
                     continue;
                 };
-                physical.scalar_enum_cases.entry(id).or_insert_with(|| {
-                    enum_schema
-                        .variants
-                        .iter()
-                        .enumerate()
-                        .map(|(ordinal, _)| GlobalScalarEnumCaseId {
-                            introducing_schema: schema_version,
-                            introducing_ordinal: ordinal as u8,
-                        })
-                        .collect()
-                });
+                let ids = &table_identities.columns[&column.name].enum_variants["root"];
+                if ids.len() != enum_schema.variants.len() {
+                    return Err(Error::InvalidStoredValue("scalar enum authority identity width mismatch"));
+                }
+                install_enum_case_ids(physical.scalar_enum_cases.entry(id).or_default(), ids, schema_version)?;
             }
             for column in &table.columns {
                 let records::ValueType::Enum(enum_schema) = &column.column_type else {
@@ -99,28 +99,27 @@ self.database.finish_persistence(persisted)?;
                 let Some(id) = physical.columns.get(&column.name).copied() else {
                     continue;
                 };
-                physical.payload_enum_cases.entry(id).or_insert_with(|| {
-                    enum_schema
-                        .cases
-                        .iter()
-                        .enumerate()
-                        .map(|(ordinal, _)| GlobalScalarEnumCaseId {
-                            introducing_schema: schema_version,
-                            introducing_ordinal: ordinal as u8,
-                        })
-                        .collect()
-                });
+                let identities = &table_identities.columns[&column.name].enum_variants;
+                let ids = &identities["root"];
+                if ids.len() != enum_schema.cases.len() {
+                    return Err(Error::InvalidStoredValue("payload enum authority identity width mismatch"));
+                }
+                install_enum_case_ids(physical.payload_enum_cases.entry(id).or_default(), ids, schema_version)?;
                 let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
                 hydrate_nested_scalar_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested,
                 )?;
                 let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
                 hydrate_nested_payload_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested_payload,
                 )?;
@@ -133,16 +132,21 @@ self.database.finish_persistence(persisted)?;
                     continue;
                 };
                 let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
+                let identities = &table_identities.columns[&column.name].enum_variants;
                 hydrate_nested_scalar_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested,
                 )?;
                 let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
                 hydrate_nested_payload_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested_payload,
                 )?;
@@ -389,6 +393,12 @@ self.database.finish_persistence(persisted)?;
                 .ok_or(Error::InvalidStoredValue(
                     "target physical table schema missing",
                 ))?;
+            let target_table_identities = target_mapping
+                .identities
+                .tables
+                .get(&table_lens.target_table)
+                .ok_or(Error::InvalidStoredValue("target physical table identities missing"))?
+                .clone();
             let mut columns = source_table
                 .columns
                 .iter()
@@ -474,14 +484,8 @@ self.database.finish_persistence(persisted)?;
                                 "scalar enum registry changed non-additively",
                             ));
                         }
-                        for ordinal in cases.len()..enum_schema.variants.len() {
-                            cases.push(GlobalScalarEnumCaseId {
-                                introducing_schema: target_schema_version.id,
-                                introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
-                                    Error::InvalidStoredValue("scalar enum ordinal exhausted")
-                                })?,
-                            });
-                        }
+                        let ids = &target_table_identities.columns[&column.name].enum_variants["root"];
+                        install_enum_case_ids(&mut cases, ids, target_schema_version.id)?;
                         scalar_enum_cases.insert(id, cases);
                     }
                     records::ValueType::Enum(enum_schema) => {
@@ -495,14 +499,8 @@ self.database.finish_persistence(persisted)?;
                                 "payload enum registry changed non-additively",
                             ));
                         }
-                        for ordinal in cases.len()..enum_schema.cases.len() {
-                            cases.push(GlobalScalarEnumCaseId {
-                                introducing_schema: target_schema_version.id,
-                                introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
-                                    Error::InvalidStoredValue("payload enum ordinal exhausted")
-                                })?,
-                            });
-                        }
+                        let ids = &target_table_identities.columns[&column.name].enum_variants["root"];
+                        install_enum_case_ids(&mut cases, ids, target_schema_version.id)?;
                         payload_enum_cases.insert(id, cases);
                     }
                     _ => {}
@@ -515,16 +513,21 @@ self.database.finish_persistence(persisted)?;
                     "nested enum physical column missing",
                 ))?;
                 let nested = nested_scalar_enum_cases.entry(id).or_default();
-                reconcile_nested_scalar_enum_cases(
+                let identities = &target_table_identities.columns[&column.name].enum_variants;
+                hydrate_nested_scalar_enum_cases(
                     &column.column_type,
+                    identities,
                     target_schema_version.id,
+                    "root",
                     "root",
                     nested,
                 )?;
                 let nested_payload = nested_payload_enum_cases.entry(id).or_default();
-                reconcile_nested_payload_enum_cases(
+                hydrate_nested_payload_enum_cases(
                     &column.column_type,
+                    identities,
                     target_schema_version.id,
+                    "root",
                     "root",
                     nested_payload,
                 )?;

@@ -119,6 +119,10 @@ introduction. Concurrent siblings have no ancestral order, so a target schema's
 authored view defines their presentation order. Neither that order nor the
 authored ordinal is identity. It is optimized into a node-local registry tag only
 after the permanent UUID has been resolved.
+The durable binding also records introducing schema/position solely as ordering
+provenance for the append-only physical tag vector. Changing that provenance
+cannot create a distinct case: equality, collision checks, descriptor spelling,
+and recursive payload paths use only the authority UUID.
 
 Payload-enum projection preserves the selected payload record while remapping
 its case tag. Same-name cases from independent schemas are distinct identities;

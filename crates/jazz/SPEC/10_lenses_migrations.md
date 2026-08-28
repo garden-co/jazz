@@ -301,7 +301,10 @@ dependent rows can be decoded, Jazz rejects nil UUIDs, duplicate UUIDs, missing
 or extra descriptor coverage, and any mapped identity that changes across an
 evolution. Durable enum registry vectors bind local tags to permanent enum
 variant UUIDs; authored ordinals select entries in a schema but do not identify
-them. There is intentionally no legacy JSON reader or in-place migration for
+them. A binding may retain introducing schema/position solely as ordering and
+diagnostic provenance so an established append-only local tag prefix survives
+reopen; UUID alone defines equality, descriptor spelling, recursive parent path,
+collision detection, and cross-node identity. There is intentionally no legacy JSON reader or in-place migration for
 this pre-freeze format.
 
 This freeze covers authority allocation, publication/snapshot transport,

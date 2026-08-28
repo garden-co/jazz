@@ -193,6 +193,9 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
         open_node_with_schema(node(0x61), evolved.schema.clone());
     let local_alias = receiver.catalogue.current_schema_version_alias.unwrap();
     let local_mapping = receiver.catalogue.physical_mappings[&evolved.id].clone();
+    let authority_identities = authority.catalogue.physical_mappings[&evolved.id]
+        .identities
+        .clone();
     let (tx_id, _) = receiver
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x62), 10).cells(BTreeMap::from([
@@ -209,7 +212,10 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
         receiver.catalogue.current_schema_version_alias,
         Some(local_alias)
     );
-    assert_eq!(receiver.catalogue.physical_mappings[&evolved.id], local_mapping);
+    let received_mapping = &receiver.catalogue.physical_mappings[&evolved.id];
+    assert_eq!(received_mapping.tables, local_mapping.tables);
+    assert_eq!(received_mapping.identities, authority_identities);
+    assert_ne!(received_mapping.identities, local_mapping.identities);
     let stored = receiver.query_versions_for_tx(tx_id).unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].schema_version_alias(), local_alias);

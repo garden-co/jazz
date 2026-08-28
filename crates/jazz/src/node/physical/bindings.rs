@@ -242,9 +242,9 @@ fn validate_enum_cases(
 ) -> Result<(), Error> {
     let mut seen = BTreeSet::new();
     for case in cases {
-        if !aliases.contains_key(&case.introducing_schema) {
+        if case.id.0.is_nil() {
             return Err(Error::InvalidStoredValue(
-                "physical enum registry references an unknown schema",
+                "physical enum registry contains a nil global identity",
             ));
         }
         if !seen.insert(case.clone()) {

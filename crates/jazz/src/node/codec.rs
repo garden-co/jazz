@@ -716,6 +716,7 @@ fn put_string(payload: &mut Vec<u8>, value: &str, context: &'static str) -> Resu
 }
 
 fn encode_case_id(payload: &mut Vec<u8>, case: &GlobalScalarEnumCaseId) {
+    payload.extend_from_slice(case.id.0.as_bytes());
     payload.extend_from_slice(case.introducing_schema.0.as_bytes());
     payload.push(case.introducing_ordinal);
 }
@@ -772,8 +773,9 @@ fn decode_case_id(
     cursor: &mut CataloguePayloadCursor<'_>,
 ) -> Result<GlobalScalarEnumCaseId, Error> {
     Ok(GlobalScalarEnumCaseId {
+        id: crate::ids::GlobalPhysicalEnumVariantId(cursor.uuid()?),
         introducing_schema: SchemaVersionId(cursor.uuid()?),
-        introducing_ordinal: cursor.u8()?,
+        introducing_ordinal: cursor.bytes(1)?[0],
     })
 }
 
@@ -1020,10 +1022,6 @@ impl<'a> CataloguePayloadCursor<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    fn u8(&mut self) -> Result<u8, Error> {
-        Ok(self.bytes(1)?[0])
-    }
-
     fn string(&mut self) -> Result<String, Error> {
         let bytes = self.sized_bytes()?;
         std::str::from_utf8(bytes)
@@ -1062,6 +1060,7 @@ mod catalogue_payload_tests {
 
     fn mapping_fixture() -> SchemaPhysicalMapping {
         let case = |byte, ordinal| GlobalScalarEnumCaseId {
+            id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_bytes([byte; 16])),
             introducing_schema: SchemaVersionId(uuid::Uuid::from_bytes([byte; 16])),
             introducing_ordinal: ordinal,
         };
@@ -1127,18 +1126,22 @@ mod catalogue_payload_tests {
             b"state",
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
             &[0x11; 16],
+            &[0x11; 16],
             &[2],
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
+            &[0x22; 16],
             &[0x22; 16],
             &[1],
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 10, 0, 0, 0][..],
             b"root/array",
             &[1, 0, 0, 0][..],
             &[0x33; 16],
+            &[0x33; 16],
             &[0],
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 19, 0, 0, 0][..],
             b"root/case/canonical",
             &[1, 0, 0, 0][..],
+            &[0x44; 16],
             &[0x44; 16],
             &[3],
         ]

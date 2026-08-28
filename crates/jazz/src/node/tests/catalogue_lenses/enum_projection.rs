@@ -131,27 +131,20 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
     let physical_cases = core
         .physical_scalar_enum_cases(b_mapping.table_id, b_mapping.columns["status"])
         .unwrap();
-    assert_eq!(
-        physical_cases,
-        vec![
-            GlobalScalarEnumCaseId {
-                introducing_schema: base.version_id(),
-                introducing_ordinal: 0,
-            },
-            GlobalScalarEnumCaseId {
-                introducing_schema: a.id,
-                introducing_ordinal: 1,
-            },
-            GlobalScalarEnumCaseId {
-                introducing_schema: a2.id,
-                introducing_ordinal: 2,
-            },
-            GlobalScalarEnumCaseId {
-                introducing_schema: b.id,
-                introducing_ordinal: 1,
-            },
-        ],
-    );
+    let case = |schema, ordinal| GlobalScalarEnumCaseId {
+        id: core.catalogue.physical_mappings[&schema].identities.tables["items"].columns
+            ["status"]
+            .enum_variants["root"][ordinal],
+        introducing_schema: schema,
+        introducing_ordinal: ordinal as u8,
+    };
+    let expected = vec![
+        case(base.version_id(), 0),
+        case(a.id, 1),
+        case(a2.id, 2),
+        case(b.id, 1),
+    ];
+    assert_eq!(physical_cases, expected);
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
