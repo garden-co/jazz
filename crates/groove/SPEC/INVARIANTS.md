@@ -162,7 +162,10 @@ Every `now` invariant trends toward coverage `✓`; an untested `now` is visible
 gate. Its maintained settlement metadata is
 `fixtures/storage_epoch_1_codec_corpus.md`; it records the frozen payload-codec
 registry, semantic sample, exact bytes, and checksum. Any new persistent opaque
-byte codec must be registered there and requires a new storage epoch.
+byte codec must be registered there and requires a new storage epoch. The gate
+rejects omission, addition, and substitution of registry IDs on construction,
+encode, and decode. RocksDB and SQLite consume the closed constructor;
+IndexedDB's missing shared physical manifest remains non-covered under #2160.
 
 ### Reserved ids (allocated, not yet cited)
 

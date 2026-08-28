@@ -514,7 +514,6 @@ fn rocksdb_manifest() -> Result<StorageEpochManifest, Error> {
     StorageEpochManifest::epoch_1(
         "rocksdb",
         3,
-        StorageEpochManifest::epoch_1_authoritative_codecs(),
         BTreeMap::from([
             (
                 "internal-cf".to_owned(),

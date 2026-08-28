@@ -35,12 +35,12 @@ pub struct AdapterFormat {
 /// The complete decoding-relevant contract for one durable storage root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageEpochManifest {
-    pub epoch: u16,
-    pub adapter: AdapterFormat,
+    epoch: u16,
+    adapter: AdapterFormat,
     /// Stable IDs of every authoritative codec reachable from this root.
-    pub required_codecs: BTreeSet<String>,
+    required_codecs: BTreeSet<String>,
     /// Adapter-owned, decode-relevant parameters, in canonical key order.
-    pub parameters: BTreeMap<String, Vec<u8>>,
+    parameters: BTreeMap<String, Vec<u8>>,
 }
 
 /// Evidence returned by the manifest gate. A successful receipt is the only
@@ -52,15 +52,9 @@ pub enum ManifestOpenReceipt {
 }
 
 impl StorageEpochManifest {
-    /// Required codec IDs for every durable Epoch-1 adapter.
-    pub fn epoch_1_authoritative_codecs() -> impl Iterator<Item = &'static str> {
-        EPOCH_1_AUTHORITATIVE_CODECS.iter().copied()
-    }
-
     pub fn epoch_1(
         adapter_id: impl Into<String>,
         adapter_version: u16,
-        required_codecs: impl IntoIterator<Item = impl Into<String>>,
         parameters: BTreeMap<String, Vec<u8>>,
     ) -> Result<Self, Error> {
         let manifest = Self {
@@ -69,7 +63,7 @@ impl StorageEpochManifest {
                 id: adapter_id.into(),
                 version: adapter_version,
             },
-            required_codecs: required_codecs.into_iter().map(Into::into).collect(),
+            required_codecs: epoch_1_authoritative_codec_set(),
             parameters,
         };
         manifest.validate()?;
@@ -176,11 +170,23 @@ impl StorageEpochManifest {
         for codec in &self.required_codecs {
             valid_id("codec ID", codec)?;
         }
+        if self.required_codecs != epoch_1_authoritative_codec_set() {
+            return Err(invalid(
+                "epoch-1 manifest codec IDs do not match the authoritative registry",
+            ));
+        }
         for key in self.parameters.keys() {
             valid_id("parameter ID", key)?;
         }
         Ok(())
     }
+}
+
+fn epoch_1_authoritative_codec_set() -> BTreeSet<String> {
+    EPOCH_1_AUTHORITATIVE_CODECS
+        .iter()
+        .map(|codec| (*codec).to_owned())
+        .collect()
 }
 
 /// A future migration must be explicitly registered for exactly one adjacent
@@ -288,7 +294,6 @@ mod tests {
         StorageEpochManifest::epoch_1(
             "memory",
             1,
-            StorageEpochManifest::epoch_1_authoritative_codecs(),
             BTreeMap::from([("key-order".into(), b"unsigned-lexicographic".to_vec())]),
         )
         .unwrap()
@@ -336,6 +341,41 @@ mod tests {
         unknown[5] = 2;
         assert!(StorageEpochManifest::decode(&unknown).is_err());
     }
+
+    #[test]
+    fn epoch_1_codec_registry_rejects_omitted_extra_and_unknown_ids() {
+        fn unchecked_manifest(codecs: &[&str]) -> StorageEpochManifest {
+            StorageEpochManifest {
+                epoch: STORAGE_EPOCH_1,
+                adapter: AdapterFormat {
+                    id: "memory".to_owned(),
+                    version: 1,
+                },
+                required_codecs: codecs.iter().map(|codec| (*codec).to_owned()).collect(),
+                parameters: BTreeMap::new(),
+            }
+        }
+
+        fn unchecked_bytes(codecs: &[&str]) -> Vec<u8> {
+            let mut bytes = b"JSM1\0\x01\0\x01\x06memory".to_vec();
+            bytes.push(codecs.len() as u8);
+            for codec in codecs {
+                bytes.push(codec.len() as u8);
+                bytes.extend_from_slice(codec.as_bytes());
+            }
+            bytes.push(0); // no parameters
+            bytes
+        }
+
+        for codecs in [
+            Vec::<&str>::new(),
+            vec!["groove.ordered-kv.v1", "groove.future.v2"],
+            vec!["groove.future.v2"],
+        ] {
+            assert!(unchecked_manifest(&codecs).encode().is_err());
+            assert!(StorageEpochManifest::decode(&unchecked_bytes(&codecs)).is_err());
+        }
+    }
     #[test]
     fn missing_unknown_inconsistent_and_corrupt_manifests_fail_closed() {
         let expected = manifest();
@@ -343,8 +383,7 @@ mod tests {
         let mut unknown = expected.encode().unwrap();
         unknown[5] = 2;
         assert!(expected.admit_existing(&unknown).is_err());
-        let other =
-            StorageEpochManifest::epoch_1("memory", 2, ["groove.key.v1"], BTreeMap::new()).unwrap();
+        let other = StorageEpochManifest::epoch_1("memory", 2, BTreeMap::new()).unwrap();
         assert!(expected.admit_existing(&other.encode().unwrap()).is_err());
         let mut corrupt = expected.encode().unwrap();
         corrupt[0] = b'X';

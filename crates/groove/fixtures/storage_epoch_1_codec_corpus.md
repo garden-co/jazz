@@ -14,8 +14,9 @@ settled durable format.
 - committed bytes: asserted verbatim by
   `storage::manifest::tests::epoch_1_codec_corpus_round_trips_committed_bytes_exactly`
 
-The test also rejects malformed magic, trailing bytes, a noncanonical
-unsorted codec list, and an unknown epoch before a caller can admit a root.
+The tests also reject malformed magic, trailing bytes, a noncanonical codec
+list, an unknown epoch, and omitted, extra, or substituted codec registry IDs
+before a caller can construct, encode, decode, or admit an epoch-1 root.
 It deliberately checks `decode(committed).encode() == committed`; a successful
 semantic decode alone is insufficient evidence for a durable format.
 
@@ -23,6 +24,7 @@ It runs in the canonical Rust workspace partition. For focused local work use:
 `cargo test -p groove storage::manifest::tests::epoch_1_codec_corpus_`.
 
 Physical RocksDB, SQLite, and IndexedDB files are backend implementation
-formats, not this corpus and not file-level interchange. Historical-store
-fixture capture remains follow-up work; the shared manifest corpus covers the
-portable epoch boundary today.
+formats, not this corpus and not file-level interchange. RocksDB and SQLite
+persist the shared manifest today. IndexedDB only has its adapter-private page
+metadata, so its missing shared physical epoch manifest and historical-store
+fixture capture remain explicitly non-covered acceptance work under #2160.
