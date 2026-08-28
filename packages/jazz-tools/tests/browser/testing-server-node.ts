@@ -109,6 +109,17 @@ export async function jazzServerJwtForUser(
   return jwtIssuer.jwtForUser(userId, claims);
 }
 
+export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {
+  for (const [key, runningServer] of jazzServerPromises) {
+    const started = await runningServer;
+    if (started.serverUrl !== serverUrl) continue;
+    jazzServerPromises.delete(key);
+    await Promise.all([started.server.stop(), started.jwtIssuer.stop()]);
+    return;
+  }
+  throw new Error(`No Jazz test server is running at ${serverUrl}`);
+}
+
 export async function stopJazzServer(): Promise<void> {
   const runningServers = [...jazzServerPromises.values()];
   jazzServerPromises.clear();

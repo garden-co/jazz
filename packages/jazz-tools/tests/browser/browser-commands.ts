@@ -4,6 +4,7 @@ import type { JazzServerInfo } from "./testing-server.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string, schema?: number[]): Promise<JazzServerInfo>;
+  jazzServerStop(serverUrl: string): Promise<void>;
   jazzServerBlockNetwork(serverUrl: string): Promise<void>;
   jazzServerUnblockNetwork(serverUrl: string): Promise<void>;
   jazzServerJwtForUser(
@@ -30,6 +31,7 @@ function isJazzServerBrowserCommands(value: unknown): value is JazzServerBrowser
     typeof value === "object" &&
     value !== null &&
     hasFunction(value, "jazzServerInfo") &&
+    hasFunction(value, "jazzServerStop") &&
     hasFunction(value, "jazzServerBlockNetwork") &&
     hasFunction(value, "jazzServerUnblockNetwork") &&
     hasFunction(value, "jazzServerJwtForUser")
@@ -53,7 +55,8 @@ export function jazzServerBrowserCommands(): JazzServerBrowserCommands {
   if (!isJazzServerBrowserCommands(commands)) {
     throw new Error(
       "Browser test project is missing Jazz server commands. Configure jazzServerInfo, " +
-        "jazzServerBlockNetwork, jazzServerUnblockNetwork, and jazzServerJwtForUser.",
+        "jazzServerStop, jazzServerBlockNetwork, jazzServerUnblockNetwork, and " +
+        "jazzServerJwtForUser.",
     );
   }
   return commands;

@@ -24,6 +24,7 @@ import {
   blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  stopJazzServer,
   type JazzServerInfo,
   unblockJazzServerNetwork,
 } from "./testing-server.js";
@@ -1719,6 +1720,49 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     expect(rowsOnB.some((row) => row.title === recoveredTitle)).toBe(true);
   }, 60000);
+
+  it("keeps a local subscription live after an unexpected server shutdown", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("local-after-server-shutdown");
+    const db = await createSyncedDb(
+      ctx,
+      "local-after-server-shutdown",
+      generateAuthSecret(),
+      syncServer,
+    );
+    const snapshots: Todo[][] = [];
+    trackSubscription(db.subscribe(allTodos, (rows) => snapshots.push(rows), { tier: "local" }));
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      5000,
+      "local subscription did not publish its opening snapshot",
+    );
+
+    await stopJazzServer(syncServer.serverUrl);
+    const edgeError = await withTimeout(
+      db.all(allTodos, { tier: "edge" }),
+      5000,
+      "edge read did not observe the stopped server",
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(edgeError).toBeInstanceOf(Error);
+    expect((edgeError as Error).message).not.toContain(
+      "edge read did not observe the stopped server",
+    );
+
+    const title = `local-after-server-shutdown-${Date.now()}`;
+    await withTimeout(
+      db.insert(todos, { title, done: false }).wait({ tier: "local" }),
+      5000,
+      "offline insert did not become locally durable",
+    );
+    await waitForCondition(
+      async () => snapshots.some((rows) => rows.some((row) => row.title === title)),
+      5000,
+      "local subscription did not publish the offline insert",
+    );
+  });
 
   /**
    *   writer ──baseline write──► server

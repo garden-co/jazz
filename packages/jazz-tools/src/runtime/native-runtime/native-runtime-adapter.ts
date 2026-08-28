@@ -3306,7 +3306,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.serverTransportError && message === "websocket closed") return;
     const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
-    this.failActiveSubscriptions(this.serverTransportError);
+    this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
@@ -3339,9 +3339,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private failActiveSubscriptions(error: Error): void {
+  private failRemoteSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
+      const tier = (subscription.opts as { tier?: unknown }).tier ?? "local";
+      if (tier !== "edge" && tier !== "global") continue;
       this.failSubscription(subscription, error);
     }
   }
