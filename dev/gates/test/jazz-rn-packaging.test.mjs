@@ -46,6 +46,15 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
+// C and Objective-C translate physical source lines before recognizing either
+// comments or macro invocations. Clang accepts a backslash followed by an LF,
+// CRLF, or implementation-permitted horizontal whitespace and a newline as a
+// line continuation. Normalize that spelling first so this lexical receipt
+// observes the same JavaScript-visible exports as the compiler.
+function normalizeObjcLineContinuations(source) {
+  return source.replace(/\\[ \t\v\f]*\r?\n/g, "");
+}
+
 function assertExactNames(surface, actual, allowed) {
   const unexpected = [...actual].filter((name) => !allowed.has(name));
   const missing = [...allowed].filter((name) => !actual.has(name));
@@ -409,7 +418,7 @@ function objcImplementations(source) {
 }
 
 function assertOpaqueIosRelaySurface(iosRelay) {
-  const commentFreeRelay = stripComments(iosRelay);
+  const commentFreeRelay = stripComments(normalizeObjcLineContinuations(iosRelay));
   const implementations = objcImplementations(commentFreeRelay);
   const relayImplementations = implementations.filter(
     (implementation) => implementation.className === "JazzRelay",
@@ -922,6 +931,30 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     "a multiline RCT_REMAP_METHOD must not introduce an arbitrary iOS JS export",
   );
   for (const fixture of [
+    {
+      name: "an LF-spliced RCT_EXPORT_METHOD",
+      source: "RCT_EXPORT_\\\nMETHOD(configure:(NSString *)scope)",
+    },
+    {
+      name: "a CRLF-and-whitespace-spliced RCT_REMAP_METHOD",
+      source: "RCT_REMAP_\\ \t\r\nMETHOD(begin, begin:(NSString *)scope)",
+    },
+    {
+      name: "an LF-spliced synchronous RCT export",
+      source:
+        "RCT_EXPORT_SYNCHRONOUS_TYPED_\\\nMETHOD(NSString *, configure)",
+    },
+  ]) {
+    assert.throws(
+      () =>
+        assertOpaqueIosRelaySurface(
+          iosRelay.replace("- (void)invalidate", `${fixture.source}\n\n- (void)invalidate`),
+        ),
+      /RCT_|configure|begin/,
+      `${fixture.name} must not bypass the sealed iOS relay receipt`,
+    );
+  }
+  for (const fixture of [
     "RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(configure)",
     "RCT_EXPORT_SYNCHRONOUS_TYPED_METHOD(NSString *, configure)",
     "RCT_REMAP_BLOCKING_SYNCHRONOUS_METHOD(configure, configure)",
@@ -962,6 +995,13 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
         `${iosRelay}\n// RCT_EXPORT_METHOD(configure:(NSString *)scope)`,
       ),
     "comments must not become iOS relay exports",
+  );
+  assert.doesNotThrow(
+    () =>
+      assertOpaqueIosRelaySurface(
+        `${iosRelay}\n// Still a comment after C line splicing \\ \t\r\nRCT_EXPORT_METHOD(configure:(NSString *)scope)`,
+      ),
+    "a continued Objective-C line comment must not become a relay export",
   );
   assert.match(androidBridge, /object JazzRelayTrustedAdmission/);
   assert.match(androidBridge, /TrustedRelayScopeConfig/);
