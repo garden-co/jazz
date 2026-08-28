@@ -87,7 +87,7 @@ where
         .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
         .await?
     {
-        let existing = decode_staged_large_value(&encoded)?;
+        let existing = decode_staged_large_value_at_key(&staged_key, &encoded)?;
         if existing.value_ref == value_ref && existing.accounting == accounting {
             return Ok((existing, Vec::new()));
         }
@@ -202,7 +202,8 @@ where
                 "completed upload points to a missing staged receipt".to_owned(),
             )
         })?;
-    let staged = decode_staged_large_value(&encoded)?;
+    let staged_key = staged_large_value_key(receipt_id);
+    let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
     if staged.id != receipt_id
         || staged.value_ref != *value_ref
         || staged.accounting != completed.accounting
@@ -587,7 +588,7 @@ impl Database {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
             .await?
         {
-            decode_pending_large_value_upload(&encoded)?
+            decode_pending_large_value_upload_at_key(&key, &encoded)?
         } else {
             if require_existing {
                 return Ok(false);
@@ -795,7 +796,7 @@ impl Database {
             .ok_or_else(|| {
                 Error::InvalidLargeValueMetadata("pending upload is missing".to_owned())
             })?;
-        let mut upload = decode_pending_large_value_upload(&encoded)?;
+        let mut upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
         if let Some(bound) = &upload.descriptor {
             if bound == value_ref {
                 return Ok(());
@@ -1120,7 +1121,7 @@ impl Database {
         else {
             return Ok(None);
         };
-        let upload = decode_pending_large_value_upload(&encoded)?;
+        let upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
         if let Some(bound) = &upload.descriptor
             && bound != &value_ref
         {
@@ -1226,8 +1227,8 @@ impl Database {
             .await?;
         let mut uploads = Vec::new();
         while let Some(batch) = cursor.next_batch().await? {
-            for (_, encoded) in batch {
-                uploads.push(decode_pending_large_value_upload(&encoded)?);
+            for (key, encoded) in batch {
+                uploads.push(decode_pending_large_value_upload_at_key(&key, &encoded)?);
             }
         }
         Ok(uploads)
@@ -1248,7 +1249,7 @@ impl Database {
         else {
             return Ok(false);
         };
-        let upload = decode_pending_large_value_upload(&encoded)?;
+        let upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
         self.release_pending_large_value_upload(key, upload).await?;
         Ok(true)
     }
@@ -1266,8 +1267,8 @@ impl Database {
             .await?;
         let mut staged = Vec::new();
         while let Some(batch) = cursor.next_batch().await? {
-            for (_, encoded) in batch {
-                staged.push(decode_staged_large_value(&encoded)?);
+            for (key, encoded) in batch {
+                staged.push(decode_staged_large_value_at_key(&key, &encoded)?);
             }
         }
         Ok(staged)
@@ -1289,7 +1290,7 @@ impl Database {
         else {
             return Ok(false);
         };
-        let staged = decode_staged_large_value(&encoded)?;
+        let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
         let root_key = large_value_root_key(&staged.value_ref.root)?;
         let encoded = self
             .storage

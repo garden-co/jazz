@@ -56,6 +56,28 @@ fn pending_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -
     key
 }
 
+/// Bind an engine-owned lifecycle record to the fixed-width opaque identity in
+/// its metadata key.  The key is part of the durable authority: copying a
+/// receipt under a different key must never make it resumable or evictable as
+/// that other lifecycle handle.
+fn staged_large_value_id_from_metadata_key(
+    key: &[u8],
+    prefix: &'static [u8],
+    record_name: &'static str,
+) -> Result<crate::large_values::StagedLargeValueId, Error> {
+    let encoded = key.strip_prefix(prefix).ok_or_else(|| {
+        Error::InvalidLargeValueMetadata(format!(
+            "{record_name} has an invalid metadata key prefix"
+        ))
+    })?;
+    let id: [u8; 16] = encoded.try_into().map_err(|_| {
+        Error::InvalidLargeValueMetadata(format!(
+            "{record_name} metadata key must contain exactly 16 staging-id bytes"
+        ))
+    })?;
+    Ok(crate::large_values::StagedLargeValueId(id))
+}
+
 fn completed_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8> {
     let mut key = b"completed-upload/".to_vec();
     key.extend_from_slice(&id.0);
@@ -731,6 +753,20 @@ fn decode_staged_large_value(
     })
 }
 
+fn decode_staged_large_value_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::StagedLargeValue, Error> {
+    let key_id = staged_large_value_id_from_metadata_key(key, b"staged/", "staged large value")?;
+    let staged = decode_staged_large_value(encoded)?;
+    if staged.id != key_id {
+        return Err(Error::InvalidLargeValueMetadata(
+            "staged large value key and receipt id differ".to_owned(),
+        ));
+    }
+    Ok(staged)
+}
+
 fn encode_pending_large_value_upload(
     upload: &crate::large_values::PendingLargeValueUpload,
 ) -> Result<Vec<u8>, Error> {
@@ -882,6 +918,20 @@ fn decode_pending_large_value_upload(
         created_at_ms,
         chunks: canonical_node_refs_from_value(&chunks, "pending large-value upload chunks")?,
     })
+}
+
+fn decode_pending_large_value_upload_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+    let key_id = staged_large_value_id_from_metadata_key(key, b"upload/", "pending upload")?;
+    let upload = decode_pending_large_value_upload(encoded)?;
+    if upload.id != key_id {
+        return Err(Error::InvalidLargeValueMetadata(
+            "pending upload key and journal id differ".to_owned(),
+        ));
+    }
+    Ok(upload)
 }
 
 /// Apply physical-node ownership transitions against one read-your-own-write
