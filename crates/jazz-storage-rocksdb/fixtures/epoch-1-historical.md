@@ -2,11 +2,11 @@
 
 This committed archive contains a RocksDB epoch-1 store, encoded as base64 so
 the binary fixture remains reviewable. Its decoded archive SHA-256 is
-`468ba3377ed1b219d332c56af40f8e5d5d0cabc7ca085e3ae88c66434e7efa49`.
+`58c9198a4eb2373b6cd475177f7cbbbc0482ce5c037d388630565fd000659202`.
 
 It was generated at settlement baseline `8b946278e`, not during the gate. It
 contains the fixed internal column family, `raw-v3` marker, and canonical
-RocksDB `JSM1` manifest plus the rows in Groove's backend-neutral
+RocksDB `JSM1` manifest with Groove's complete epoch-1 codec base, plus the rows in Groove's backend-neutral
 `epoch-1-ordered-kv.pack`. RocksDB SST, log, manifest, and option files remain
 adapter-private physical implementation artifacts, not interchange bytes.
 

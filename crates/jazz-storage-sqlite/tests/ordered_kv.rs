@@ -18,7 +18,7 @@ use std::path::Path;
 const EPOCH_1_SQLITE_FIXTURE_BASE64: &str =
     include_str!("../fixtures/epoch-1-historical.sqlite.base64");
 const EPOCH_1_SQLITE_FIXTURE_SHA256: &str =
-    "a5aaa7fdcfab2759d10263e564419d18466d30e6f60ab911405f8e224b5de3d9";
+    "6a195b6db62f9fdea2509e29cb4fb5bdff7f98ae2f1badae84639137ebe33321";
 const EPOCH_1_ORDERED_KV_PACK: &str = include_str!("../../groove/fixtures/epoch-1-ordered-kv.pack");
 const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
     "5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7";

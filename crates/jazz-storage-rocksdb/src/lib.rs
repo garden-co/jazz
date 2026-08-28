@@ -987,9 +987,7 @@ impl OrderedKvStorage for RocksDbStorage {
 mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use flate2::read::GzDecoder;
-    use groove::storage::{
-        Error, OrderedKvStorage, ReopenableStorage, StorageCodecProfile,
-    };
+    use groove::storage::{Error, OrderedKvStorage, ReopenableStorage, StorageCodecProfile};
     use sha2::{Digest, Sha256};
     use std::future::Future;
     use std::io::Cursor;
@@ -1009,7 +1007,7 @@ mod tests {
     const EPOCH_1_ROCKSDB_FIXTURE_BASE64: &str =
         include_str!("../fixtures/epoch-1-historical.tar.gz.base64");
     const EPOCH_1_ROCKSDB_FIXTURE_SHA256: &str =
-        "468ba3377ed1b219d332c56af40f8e5d5d0cabc7ca085e3ae88c66434e7efa49";
+        "58c9198a4eb2373b6cd475177f7cbbbc0482ce5c037d388630565fd000659202";
     const EPOCH_1_ORDERED_KV_PACK: &str =
         include_str!("../../groove/fixtures/epoch-1-ordered-kv.pack");
     const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
@@ -1084,7 +1082,16 @@ mod tests {
         // This is intentionally spelled as fixed wire bytes instead of
         // calling the current manifest encoder: the fixture proves a release
         // baseline, not that the current implementation agrees with itself.
-        let mut bytes = b"JSM1\0\x01\0\x03\x07rocksdb\x01\x14groove.ordered-kv.v1\x04".to_vec();
+        let mut bytes = b"JSM1\0\x01\0\x03\x07rocksdb\x03".to_vec();
+        for codec in [
+            "groove.large-value.v1",
+            "groove.ordered-chunk-storage.v1",
+            "groove.ordered-kv.v1",
+        ] {
+            bytes.push(codec.len() as u8);
+            bytes.extend_from_slice(codec.as_bytes());
+        }
+        bytes.push(4);
         for (key, value) in [
             ("internal-cf", b"__groove_storage_internal_v3".as_slice()),
             ("key-order", b"unsigned-lexicographic".as_slice()),

@@ -19,8 +19,13 @@ def identifier(value):
     value = value.encode()
     return bytes([len(value)]) + value
 
-manifest = (b"JSM1\0\x01\0\x01" + identifier("sqlite") + b"\x01" +
-            identifier("groove.ordered-kv.v1") + b"\x03" +
+codecs = [
+    "groove.large-value.v1",
+    "groove.ordered-chunk-storage.v1",
+    "groove.ordered-kv.v1",
+]
+manifest = (b"JSM1\0\x01\0\x01" + identifier("sqlite") + bytes([len(codecs)]) +
+            b"".join(identifier(codec) for codec in codecs) + b"\x03" +
             identifier("application-id") + b"\0\x08" + (0x4A415A5A).to_bytes(8, "big") +
             identifier("ddl-id") + b"\0\x1d" + b"jazz-groove-ordered-kv-ddl-v1" +
             identifier("key-order") + b"\0\x16" + b"unsigned-lexicographic")
