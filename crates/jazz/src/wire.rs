@@ -338,7 +338,16 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     if validate_wire_frame_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
-    from_bytes(bytes)
+    let frame: WireFrame = from_bytes(bytes)?;
+    // `postcard` is a compact transport, not a permissive interchange
+    // language.  A payload with another spelling for the same semantic frame
+    // would undermine byte-addressed receipts and golden fixtures.  Decode
+    // first so ordinary malformed/trailing inputs retain postcard's error,
+    // then require the one encoder spelling for every accepted frame.
+    if to_allocvec(&frame)? != bytes {
+        return Err(postcard::Error::DeserializeBadOption);
+    }
+    Ok(frame)
 }
 
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
@@ -376,6 +385,12 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     message
         .validate_version_carriers()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
+    // Wire receipts and replay fixtures name bytes, not only deserialized
+    // values.  Do not accept an alternate postcard representation for the
+    // same transaction/version message.
+    if to_allocvec(&message)? != bytes {
+        return Err(postcard::Error::DeserializeBadOption);
+    }
     Ok(message)
 }
 
@@ -867,6 +882,60 @@ mod tests {
         let decoded = decode_sync_message(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    // This stays a codec-level test: exact transport bytes are intentionally
+    // not observable through the public database API.  The fixture is written
+    // independently of the encoder call so a field reordering, enum-tag drift,
+    // UUID-width change, or fate/durability swap cannot update its own oracle.
+    #[test]
+    fn transaction_fate_receipt_has_one_canonical_postcard_spelling() {
+        const ACCEPTED_GLOBAL_RECEIPT_HEX: &str =
+            "040c10111111111111111111111111111111110101070103";
+        let tx_id = TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]));
+        let expected = SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        };
+        let fixture = hex::decode(ACCEPTED_GLOBAL_RECEIPT_HEX).expect("fixture hex");
+
+        // semantic -> bytes
+        assert_eq!(encode_sync_message(&expected).unwrap(), fixture);
+        // independent bytes -> semantic
+        assert_eq!(decode_sync_message(&fixture).unwrap(), expected);
+
+        // Sensitivity plant: the final enum tag is durability.  A receiver
+        // must not silently retain Global when a payload says Edge.
+        let mut edge = fixture.clone();
+        *edge.last_mut().expect("non-empty fixture") = 2;
+        assert_eq!(
+            decode_sync_message(&edge).unwrap(),
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(7)),
+                durability: Some(DurabilityTier::Edge),
+            }
+        );
+    }
+
+    #[test]
+    fn transaction_fate_receipt_rejects_trailing_and_noncanonical_bytes() {
+        let canonical =
+            hex::decode("040c10111111111111111111111111111111110101070103").expect("fixture hex");
+
+        let mut trailing = canonical.clone();
+        trailing.push(0);
+        assert!(decode_sync_message(&trailing).is_err());
+
+        // `12` has the one-byte varint spelling `0x0c`; `0x8c, 0x00` is the
+        // same number in a permissive LEB128 decoder.  Whether postcard
+        // rejects it directly or after decode, Jazz must reject it.
+        let mut noncanonical = canonical;
+        noncanonical.splice(1..2, [0x8c, 0x00]);
+        assert!(decode_sync_message(&noncanonical).is_err());
     }
 
     #[test]

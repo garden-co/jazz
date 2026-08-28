@@ -575,9 +575,22 @@ impl SyncMessage {
 
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
-        self.carried_view_update().map_or(Ok(()), |view| {
-            validate_version_carrier_runs(&view.version_carriers)
-        })
+        match self {
+            Self::CommitUnit { versions, .. } => validate_version_records(versions),
+            Self::RowVersionPayloads { version_bundles } => {
+                validate_version_bundles(version_bundles)
+            }
+            _ => self.carried_view_update().map_or(Ok(()), |view| {
+                validate_version_carrier_runs(&view.version_carriers)?;
+                validate_version_bundles(&view.version_bundles)?;
+                for carrier in &view.version_carriers {
+                    for bundle in carrier.bundle_refs()? {
+                        validate_version_records(bundle.versions)?;
+                    }
+                }
+                Ok(())
+            }),
+        }
     }
 
     fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
@@ -608,6 +621,26 @@ fn validate_version_carrier_runs(
     for carrier in version_carriers {
         if let VersionCarrier::Run(run) = carrier {
             run.validate()?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBundleRunError> {
+    for bundle in bundles {
+        validate_version_records(&bundle.versions)?;
+    }
+    Ok(())
+}
+
+fn validate_version_records(versions: &[VersionRecord]) -> Result<(), VersionBundleRunError> {
+    for version in versions {
+        let parents = version.parents();
+        if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(VersionBundleRunError::NonCanonicalParents {
+                table: version.table().to_owned(),
+                row_uuid: version.row_uuid(),
+            });
         }
     }
     Ok(())
@@ -728,7 +761,7 @@ impl VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
-        parents: Vec<TxId>,
+        mut parents: Vec<TxId>,
         created_by: AuthorSubject,
         created_at_ms: u64,
         updated_by: AuthorSubject,
@@ -737,6 +770,10 @@ impl VersionRecord {
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
         // This path is for data birth only; stored rows project to wire bytes without decoding.
+        // Parents are a causal set. Its permanent wire/storage spelling is
+        // strict TxId order, never author insertion order.
+        parents.sort();
+        parents.dedup();
         let descriptor = table.wire_record_descriptor();
         let values = [
             Value::Uuid(row_uuid.0),
@@ -1393,6 +1430,13 @@ pub enum VersionBundleRunError {
         /// Table found in a body version.
         actual: String,
     },
+    /// A version's parent set was not encoded in strict `TxId` order.
+    NonCanonicalParents {
+        /// Table containing the version.
+        table: String,
+        /// Row whose parent list was malformed.
+        row_uuid: RowUuid,
+    },
 }
 
 impl std::fmt::Display for VersionBundleRunError {
@@ -1416,6 +1460,10 @@ impl std::fmt::Display for VersionBundleRunError {
             Self::TableMismatch { expected, actual } => write!(
                 f,
                 "version-bundle run table context {expected} did not match body table {actual}"
+            ),
+            Self::NonCanonicalParents { table, row_uuid } => write!(
+                f,
+                "version for {table}/{row_uuid:?} has non-canonical parents"
             ),
         }
     }
@@ -3467,6 +3515,7 @@ mod tests {
         ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
         TableSchemaBuilder,
     };
+    use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
 
     fn schema_id(byte: u8) -> SchemaVersionId {
@@ -3539,6 +3588,72 @@ mod tests {
         unknown_tag.extend(1_u32.to_le_bytes());
         append_entry(&mut unknown_tag, "a", &[1, u8::MAX]);
         assert!(BranchKey::from_canonical_bytes(&unknown_tag).is_err());
+    }
+
+    #[test]
+    fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let table = &schema.tables()[0];
+        let low = TxId::new(TxTime(3), NodeUuid::from_bytes([0x11; 16]));
+        let high = TxId::new(TxTime(4), NodeUuid::from_bytes([0x22; 16]));
+        let author = AuthorSubject::for_test_bytes([0x33; 16]);
+        let version = VersionRecord::encode(
+            table,
+            schema_id(0x44),
+            RowUuid::from_bytes([0x55; 16]),
+            vec![high, low, high],
+            author,
+            7,
+            author,
+            8,
+            &[Some(Value::String("receipt".to_owned()))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(version.parents(), vec![low, high]);
+
+        // A peer can construct a VersionRecord without the birth helper, so
+        // receipt validation must reject that alternate parent spelling too.
+        let raw = table
+            .wire_record_descriptor()
+            .create(&[
+                Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
+                Value::Array(vec![tx_id_value(high), tx_id_value(low)]),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(7),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(8),
+                Value::Nullable(None),
+                Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
+            ])
+            .unwrap();
+        let noncanonical = VersionRecord::new(
+            "todos",
+            schema_id(0x44),
+            OwnedRecord::new(raw, table.wire_record_descriptor()),
+        );
+        let message = SyncMessage::CommitUnit {
+            tx: Transaction {
+                tx_id: high,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: author,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            versions: vec![noncanonical],
+        };
+        assert!(message.validate_version_carriers().is_err());
     }
 
     #[test]

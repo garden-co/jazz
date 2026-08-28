@@ -32,6 +32,7 @@ Invariant digest:
 - `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state, and change history.
 - `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(physical_table_id, branch_key, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch-key branch-local rows.
 - `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
+- `INV-DATA-23`: Transaction/version receipts MUST have one canonical byte spelling: fixed record-field positions and discriminants, canonical author JSON and UUID/HLC encodings, strictly ordered parent `TxId`s, and no malformed, trailing, or alternate postcard encoding.
 
 ## Details
 
@@ -264,6 +265,82 @@ row_uuid, tx_time, tx_node_id)` and with a seek/index prefix
 - _change stream_ — the append-only `jazz_global_changes`, keyed
   `(physical_table_id, row_uuid, layer, global_time)` with physical-table and
   global-time indexes (`INV-DATA-19`);
+
+### 2.8 Frozen transaction, version, and receipt layout
+
+This is the epoch-1 layout decision for the canonical transaction/version
+facts. It applies to the node's Groove records and to their replicated postcard
+receipts. There is no alpha compatibility decoder or migration for an older
+layout: malformed, trailing, and non-canonical bytes fail closed
+(`INV-DATA-23`). Backend database/WAL files remain adapter-private, as specified
+by Groove's storage epoch; this section freezes logical record and transport
+bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
+
+**Transaction audit record.** `jazz_transactions` has permanent logical field
+positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
+made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
+user_metadata_json, contribution_merge, permission_subject,
+view_scoped_cardinality_marker, fate, global_time, rejection_reason,
+cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
+`Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
+`None=0`, `Local=1`, `Edge=2`, `Global=3`; rejection reasons are
+`ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
+`CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`. The
+`view-scoped-cardinality` marker is exactly the internal string
+`"view-scoped-cardinality"` in retained position 12; it says only that the
+stored `n_total_writes` is view-redacted, and is cleared when a complete payload
+arrives. Fate/global time and durability remain separate lattice observations:
+accepted/global uses an authority `GlobalTime`, rejection has no global winner,
+and a receiver never infers one from durability alone. A malformed or stale
+receipt that happens to carry a global-time field with a rejection still cannot
+make that transaction a content or deletion winner (ch. 3).
+
+**Version/provenance record.** Content history positions `0..=9` are
+`(branch_key, row_uuid, tx_time, tx_node_alias, schema_version_alias, parents,
+created_by, created_at, updated_by, updated_at)`, followed by declared
+`user_{column}` cells in application declaration order. The deletion relation
+adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
+it has no user cells. The replicated `WireRowRecord` positions are
+`(row_uuid, parents, created_by, created_at_ms, updated_by, updated_at_ms,
+nullable _deletion, user cells...)`. A version is content iff `_deletion` is
+null, otherwise it is the deletion/register layer. Parent references are the
+strictly increasing lexicographic sequence of `(TxTime, NodeUuid)` pairs;
+duplicates and insertion-order spellings are rejected on receipt. This makes a
+parent set one deterministic byte sequence while leaving causal DAG semantics
+unchanged.
+
+**Portable identity and time.** `NodeUuid`, `RowUuid`, and
+`SchemaVersionId` are raw canonical 16-byte UUIDs on the wire; local aliases
+never escape. `AuthorSubject` is its exact canonical JSON `[issuer, subject]`
+string, including `AuthorSubject::SYSTEM`'s fixed spelling. Transaction and
+global times are unsigned packed HLC `u64`s (46 physical-millisecond bits then
+18 logical bits); row provenance emits only physical milliseconds and restores
+the logical counter as zero. The authoritative HLC/UUID comparison is also the
+winner tie-break order. Content and deletion winners are derived independently;
+accepted versions update global-current state, while pending/rejected versions
+never become a global winner.
+
+**Receipt envelope.** Semantic `SyncMessage` and `WireFrame` values serialize
+with postcard in declaration/variant order. A decoder must validate the
+semantic carrier shape and then re-encode to require byte-for-byte equality.
+Consequently it rejects trailing bytes, overlong/alternate varints, invalid
+discriminants, non-canonical authors, unsorted or duplicate parents, and malformed
+carrier runs before storage/replay. The hard-coded accepted/global fate receipt
+in `wire::tests::transaction_fate_receipt_has_one_canonical_postcard_spelling`
+is both semantic-to-bytes and independent bytes-to-semantic coverage; the test's
+durability-tag mutation is a planted sensitivity check. Reopen and replay
+receipts for accepted, rejected, concurrent content/delete, and view-scoped
+payloads remain covered by the cited invariant tests below.
+
+**Explicit non-goals and follow-on #2036 work.** This decision does not promise
+mixed-schema wire compatibility, a persisted-storage migration, physical backend
+file interchange, a public raw-record API, or a format for open transactions.
+The remaining #2036 work is (1) independent golden fixtures for every
+transaction/history Groove record rather than the first fate receipt, (2) a
+cross-adapter corpus for accepted/rejected/concurrent/delete and view-scoped
+reopen/replay, and (3) an adversarial corrupt-store matrix for every retained
+transaction/version field. Those are intentionally not claimed complete by this
+first layout-freeze slice.
 
 ### 2.14 Subsumed table-first row-history notes
 
