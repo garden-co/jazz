@@ -2196,6 +2196,12 @@ function PlainTableView({
           schemaColumn && isEditable
             ? (props) => <QueuedCellEditor {...props} schemaColumn={schemaColumn} />
             : undefined,
+        // Live query delivery and row-change animations can replace an otherwise
+        // unchanged row object. Queued editors own their draft until commit, so
+        // those external identity changes must not close the editor.
+        editorOptions: {
+          closeOnExternalRowChange: false,
+        },
       };
     });
 

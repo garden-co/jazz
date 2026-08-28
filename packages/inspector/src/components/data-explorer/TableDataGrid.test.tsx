@@ -584,6 +584,22 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("server pushed update")).toBeNull();
   });
 
+  it("keeps an active inline editor open when the current row live-updates", async () => {
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), {
+      target: { value: "local draft" },
+    });
+
+    currentRows = [{ ...currentRows[0], title: "server pushed update" }, currentRows[1]!];
+    rerender(renderGridUi());
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Edit title") as HTMLInputElement).value).toBe("local draft");
+    });
+  });
+
   it("sets nullable columns to NULL from the inline editor action", async () => {
     renderGrid();
 
