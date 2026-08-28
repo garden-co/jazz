@@ -174,6 +174,10 @@ where
         self.upstream_durability_floor.set(DurabilityTier::Local);
     }
 
+    pub(super) fn set_relay_authority_session_owner(&self) {
+        self.node.borrow_mut().set_relay_authority_session_owner();
+    }
+
     pub(super) fn set_deferred_local_persistence(&self, deferred: bool) {
         self.defer_local_persistence.set(deferred);
     }
@@ -953,6 +957,7 @@ where
             ),
             query_coverage_registrations: Rc::clone(&self.query_coverage_registrations),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
+            coverage_refresh_generations: Rc::clone(&self.coverage_refresh_generations),
             scheduler: Rc::clone(&self.scheduler),
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
             upstream_upload_destination,
@@ -1202,6 +1207,7 @@ where
             ),
             query_coverage_registrations: Rc::clone(&self.query_coverage_registrations),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
+            coverage_refresh_generations: Rc::clone(&self.coverage_refresh_generations),
             scheduler: Rc::clone(&self.scheduler),
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
             upstream_upload_destination: None,
@@ -1850,6 +1856,7 @@ where
                     tier: settled_tier,
                     read_view: read_view.clone(),
                     propagate_upstream: remote_propagate_upstream,
+                    ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
             };
@@ -2103,6 +2110,7 @@ where
                         tier: *tier,
                         read_view: read_view.clone(),
                         propagate_upstream: remote_propagate_upstream,
+                        ..RegisterShapeOptions::default()
                     }
                     .read_view_key(),
                 })
@@ -2115,6 +2123,7 @@ where
                     tier: settled_tier,
                     read_view: read_view.clone(),
                     propagate_upstream: remote_propagate_upstream,
+                    ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
             };
@@ -3006,6 +3015,7 @@ pub(super) fn route_upstream_subscription_rejection(
             tier: state_ref.remote_read_tier.unwrap_or(state_ref.read_tier),
             read_view: state_ref.read_view.clone(),
             propagate_upstream: state_ref.remote_propagate_upstream,
+            ..RegisterShapeOptions::default()
         };
         if !register_shape_rejection_matches(subscription, shape, &opts) {
             continue;

@@ -1627,6 +1627,12 @@ pub struct RegisterShapeOptions {
     /// Whether the serving node may register matching coverage with its own upstream.
     #[serde(default = "default_propagate_upstream")]
     pub propagate_upstream: bool,
+    /// Internal ownership of the binding whose ViewUpdates an Edge relay may
+    /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
+    /// relay code creates `RelayAuthoritySession` only for its own upstream
+    /// coverage handle.
+    #[serde(default)]
+    pub(crate) binding_source: BindingSource,
 }
 
 impl Default for RegisterShapeOptions {
@@ -1635,8 +1641,32 @@ impl Default for RegisterShapeOptions {
             tier: default_register_shape_tier(),
             read_view: ReadViewSpec::default(),
             propagate_upstream: default_propagate_upstream(),
+            binding_source: BindingSource::Ordinary,
         }
     }
+}
+
+/// Internal discriminator for otherwise-identical binding views.
+///
+/// It participates in [`RegisterShapeOptions::read_view_key`], so an Edge
+/// relay authority receipt cannot be confused with an ordinary Global read.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub(crate) enum BindingSource {
+    #[default]
+    Ordinary,
+    RelayAuthoritySession,
 }
 
 impl RegisterShapeOptions {

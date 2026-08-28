@@ -1622,7 +1622,7 @@ export class Db {
     await this.connection.ensureReady(tier, signal);
   }
 
-  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
+  private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
     const wait = handle.wait.bind(handle);
     handle.wait = (async (options: { tier: DurabilityTier }) => {
       await this.ensureReady(options.tier);

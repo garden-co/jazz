@@ -635,6 +635,7 @@ where
             }
         }
         self.query.settled_result_sets.clear();
+        self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         Ok(())
@@ -648,6 +649,12 @@ where
     }
 
     async fn recover_known_state_facts(&mut self) -> Result<(), Error> {
+        self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
+        self.query.settled_result_sets.clear();
+        self.query.local_materialized_window_binding_views.clear();
+        self.query.settled_result_row_index.clear();
+        self.query.settled_program_facts.clear();
         // Validate the complete durable closure off to the side.  Open/recovery
         // must not leave even a prefix of the recovered state resident when a
         // later store entry is malformed.

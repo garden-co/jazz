@@ -344,6 +344,7 @@ where
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
     pub(super) query_coverage_registrations: QueryCoverageRegistrations,
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
+    pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
     pub(super) scheduler: SharedTickScheduler,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
     pub(super) upstream_upload_destination: Option<UpstreamUploadDestination>,
@@ -1753,6 +1754,9 @@ where
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
+                                        &self.coverage_refresh_generations,
+                                        &self.subscriber_dirty_epoch,
+                                        &self.scheduler,
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -1774,6 +1778,9 @@ where
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
+                                        &self.coverage_refresh_generations,
+                                        &self.subscriber_dirty_epoch,
+                                        &self.scheduler,
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -2014,6 +2021,9 @@ where
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
+                                        &self.coverage_refresh_generations,
+                                        &self.subscriber_dirty_epoch,
+                                        &self.scheduler,
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -2298,6 +2308,9 @@ where
                                         &mut pending_initial_coverage_clears,
                                         &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
+                                        &self.coverage_refresh_generations,
+                                        &self.subscriber_dirty_epoch,
+                                        &self.scheduler,
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -2386,6 +2399,9 @@ where
                             &mut pending_initial_coverage_clears,
                             &self.query_coverage_registrations,
                             &self.active_authority_view_receipts,
+                            &self.coverage_refresh_generations,
+                            &self.subscriber_dirty_epoch,
+                            &self.scheduler,
                             self.connection_epoch,
                         )
                         .await?;
@@ -2695,6 +2711,8 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
+                                !*local_receiver
+                                    && matches!(peer.role(), PeerRole::ClientLink { .. }),
                             ) {
                                 shape_registrations.insert(
                                     registration_key,
@@ -2964,6 +2982,8 @@ where
                                 &opts,
                                 *local_receiver,
                                 peer.role(),
+                                !*local_receiver
+                                    && matches!(peer.role(), PeerRole::ClientLink { .. }),
                             )
                             .is_err()
                             {
@@ -3078,12 +3098,16 @@ where
                             };
                             let local_subscriber = *local_receiver;
                             let upstream_opts = if local_subscriber {
-                                upstream_register_shape_options(
+                                let mut opts = upstream_register_shape_options(
                                     opts.tier,
                                     opts.read_view.clone(),
                                     DurabilityTier::Global,
                                     opts.propagate_upstream,
-                                )
+                                );
+                                if self.node.borrow().is_relay_authority_session_owner() {
+                                    opts.binding_source = BindingSource::RelayAuthoritySession;
+                                }
+                                opts
                             } else {
                                 opts.clone()
                             };
@@ -3985,6 +4009,9 @@ async fn apply_pending_authority_view_updates<S>(
     clears: &mut BTreeSet<CoverageKey>,
     query_coverage_registrations: &QueryCoverageRegistrations,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    coverage_refresh_generations: &CoverageRefreshGenerations,
+    subscriber_dirty_epoch: &Rc<Cell<u64>>,
+    scheduler: &SharedTickScheduler,
     connection_epoch: u64,
 ) -> Result<(), Error>
 where
@@ -4006,6 +4033,7 @@ where
         .map(|update| update.parts.settled_through)
         .max();
     let node_ref = node.borrow();
+    let relay_authority_session_owner = node_ref.is_relay_authority_session_owner();
     let confirmed_binding_views = confirmed_subscriptions
         .iter()
         .filter_map(|(subscription, settled_through)| {
@@ -4043,6 +4071,15 @@ where
     let mut node_ref = node.lock().await;
     node_ref.apply_view_updates_in_batch(updates).await?;
     drop(node_ref);
+    if relay_authority_session_owner {
+        // A relay authority view is input to every locally served browser
+        // Edge child. Advance the shared generation only after the validated
+        // batch commits, so a later tab is rehydrated from the worker's
+        // resident authority membership without unrelated upstream traffic.
+        let next = subscriber_dirty_epoch.get().wrapping_add(1);
+        subscriber_dirty_epoch.set(next);
+        schedule_tick_in(scheduler, TickUrgency::Immediate);
+    }
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
     {
@@ -4059,8 +4096,15 @@ where
     }
     if !clears.is_empty() {
         let mut awaiting = awaiting.borrow_mut();
+        let mut refreshes = coverage_refresh_generations.borrow_mut();
         for coverage in std::mem::take(clears) {
             awaiting.remove(&coverage);
+            if relay_authority_session_owner {
+                // Coalescing is valid only while this relay authority reply
+                // remains outstanding. A later tab must request a receipt of
+                // its own rather than inheriting an obsolete refresh marker.
+                refreshes.remove(&coverage);
+            }
         }
     }
     Ok(())

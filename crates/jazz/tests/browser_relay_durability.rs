@@ -19,7 +19,7 @@ use jazz::protocol::{
 };
 use jazz::query::{BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
@@ -103,6 +103,18 @@ fn schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+            .build(),
+    )
+}
+
+fn write_only_policy_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::True)),
+            )
             .build(),
     )
 }
@@ -1600,9 +1612,10 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
 }
 
 /// A fresh browser main thread receives the worker's authority-owned reset as
-/// a complete relation snapshot. This is intentionally an internal topology
-/// test: only the public `Db` facade can model the non-durable main/runtime
-/// worker/core boundary used by the browser bridge.
+/// a complete relation snapshot in the same relay turn that applies it. This
+/// is intentionally an internal topology test: only the public `Db` facade
+/// can model the non-durable main/runtime worker/core boundary used by the
+/// browser bridge.
 #[test]
 fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let schema = included_relation_schema();
@@ -1611,6 +1624,9 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let worker = open_db(0x2f, alice, &schema);
     let core = open_core(0x3f, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner();
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
 
     let seeder = open_db(0x20, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
@@ -1669,15 +1685,26 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
         "fresh remote coverage must withhold its provisional local snapshot"
     );
 
+    let mut authority_update_scheduled = false;
     for _ in 0..4 {
         main_thread.tick().expect("register worker coverage");
         worker.tick().expect("forward authority coverage");
         core.tick().expect("serve authority relation snapshot");
+        let schedules_before = scheduler.calls.get();
         worker.tick().expect("relay authority relation snapshot");
+        authority_update_scheduled |= scheduler.calls.get() > schedules_before;
         main_thread
             .tick()
             .expect("apply authority relation snapshot");
     }
+
+    assert!(
+        authority_update_scheduled,
+        "applying the authority view must schedule the relay post-receive serve pass",
+    );
+    main_thread
+        .tick()
+        .expect("apply relayed authority relation snapshot");
 
     let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
     assert!(
@@ -1690,8 +1717,248 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     );
 }
 
+/// A reopened browser tab receives a new Edge receipt after the persistent
+/// worker has already applied the authority membership for an earlier tab.
+/// Alice closes the first main-thread runtime; the worker remains connected
+/// and retains its resident authority row; then Alice opens a fresh runtime.
+///
+/// ```text
+/// alice tab 1 ──Edge──► persistent worker ──Global──► core
+///      │                         │
+///      └──close──────────────────┤ retains applied authority row
+/// alice tab 2 ──Edge──► same worker ──receipt──► tab 2
+/// ```
+#[test]
+fn reopened_browser_tab_hydrates_from_worker_authority_state() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let worker = open_db(0x2b, alice, &schema);
+    let core = open_core(0x3b, &schema);
+    worker.set_relay_authority_session_owner();
+
+    let seeder = open_db(0x4b, alice, &schema);
+    let (seeder_transport, core_seed_transport) = duplex();
+    let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
+    let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let seeded = seeder
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("survives tab reopen".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("seed authority row");
+    for _ in 0..3 {
+        seeder.tick().expect("upload seeded row");
+        core.tick().expect("accept seeded row");
+        seeder.tick().expect("settle seeded row");
+    }
+
+    let first_tab = open_db(0x1b, alice, &schema);
+    first_tab.set_non_durable_client();
+    let (first_transport, first_worker_transport) = duplex();
+    let first_connection = block_on(first_tab.connect_upstream(first_transport));
+    let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let first_query = first_tab
+        .prepare_query(&first_tab.table("todos"))
+        .expect("prepare first-tab Edge query");
+    let mut first_subscription = block_on(first_tab.subscribe(
+        &first_query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe from first tab");
+    for _ in 0..6 {
+        first_tab.tick().expect("register first-tab coverage");
+        worker.tick().expect("forward first-tab coverage");
+        core.tick().expect("serve first-tab authority coverage");
+        worker.tick().expect("apply first-tab authority coverage");
+        first_tab.tick().expect("apply first-tab handoff");
+    }
+    assert!(
+        std::iter::from_fn(|| first_subscription.try_next_event()).any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, settled: true, .. }
+                if added.iter().any(|row| row.row.row_uuid() == seeded.row_uuid())
+        ))
+    );
+
+    // Closing the tab removes only its connection-scoped relay ownership. The
+    // worker has already applied the authority row and must remain usable by a
+    // subsequent tab without a process restart.
+    drop(first_subscription);
+    first_tab.tick().expect("finalize first-tab subscription");
+    worker.tick().expect("retire first-tab relay owner");
+    core.tick().expect("process first-tab relay retirement");
+    worker.tick().expect("apply first-tab relay retirement");
+    assert!(first_tab.detach_connection(&first_connection));
+    assert!(worker.detach_connection(&first_worker_connection));
+    let worker_query = worker
+        .prepare_query(&worker.table("todos"))
+        .expect("prepare worker resident query");
+    assert_eq!(
+        worker
+            .read(&worker_query)
+            .expect("read retained worker row")
+            .len(),
+        1,
+        "the persistent worker must retain the authority row after tab 1 closes",
+    );
+
+    let reopened_tab = open_db(0x1c, alice, &schema);
+    reopened_tab.set_non_durable_client();
+    let (reopened_transport, reopened_worker_transport) = duplex();
+    let _reopened_connection = block_on(reopened_tab.connect_upstream(reopened_transport));
+    let _reopened_worker_connection = worker.accept_subscriber(reopened_worker_transport, alice);
+    let reopened_query = reopened_tab
+        .prepare_query(&reopened_tab.table("todos"))
+        .expect("prepare reopened-tab Edge query");
+    let mut reopened_subscription = block_on(reopened_tab.subscribe(
+        &reopened_query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe from reopened tab");
+    for _ in 0..8 {
+        reopened_tab.tick().expect("register reopened-tab coverage");
+        worker.tick().expect("forward reopened-tab coverage");
+        core.tick().expect("serve reopened-tab authority coverage");
+        worker
+            .tick()
+            .expect("apply reopened-tab authority coverage");
+        reopened_tab.tick().expect("apply reopened-tab handoff");
+    }
+    assert!(
+        std::iter::from_fn(|| reopened_subscription.try_next_event()).any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, settled: true, .. }
+                if added.iter().any(|row| row.row.row_uuid() == seeded.row_uuid())
+        )),
+        "the reopened tab must receive a settled authority handoff"
+    );
+}
+
+/// A write policy changes admission only; it cannot revoke read membership.
+/// A browser-authored exact-row transaction therefore uses the worker's one
+/// ordinary Edge projection. Treating the write-only table as read-scoped
+/// would select a second relay-authority projection and deliver the same
+/// transaction through incompatible bundles (`ConflictingCommitUnit`).
+#[test]
+fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection() {
+    let schema = write_only_policy_schema();
+    let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let worker = open_db(0xc3, alice, &schema);
+    let core = open_core(0xc4, &schema);
+    worker.set_relay_authority_session_owner();
+
+    let main_thread = open_db(0xc5, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    let row_id = jazz::ids::RowUuid::from_bytes([0xc6; 16]);
+    let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
+    let todos = main_thread
+        .prepare_query(&exact_query)
+        .expect("prepare exact Edge query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe exact Edge query");
+
+    for _ in 0..4 {
+        main_thread.tick().expect("register exact Edge coverage");
+        worker.tick().expect("relay exact Edge coverage");
+        core.tick().expect("serve initial exact coverage");
+        worker.tick().expect("apply initial exact coverage");
+        main_thread.tick().expect("settle initial exact coverage");
+    }
+    while subscription.try_next_event().is_some() {}
+
+    let authored = main_thread
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("one ordinary projection".to_owned()),
+            )]),
+            jazz::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .expect("author browser row");
+    for _ in 0..8 {
+        main_thread.tick().expect("upload browser-authored row");
+        worker
+            .tick()
+            .expect("relay authored row without conflicting commit units");
+        core.tick().expect("admit authored row");
+        worker
+            .tick()
+            .expect("apply authored settlement without conflicting commit units");
+        main_thread.tick().expect("apply authored row settlement");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. }
+                if added.iter().any(|row| row.row.row_uuid() == authored.row_uuid())
+        )),
+        "the public Edge read must receive the authored row once: {events:?}",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
+        "the authored row must settle through the ordinary projection: {events:?}",
+    );
+}
+
+/// A browser worker must rebase a narrower one-shot page against a received
+/// authority window instead of applying that page's absolute offset twice.
+/// Alice first subscribes to positions 8..24, then asks for positions 8..10;
+/// the latter must remain the first two members of the received window.
+///
+/// ```text
+/// core Global page 8..24 ──► worker ──► main Edge page 8..24
+/// main later Local page 8..10 ──► materialized page 8..24
+/// ```
 #[test]
 fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
+    // This receipt seeds and propagates several independently maintained
+    // browser/worker/core views. Give only its test thread the normal 2 MiB
+    // stack plus a 4 MiB margin, rather than changing the process-wide test
+    // stack or production runtime configuration.
+    std::thread::Builder::new()
+        .name("browser-relay-window-receipt".to_owned())
+        .stack_size(6 * 1024 * 1024)
+        .spawn(browser_relay_keeps_offset_window_membership_on_large_stack)
+        .expect("spawn browser relay window receipt")
+        .join()
+        .expect("browser relay window receipt panicked");
+}
+
+fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xc2; 16]);
     let main_thread = open_db(0x1c, alice, &schema);
@@ -1899,6 +2166,95 @@ fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
         todo_ids[7..9].to_vec(),
         "a local subwindow is invalidated with the authority window it derives from",
     );
+
+    // Mirror a browser `db.all({ tier: "edge" })`: it releases the broad
+    // coverage after its result is materialized, but its rows remain in the
+    // main-thread overlay for later Local reads.
+    drop(subscription);
+    for _ in 0..12 {
+        main_thread.tick().expect("release broad browser window");
+        worker.tick().expect("forward broad window release");
+        core.tick().expect("accept broad window release");
+        worker.tick().expect("apply broad window release");
+        main_thread.tick().expect("apply broad window cleanup");
+    }
+
+    // A later Local one-shot must recognize that the overlay is only the
+    // materialized 8..24 page. It starts at the same absolute offset, so it
+    // must slice relative to that page instead of returning positions 16/17.
+    let same_offset_one_shot = main_thread
+        .prepare_query(
+            &Query::from("todos")
+                .order_by("title", OrderDirection::Asc)
+                .offset(8)
+                .limit(2),
+        )
+        .expect("prepare same-offset one-shot subwindow");
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &same_offset_one_shot,
+                ReadOpts {
+                    tier: DurabilityTier::Local,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read same-offset local one-shot after broad coverage release"),
+        ),
+        todo_ids[7..9].to_vec(),
+        "same-offset Local page is relative to the materialized authority page",
+    );
+
+    // The retained page is deliberately not an Edge receipt. A fresh Edge
+    // usage site must clear the local-only interpretation and wait for a new
+    // authority response instead of treating detached membership as current
+    // authorization coverage.
+    let fresh_edge_read = main_thread
+        .attach_query_with_opts(
+            &same_offset_one_shot,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        )
+        .expect("attach fresh same-offset Edge read");
+    assert!(
+        !main_thread.query_attachment_is_covered(&fresh_edge_read),
+        "a detached materialized page must not satisfy a fresh Edge read",
+    );
+    for _ in 0..12 {
+        main_thread
+            .tick()
+            .expect("send fresh same-offset Edge read");
+        worker.tick().expect("forward fresh same-offset Edge read");
+        core.tick().expect("serve fresh same-offset Edge read");
+        worker.tick().expect("relay fresh same-offset Edge read");
+        main_thread
+            .tick()
+            .expect("apply fresh same-offset Edge receipt");
+        if main_thread.query_attachment_is_covered(&fresh_edge_read) {
+            break;
+        }
+    }
+    assert!(
+        main_thread.query_attachment_is_covered(&fresh_edge_read),
+        "the fresh Edge page must receive a new authority receipt",
+    );
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &same_offset_one_shot,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read fresh same-offset Edge page"),
+        ),
+        todo_ids[7..9].to_vec(),
+        "fresh Edge coverage replaces the detached local materialization",
+    );
+    main_thread.detach_query(fresh_edge_read);
 }
 
 /// A detached bounded Edge read releases its exact authoritative receipt.
@@ -2018,6 +2374,11 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             main_thread.settled_authoritative_receipt_counts_for_test(),
             (0, 0),
             "offset {offset} leaves no retained authority membership"
+        );
+        assert_eq!(
+            worker.settled_authoritative_receipt_counts_for_test(),
+            (0, 0),
+            "offset {offset} must also release the worker's paired Global receipt",
         );
     }
 }

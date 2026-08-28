@@ -561,6 +561,7 @@ where
                 registered_bindings: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
+                local_materialized_window_binding_views: BTreeSet::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
@@ -588,6 +589,7 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
+            relay_authority_session_owner: false,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
             ahead_current_keys: FxHashSet::default(),
@@ -704,6 +706,17 @@ where
 
     pub(crate) fn set_non_durable_client(&mut self) {
         self.authored_commit_durability = DurabilityTier::None;
+    }
+
+    /// Mark this process as the durable half of a browser client/worker relay.
+    /// The marker only selects an internal upstream binding identity for Edge
+    /// coverage; it is neither persisted nor an authorization policy input.
+    pub(crate) fn set_relay_authority_session_owner(&mut self) {
+        self.relay_authority_session_owner = true;
+    }
+
+    pub(crate) fn is_relay_authority_session_owner(&self) -> bool {
+        self.relay_authority_session_owner
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.
@@ -1426,6 +1439,7 @@ where
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.settled_result_sets.clear();
+        self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
@@ -1506,6 +1520,9 @@ where
 
     fn clear_settled_result_view(&mut self, binding_view_key: BindingViewKey) {
         self.query.settled_result_sets.remove(&binding_view_key);
+        self.query
+            .local_materialized_window_binding_views
+            .remove(&binding_view_key);
         self.query
             .settled_result_row_index
             .remove(&binding_view_key);

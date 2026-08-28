@@ -422,6 +422,13 @@ where
         self.node.set_non_durable_client();
     }
 
+    /// Configure this durable process as the internal browser relay that owns
+    /// fresh upstream authority sessions for client Edge reads.
+    #[doc(hidden)]
+    pub fn set_relay_authority_session_owner(&self) {
+        self.node.set_relay_authority_session_owner();
+    }
+
     /// Restore unsettled writes relayed from a browser client sharing this
     /// worker's author. Browser workers persist main-thread transactions whose
     /// node differs from the worker node, so ordinary local-origin recovery

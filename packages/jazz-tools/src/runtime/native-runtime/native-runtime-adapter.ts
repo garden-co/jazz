@@ -188,6 +188,7 @@ type NativeDb = {
     opts: unknown,
   ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
+  setRelayAuthoritySessionOwner?(): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
   queryAttachmentIsCovered?(attachment: unknown): boolean;
@@ -1758,11 +1759,12 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
-    // In browser mode the requested tier gates hydration through the worker,
-    // while the main-thread Db remains an in-memory materialized cache. Once
-    // coverage is confirmed, evaluate that cache at its Local tier.
-    const materializedTier = this.nonDurableClient ? "local" : tier;
-    const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    // Browser runtimes still materialize row bodies from their in-memory
+    // cache, but an Edge/Global read must keep its requested tier while doing
+    // so. The settled membership from the worker is the authorization
+    // boundary; lowering it to Local here would re-scan cached rows that a
+    // fresh remote receipt had just removed.
+    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
@@ -1821,7 +1823,7 @@ export class NativeRuntimeAdapter implements Runtime {
       let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
-        await this.refreshRowsFromEdge(session, rowStates);
+        await this.refreshRowsFromEdge(session, query, opts);
         if (this.closed) return [];
         rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
         rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
@@ -2419,30 +2421,15 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private async refreshRowsFromEdge(
     session: RuntimeSession | null,
-    rows: RowState[],
+    query: PreparedQuery,
+    opts: unknown,
   ): Promise<void> {
-    if (!this.hasUpstream() || rows.length === 0) return;
-    const seen = new Set<string>();
-    for (const row of rows) {
-      const key = rowKey(row.table, row.id);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const queryJson = JSON.stringify({
-        table: row.table,
-        conditions: [{ column: "id", op: "eq", value: row.id }],
-        array_subqueries: [],
-      });
-      const query = this.prepareQuery(queryJson);
-      let attachment: unknown;
-      try {
-        attachment = await this.attachQueryIfNeeded("edge", null, query, session);
-        if (this.closed) return;
-        const opts = readOptions("edge", false, null);
-        await this.readRowsForHostAsync(query, opts, session?.identity);
-      } finally {
-        if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
-      }
-    }
+    if (!this.hasUpstream()) return;
+    // The outer Edge attachment owns both membership and concrete
+    // occurrences. Reusing that prepared query materializes only its
+    // delivered versions; a nested exact-id request creates a second scope
+    // and can circularly await its own authority receipt.
+    await this.readRowsForHostAsync(query, opts, session?.identity);
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {

@@ -716,7 +716,7 @@ export class PersistedWriteRejectedError extends Error {
  * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
  */
-export class WriteHandle<T = void> {
+export class WriteHandle<T = void, WaitResult = void> {
   readonly #client: JazzClient;
   readonly value: T;
   readonly batchId: Promise<BatchId>;
@@ -735,8 +735,8 @@ export class WriteHandle<T = void> {
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
-  async wait(options: { tier: DurabilityTier }): Promise<T> {
-    return this.#client.waitForTransaction(this.batchId, options.tier) as Promise<T>;
+  async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
+    return this.#client.waitForTransaction(this.batchId, options.tier) as Promise<WaitResult>;
   }
 
   protected client(): JazzClient {
@@ -749,7 +749,7 @@ export class WriteHandle<T = void> {
  * Allows getting the inserted value and waiting for the write
  * to be persisted at a given durability tier.
  */
-export class WriteResult<T> extends WriteHandle<T> {
+export class WriteResult<T> extends WriteHandle<T, T> {
   constructor(value: T, batchId: BatchId | Promise<BatchId>, client: JazzClient) {
     super(batchId, client, value);
   }

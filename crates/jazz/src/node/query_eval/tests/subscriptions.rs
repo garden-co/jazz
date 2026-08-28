@@ -99,6 +99,99 @@ fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
 }
 
 #[test]
+fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_source() {
+    let (_dir, mut node) = open_node();
+    let shape = Query::from("issues")
+        .validate(&node.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let ordinary_direct = node
+        .client_settled_binding_view_key_for_query(
+            &shape,
+            &binding,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        )
+        .expect("durable direct Edge reads use their upstream Global source");
+    let expected_ordinary = BindingViewKey::new(
+        shape.shape_id(),
+        binding.binding_id(),
+        RegisterShapeOptions::default().read_view_key(),
+    );
+    assert_eq!(ordinary_direct, expected_ordinary);
+
+    node.set_relay_authority_session_owner();
+    assert_eq!(
+        node.client_settled_binding_view_key_for_query(
+            &shape,
+            &binding,
+            DurabilityTier::Edge,
+            &ReadViewSpec::default(),
+        ),
+        Some(expected_ordinary),
+        "marking a worker must not retag ordinary direct Edge settlement",
+    );
+    let relay_authority =
+        node.relay_authority_session_binding_view_key(&shape, &binding, &ReadViewSpec::default());
+    assert_ne!(relay_authority, ordinary_direct);
+    assert_eq!(
+        relay_authority,
+        BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            RegisterShapeOptions {
+                tier: DurabilityTier::Global,
+                binding_source: BindingSource::RelayAuthoritySession,
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
+        ),
+        "only the relay publication path uses the distinct authority ingress key",
+    );
+}
+
+#[test]
+fn relay_authority_source_selection_requires_read_policy_for_exact_id() {
+    fn selected(schema: JazzSchema) -> bool {
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0x35; 16]), schema.clone());
+        node.set_relay_authority_session_owner();
+        let shape = Query::from("docs")
+            .filter(eq(col("id"), lit(Value::Uuid(row(0x36).0))))
+            .validate_runtime(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        node.relay_edge_query_requires_authority_source(&shape, &binding)
+            .unwrap()
+    }
+
+    let table = || PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text);
+    let no_policy = public_query_eval_schema(PublicSchemaBuilder::new().table(table()));
+    let read_policy =
+        public_query_eval_schema(PublicSchemaBuilder::new().table(
+            table().policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ));
+    let write_only_policy =
+        public_query_eval_schema(PublicSchemaBuilder::new().table(
+            table().policies(PublicTablePolicies::new().with_insert(PublicPolicyExpr::True)),
+        ));
+
+    assert!(
+        !selected(no_policy),
+        "public point reads stay on the ordinary relay path"
+    );
+    assert!(
+        selected(read_policy),
+        "read-policy revocation requires authority membership"
+    );
+    assert!(
+        !selected(write_only_policy),
+        "write-only policy cannot revoke read membership and must not select a second source",
+    );
+}
+
+#[test]
 fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
     let schema = owner_policy_schema();
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());

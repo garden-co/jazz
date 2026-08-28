@@ -2497,6 +2497,106 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(detached).toEqual([]);
   });
 
+  it("hydrates broad Edge members through its attached Edge receipt, never a nested exact read", async () => {
+    const attachments: unknown[] = [];
+    const readOptions: unknown[] = [];
+    const detached: unknown[] = [];
+    const row = {
+      table: "todos",
+      rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+      title: "authority-selected todo",
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return encodeRows([row]);
+            },
+            attachQuery: (_query: unknown, opts: unknown) => {
+              attachments.push(opts);
+              return { tier: (opts as { tier: string }).tier };
+            },
+            connectUpstream: () => new FakeTransport([]),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: (attachment: unknown) => detached.push(attachment),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connectUpstreamPeer();
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
+      {
+        id: "00000000-0000-0000-0000-000000000001",
+        table: "todos",
+        values: [{ type: "Text", value: "authority-selected todo" }],
+      },
+    ]);
+
+    expect(attachments).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "edge" }, { tier: "edge" }, { tier: "edge" }]);
+    expect(detached).toEqual([{ tier: "edge" }]);
+  });
+
+  it("forwards a standalone exact Edge read as a fresh Edge authority request", async () => {
+    const attachments: unknown[] = [];
+    const readOptions: unknown[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return encodeRows([]);
+            },
+            attachQuery: (_query: unknown, opts: unknown) => {
+              attachments.push(opts);
+              return {};
+            },
+            connectUpstream: () => new FakeTransport([]),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connectUpstreamPeer();
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "id", op: "eq", value: "00000000-0000-0000-0000-000000000001" }],
+        }),
+        null,
+        "edge",
+      ),
+    ).resolves.toEqual([]);
+
+    expect(attachments).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "edge" }]);
+  });
+
   it("ignores the removed propagate read option", async () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -2788,13 +2888,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       expect(secondSettled).toBe(false);
       await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
-      expect(secondSettled).toBe(false);
-
-      // The populated global read performs one row-scoped edge refresh before
-      // publishing, which likewise requires coverage for its new attachment.
-      runtime.notifyPeerTransportActivity();
-      await runtime.progressPeerTransport();
-      await vi.advanceTimersByTimeAsync(10);
       await expect(second).resolves.toEqual([
         {
           table: "todos",
@@ -2802,7 +2895,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           values: [{ type: "Text", value: "committed while detached" }],
         },
       ]);
-      expect(attachmentCount).toBe(3);
+      // The new full attachment itself supplied both membership and the
+      // concrete row. Re-reading that settled outer scope must not manufacture
+      // a second exact-id authority attachment: it would be a distinct receipt
+      // with no extra authorization information and can self-await.
+      expect(attachmentCount).toBe(2);
     } finally {
       vi.useRealTimers();
     }

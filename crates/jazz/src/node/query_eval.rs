@@ -48,10 +48,11 @@ use super::query_engine::{
 };
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
-    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
-    ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
-    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
+    BindingSource, BindingViewKey, KnownStateCompleteness, KnownStateDeclaration,
+    PermissionAdviceAction, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec,
+    RegisterShapeOptions, RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry,
+    ResultRowLayer, RowVersionRef, RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe,
+    SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -1476,6 +1477,34 @@ where
             .map(|view| view.key)
     }
 
+    fn is_policy_scoped_exact_id_query(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<bool, Error> {
+        let table = self.table_in_schema(&shape.query().table, shape.schema_version())?;
+        Ok(table.read_policy.is_some()
+            && root_literal_equalities(shape.query(), binding)?.contains_key("id"))
+    }
+
+    /// Relay forwarding consumes a selected upstream authority receipt only
+    /// where local re-evaluation would change its meaning: windows would
+    /// otherwise apply their offset twice, and policy-scoped exact-ID reads
+    /// could resurrect a cached row after revocation. A browser worker's
+    /// dedicated authority-session identity keeps that selected receipt
+    /// separate from ordinary Global coverage; it does not turn every Edge
+    /// child into a second projection path.
+    pub(crate) fn relay_edge_query_requires_authority_source(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<bool, Error> {
+        if shape.query().offset != 0 {
+            return Ok(true);
+        }
+        self.is_policy_scoped_exact_id_query(shape, binding)
+    }
+
     fn client_settled_binding_view_for_query(
         &self,
         shape: &ValidatedQuery,
@@ -1503,8 +1532,10 @@ where
             binding.binding_id(),
             RegisterShapeOptions {
                 // A non-durable browser-side runtime consumes the worker
-                // relay's Edge handoff rather than the worker's Global
-                // upstream coverage.
+                // relay's Edge handoff. Ordinary durable clients retain the
+                // Global source their upstream coverage actually populated.
+                // The relay-only authority source is selected explicitly by
+                // `open_seeded_relay_edge_subscription_view` below.
                 tier: if self.authored_commit_durability == DurabilityTier::None {
                     settled_tier
                 } else {
@@ -1515,6 +1546,17 @@ where
             }
             .read_view_key(),
         );
+        if tier >= DurabilityTier::Edge
+            && self
+                .query
+                .local_materialized_window_binding_views
+                .contains(&binding_view)
+        {
+            // A detached browser window is only enough to rebase a Local
+            // read over the materialized overlay. It must never stand in for
+            // a fresh Edge/Global authorization receipt.
+            return None;
+        }
         if tier == DurabilityTier::Local
             && !self.query.settled_result_sets.contains_key(&binding_view)
         {
@@ -2958,12 +3000,8 @@ where
         ),
         Error,
     > {
-        let settled_binding_view = self.client_settled_binding_view_key_for_query(
-            shape,
-            binding,
-            DurabilityTier::Edge,
-            read_view,
-        );
+        let settled_binding_view =
+            self.relay_edge_subscription_source_binding_view_key(shape, binding, read_view);
         self.open_seeded_maintained_subscription_view_in_authorization_mode(
             shape,
             binding,
@@ -2975,6 +3013,50 @@ where
             PreparedClaimBindingMode::Strict,
         )
         .await
+    }
+
+    /// The non-public source identity owned by a durable browser relay for a
+    /// downstream Edge handoff.  Only the relay publication path asks for
+    /// this key; ordinary client reads continue using their normal upstream
+    /// Global/Edge coverage identity.
+    pub(crate) fn relay_authority_session_binding_view_key(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        read_view: &ReadViewSpec,
+    ) -> BindingViewKey {
+        BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            RegisterShapeOptions {
+                tier: DurabilityTier::Global,
+                read_view: read_view.clone(),
+                binding_source: BindingSource::RelayAuthoritySession,
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
+        )
+    }
+
+    /// Select the source receipt used while relaying an Edge view. The
+    /// browser-worker topology gives its upstream coverage a dedicated source
+    /// identity; older/general relay paths retain their existing Global view.
+    pub(crate) fn relay_edge_subscription_source_binding_view_key(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        read_view: &ReadViewSpec,
+    ) -> Option<BindingViewKey> {
+        if self.is_relay_authority_session_owner() {
+            Some(self.relay_authority_session_binding_view_key(shape, binding, read_view))
+        } else {
+            self.client_settled_binding_view_key_for_query(
+                shape,
+                binding,
+                DurabilityTier::Edge,
+                read_view,
+            )
+        }
     }
 
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an

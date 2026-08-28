@@ -49,12 +49,12 @@ pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, ChunkRequestBatch,
-    ChunkRequestEntry, ChunkResponse, ChunkResponseBatch, ChunkResponseEntry, CoverageKey,
-    CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
-    ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
-    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
-    SubscriptionKey, SyncMessage, TableLens, VersionRecord,
+    AuthorizationScopeReceipt, BindingSource, BindingViewKey, BranchSelector, BranchViewBase,
+    ChunkRequestBatch, ChunkRequestEntry, ChunkResponse, ChunkResponseBatch, ChunkResponseEntry,
+    CoverageKey, CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction,
+    PermissionAdviceRequestId, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionRecord,
 };
 use crate::protocol_limits::{
     validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
@@ -2596,6 +2596,7 @@ fn upstream_register_shape_options(
         tier: remote_subscription_tier(tier, upstream_durability_floor),
         read_view,
         propagate_upstream,
+        ..RegisterShapeOptions::default()
     }
 }
 
@@ -2651,8 +2652,17 @@ fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
     local_receiver: bool,
     peer_role: PeerRole,
+    relay_authority_session_admitted: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
+    if opts.binding_source == BindingSource::RelayAuthoritySession
+        && !relay_authority_session_admitted
+    {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "relay authority-session bindings may only be registered by an admitted upstream relay",
+        ));
+    }
     let supported = match (local_receiver, peer_role) {
         (true, _) | (false, PeerRole::Relay) => opts.tier >= DurabilityTier::Local,
         (false, PeerRole::ClientLink { .. }) => opts.tier == DurabilityTier::Global,
@@ -5250,6 +5260,7 @@ where
             tier,
             read_view,
             propagate_upstream,
+            ..RegisterShapeOptions::default()
         }
         .read_view_key(),
     };
