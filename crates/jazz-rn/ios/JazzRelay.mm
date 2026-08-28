@@ -1,5 +1,6 @@
 #import "JazzRelayModule.h"
 #import "JazzRelay.h"
+#import <React/RCTBridgeModule.h>
 
 #if __has_include(<JazzNativeRelay/jazz_native_relay.h>)
 #import <JazzNativeRelay/jazz_native_relay.h>
@@ -12,11 +13,16 @@
 #endif
 
 #ifdef RCT_NEW_ARCH_ENABLED
-#import <React/RCTBridgeModule.h>
 #import <ReactCommon/RCTTurboModule.h>
 #endif
 
 @implementation JazzRelay
+
+// New-Architecture modules still require this registration hook: it binds the
+// generated `JazzRelay` spec to the Objective-C implementation that supplies
+// `getTurboModule:` below. Without it TurboModuleRegistry.get("JazzRelay")
+// returns null in a release host even though the pod and XCFramework linked.
+RCT_EXPORT_MODULE()
 
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
 static jazz_native_relay_host *relayHost = NULL;

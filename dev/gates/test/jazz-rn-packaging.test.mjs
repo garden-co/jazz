@@ -53,11 +53,23 @@ function spliceCPreprocessorLines(source) {
   return source.replace(/\\(?:\r\n|\n)/g, "");
 }
 
-function assertNoLegacyIosMacroToken(source) {
-  assert.doesNotMatch(
-    spliceCPreprocessorLines(source),
-    /\bRCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*\b/,
-    "iOS JazzRelay must contain no legacy RCT export/remap macro token",
+function assertExactIosModuleRegistration(source) {
+  const macroSource = spliceCPreprocessorLines(source);
+  const registration = macroSource.match(/\bRCT_EXPORT_MODULE\s*\(\s*\)/g) ?? [];
+  assert.deepEqual(
+    registration,
+    ["RCT_EXPORT_MODULE()"],
+    "iOS JazzRelay must register exactly once so TurboModuleRegistry can discover its generated ABI",
+  );
+  const legacyMacros = [
+    ...macroSource.matchAll(/\b(RCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*)\b/g),
+  ]
+    .map((match) => match[1])
+    .filter((macro) => macro !== "RCT_EXPORT_MODULE");
+  assert.deepEqual(
+    legacyMacros,
+    [],
+    `iOS JazzRelay must contain no legacy RCT export/remap macro token: ${legacyMacros.join(", ")}`,
   );
 }
 
@@ -345,7 +357,7 @@ function assertOpaqueIosRelaySurface(iosRelay) {
   // The generated New-Architecture spec is the sole iOS JavaScript ABI. A raw
   // source ban is intentional: comments, strings, categories, and line
   // continuations must not create a parser-dependent escape hatch.
-  assertNoLegacyIosMacroToken(iosRelay);
+  assertExactIosModuleRegistration(iosRelay);
   const commentFreeRelay = stripComments(iosRelay);
   const implementations = objcImplementations(commentFreeRelay);
   const relayImplementations = implementations.filter(
@@ -530,12 +542,18 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
   assert.doesNotMatch(androidPackage, /JazzRnModule/);
-  assertNoLegacyIosMacroToken(iosRelay);
+  assertExactIosModuleRegistration(iosRelay);
   assert.match(iosRelay, /JAZZ_RELAY_ARTIFACT_AVAILABLE/);
   assert.match(iosRelay, /jazz_native_relay_host_execute/);
   assert.match(iosRelay, /<JazzNativeRelay\/jazz_native_relay\.h>/);
   assert.match(iosRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
   assert.match(iosRelay, /NativeJazzRelaySpecJSI/);
+  assert.match(iosRelay, /RCT_EXPORT_MODULE\(\)/);
+  assert.throws(
+    () => assertOpaqueIosRelaySurface(iosRelay.replace("RCT_EXPORT_MODULE()", "")),
+    /register exactly once/,
+    "the receipt must fail if the iOS TurboModule registration is removed",
+  );
   assert.doesNotMatch(packageRoot, /NativeJazzRn|uniffi/);
   assert.doesNotMatch(rootCargo, /jazz-rn\/rust/);
   assert.equal(legacyConfig, null);
