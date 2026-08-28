@@ -55,16 +55,30 @@ fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
 
     let uuid = uuid::Uuid::from_bytes([0x10; 16]);
     let primary_values = [
+        Value::U8(0xaa),
         Value::U16(0x1234),
+        Value::U32(0x1234_5678),
+        Value::U64(0x0102_0304_0506_0708),
+        Value::I64(-2),
+        Value::I32(-3),
         Value::Bool(true),
         Value::String("a\0b".to_owned()),
+        Value::Bytes(vec![0, 0xff]),
         Value::Uuid(uuid),
         Value::Tuple(vec![Value::U16(2), Value::Bool(false)]),
     ];
     let frozen_primary = [
-        0x01, 0x12, 0x34, 0x05, 0x01, 0x06, b'a', 0x00, 0xff, b'b', 0x00, 0x00, 0x0a, 0x10, 0x10,
-        0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0b,
-        0x01, 0x00, 0x02, 0x05, 0x00,
+        0x00, 0xaa, // U8
+        0x01, 0x12, 0x34, // U16
+        0x02, 0x12, 0x34, 0x56, 0x78, // U32
+        0x03, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // U64
+        0x0d, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, // I64 sign-flipped
+        0x0e, 0x7f, 0xff, 0xff, 0xfd, // I32 sign-flipped
+        0x05, 0x01, // Bool
+        0x06, b'a', 0x00, 0xff, b'b', 0x00, 0x00, // String
+        0x07, 0x00, 0xff, 0xff, 0x00, 0x00, // Bytes
+        0x0a, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+        0x10, 0x10, 0x0b, 0x01, 0x00, 0x02, 0x05, 0x00, // fixed Tuple(U16, Bool)
     ];
 
     let mut encoded = Vec::new();
@@ -74,25 +88,21 @@ fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
     assert_eq!(encoded, frozen_primary);
 
     let mut remaining = frozen_primary.as_slice();
-    for value_type in [
+    for (value, value_type) in primary_values.iter().zip([
+        ValueType::U8,
         ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::I64,
+        ValueType::I32,
         ValueType::Bool,
         ValueType::String,
+        ValueType::Bytes,
         ValueType::Uuid,
         ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
-    ] {
+    ]) {
         let decoded = decode_primary_key_part(&mut remaining, &value_type).unwrap();
-        assert_eq!(
-            decoded,
-            primary_values[match value_type {
-                ValueType::U16 => 0,
-                ValueType::Bool => 1,
-                ValueType::String => 2,
-                ValueType::Uuid => 3,
-                ValueType::Tuple(_) => 4,
-                _ => unreachable!("fixture declares only primary-key types"),
-            }]
-        );
+        assert_eq!(decoded, *value);
     }
     assert!(remaining.is_empty());
 
