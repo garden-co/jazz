@@ -12,7 +12,7 @@ identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 Invariant digest:
 
 - `INV-LENS-1`: A published `SchemaVersion` MUST have `schema.id == schema.schema.version_id()`; every non-genesis schema MUST be admitted in one catalogue operation with its lineage-defining lens before it is known or writeable.
-- `INV-LENS-2`: A published `MigrationLens` MUST have `lens.id == lens.content_id()` and both `lens.source` and `lens.target` MUST be known `SchemaVersionId`s; `content_id()` MUST hash the canonical lens payload and exclude the embedded id field.
+- `INV-LENS-2`: A published `MigrationLens` MUST have `lens.id == lens.content_id()` and both `lens.source` and `lens.target` MUST be known `SchemaVersionId`s; `content_id()` MUST hash the canonical lens payload, and the durable/wire form MUST reconstruct rather than store that derived id.
 - `INV-LENS-3`: Catalogue mutation messages MUST be accepted only from catalogue admin identity and MUST reject non-admin authors.
 - `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire `VersionRecord` MUST expose the full `SchemaVersionId`.
 - `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding `SchemaVersion` catalogue value arrives.
@@ -62,9 +62,10 @@ were authored, and translation happens at read time (§10.5).
 Identity is content-addressed. `SchemaVersionId = JazzSchema::version_id()`
 (ch. 2), and `MigrationLensId = lens.content_id()`. The lens id hashes a
 canonical byte encoding of the source id, target id, declared table lenses,
-ordered lens ops, and recursively tagged default values. The embedded
-`MigrationLens.id` field is excluded from that encoding, and catalogue ingest
-rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
+ordered lens ops, and recursively tagged default values. The durable catalogue
+and postcard wire form contain that bounded canonical byte blob, not a separate
+`MigrationLens.id` field; decoding reconstructs the id from the payload, making
+a mismatched durable lens identity unrepresentable (`INV-LENS-1`, `INV-LENS-2`).
 
 ### 10.2 The catalogue
 

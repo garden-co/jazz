@@ -86,7 +86,9 @@ data. Wire v13's otherwise-current storage layout still carries packed-HLC
 provenance, so it and every earlier version are rejected rather than decoded or
 migrated. Every endpoint advertises exactly v14 and negotiation with an older
 peer fails with `UnsupportedProtocolVersion`; the v14 golden fixture set is the
-only supported message layout.
+only supported message layout. `MigrationLens` payloads in that fixture set are
+their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
+derived on decode), replacing postcard's former field-by-field representation.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at

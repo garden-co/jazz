@@ -1144,7 +1144,7 @@ fn assert_staged_corruption_rejected(
         &mut receiver,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(&staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
     );
     drop(receiver);
 
@@ -1160,8 +1160,9 @@ fn assert_catalogue_reopen_rejected(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = NodeState::new(node_uuid, schema, storage).resolve();
     assert!(matches!(
-        NodeState::new(node_uuid, schema, storage).resolve(),
+        reopened,
         Err(Error::InvalidStoredValue(message)) if message == expected
     ));
 }
@@ -1213,7 +1214,7 @@ fn reopen_rejects_active_catalogue_marker_with_mismatched_payload_sequence() {
         &mut receiver,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(&staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
     );
     drop(receiver);
 
@@ -1326,7 +1327,7 @@ fn reopen_rejects_inactive_catalogue_target_already_active() {
         &mut receiver,
         b"schema_lineage_staged",
         duplicate.publication.id.0,
-        serde_json::to_vec(&duplicate).unwrap(),
+        codec::encode_catalogue_staged_lineage(&duplicate).unwrap(),
     );
     drop(receiver);
 
@@ -1367,13 +1368,13 @@ fn reopen_rejects_duplicate_inactive_catalogue_targets() {
         &mut receiver,
         b"schema_lineage_staged",
         first.publication.id.0,
-        serde_json::to_vec(&first).unwrap(),
+        codec::encode_catalogue_staged_lineage(&first).unwrap(),
     );
     write_catalogue_record(
         &mut receiver,
         b"schema_lineage_staged",
         duplicate.publication.id.0,
-        serde_json::to_vec(&duplicate).unwrap(),
+        codec::encode_catalogue_staged_lineage(&duplicate).unwrap(),
     );
     drop(receiver);
 
@@ -1403,7 +1404,7 @@ fn reopen_rejects_zero_sequence_staged_lineage() {
         &mut receiver,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(&staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
     );
     drop(receiver);
 
@@ -1420,7 +1421,7 @@ fn reopen_rejects_staged_schema_payload_identity_mismatch() {
     let base_id = schema().version_id();
     assert_staged_corruption_rejected(
         0x47,
-        "staged schema lineage violates trusted publication invariants",
+        "catalogue schema content id mismatch",
         |staged| {
             staged.publication.schema.id = base_id;
             staged.publication.id = staged.publication.content_id();
@@ -1429,14 +1430,41 @@ fn reopen_rejects_staged_schema_payload_identity_mismatch() {
 }
 
 #[test]
-fn reopen_rejects_staged_lens_content_identity_mismatch() {
-    assert_staged_corruption_rejected(
-        0x48,
-        "staged schema lineage violates trusted publication invariants",
-        |staged| {
-            staged.publication.lens.id = MigrationLensId(uuid::Uuid::nil());
-            staged.publication.id = staged.publication.content_id();
-        },
+fn reopen_derives_staged_lens_identity_from_canonical_payload() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x48), base.clone());
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    let mut staged = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let expected_lens_id = staged.publication.lens.content_id();
+    // `MigrationLens::id` is derived, never serialized: stale in-memory
+    // bookkeeping cannot become a distinct durable identity.
+    staged.publication.lens.id = MigrationLensId(uuid::Uuid::nil());
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        staged.publication.id.0,
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
+    );
+    drop(receiver);
+
+    let reopened = reopen_node_at(&dir, node(0x48), base);
+    let recovered = reopened
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .expect("recovered staged lineage");
+    assert_eq!(recovered.publication.lens.id(), expected_lens_id);
+    assert_eq!(
+        recovered.publication.lens.id(),
+        recovered.publication.lens.content_id()
     );
 }
 
@@ -1563,7 +1591,7 @@ fn reopen_rejects_standalone_lens_semantic_tamper() {
         &mut receiver,
         b"lens",
         tampered.id.0,
-        serde_json::to_vec(&tampered).unwrap(),
+        codec::encode_catalogue_lens(&tampered),
     );
     drop(receiver);
 
