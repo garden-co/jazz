@@ -32,7 +32,13 @@ test("iOS launch parser accepts only the expected bundle and positive sole PID",
   assert.equal(parseLaunchProcessId("dev.jazz.rndeviceacceptance: 4999"), 4999);
   for (const malformed of [
     "other.bundle: 4999",
+    "devXjazzYrndeviceacceptance: 4999",
+    "dev-jazz-rndeviceacceptance: 4999",
+    " dev.jazz.rndeviceacceptance: 4999",
+    "dev.jazz.rndeviceacceptance: 4999 ",
     "dev.jazz.rndeviceacceptance: 0",
+    "dev.jazz.rndeviceacceptance: -1",
+    "dev.jazz.rndeviceacceptance: 9007199254740992",
     "dev.jazz.rndeviceacceptance: 4999\nunexpected text",
     "4999",
   ]) {

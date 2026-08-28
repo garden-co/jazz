@@ -40,7 +40,7 @@ const launchResult = simctl([
   buildFingerprint,
   "-JazzDeviceDeviceIdentifier",
   udid,
-]).trim();
+]);
 const launchPid = parseLaunchProcessId(launchResult);
 const receiptOutput = () =>
   simctl([
