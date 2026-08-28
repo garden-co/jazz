@@ -1157,11 +1157,11 @@ fn branch_prefixed_current_index_backfills_legacy_rocks_layout_on_reopen() {
     for (table_id, index, branch_key, expected_candidates) in [
         (
             users_mapping.table_id,
-            users_v2_index,
+            users_v2_index.clone(),
             BranchKey::default(),
             1,
         ),
-        (todos_mapping.table_id, todos_v2_index, draft_key, 2),
+        (todos_mapping.table_id, todos_v2_index.clone(), draft_key, 2),
     ] {
         assert_eq!(
             reopened
@@ -1211,6 +1211,39 @@ fn branch_prefixed_current_index_backfills_legacy_rocks_layout_on_reopen() {
             "reopen must use the backfilled branch-prefixed current relation without stale index entries"
         );
     }
+
+    // The first ordinary reopen registered V2 and durably marked that
+    // settlement only after the backfill completed. A second reopen must
+    // therefore declare V2 directly rather than temporarily reopening the
+    // predecessor V1 indexes again. This storage-boundary assertion is the
+    // observable distinction between the two bootstrap paths.
+    drop(reopened);
+    let mut reopened_again = reopen_history_complete_node_at(&directory, node(0x73), schema.clone());
+    for (table_id, v2_index) in [
+        (users_mapping.table_id, users_v2_index),
+        (todos_mapping.table_id, todos_v2_index),
+    ] {
+        for storage_table in [
+            physical_ahead_current_table_name(table_id),
+            physical_global_current_table_name(table_id),
+        ] {
+            let indices = &reopened_again.database.table_schema(&storage_table).unwrap().indices;
+            assert!(indices.iter().any(|index| index.name == v2_index));
+            assert!(
+                indices
+                    .iter()
+                    .all(|index| !index.name.starts_with("current_v1_")),
+                "settled V2 marker must bypass the predecessor V1 bootstrap layout"
+            );
+        }
+    }
+    let (rows, metrics) = query_rows_by_uuid(
+        &mut reopened_again,
+        Query::from("users").filter(eq(col("name"), lit("root"))),
+        DurabilityTier::Local,
+    );
+    assert_eq!(rows, vec![shared]);
+    assert_eq!(metrics.source_index_probes, 1);
 }
 
 // This is necessarily an internal protocol-boundary regression test: public
