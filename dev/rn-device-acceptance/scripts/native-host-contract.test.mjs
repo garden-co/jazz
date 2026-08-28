@@ -61,6 +61,10 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   assert.match(fixture, /RCT_REMAP_METHOD\(linkedAbi/);
   assert.match(fixture, /JazzRelayTrustedAdmission admitScopeJSON/);
   assert.match(fixture, /RCT_REMAP_METHOD\(acceptanceRunMetadata/);
+  assert.match(fixture, /@"schema_json": @"\{\\"tables\\":\{\}\}"/);
+  assert.doesNotMatch(fixture, /@"schema_json": @"\{\}"/);
+  assert.match(fixture, /11111111-1111-4111-8111-111111111111/);
+  assert.match(fixture, /https:\/\/jazz\.device\.test/);
   for (const key of [
     "-JazzDeviceRunNonce",
     "-JazzDeviceBuildFingerprint",
