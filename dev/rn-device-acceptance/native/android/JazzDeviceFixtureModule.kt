@@ -1,6 +1,7 @@
 package dev.jazz.rndeviceacceptance
 
 import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -57,12 +58,12 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
         reactApplicationContext.contentResolver,
         Settings.Secure.ANDROID_ID,
       ) ?: error("Android secure device identifier is unavailable")
-      promise.resolve(mapOf(
-        "platform" to "android",
-        "deviceIdentifier" to deviceIdentifier,
-        "buildFingerprint" to buildFingerprint,
-        "runNonce" to nonce,
-      ))
+      promise.resolve(Arguments.createMap().apply {
+        putString("platform", "android")
+        putString("deviceIdentifier", deviceIdentifier)
+        putString("buildFingerprint", buildFingerprint)
+        putString("runNonce", nonce)
+      })
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
   }
 }

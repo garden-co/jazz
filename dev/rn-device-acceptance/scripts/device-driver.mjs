@@ -7,7 +7,10 @@ export function collectResults(output) {
   const results = [];
   for (const line of output.split(/\r?\n/)) {
     // parseResult is the sole decoder. Invalid prefixed JSON is a hard error.
-    const parsed = parseResult(line);
+    // adb/simctl prepend their own timestamp/process columns; the protocol
+    // message itself remains exact and is still decoded only by parseResult.
+    const offset = line.indexOf("JAZZ_DEVICE_RESULT ");
+    const parsed = parseResult(offset < 0 ? line : line.slice(offset));
     if (parsed) results.push(parsed);
   }
   return results;
