@@ -516,6 +516,13 @@ pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, E
     cursor.finish()?;
     let schema = crate::tools::public_schema_convert::decode_public_schema_json(public_schema)
         .map_err(|_| Error::InvalidStoredValue("invalid catalogue schema public schema"))?;
+    let canonical_public_schema = serde_json::to_vec(schema.public_schema())
+        .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))?;
+    if canonical_public_schema != public_schema {
+        return Err(Error::InvalidStoredValue(
+            "non-canonical catalogue schema public schema",
+        ));
+    }
     if schema.version_id() != id {
         return Err(Error::InvalidStoredValue(
             "catalogue schema content id mismatch",
@@ -560,6 +567,10 @@ pub(super) fn encode_catalogue_write_pointer(pointer: CurrentWriteSchema) -> Vec
     payload.extend_from_slice(&pointer.revision.to_le_bytes());
     payload.extend_from_slice(pointer.schema.0.as_bytes());
     payload
+}
+
+pub(super) fn catalogue_write_pointer_id(pointer: CurrentWriteSchema) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&pointer.schema.0, &pointer.revision.to_le_bytes())
 }
 
 pub(super) fn decode_catalogue_write_pointer(payload: &[u8]) -> Result<CurrentWriteSchema, Error> {
@@ -732,6 +743,21 @@ mod catalogue_payload_tests {
         assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
+    }
+
+    #[test]
+    fn catalogue_schema_payload_rejects_noncanonical_public_schema_json() {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let mut encoded = encode_catalogue_schema(&schema).unwrap();
+        let length = u32::from_le_bytes(encoded[17..21].try_into().unwrap());
+        encoded[17..21].copy_from_slice(&(length + 1).to_le_bytes());
+        encoded.insert(21, b' ');
+        assert!(matches!(
+            decode_catalogue_schema(&encoded),
+            Err(Error::InvalidStoredValue(
+                "non-canonical catalogue schema public schema"
+            ))
+        ));
     }
 
     #[test]

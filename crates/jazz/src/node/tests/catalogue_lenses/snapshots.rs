@@ -633,6 +633,99 @@ fn catalogue_kernel_payload_corruption_rejects_reopen_before_resident_mutation()
     ));
 }
 
+/// The public-schema JSON body is a canonical byte string within the typed
+/// schema envelope. A semantically equivalent spelling must not become a
+/// second durable representation of the same schema.
+#[test]
+fn noncanonical_catalogue_public_schema_rejects_reopen_before_resident_mutation() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa6), base.clone());
+    let durable_schema = SchemaVersion::new(base.clone());
+    let mut payload = codec::encode_catalogue_schema(&durable_schema).unwrap();
+    let length = u32::from_le_bytes(payload[17..21].try_into().unwrap());
+    payload[17..21].copy_from_slice(&(length + 1).to_le_bytes());
+    payload.insert(21, b' ');
+    write_catalogue_record(
+        &mut node_state,
+        b"schema",
+        durable_schema.id.0,
+        payload,
+    );
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa6), base, storage)),
+        Err(Error::InvalidStoredValue(
+            "non-canonical catalogue schema public schema"
+        ))
+    ));
+}
+
+#[test]
+fn pending_catalogue_write_pointer_reopen_requires_deterministic_row_id() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa7), base.clone());
+    let pointer = CurrentWriteSchema {
+        revision: 9,
+        schema: base.version_id(),
+    };
+    write_catalogue_record(
+        &mut node_state,
+        b"write_pointer_pending",
+        uuid::Uuid::from_u128(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa),
+        codec::encode_catalogue_write_pointer(pointer),
+    );
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa7), base, storage)),
+        Err(Error::InvalidStoredValue(
+            "pending catalogue write-pointer id mismatch"
+        ))
+    ));
+}
+
+#[test]
+fn pending_catalogue_write_pointer_reopen_rejects_duplicate_revision() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa8), base.clone());
+    let first = CurrentWriteSchema {
+        revision: 9,
+        schema: base.version_id(),
+    };
+    let second = CurrentWriteSchema {
+        revision: 9,
+        schema: SchemaVersionId(uuid::Uuid::from_u128(
+            0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,
+        )),
+    };
+    for pointer in [first, second] {
+        write_catalogue_record(
+            &mut node_state,
+            b"write_pointer_pending",
+            codec::catalogue_write_pointer_id(pointer),
+            codec::encode_catalogue_write_pointer(pointer),
+        );
+    }
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa8), base, storage)),
+        Err(Error::InvalidStoredValue(
+            "duplicate pending catalogue write-pointer revision"
+        ))
+    ));
+}
+
 fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id: uuid::Uuid) {
     let mut batch = node.database.open_batch();
     batch.delete(

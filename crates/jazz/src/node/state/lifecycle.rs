@@ -1609,7 +1609,21 @@ where
                     let pointer = codec::decode_catalogue_write_pointer(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
-                    pending_write_pointers.insert(pointer.revision, pointer);
+                    if record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        != codec::catalogue_write_pointer_id(pointer)
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "pending catalogue write-pointer id mismatch",
+                        ));
+                    }
+                    if pending_write_pointers
+                        .insert(pointer.revision, pointer)
+                        .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate pending catalogue write-pointer revision",
+                        ));
+                    }
                 }
                 codec::CatalogueRecordKind::Genesis => {
                     let schema =

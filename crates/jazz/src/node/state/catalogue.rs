@@ -822,7 +822,7 @@ self.database.finish_persistence(persisted)?;
         &mut self,
         pointer: CurrentWriteSchema,
     ) -> Result<(), Error> {
-        let id = uuid::Uuid::new_v5(&pointer.schema.0, &pointer.revision.to_le_bytes());
+        let id = codec::catalogue_write_pointer_id(pointer);
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
