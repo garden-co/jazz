@@ -8,7 +8,8 @@ import { scenarioPlan } from "../src/scenarios.ts";
 const serial = process.env.ANDROID_SERIAL;
 const apk = process.env.JAZZ_DEVICE_APK;
 if (!apk) throw new Error("JAZZ_DEVICE_APK must point to the assembled development-build APK");
-const relayRoot = process.env.JAZZ_DEVICE_RELAY_ROOT ?? resolve(import.meta.dirname, "../../../crates/jazz-rn");
+const relayRoot =
+  process.env.JAZZ_DEVICE_RELAY_ROOT ?? resolve(import.meta.dirname, "../../../crates/jazz-rn");
 verifyAndroidRelayStage({
   packageRoot: relayRoot,
   sourceRevision: process.env.JAZZ_DEVICE_RELAY_SOURCE_REVISION,
@@ -24,7 +25,8 @@ adb(["install", "-r", apk]);
 const packagePath = adb(["shell", "pm", "path", "dev.jazz.rndeviceacceptance"])
   .trim()
   .replace(/^package:/, "");
-if (!packagePath.startsWith("/")) throw new Error("Android package manager did not report an installed APK path");
+if (!packagePath.startsWith("/"))
+  throw new Error("Android package manager did not report an installed APK path");
 const buildFingerprint = adb(["shell", "sha256sum", packagePath]).trim().split(/\s+/)[0];
 if (!/^[0-9a-f]{64}$/i.test(buildFingerprint ?? ""))
   throw new Error("could not hash the installed Android package artifact");

@@ -127,11 +127,11 @@ jobs:
           echo "IOS_SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
           xcrun simctl boot "${udid}" 2>/dev/null || true
           xcrun simctl bootstatus "${udid}" -b
-      - name: Build the staged app for that simulator
+      - name: Build the staged app with its JavaScript embedded
         run: |
-          xcodebuild -workspace JazzRNdeviceacceptance.xcworkspace -scheme JazzRNdeviceacceptance -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_UDID}" -derivedDataPath "${JAZZ_DEVICE_DERIVED_DATA}" build
+          xcodebuild -workspace JazzRNdeviceacceptance.xcworkspace -scheme JazzRNdeviceacceptance -configuration Release -sdk iphonesimulator -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_UDID}" -derivedDataPath "${JAZZ_DEVICE_DERIVED_DATA}" build
         working-directory: dev/rn-device-acceptance/ios
       - name: Install, launch, and require run-bound device receipts
         env:
-          JAZZ_DEVICE_APP: ${{ env.JAZZ_DEVICE_DERIVED_DATA }}/Build/Products/Debug-iphonesimulator/JazzRNdeviceacceptance.app
+          JAZZ_DEVICE_APP: ${{ env.JAZZ_DEVICE_DERIVED_DATA }}/Build/Products/Release-iphonesimulator/JazzRNdeviceacceptance.app
         run: pnpm --filter rn-device-acceptance device:ios

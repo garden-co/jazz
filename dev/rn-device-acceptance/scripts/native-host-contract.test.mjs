@@ -39,7 +39,10 @@ test("Android fixture BuildConfig fields and package registration remain compile
 });
 
 test("iOS fixture imports the public JazzRn pod header, not its private relay framework", () => {
-  const podspec = fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/JazzRn.podspec"), "utf8");
+  const podspec = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/JazzRn.podspec"),
+    "utf8",
+  );
   const fixture = read("native/ios/JazzDeviceFixture.mm");
   assert.match(podspec, /s\.name\s+=\s+"JazzRn"/);
   assert.match(podspec, /s\.source_files\s+=\s+"ios\/\*\*\/\*\.\{h,m,mm,swift\}"/);
@@ -58,10 +61,17 @@ test("Android bootstrap rejects corrupt pinned archives before extraction", () =
 });
 
 test("checksum pin rejects a planted corrupt cache archive", () => {
-  const archive = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jazz-corrupt-cache-")), "jdk.tgz");
+  const archive = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "jazz-corrupt-cache-")),
+    "jdk.tgz",
+  );
   fs.writeFileSync(archive, "corrupt");
   assert.throws(() =>
-    execFileSync("bash", [path.join(root, "scripts/verify-pinned-archive.sh"), archive, "0".repeat(64)]),
+    execFileSync("bash", [
+      path.join(root, "scripts/verify-pinned-archive.sh"),
+      archive,
+      "0".repeat(64),
+    ]),
   );
 });
 
@@ -82,5 +92,23 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
     "-JazzDeviceDeviceIdentifier",
   ]) {
     assert.match(fixture, new RegExp(key));
+  }
+});
+
+test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt timeout", () => {
+  const workflow = fs.readFileSync(
+    path.resolve(root, "../../.github/workflows/rn-device-acceptance.yml"),
+    "utf8",
+  );
+  const driver = read("scripts/run-ios.mjs");
+  assert.match(workflow, /-configuration Release -sdk iphonesimulator/);
+  assert.match(workflow, /Release-iphonesimulator\/JazzRNdeviceacceptance\.app/);
+  for (const detail of [
+    "simctl launch did not return an app process id",
+    "get_app_container",
+    "launchctl",
+    "recent app/device logs",
+  ]) {
+    assert.match(driver, new RegExp(detail));
   }
 });

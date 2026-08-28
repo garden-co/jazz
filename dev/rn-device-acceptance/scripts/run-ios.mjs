@@ -13,11 +13,19 @@ const buildFingerprint =
     .update(readFileSync(`${app}/JazzRNdeviceacceptance`))
     .digest("hex");
 const simctl = (args) => execFileSync("xcrun", ["simctl", ...args], { encoding: "utf8" });
+const trySimctl = (args) => {
+  try {
+    return simctl(args).trim();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return `command failed: xcrun simctl ${args.join(" ")}\n${detail}`;
+  }
+};
 const startedAt = Date.now();
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
 simctl(["bootstatus", udid, "-b"]);
 simctl(["install", udid, app]);
-simctl([
+const launchResult = simctl([
   "launch",
   udid,
   "dev.jazz.rndeviceacceptance",
@@ -27,7 +35,9 @@ simctl([
   buildFingerprint,
   "-JazzDeviceDeviceIdentifier",
   udid,
-]);
+]).trim();
+if (!/^\d+$/.test(launchResult))
+  throw new Error(`simctl launch did not return an app process id: ${launchResult}`);
 const receiptOutput = () =>
   simctl([
     "spawn",
@@ -49,12 +59,33 @@ const expected = {
   startedAt,
   scenarios: scenarioPlan.filter((item) => item.state === "passed").map((item) => item.scenario),
 };
+const diagnostics = () =>
+  [
+    `simctl launch PID: ${launchResult}`,
+    `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
+    `launchd app state:\n${trySimctl(["spawn", udid, "launchctl", "print", "gui/501"])}`,
+    `recent app/device logs:\n${trySimctl([
+      "spawn",
+      udid,
+      "log",
+      "show",
+      "--last",
+      "3m",
+      "--style",
+      "compact",
+      "--predicate",
+      'process == "JazzRNdeviceacceptance" OR eventMessage CONTAINS[c] "JazzDevice" OR eventMessage CONTAINS[c] "ReactNative"',
+    ])}`,
+  ].join("\n\n");
 for (let attempt = 0; attempt < 30; attempt += 1) {
   try {
     assertDeviceReceipt(receiptOutput(), expected);
     break;
   } catch (error) {
-    if (attempt === 29) throw error;
+    if (attempt === 29) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`${detail}\n\n${diagnostics()}`);
+    }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
   }
 }
