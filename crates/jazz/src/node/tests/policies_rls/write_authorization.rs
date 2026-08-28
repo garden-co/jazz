@@ -543,7 +543,7 @@ fn owner_only_delete_requires_current_owner() {
     let owner = user(0xa1);
     let other = user(0xb2);
     let row_uuid = row(1);
-    let create = commit_owner_policy_global(
+    let _create = commit_owner_policy_global(
         &mut owner_writer,
         &mut core,
         row_uuid,
@@ -557,7 +557,6 @@ fn owner_only_delete_requires_current_owner() {
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 11)
                 .made_by(other)
-                .parents(vec![create])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -580,7 +579,6 @@ fn owner_only_delete_requires_current_owner() {
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 12)
                 .made_by(owner)
-                .parents(vec![create])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();

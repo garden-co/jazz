@@ -243,22 +243,26 @@ where
         let Some(base_snapshot) = &tx.base_snapshot else {
             return Ok(false);
         };
-        let mut visible_content_memo = BTreeMap::<(String, RowUuid), Option<TxId>>::new();
+        // Read sets validate the visible row state (a current deletion hides
+        // content); write CAS validates only the register being written.
+        let mut visible_row_memo = BTreeMap::<(String, RowUuid), Option<TxId>>::new();
+        let mut visible_layer_memo =
+            BTreeMap::<(String, RowUuid, VersionLayer), Option<TxId>>::new();
         for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
-            let current = self.visible_global_content_tx_id_now_memoized(
+            let current = self.visible_global_row_tx_id_now_memoized(
                 &read.table,
                 read.row_uuid,
-                &mut visible_content_memo,
+                &mut visible_row_memo,
             ).await;
             if current != Some(read.version) {
                 return Ok(false);
             }
         }
         for absent in tx.absent_read_set.as_deref().unwrap_or(&[]) {
-            let current = self.visible_global_content_tx_id_now_memoized(
+            let current = self.visible_global_row_tx_id_now_memoized(
                 &absent.table,
                 absent.row_uuid,
-                &mut visible_content_memo,
+                &mut visible_row_memo,
             ).await;
             if current.is_some() {
                 return Ok(false);
@@ -281,10 +285,11 @@ where
         }
         for version in versions {
             self.table_in_schema(version.table(), version.schema_version())?;
-            let current = self.visible_global_content_tx_id_now_memoized(
+            let current = self.visible_global_layer_tx_id_now_memoized(
                 version.table(),
                 version.row_uuid(),
-                &mut visible_content_memo,
+                VersionLayer::for_record(version),
+                &mut visible_layer_memo,
             ).await;
             let parents = version.parents();
             let parent = match parents.as_slice() {
@@ -299,7 +304,7 @@ where
         Ok(true)
     }
 
-    async fn visible_global_content_tx_id_now_memoized(
+    async fn visible_global_row_tx_id_now_memoized(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -308,8 +313,25 @@ where
         if let Some(current) = memo.get(&(table.to_owned(), row_uuid)) {
             return *current;
         }
-        let current = self.visible_global_content_tx_id_now(table, row_uuid).await;
+        let current = self.visible_global_row_tx_id_now(table, row_uuid).await;
         memo.insert((table.to_owned(), row_uuid), current);
+        current
+    }
+
+    async fn visible_global_layer_tx_id_now_memoized(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        memo: &mut BTreeMap<(String, RowUuid, VersionLayer), Option<TxId>>,
+    ) -> Option<TxId> {
+        if let Some(current) = memo.get(&(table.to_owned(), row_uuid, layer)) {
+            return *current;
+        }
+        let current = self
+            .visible_global_layer_tx_id_now(table, row_uuid, layer)
+            .await;
+        memo.insert((table.to_owned(), row_uuid, layer), current);
         current
     }
 

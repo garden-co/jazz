@@ -1775,6 +1775,27 @@ fn known_parent_must_match_exact_row_coordinate_and_layer() {
             "version parent does not resolve to the same physical row, branch, and layer"
         ))
     ));
+
+    // A mergeable transaction may still atomically write unrelated rows; the
+    // transaction envelope supplies that atomicity, so no cross-row parent is
+    // available (or needed) to encode a general dependency.
+    let multi_row = core
+        .commit_mergeable_many_settled(vec![
+            MergeableCommit::new("todos", row(0x72), 14)
+                .parents(vec![content_parent])
+                .cells(title_cells("same-row successor")),
+            MergeableCommit::new("todos", row(0x74), 14)
+                .cells(title_cells("independent atomic member")),
+        ])
+        .unwrap();
+    let versions = core.query_versions_for_tx(multi_row).unwrap();
+    assert_eq!(versions.len(), 2);
+    assert!(versions.iter().any(|version| {
+        version.row_uuid() == row(0x72) && version.parents() == vec![content_parent]
+    }));
+    assert!(versions
+        .iter()
+        .any(|version| version.row_uuid() == row(0x74) && version.parents().is_empty()));
 }
 
 #[test]

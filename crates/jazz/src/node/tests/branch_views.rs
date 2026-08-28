@@ -282,7 +282,7 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
     let base = branch_selector(0x4c);
     let head = branch_selector(0x4d);
     let owner = AuthorSubject::for_test_bytes([0x4e; 16]);
-    let base_tx = node
+    let _base_tx = node
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(base.clone())
@@ -296,11 +296,10 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 15)
                 .branch(base.clone())
-                .parents(vec![base_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
-    node.commit_mergeable_settled(
+    let head_delete = node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 20)
             .branch(head.clone())
             .deletion(DeletionEvent::Deleted),
@@ -346,6 +345,7 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
             .branch(head)
+            .parents(vec![head_delete])
             .deletion(DeletionEvent::Restored),
     )
     .unwrap();

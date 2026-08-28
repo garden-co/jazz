@@ -39,7 +39,14 @@ version is identified by the `TxId` that wrote it and names zero or more direct
 `parents` (ch. 2). Every parent resolves to the same physical table, exact branch
 key, `RowUuid`, and content/deletion layer as its child (`INV-HIST-18`). Thus
 `parents` are history edges only: mergeable transactions have no general
-dependency graph, and content does not parent deletion or vice versa. Ordering is based on `TxId.time`, the HLC input, with the full
+dependency graph, and content does not parent deletion or vice versa. The same
+separation governs exclusive first-committer-wins: a content write is compared
+with the content winner, and a deletion/restore write with the deletion winner;
+row/predicate read checks validate the visible state they observed instead. Thus
+content `C` followed by first delete `D` gives `D` no history parent, and a
+later restore parents `D` rather than `C` (covered by
+`exclusive_delete_compares_the_deletion_register_not_content` and
+`known_parent_must_match_exact_row_coordinate_and_layer`). Ordering is based on `TxId.time`, the HLC input, with the full
 sort key `(time, node)` used for deterministic tie-breaking.
 
 Causality is enforced at acceptance time. A causal child has a strictly greater

@@ -11,6 +11,49 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Return the global winner's transaction for one physical history
+    /// register. Unlike visible content, a deletion-register winner remains
+    /// observable even when its event hides the row.
+    pub(super) async fn visible_global_layer_tx_id_now(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Option<TxId> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let current_table = self
+            .physical_current_table_for_schema(
+                schema_version,
+                table,
+                layer,
+                PhysicalCurrentClass::Global,
+            )
+            .ok()?;
+        let raw = self
+            .database
+            .primary_key_get_raw(
+                &current_table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await
+            .ok()??;
+        let record = raw.record();
+        let tx_time = TxTime(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                .ok()?,
+        );
+        let tx_node_alias = NodeAlias(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                .ok()?,
+        );
+        Some(TxId::new(tx_time, self.node_for_alias(tx_node_alias)?))
+    }
+
     pub(super) async fn global_currency_changed_after(
         &mut self,
         table: &str,
@@ -79,6 +122,60 @@ where
             }
         }
         Ok(false)
+    }
+
+    /// Return the transaction whose row state is currently observed by an
+    /// exclusive read: the deleting transaction while deleted, otherwise the
+    /// visible content transaction.
+    pub(super) async fn visible_global_row_tx_id_now(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Option<TxId> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let deletion_current_table = self
+            .physical_current_table_for_schema(
+                schema_version,
+                table,
+                VersionLayer::Deletion,
+                PhysicalCurrentClass::Global,
+            )
+            .ok()?;
+        if let Some(raw) = self
+            .database
+            .primary_key_get_raw(
+                &deletion_current_table,
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await
+            .ok()?
+        {
+            let record = raw.record();
+            let deletion = deletion_event_from_value(
+                record
+                    .get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)
+                    .ok()?,
+            )
+            .ok()?;
+            if deletion == DeletionEvent::Deleted {
+                let tx_time = TxTime(
+                    record
+                        .get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                        .ok()?,
+                );
+                let tx_node_alias = NodeAlias(
+                    record
+                        .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                        .ok()?,
+                );
+                let tx_node = self.node_for_alias(tx_node_alias)?;
+                return Some(TxId::new(tx_time, tx_node));
+            }
+        }
+        self.visible_global_content_tx_id_now(table, row_uuid).await
     }
 
     pub(super) async fn visible_global_content_tx_id_now(

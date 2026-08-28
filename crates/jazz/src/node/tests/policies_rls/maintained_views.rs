@@ -18,24 +18,22 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
         .unwrap();
     core.accept_global_for_test(sibling_tx).unwrap();
 
-    let deleted_readable_content = accept_global(
+    let _deleted_readable_content = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x93), 20).cells(owner_cells(author_a, "delete me")),
     );
     let deleted_readable_delete = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x93), 21)
-            .parents(vec![deleted_readable_content])
             .deletion(DeletionEvent::Deleted),
     );
-    let deleted_unreadable_content = accept_global(
+    let _deleted_unreadable_content = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x94), 22).cells(owner_cells(author_b, "hidden delete")),
     );
     let deleted_unreadable_delete = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x94), 23)
-            .parents(vec![deleted_unreadable_content])
             .deletion(DeletionEvent::Deleted),
     );
 
@@ -140,24 +138,22 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
         .unwrap();
     core.accept_global_for_test(sibling_tx).unwrap();
 
-    let deleted_readable_content = accept_global(
+    let _deleted_readable_content = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x93), 20).cells(owner_cells(author_a, "delete me")),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x93), 21)
-            .parents(vec![deleted_readable_content])
             .deletion(DeletionEvent::Deleted),
     );
-    let deleted_unreadable_content = accept_global(
+    let _deleted_unreadable_content = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x94), 22).cells(owner_cells(author_b, "hidden delete")),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x94), 23)
-            .parents(vec![deleted_unreadable_content])
             .deletion(DeletionEvent::Deleted),
     );
 
@@ -192,14 +188,13 @@ fn maintained_view_system_identity_bypasses_root_read_policy() {
         &mut core,
         MergeableCommit::new("todos", row(0xa1), 11).cells(owner_cells(author_b, "b")),
     );
-    let deleted_content = accept_global(
+    let _deleted_content = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0xa2), 12).cells(owner_cells(author_b, "deleted")),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0xa2), 13)
-            .parents(vec![deleted_content])
             .deletion(DeletionEvent::Deleted),
     );
 
@@ -591,14 +586,14 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
             ("title".to_owned(), v("entry")),
         ])),
     );
-    let first_edge_tx = accept_global(
+    let _first_edge_tx = accept_global(
         &mut core,
         MergeableCommit::new("containerAccess", first_edge, 12).cells(BTreeMap::from([
             ("container".to_owned(), Value::Uuid(container.0)),
             ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
         ])),
     );
-    let second_edge_tx = accept_global(
+    let _second_edge_tx = accept_global(
         &mut core,
         MergeableCommit::new("containerAccess", second_edge, 13).cells(BTreeMap::from([
             ("container".to_owned(), Value::Uuid(container.0)),
@@ -642,7 +637,6 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
     accept_global(
         &mut core,
         MergeableCommit::new("containerAccess", first_edge, 15)
-            .parents(vec![first_edge_tx])
             .deletion(DeletionEvent::Deleted),
     );
     let first_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -661,7 +655,6 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
     accept_global(
         &mut core,
         MergeableCommit::new("containerAccess", second_edge, 16)
-            .parents(vec![second_edge_tx])
             .deletion(DeletionEvent::Deleted),
     );
     let last_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -746,7 +739,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
     );
 
     let zeroth = row(0x05);
-    let zeroth_tx = accept_global(
+    let _zeroth_tx = accept_global(
         &mut core,
         MergeableCommit::new("todos", zeroth, 14).cells(priority_cells("zeroth", 5)),
     );
@@ -760,7 +753,6 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
     accept_global(
         &mut core,
         MergeableCommit::new("todos", zeroth, 15)
-            .parents(vec![zeroth_tx])
             .deletion(DeletionEvent::Deleted),
     );
     let shifted_back = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -773,7 +765,6 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
     accept_global(
         &mut core,
         MergeableCommit::new("todos", second, 16)
-            .parents(vec![second_tx])
             .deletion(DeletionEvent::Deleted),
     );
     let fill_from_tail = peer.query_update(&mut core, &shape, &binding).unwrap();

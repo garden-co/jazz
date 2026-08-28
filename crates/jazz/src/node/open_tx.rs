@@ -467,10 +467,12 @@ where
             self.snapshot_row_in_schema(write_schema_version, table, row_uuid, &snapshot)
                 .await?
         };
-        let parent = if snapshot_row.deleted {
-            None
-        } else {
-            snapshot_row.content_version
+        // Content and deletion are independent history registers.  A version
+        // parent is ancestry for the register being written, never a generic
+        // causal dependency on whichever row version happened to be read.
+        let parent = match deletion {
+            Some(_) => snapshot_row.deletion_version,
+            None => snapshot_row.content_version,
         };
         positional_cells_from_map(&table_schema, &cells)?;
         let pending = PendingWrite {
@@ -1264,6 +1266,9 @@ where
             content_version: content
                 .as_ref()
                 .and_then(|version| self.version_tx_id(version).ok()),
+            deletion_version: deletion
+                .as_ref()
+                .and_then(|version| self.version_tx_id(version).ok()),
             read_version: if deleted {
                 deletion
                     .as_ref()
@@ -1449,6 +1454,7 @@ pub(super) struct PendingWrite {
 pub(super) struct SnapshotRow {
     content_cells: Option<Vec<Option<Value>>>,
     content_version: Option<TxId>,
+    deletion_version: Option<TxId>,
     read_version: Option<TxId>,
     deleted: bool,
     provenance: Option<(VersionRow, VersionRow)>,
