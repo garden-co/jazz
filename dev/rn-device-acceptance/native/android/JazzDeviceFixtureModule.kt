@@ -8,7 +8,7 @@ import com.facebook.react.bridge.ReactMethod
 import com.jazzrn.JazzRelayTrustedAdmission
 import com.jazzrn.TrustedRelayScopeConfig
 import android.util.Base64
-import android.provider.Settings
+import android.os.Build
 
 /**
  * Test-app-only trusted fixture. It is compiled into the development build,
@@ -54,10 +54,8 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
         ?: error("acceptance launch did not include a run nonce")
       val buildFingerprint = activity.intent.getStringExtra("jazzDeviceBuildFingerprint")
         ?: error("acceptance launch did not include an APK fingerprint")
-      val deviceIdentifier = Settings.Secure.getString(
-        reactApplicationContext.contentResolver,
-        Settings.Secure.ANDROID_ID,
-      ) ?: error("Android secure device identifier is unavailable")
+      val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
+        ?: error("Android build fingerprint is unavailable")
       promise.resolve(Arguments.createMap().apply {
         putString("platform", "android")
         putString("deviceIdentifier", deviceIdentifier)

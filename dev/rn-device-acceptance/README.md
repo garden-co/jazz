@@ -38,5 +38,5 @@ It pins Temurin 17.0.16+8, command-line tools 13114758, NDK 27.1.12297006,
 Android API/build tools 36, cargo-ndk 4.1.2, and (with `--emulator`) the API 35
 Google APIs x86_64 image. The cache is ignored and never needs system Java,
 Android SDK, adb, or a global cargo-ndk installation. `device:android` compares
-the fixture's `ANDROID_ID` with adb's `settings secure android_id`; an adb
-transport serial is intentionally not used because the app cannot read it.
+the fixture's immutable `Build.FINGERPRINT` with adb's `ro.build.fingerprint`;
+app-scoped Android IDs and adb transport serials are intentionally not used.

@@ -12,9 +12,9 @@ const adb = (args) =>
 const startedAt = Date.now();
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
 const buildFingerprint = createHash("sha256").update(readFileSync(apk)).digest("hex");
-// Android secure ID is readable by the trusted fixture, unlike adb's transport
-// serial. Bind both sides to that same stable, non-display identifier.
-const deviceIdentifier = adb(["shell", "settings", "get", "secure", "android_id"]).trim();
+// Android IDs are scoped per app/signing identity, so use the immutable system
+// build fingerprint that both trusted fixture code and adb observe identically.
+const deviceIdentifier = adb(["shell", "getprop", "ro.build.fingerprint"]).trim();
 adb(["install", "-r", apk]);
 adb(["logcat", "-c"]);
 adb([
