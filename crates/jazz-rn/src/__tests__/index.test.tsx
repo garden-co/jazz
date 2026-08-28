@@ -24,7 +24,7 @@ it('tells Expo Go and old development builds that a native artifact is required'
   const relay = loadRelay(null);
 
   await expect(relay.executeNativeRelayCommand('AA==')).rejects.toThrow(
-    'install a matching native development or release build containing the Jazz relay artifact. Expo Go never includes it.',
+    'install a matching native development or release build containing the Jazz relay artifact. Expo Go never includes it.'
   );
 });
 
@@ -36,7 +36,20 @@ it('rejects an installed native build with an incompatible ABI before executing 
   const relay = loadRelay(nativeRelay);
 
   await expect(relay.executeNativeRelayCommand('AA==')).rejects.toThrow(
-    'Jazz native relay ABI 2 is incompatible with JavaScript ABI 3..=3; install a matching native development or release build.',
+    'Jazz native relay ABI 2 is incompatible with JavaScript ABI 3..=3; install a matching native development or release build.'
+  );
+  expect(nativeRelay.execute).not.toHaveBeenCalled();
+});
+
+it('rejects the source-only ABI fallback before executing a command', async () => {
+  const nativeRelay: NativeRelay = {
+    getAbiVersion: () => 0,
+    execute: jest.fn(),
+  };
+  const relay = loadRelay(nativeRelay);
+
+  await expect(relay.executeNativeRelayCommand('AA==')).rejects.toThrow(
+    'Jazz native relay is unavailable: this native build contains only the source fallback (ABI 0), not the Jazz relay artifact. Install a matching native development or release build.'
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
