@@ -44,6 +44,23 @@ impl LargeValueFormat {
         }
     }
 
+    /// The descriptor, its nested edit records, and the schema-known stored
+    /// scalar arm are one versioned physical contract.  Decode the descriptor
+    /// version before interpreting any of those nested fields; a future codec
+    /// gets an explicit implementation here rather than inheriting V2's
+    /// tail/record assumptions.
+    fn validate_descriptor_shape(self, value: &LargeValueRef) -> Result<(), Error> {
+        match self {
+            Self::V2 => validate_descriptor_shape_v2(value),
+        }
+    }
+
+    fn validate_descriptor(self, value: &LargeValueRef) -> Result<(), Error> {
+        match self {
+            Self::V2 => validate_descriptor_v2(value),
+        }
+    }
+
     fn encode_node(self, node: &ChunkNode) -> Result<Vec<u8>, Error> {
         match self {
             Self::V1 => encode_node_v1(node),
@@ -62,16 +79,31 @@ impl LargeValueFormat {
 }
 /// Logical scalar size above which ordinary writes use indirect storage.
 pub const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
-pub const LEAF_MIN_BYTES: usize = 16 * 1024;
-pub const LEAF_TARGET_BYTES: usize = 64 * 1024;
-pub const LEAF_MAX_BYTES: usize = 256 * 1024;
+/// Frozen V2 content-defined leaf profile. These values, masks, and the gear
+/// mixer below are format data: changing any of them requires a new immutable
+/// format, not a tuning-only release.
+pub const V2_FASTCDC_LEAF_MIN_BYTES: usize = 16 * 1024;
+pub const V2_FASTCDC_LEAF_TARGET_BYTES: usize = 64 * 1024;
+pub const V2_FASTCDC_LEAF_MAX_BYTES: usize = 256 * 1024;
+pub const V2_FASTCDC_LEAF_SHORT_MASK: u64 = 0x0000_0000_0001_ffff;
+pub const V2_FASTCDC_LEAF_LONG_MASK: u64 = 0x0000_0000_0000_7fff;
+/// Compatibility aliases for callers that need only the active writer
+/// profile. Persisted descriptors always select the versioned constants.
+pub const LEAF_MIN_BYTES: usize = V2_FASTCDC_LEAF_MIN_BYTES;
+pub const LEAF_TARGET_BYTES: usize = V2_FASTCDC_LEAF_TARGET_BYTES;
+pub const LEAF_MAX_BYTES: usize = V2_FASTCDC_LEAF_MAX_BYTES;
 /// Hard allocation/CPU boundary for one encoded immutable node. Leaves dominate
 /// the format; the additional envelope allowance is comfortably larger than a
 /// maximum-fanout branch with ordinary locators.
 pub const MAX_ENCODED_NODE_BYTES: usize = LEAF_MAX_BYTES + 16 * 1024;
-pub const BRANCH_MIN_CHILDREN: usize = 4;
-pub const BRANCH_TARGET_CHILDREN: usize = 16;
-pub const BRANCH_MAX_CHILDREN: usize = 64;
+pub const V2_GROUPING_BRANCH_MIN_CHILDREN: usize = 4;
+pub const V2_GROUPING_BRANCH_TARGET_CHILDREN: usize = 16;
+pub const V2_GROUPING_BRANCH_MAX_CHILDREN: usize = 64;
+pub const V2_GROUPING_BRANCH_SHORT_MASK: u64 = 0x0000_0000_0000_001f;
+pub const V2_GROUPING_BRANCH_LONG_MASK: u64 = 0x0000_0000_0000_0007;
+pub const BRANCH_MIN_CHILDREN: usize = V2_GROUPING_BRANCH_MIN_CHILDREN;
+pub const BRANCH_TARGET_CHILDREN: usize = V2_GROUPING_BRANCH_TARGET_CHILDREN;
+pub const BRANCH_MAX_CHILDREN: usize = V2_GROUPING_BRANCH_MAX_CHILDREN;
 pub const MAX_TREE_DEPTH: usize = 32;
 /// Maximum number of logical tree-edge occurrences one synchronous scalar
 /// operation may expand. Physical graph walks deduplicate shared nodes, but a
@@ -695,9 +727,9 @@ where
                 let length = self.leaf_scan;
                 let cut = length >= LEAF_MIN_BYTES
                     && if length < LEAF_TARGET_BYTES {
-                        self.leaf_hash & (LEAF_TARGET_BYTES as u64 * 2 - 1) == 0
+                        self.leaf_hash & V2_FASTCDC_LEAF_SHORT_MASK == 0
                     } else {
-                        self.leaf_hash & (LEAF_TARGET_BYTES as u64 / 2 - 1) == 0
+                        self.leaf_hash & V2_FASTCDC_LEAF_LONG_MASK == 0
                     };
                 if cut || length == LEAF_MAX_BYTES {
                     boundary = Some(length);
@@ -790,9 +822,9 @@ where
                 let count = state.pending.len();
                 let boundary = count >= BRANCH_MIN_CHILDREN
                     && if count < BRANCH_TARGET_CHILDREN {
-                        state.hash & (BRANCH_TARGET_CHILDREN as u64 * 2 - 1) == 0
+                        state.hash & V2_GROUPING_BRANCH_SHORT_MASK == 0
                     } else {
-                        state.hash & (BRANCH_TARGET_CHILDREN as u64 / 2 - 1) == 0
+                        state.hash & V2_GROUPING_BRANCH_LONG_MASK == 0
                     };
                 (count, boundary)
             };
@@ -2828,6 +2860,10 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
     else {
         return Err(Error::MalformedScalar);
     };
+    // Select the joint descriptor/edit/scalar contract before decoding the
+    // nested root or tail. Do not let a future version accidentally inherit
+    // V2 field interpretation merely because the outer record decoded.
+    let format = LargeValueFormat::from_version(format_version)?;
     let logical_hash =
         take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_LOGICAL_HASH_FIELD)?;
     let root = take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_ROOT_FIELD)?;
@@ -2905,7 +2941,7 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
         utf16_length,
         edit_tail,
     };
-    validate_descriptor(&value)?;
+    format.validate_descriptor(&value)?;
     Ok(value)
 }
 
@@ -2927,7 +2963,15 @@ fn large_value_kind_from_tag(tag: u8) -> Result<LargeValueKind, Error> {
 }
 
 fn validate_descriptor(value: &LargeValueRef) -> Result<(), Error> {
-    validate_descriptor_shape(value)?;
+    LargeValueFormat::from_version(value.format_version)?.validate_descriptor(value)
+}
+
+fn validate_descriptor_v2(value: &LargeValueRef) -> Result<(), Error> {
+    validate_descriptor_shape_v2(value)?;
+    validate_descriptor_tail_bounds(value)
+}
+
+fn validate_descriptor_tail_bounds(value: &LargeValueRef) -> Result<(), Error> {
     if value.edit_tail.len() > MAX_EDIT_COUNT {
         return Err(Error::MalformedScalar);
     }
@@ -2945,7 +2989,10 @@ fn validate_descriptor(value: &LargeValueRef) -> Result<(), Error> {
 }
 
 fn validate_descriptor_shape(value: &LargeValueRef) -> Result<(), Error> {
-    check_format(value.format_version)?;
+    LargeValueFormat::from_version(value.format_version)?.validate_descriptor_shape(value)
+}
+
+fn validate_descriptor_shape_v2(value: &LargeValueRef) -> Result<(), Error> {
     let mut byte_length = value.byte_length;
     let mut utf16_length = value.utf16_length;
     for edit in value.edit_tail.iter().rev() {
@@ -4817,9 +4864,9 @@ fn leaf_ranges(kind: LargeValueKind, bytes: &[u8]) -> Result<Vec<std::ops::Range
             let boundary = if length < LEAF_MIN_BYTES {
                 false
             } else if length < LEAF_TARGET_BYTES {
-                hash & (LEAF_TARGET_BYTES as u64 * 2 - 1) == 0
+                hash & V2_FASTCDC_LEAF_SHORT_MASK == 0
             } else {
-                hash & (LEAF_TARGET_BYTES as u64 / 2 - 1) == 0
+                hash & V2_FASTCDC_LEAF_LONG_MASK == 0
             };
             if boundary {
                 end = start + length;
@@ -4855,9 +4902,9 @@ fn branch_ranges(kind: LargeValueKind, nodes: &[BuiltNode]) -> Vec<std::ops::Ran
             let boundary = if length < BRANCH_MIN_CHILDREN {
                 false
             } else if length < BRANCH_TARGET_CHILDREN {
-                hash & (BRANCH_TARGET_CHILDREN as u64 * 2 - 1) == 0
+                hash & V2_GROUPING_BRANCH_SHORT_MASK == 0
             } else {
-                hash & (BRANCH_TARGET_CHILDREN as u64 / 2 - 1) == 0
+                hash & V2_GROUPING_BRANCH_LONG_MASK == 0
             };
             if boundary {
                 end = start + length;
@@ -4871,9 +4918,16 @@ fn branch_ranges(kind: LargeValueKind, nodes: &[BuiltNode]) -> Vec<std::ops::Ran
 }
 
 fn gear(byte: u8) -> u64 {
-    let mut value = u64::from(byte).wrapping_add(0x9e37_79b9_7f4a_7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    // V2's 256-entry gear table is generated by this frozen SplitMix64
+    // parameterization. Keep the arithmetic expressed here (rather than a
+    // platform-dependent RNG or tunable seed) so the content-defined profile
+    // is independently reproducible from the specification.
+    const V2_FASTCDC_GEAR_ADD: u64 = 0x9e37_79b9_7f4a_7c15;
+    const V2_FASTCDC_GEAR_MUL_1: u64 = 0xbf58_476d_1ce4_e5b9;
+    const V2_FASTCDC_GEAR_MUL_2: u64 = 0x94d0_49bb_1331_11eb;
+    let mut value = u64::from(byte).wrapping_add(V2_FASTCDC_GEAR_ADD);
+    value = (value ^ (value >> 30)).wrapping_mul(V2_FASTCDC_GEAR_MUL_1);
+    value = (value ^ (value >> 27)).wrapping_mul(V2_FASTCDC_GEAR_MUL_2);
     value ^ (value >> 31)
 }
 
@@ -5327,6 +5381,181 @@ mod tests {
                 node
             );
         }
+    }
+
+    #[test]
+    fn v2_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical() {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        // Deliberately literal source: duplicate keys, numeric spelling and
+        // escape spelling are physical JSON content, while parsed reads keep
+        // serde_json's ordinary last-duplicate-key semantics.
+        let source = b"{\"literal\":\"\\uD83D\\uDE42\",\"dup\":1,\"dup\":2,\"n\":-0,\"scientific\":1e+00,\"text\":\"\\u00e9\"}";
+        let node = ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Json,
+            bytes: source.to_vec(),
+        };
+        let encoded_node = encode_node(&node).unwrap();
+        assert_eq!(
+            hex(&encoded_node),
+            "0002027b226c69746572616c223a225c75443833445c7544453432222c22647570223a312c22647570223a322c226e223a2d302c22736369656e7469666963223a31652b30302c2274657874223a225c7530306539227d"
+        );
+        assert_eq!(
+            hex(&object_hash(&encoded_node).0),
+            "c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b0"
+        );
+        assert_eq!(
+            hex(&node_logical_hash(&node).0),
+            "b538953f883dc4ca231dc62746a6b3e8413b772e2baf267f16be791bd58fcb3f"
+        );
+        assert_eq!(
+            decode_node_for_format(
+                FORMAT_VERSION,
+                LargeValueKind::Json,
+                object_hash(&encoded_node),
+                &encoded_node,
+            ),
+            Ok(node.clone())
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(source).unwrap();
+        assert_eq!(parsed.pointer("/literal"), Some(&serde_json::json!("🙂")));
+        assert_eq!(parsed.pointer("/dup"), Some(&serde_json::json!(2)));
+        assert_eq!(parsed.pointer("/n"), Some(&serde_json::json!(-0.0)));
+        assert_eq!(parsed.pointer("/scientific"), Some(&serde_json::json!(1.0)));
+
+        let primitive = encode_stored_scalar(
+            LargeValueKind::Json,
+            &StoredScalar::Primitive(source.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(hex(&primitive), format!("02{}", hex(source)));
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Json, &primitive),
+            Ok(StoredScalar::Primitive(source.to_vec()))
+        );
+        let prepared =
+            prepare_with_locator(LargeValueKind::Json, source, deterministic_locator).unwrap();
+        let mut inputs = EvaluationInputs::default();
+        for chunk in &prepared.staged_chunks {
+            inputs.install_chunk(
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                bytes::Bytes::copy_from_slice(&chunk.encoded),
+            );
+        }
+        let replacement =
+            "{\"literal\":\"🙂\",\"dup\":3,\"n\":0,\"scientific\":1.0,\"text\":\"é!\"}".as_bytes();
+        let TailEditOutcome::Updated(with_tail) = replace_tail_attempt(
+            &prepared.value_ref,
+            0,
+            prepared.value_ref.byte_length,
+            replacement.to_vec(),
+            &mut inputs,
+        )
+        .unwrap() else {
+            panic!("whole JSON replacement fits one tail entry")
+        };
+        assert_eq!(
+            with_tail.utf16_length,
+            Some(
+                std::str::from_utf8(replacement)
+                    .unwrap()
+                    .encode_utf16()
+                    .count() as u64
+            )
+        );
+        assert_eq!(
+            hex(&encode_large_value_ref(&with_tail).unwrap()),
+            "02023e00000000000000013b000000000000003a0000007e000000b538953f883dc4ca231dc62746a6b3e8413b772e2baf267f16be791bd58fcb3f24000000c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b0c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b00100000000000000000000005400000000000000000000000000000054000000000000003b000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
+        );
+        let scalar = encode_stored_scalar(
+            LargeValueKind::Json,
+            &StoredScalar::Chunked(with_tail.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            hex(&scalar),
+            "03023e00000000000000013b000000000000003a0000007e000000b538953f883dc4ca231dc62746a6b3e8413b772e2baf267f16be791bd58fcb3f24000000c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b0c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b00100000000000000000000005400000000000000000000000000000054000000000000003b000000000000007b226c69746572616c223a22f09f9982222c22647570223a332c226e223a302c22736369656e7469666963223a312e302c2274657874223a22c3a921227d"
+        );
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Json, &scalar),
+            Ok(StoredScalar::Chunked(with_tail.clone()))
+        );
+
+        let mut future_descriptor = encode_large_value_ref(&with_tail).unwrap();
+        future_descriptor[1] = FORMAT_VERSION + 1;
+        assert_eq!(
+            decode_large_value_ref(&future_descriptor),
+            Err(Error::UnsupportedFormat(FORMAT_VERSION + 1)),
+            "descriptor version is dispatched before its root and edit tail"
+        );
+        let mut future_scalar = scalar.clone();
+        future_scalar[1] = FORMAT_VERSION + 1;
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Json, &future_scalar),
+            Err(Error::UnsupportedFormat(FORMAT_VERSION + 1)),
+            "stored scalar must use the descriptor's same joint dispatch"
+        );
+
+        let mut alternate = scalar.clone();
+        alternate.push(0);
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Json, &alternate),
+            Err(Error::MalformedScalar),
+            "planted trailing-byte mutation proves the fixture is exact"
+        );
+        let mut forged_utf16 = with_tail.clone();
+        forged_utf16.edit_tail[0].insert_utf16_length -= 1;
+        assert_eq!(
+            encode_large_value_ref(&forged_utf16),
+            Err(Error::MalformedScalar),
+            "the UTF-16 witness must match literal UTF-8 insert bytes"
+        );
+        assert!(matches!(
+            replace_tail_attempt(
+                &prepared.value_ref,
+                1,
+                prepared.value_ref.byte_length - 1,
+                replacement.to_vec(),
+                &mut EvaluationInputs::default(),
+            ),
+            Err(IvmRuntimeError::LargeValue(Error::InvalidJson))
+        ));
+        assert_eq!(
+            prepare_with_locator(LargeValueKind::Json, b"{\"broken\":", deterministic_locator),
+            Err(Error::InvalidJson)
+        );
+        assert_eq!(
+            prepare_with_locator(
+                LargeValueKind::Json,
+                b"{\"text\":\"\xff\"}",
+                deterministic_locator
+            ),
+            Err(Error::InvalidUtf8)
+        );
+
+        let consolidated =
+            consolidate_single_edit_attempt(&with_tail, &mut inputs, deterministic_locator)
+                .unwrap();
+        for chunk in &consolidated.staged_chunks {
+            inputs.install_chunk(
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                bytes::Bytes::copy_from_slice(&chunk.encoded),
+            );
+        }
+        assert!(consolidated.value_ref.edit_tail.is_empty());
+        assert_eq!(
+            materialize_attempt(&consolidated.value_ref, &mut inputs).unwrap(),
+            replacement,
+            "tail consolidation preserves literal JSON replacement bytes"
+        );
     }
 
     // This is an intentionally internal physical-codec receipt. Application

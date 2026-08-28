@@ -69,6 +69,36 @@ and integrity validation have one implementation in Groove. Jazz MUST treat the
 descriptor and all nodes as opaque values except for the root locator/hash fields
 required to bind authorization and lifecycle.
 
+### Frozen V2 JSON and chunking boundary
+
+Jazz's JSON columns inherit Groove V2's literal-source contract. A JSON scalar
+is syntactically validated UTF-8 source; Jazz neither normalizes object key
+order, duplicate keys, numeric spelling, escape spelling, nor Unicode before
+staging or publication. Parsed reads use Groove's ordinary JSON semantics
+(including the parser's last-duplicate-key behavior), but those parse results
+do not rewrite the stored bytes. JSON mutation remains a complete replacement
+lowered to the same bounded byte-edit tail as all other large scalars; Jazz
+must not add an object-like patch, merge, or locator API at this boundary.
+
+The descriptor's V2 format selector jointly governs its root, nested edit
+records, and schema-known `Chunked = 3` physical scalar arm before Groove
+interprets any of them. The permanent V2 FastCDC/content-defined-grouping
+profile is owned by Groove and applies identically to in-memory, RocksDB,
+SQLite/OPFS/IDB, and remote byte-plane adapters. A backend cannot tune chunk
+boundaries or use locator layout to alter logical identity. The authoritative
+literal JSON, duplicate-key, numeric, Unicode, malformed, replay, tail,
+UTF-8/UTF-16, and consolidation receipts live in Groove spec §9.2 and its
+named hard-coded codec test.
+
+Remaining lifecycle scope is intentionally unchanged: Jazz still owns
+authorization, staging expiry/admission, atomic owner-row publication,
+retention, and cross-backend durability verification; Groove still owns
+locators, node traversal, integrity, edit replay, materialization, and
+collection mechanics. This V2 decision adds no migration/backcompat decoder,
+no new backend locator format, and no cross-backend fixture corpus. Those
+physical-adapter compatibility fixtures remain tracked separately under the
+storage-freeze corpus work rather than being inferred from this codec receipt.
+
 ## 19.2 Opaque traversal capabilities
 
 Every retrievable node has two independent identities:
