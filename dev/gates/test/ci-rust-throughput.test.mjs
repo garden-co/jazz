@@ -1136,7 +1136,7 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
   }, /strictly equal/);
 });
 
-test("React Native artifact builds are explicit same-repository label opt-ins", () => {
+test("React Native artifact and host-link builds are explicit same-repository platform-label opt-ins", () => {
   const document = parse(rnNativeArtifactsWorkflow);
   const nativeArtifactPushPaths = [
     "Cargo.lock",
@@ -1170,6 +1170,11 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   assert.equal(document.on.workflow_dispatch, undefined);
   assert.equal(document.on.schedule, undefined);
   assert.deepEqual(document.permissions, { contents: "read" });
+  assert.equal(
+    document.env.CACHE_SCOPE_REPOSITORY_ID,
+    "${{ github.event.pull_request.head.repo.id || github.repository_id }}",
+    "native artifact caches must be scoped to the checked-out repository",
+  );
   assert.equal(document.permissions["id-token"], undefined);
   assert.doesNotMatch(rnNativeArtifactsWorkflow, /\bsecrets\./);
   assert.doesNotMatch(rnNativeArtifactsWorkflow, /SCCACHE_(?:TRUSTED|PR)_/);
@@ -1179,12 +1184,37 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   });
 
   const expectedCondition =
-    "${{ github.event_name != 'pull_request' || ( contains(github.event.pull_request.labels.*.name, 'react-native') && github.event.pull_request.head.repo.full_name == github.repository ) }}";
+    "${{ github.event_name != 'pull_request' || ( ( contains(github.event.pull_request.labels.*.name, 'react-native') || contains(github.event.pull_request.labels.*.name, 'rn-preview-release') ) && github.event.pull_request.head.repo.full_name == github.repository ) }}";
   const normalizeCondition = (condition) => condition.replace(/\s+/g, " ").trim();
   for (const jobName of ["android", "ios"]) {
     const job = document.jobs[jobName];
     assert.equal(normalizeCondition(job.if), expectedCondition, `${jobName} must be label-gated`);
   }
+
+  for (const [jobName, producer, receipt, cachePath] of [
+    ["android-link", "android", /:app:assembleDebug/, /~\/\.gradle\/caches/],
+    ["ios-link", "ios", /xcodebuild/, /examples\/todo-client-localfirst-expo\/ios\/Pods/],
+  ]) {
+    const job = document.jobs[jobName];
+    assert.equal(job.needs, producer, `${jobName} must receive only the guarded platform artifact`);
+    assert.equal(
+      job.if,
+      `needs.${producer}.result == 'success'`,
+      `${jobName} must not run when its guarded producer was skipped`,
+    );
+    assert.ok(
+      job.steps.some((step) => receipt.test(step.run ?? "")),
+      `${jobName} must compile and link its host`,
+    );
+    const cache = job.steps.find((step) => step.uses?.startsWith("actions/cache@"));
+    assert.match(cache?.with?.path ?? "", cachePath, `${jobName} must cache its build inputs`);
+  }
+  assert.ok(
+    document.jobs["android-link"].steps.some(
+      (step) => step.run === 'sdkmanager --install "ndk;27.1.12297006"',
+    ),
+    "the Android JNI receipt must provision its pinned NDK on its own runner",
+  );
 
   assert.throws(() => {
     const unsafe = parse(
@@ -1199,6 +1229,19 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
       "a labeled fork must not execute native artifact builds",
     );
   }, /a labeled fork/);
+  assert.throws(() => {
+    const unsafe = parse(
+      rnNativeArtifactsWorkflow.replace(
+        "|| contains(github.event.pull_request.labels.*.name, 'rn-preview-release')",
+        "",
+      ),
+    );
+    assert.equal(
+      normalizeCondition(unsafe.jobs.android.if),
+      expectedCondition,
+      "an RN preview release must receive the same platform compile/link receipts",
+    );
+  }, /RN preview release/);
   assert.throws(() => {
     const unsafe = parse(
       rnNativeArtifactsWorkflow.replace(

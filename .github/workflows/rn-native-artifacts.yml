@@ -2,7 +2,10 @@ name: React Native relay artifacts
 
 on:
   pull_request:
-    # A label is the explicit opt-in for these expensive platform builds.
+    # A platform label is the explicit opt-in for these expensive platform
+    # builds. `rn-preview-release` requests the same source-compatible
+    # artifacts for package publication, so it must exercise the host link
+    # receipts too.
     # Include removal so its no-op run joins the same concurrency group and
     # cancels a previously queued or running artifact build for this PR.
     types: [opened, reopened, synchronize, labeled, unlabeled]
@@ -23,6 +26,7 @@ permissions:
   contents: read
 
 env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
   JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 
 concurrency:
@@ -40,7 +44,10 @@ jobs:
       ${{
         github.event_name != 'pull_request'
         || (
-          contains(github.event.pull_request.labels.*.name, 'react-native')
+          (
+            contains(github.event.pull_request.labels.*.name, 'react-native')
+            || contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+          )
           && github.event.pull_request.head.repo.full_name == github.repository
         )
       }}
@@ -79,7 +86,10 @@ jobs:
       ${{
         github.event_name != 'pull_request'
         || (
-          contains(github.event.pull_request.labels.*.name, 'react-native')
+          (
+            contains(github.event.pull_request.labels.*.name, 'react-native')
+            || contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+          )
           && github.event.pull_request.head.repo.full_name == github.repository
         )
       }}
@@ -106,6 +116,10 @@ jobs:
           if-no-files-found: error
 
   android-link:
+    # This is the JNI/C++ receipt: the generated Android host compiles
+    # `cpp-relay.cpp` and `foreground-runtime.cpp` against the React Native
+    # headers, then links them to the staged Android Rust archive. It cannot
+    # run unless the guarded artifact producer succeeded.
     name: Android relay linked AAR
     needs: android
     if: needs.android.result == 'success'
@@ -115,6 +129,16 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-toolchain: ""
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      # The host receipt is a separate runner from the archive producer, so
+      # provision the NDK that CMake uses to compile the JNI bridge here too.
+      - run: sdkmanager --install "ndk;27.1.12297006"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: rn-artifacts-android-link-${{ hashFiles('pnpm-lock.yaml', 'examples/todo-client-localfirst-expo/**', 'crates/jazz-rn/android/**', 'crates/jazz-rn/native/**') }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: jazz-rn-relay-android
@@ -126,6 +150,10 @@ jobs:
         working-directory: examples/todo-client-localfirst-expo/android
 
   ios-link:
+    # This is the Objective-C++ receipt: the generated simulator host compiles
+    # `JazzRelay.mm` and `foreground-runtime.cpp` against the staged
+    # XCFramework, then links the resulting application. It inherits the
+    # producer's same-repository label/trust guard through `needs: ios`.
     name: iOS relay linked app
     needs: ios
     if: needs.ios.result == 'success'
@@ -135,6 +163,12 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-toolchain: ""
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            examples/todo-client-localfirst-expo/ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: rn-artifacts-ios-link-macos-15-${{ hashFiles('pnpm-lock.yaml', 'examples/todo-client-localfirst-expo/**', 'crates/jazz-rn/ios/**', 'crates/jazz-rn/native/**', 'crates/jazz-rn/JazzRn.podspec') }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: jazz-rn-relay-ios
