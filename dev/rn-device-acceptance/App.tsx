@@ -15,15 +15,18 @@ export default function App() {
   const [shown, setShown] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
-    void observeLinkedAbiAdmission()
+    void (async () => {
+      const receipt = await observeLinkedAbiAdmission();
+      const linked = scenarioPlan.find((scenario) => scenario.scenario === "linked-abi-admission")!;
+      console.log(
+        encodeResult({
+          ...linked,
+          receipt: { ...receipt, sequence: 1, observedAt: new Date().toISOString() },
+        }),
+      );
+      return receipt;
+    })()
       .then((receipt) => {
-        const item = scenarioPlan.find((scenario) => scenario.scenario === "linked-abi-admission")!;
-        console.log(
-          encodeResult({
-            ...item,
-            receipt: { ...receipt, sequence: 1, observedAt: new Date().toISOString() },
-          }),
-        );
         setShown(true);
       })
       .catch((reason: unknown) => {

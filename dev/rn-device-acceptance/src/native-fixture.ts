@@ -1,8 +1,6 @@
 import { NativeModules } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
-
-type NativeRelayCapability = Uint8Array;
-type NativeRelayExecutor = { execute(commandBase64: string): Promise<string> };
+import type { NativeRelayCapability, NativeRelayExecutor } from "jazz-tools/react-native";
 
 export type DeviceReceiptContext = {
   platform: "android";
@@ -40,7 +38,10 @@ export async function admittedNativeRelay(): Promise<{
   const capability = decodeCapability(await fixture.admittedCapability());
   if (capability.byteLength !== 32)
     throw new Error("JazzDeviceFixture returned a non-opaque admission capability");
-  return { executor: { execute: executeNativeRelayCommand }, capability };
+  return {
+    executor: { execute: executeNativeRelayCommand },
+    capability: capability as NativeRelayCapability,
+  };
 }
 
 /** Trusted package/launch identity used solely to bind observed device receipts. */

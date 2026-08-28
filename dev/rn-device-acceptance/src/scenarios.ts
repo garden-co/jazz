@@ -8,7 +8,7 @@ import type { ScenarioResult } from "./protocol";
  */
 export const scenarioPlan: readonly ScenarioResult[] = [
   ["linked-abi-admission", "Installed Android relay admits an opaque scope and reports ABI 3"],
-  ["local-write-subscription", "Two UI runtimes observe a write through one relay"],
+  ["local-write-subscription", "Two UI runtimes must observe a write through one relay"],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
   ["reopen", "Process/app relaunch reopens the durable relay store"],
   ["scope-isolation", "Distinct app/storage/auth scopes cannot observe each other"],
