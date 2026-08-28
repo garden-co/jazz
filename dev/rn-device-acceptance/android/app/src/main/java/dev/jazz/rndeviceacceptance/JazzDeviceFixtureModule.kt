@@ -9,6 +9,8 @@ import com.jazzrn.JazzRelayTrustedAdmission
 import com.jazzrn.TrustedRelayScopeConfig
 import android.util.Base64
 import android.os.Build
+import java.io.FileInputStream
+import java.security.MessageDigest
 
 /**
  * Test-app-only trusted fixture. It is compiled into the development build,
@@ -47,8 +49,8 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
         ?: error("acceptance activity is unavailable")
       val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
         ?: error("acceptance launch did not include a run nonce")
-      val buildFingerprint = activity.intent.getStringExtra("jazzDeviceBuildFingerprint")
-        ?: error("acceptance launch did not include an APK fingerprint")
+      // Hash the installed package itself, rather than echoing an adb extra.
+      val buildFingerprint = sha256File(reactApplicationContext.applicationInfo.sourceDir)
       val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
         ?: error("Android build fingerprint is unavailable")
       promise.resolve(Arguments.createMap().apply {
@@ -58,5 +60,18 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
         putString("runNonce", nonce)
       })
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
+  }
+
+  private fun sha256File(path: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    FileInputStream(path).use { input ->
+      val buffer = ByteArray(32 * 1024)
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
   }
 }

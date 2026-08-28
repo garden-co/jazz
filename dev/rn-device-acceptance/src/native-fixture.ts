@@ -43,7 +43,7 @@ export async function admittedNativeRelay(): Promise<{
   return { executor: { execute: executeNativeRelayCommand }, capability };
 }
 
-/** Host-owned launch identity used solely to bind observed device receipts. */
+/** Trusted package/launch identity used solely to bind observed device receipts. */
 export async function deviceReceiptContext(): Promise<DeviceReceiptContext> {
   const context = await fixtureModule().receiptContext();
   if (

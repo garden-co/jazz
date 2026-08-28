@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -31,5 +33,25 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(host, /add\(JazzDeviceFixturePackage\(\)\)/);
   assert.match(fixture, /Build\.FINGERPRINT/);
   assert.match(fixture, /jazzDeviceRunNonce/);
-  assert.match(fixture, /jazzDeviceBuildFingerprint/);
+  assert.match(fixture, /applicationInfo\.sourceDir/);
+  assert.match(fixture, /MessageDigest\.getInstance\("SHA-256"\)/);
+  assert.doesNotMatch(fixture, /jazzDeviceBuildFingerprint/);
+});
+
+test("Android bootstrap rejects corrupt pinned archives before extraction", () => {
+  const bootstrap = read("scripts/bootstrap-android.sh");
+  assert.match(bootstrap, /verify-pinned-archive\.sh/);
+  assert.match(bootstrap, /refusing corrupt cached Android bootstrap archive/);
+  assert.match(bootstrap, /OpenJDK17U-jdk_x64_linux_hotspot_17\.0\.16_8\.tar\.gz/);
+  assert.match(bootstrap, /commandlinetools-linux-13114758_latest\.zip/);
+  assert.match(bootstrap, /android-ndk-r27b-linux\.zip/);
+  assert.match(bootstrap, /33e16af1a6bbabe12cad54b2117085c07eab7e4fa67cdd831805f0e94fd826c1/);
+});
+
+test("checksum pin rejects a planted corrupt cache archive", () => {
+  const archive = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jazz-corrupt-cache-")), "jdk.tgz");
+  fs.writeFileSync(archive, "corrupt");
+  assert.throws(() =>
+    execFileSync("bash", [path.join(root, "scripts/verify-pinned-archive.sh"), archive, "0".repeat(64)]),
+  );
 });

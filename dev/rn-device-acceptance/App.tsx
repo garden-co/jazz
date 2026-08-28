@@ -3,15 +3,11 @@ import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-nat
 import { encodeResult } from "./src/protocol";
 import { scenarioPlan } from "./src/scenarios";
 import { admittedNativeRelay, deviceReceiptContext } from "./src/native-fixture";
+import { proveAdmittedRelay } from "./src/relay-admission";
 
 async function observeLinkedAbiAdmission() {
-  const { executor } = await admittedNativeRelay();
-  // Postcard RelayCommandRequest::Probe is the canonical one-byte tag 0.
-  const response = Uint8Array.from(globalThis.atob(await executor.execute("AA==")), (byte) =>
-    byte.charCodeAt(0),
-  );
-  if (response.length !== 2 || response[0] !== 0 || response[1] !== 3)
-    throw new Error("installed Jazz relay returned an unexpected ABI probe response");
+  const { executor, capability } = await admittedNativeRelay();
+  await proveAdmittedRelay(executor, capability);
   return await deviceReceiptContext();
 }
 
