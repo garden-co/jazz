@@ -38,6 +38,12 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.doesNotMatch(fixture, /jazzDeviceBuildFingerprint/);
 });
 
+test("device fixture does not import internal jazz-tools relay-frame types", () => {
+  const fixture = read("src/native-fixture.ts");
+  assert.doesNotMatch(fixture, /NativeRelay(?:Capability|Executor)/);
+  assert.match(fixture, /execute: typeof executeNativeRelayCommand/);
+});
+
 test("Android bootstrap rejects corrupt pinned archives before extraction", () => {
   const bootstrap = read("scripts/bootstrap-android.sh");
   assert.match(bootstrap, /verify-pinned-archive\.sh/);

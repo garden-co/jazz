@@ -1,6 +1,5 @@
 import { NativeModules } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
-import type { NativeRelayCapability, NativeRelayExecutor } from "jazz-tools/react-native";
 
 export type DeviceReceiptContext = {
   platform: "android";
@@ -13,6 +12,16 @@ type FixtureModule = {
   admittedCapability(): Promise<string>;
   logout(): Promise<void>;
   receiptContext(): Promise<DeviceReceiptContext>;
+};
+
+/**
+ * The native fixture is an adapter for the public command function, not part of
+ * jazz-tools' internal relay-frame API. Keep its boundary structural so it
+ * cannot make those low-level implementation types public by accident.
+ */
+type AdmittedNativeRelay = {
+  executor: { execute: typeof executeNativeRelayCommand };
+  capability: Uint8Array;
 };
 
 function fixtureModule(): FixtureModule {
@@ -30,17 +39,14 @@ function decodeCapability(value: string): Uint8Array {
 }
 
 /** The only fixture material that crosses to JS is the opaque 32-byte lease. */
-export async function admittedNativeRelay(): Promise<{
-  executor: NativeRelayExecutor;
-  capability: NativeRelayCapability;
-}> {
+export async function admittedNativeRelay(): Promise<AdmittedNativeRelay> {
   const fixture = fixtureModule();
   const capability = decodeCapability(await fixture.admittedCapability());
   if (capability.byteLength !== 32)
     throw new Error("JazzDeviceFixture returned a non-opaque admission capability");
   return {
     executor: { execute: executeNativeRelayCommand },
-    capability: capability as NativeRelayCapability,
+    capability,
   };
 }
 
