@@ -46,6 +46,24 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
+// C/C++ translation phase 2 removes each immediately-adjacent backslash and
+// LF or CRLF pair before tokenization. The legacy-macro receipt must apply
+// that one lexical transformation first, otherwise a source-level splice can
+// hide an RCT export/remap token from this deliberately raw check. Do not
+// interpret comments, strings, or any other C/C++ syntax here: those must
+// remain visible to the ban as well.
+function spliceCPreprocessorLines(source) {
+  return source.replace(/\\(?:\r\n|\n)/g, "");
+}
+
+function assertNoLegacyIosMacroToken(source) {
+  assert.doesNotMatch(
+    spliceCPreprocessorLines(source),
+    /\bRCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*\b/,
+    "iOS JazzRelay must contain no legacy RCT export/remap macro token",
+  );
+}
+
 function assertExactNames(surface, actual, allowed) {
   const unexpected = [...actual].filter((name) => !allowed.has(name));
   const missing = [...allowed].filter((name) => !actual.has(name));
@@ -375,11 +393,7 @@ function assertOpaqueIosRelaySurface(iosRelay) {
   // The generated New-Architecture spec is the sole iOS JavaScript ABI. A raw
   // source ban is intentional: comments, strings, categories, and line
   // continuations must not create a parser-dependent escape hatch.
-  assert.doesNotMatch(
-    iosRelay,
-    /\bRCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*\b/,
-    "iOS JazzRelay must contain no legacy RCT export/remap macro token",
-  );
+  assertNoLegacyIosMacroToken(iosRelay);
   const commentFreeRelay = stripComments(iosRelay);
   const implementations = objcImplementations(commentFreeRelay);
   const relayImplementations = implementations.filter(
@@ -587,7 +601,7 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
   assert.doesNotMatch(androidPackage, /JazzRnModule/);
-  assert.doesNotMatch(iosRelay, /\bRCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*\b/);
+  assertNoLegacyIosMacroToken(iosRelay);
   assert.match(iosRelay, /JAZZ_RELAY_ARTIFACT_AVAILABLE/);
   assert.match(iosRelay, /jazz_native_relay_host_execute/);
   assert.match(iosRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
@@ -867,8 +881,20 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
       source: "// RCT_REMAP_METHOD(begin, begin:(NSString *)scope)",
     },
     {
-      name: "a line continuation",
+      name: "a prefix line splice",
+      source: "RCT_\\\nEXPORT_METHOD(configure:(NSString *)scope)",
+    },
+    {
+      name: "a middle-token CRLF line splice",
+      source: "RCT_EXP\\\r\nORT_METHOD(configure:(NSString *)scope)",
+    },
+    {
+      name: "a suffix line splice",
       source: "RCT_EXPORT_\\\nMETHOD(configure:(NSString *)scope)",
+    },
+    {
+      name: "chained LF and CRLF line splices",
+      source: "RCT_\\\nEX\\\r\nPORT_METHOD(configure:(NSString *)scope)",
     },
     {
       name: "a category",
@@ -883,6 +909,17 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
       `${fixture.name} must fail the raw iOS legacy macro ban`,
     );
   }
+  assert.doesNotThrow(
+    () => assertOpaqueIosRelaySurface(`${iosRelay}\nRCT_UNRELATED_METHOD()`),
+    "an unknown RCT macro must not be mistaken for a legacy export/remap macro",
+  );
+  assert.doesNotThrow(
+    () =>
+      assertOpaqueIosRelaySurface(
+        `${iosRelay}\nRCT_EX\\ \nPORT_METHOD(configure:(NSString *)scope)`,
+      ),
+    "a backslash followed by spaces is not a C/C++ phase-2 line splice",
+  );
   assert.throws(
     () =>
       assertOpaqueIosRelaySurface(
