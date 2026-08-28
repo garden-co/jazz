@@ -1,14 +1,19 @@
 # React Native bindings
 
 This directory restores the React Native binding shape against the v2 runtime.
-It is compile-level scaffolding only: the React hooks, provider, client factory,
-typed schema exports, and auth helper all typecheck, but persistent storage does
-not run yet.
+The foreground JavaScript runtime is deliberately in-memory; persistent storage
+and upstream relay ownership remain in the installed Android/iOS `JazzRelay`
+artifact.
 
-The current `createDb()` path installs `ReactNativeRuntimeSource`. Persistent
-configurations fail before opening any SQLite driver with:
+The current `createDb()` path installs `ReactNativeRuntimeSource`. A persistent
+configuration must supply `nativeRelay`, containing only the platform-provided
+opaque 32-byte capability and its command executor. JavaScript uses it solely
+to exchange canonical peer frames with the native relay. It never receives a
+SQLite handle/path, schema, session, token, or admission derivation.
 
-`React Native persistent storage is not available in this alpha; memory mode is unverified scaffolding, not device-supported persistence`
+Persistent configurations without that installed relay fail with:
+
+`React Native persistent runtime requires the installed JazzRelay native artifact and its platform-provided opaque nativeRelay capability`
 
 The fail-fast boundary is intentional. A `ReactNativeSqliteStorageDriver`
 cannot yet be installed into the v2 Rust ordered-KV runtime. Merely opening a
@@ -19,22 +24,16 @@ remain as a proposed storage ABI, but supplying one is rejected before
 `sqliteStorage` is combined with `driver: { type: "memory" }`; the option is
 never silently ignored.
 
-Explicit `driver: { type: "memory" }` currently reaches the v2 WASM runtime in
-the Node/forks test harness. That regression proves TypeScript wiring only. It
-has not run under Metro/Hermes on iOS or Android and must not be described as a
-supported React Native runtime mode until an actual device smoke passes.
+Explicit `driver: { type: "memory" }` reaches the v2 WASM runtime without a
+relay. Supplying `nativeRelay` in that mode is rejected rather than ignored.
 
 Open decisions for the RN owner:
 
-- SQLite driver route: the shared `jazz-native-relay` artifact owns SQLite;
-  its Android/iOS wrappers must link that artifact rather than introducing a
-  JavaScript storage driver.
-- Runtime route: move the runtime boundary into `crates/jazz-rn` as the thin
-  native relay command transport; it must not revive the removed UniFFI/JSI
-  runtime.
-- Storage ABI: map the future RN SQLite driver onto the portable ordered-KV
-  contract, including migration reporting, corruption behavior, teardown, and
-  durability tests.
+- Native artifacts must provide the version-compatible relay command ABI and
+  issue the opaque capability; a rejected open is surfaced as a startup error.
+- The relay adapter serializes frames and retains them on backpressure. A
+  `Db.disconnect()` closes its foreground peer alias; `Db.reconnect()` opens a
+  fresh alias against the same platform-owned relay.
 
 Useful pointers:
 

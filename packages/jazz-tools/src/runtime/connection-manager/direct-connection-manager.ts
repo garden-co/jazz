@@ -4,12 +4,16 @@ import {
   type ConnectionManagerClientInput,
   type DbForConnection,
 } from "./types.js";
+import type { DirectRuntimeConnection } from "../runtime-source.js";
 
 /** Manages a Db whose runtime connects directly to the configured server. */
 export class DirectConnectionManager extends ConnectionManager {
   private isDisconnected = false;
   private reconnectWaiters = new Set<() => void>();
   private transportTransition: Promise<void> = Promise.resolve();
+  private connection: DirectRuntimeConnection | null = null;
+  private connectionReady: Promise<void> | null = null;
+  private connectionError: Error | null = null;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -17,7 +21,28 @@ export class DirectConnectionManager extends ConnectionManager {
 
   async start(): Promise<void> {}
 
-  protected override onClientCreated({ client }: ConnectionManagerClientInput): void {
+  protected override onClientCreated({ schema, client }: ConnectionManagerClientInput): void {
+    const connection = this.host.runtimeSource.createDirectConnection?.({
+      config: this.host.config,
+      schema,
+      client,
+      onFailure: (error) => {
+        if (this.connection === connection) this.connectionError = asError(error);
+      },
+    });
+    if (connection) {
+      this.connection = connection;
+      this.connectionReady = connection.ready().catch((error: unknown) => {
+        const failure = asError(error);
+        if (this.connection === connection) this.connectionError = failure;
+        throw failure;
+      });
+      void this.connectionReady.catch(() => undefined);
+      if (this.isDisconnected) {
+        void this.enqueueTransportTransition(() => connection.disconnect()).catch(() => undefined);
+      }
+      return;
+    }
     if (this.isDisconnected) {
       // Establish the runtime's reconnect barrier for clients created while the
       // Db is explicitly offline.
@@ -40,6 +65,9 @@ export class DirectConnectionManager extends ConnectionManager {
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
+    if (this.connectionError) throw this.connectionError;
+    await this.connectionReady;
+    if (this.connectionError) throw this.connectionError;
     if (tier === "local") return;
     for (;;) {
       while (this.isDisconnected) {
@@ -80,7 +108,8 @@ export class DirectConnectionManager extends ConnectionManager {
       throw new Error("Db.disconnect() requires a configured serverUrl.");
     }
     await this.enqueueTransportTransition(async () => {
-      await this.clientEntry?.client.disconnectTransport();
+      if (this.connection) await this.connection.disconnect();
+      else await this.clientEntry?.client.disconnectTransport();
       // An in-flight or failed disconnect is not permission for a
       // RemoteIfPossible read to fall back locally.
       this.isDisconnected = true;
@@ -92,8 +121,11 @@ export class DirectConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
     await this.enqueueTransportTransition(async () => {
-      const client = this.clientEntry?.client;
-      if (client) this.connectClient(client);
+      if (this.connection) await this.connection.reconnect();
+      else {
+        const client = this.clientEntry?.client;
+        if (client) this.connectClient(client);
+      }
       this.isDisconnected = false;
     });
     if (!this.isDisconnected) {
@@ -127,4 +159,18 @@ export class DirectConnectionManager extends ConnectionManager {
       this.clearClient();
     }
   }
+
+  override async shutdown(): Promise<void> {
+    try {
+      await this.connection?.shutdown();
+    } finally {
+      this.connection = null;
+      this.connectionReady = null;
+      await super.shutdown();
+    }
+  }
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

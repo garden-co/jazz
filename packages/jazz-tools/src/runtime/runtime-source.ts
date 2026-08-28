@@ -70,6 +70,25 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
 }
 
 /**
+ * A platform-owned peer connection for runtimes which keep their durable
+ * replica outside JavaScript.  The Db connection manager owns this lifecycle;
+ * sources must not construct a second JavaScript runtime to implement it.
+ */
+export interface DirectRuntimeConnection {
+  ready(): Promise<void>;
+  disconnect(): Promise<void>;
+  reconnect(): Promise<void>;
+  shutdown(): Promise<void>;
+}
+
+export interface DirectRuntimeConnectionContext<RuntimeConfig extends DbConfig = DbConfig> {
+  config: RuntimeConfig;
+  schema: WasmSchema;
+  client: JazzClient;
+  onFailure: (error: unknown) => void;
+}
+
+/**
  * Internal source for loading and wiring the native runtime.
  *
  * This keeps platform/source differences (WASM, NAPI, browser storage, React
@@ -103,6 +122,17 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     _context: BrowserFollowerConnectionContext<RuntimeConfig>,
   ): BrowserFollowerConnection {
     throw new Error("Db runtime source does not support browser follower connections");
+  }
+
+  /**
+   * Optionally replace the ordinary JavaScript websocket carrier with a
+   * platform-admitted peer connection. The DirectConnectionManager remains the
+   * sole owner of readiness, offline state, and teardown.
+   */
+  createDirectConnection(
+    _context: DirectRuntimeConnectionContext<RuntimeConfig>,
+  ): DirectRuntimeConnection | null {
+    return null;
   }
 
   installTelemetry(
