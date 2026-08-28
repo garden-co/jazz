@@ -7,7 +7,7 @@ import test from "node:test";
 import { androidRelayFiles, verifyAndroidRelayStage } from "./android-relay-stage.mjs";
 
 const revision = "a".repeat(40);
-function staged({ omit = false } = {}) {
+function staged({ omit = false, corrupt = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "jazz-relay-stage-"));
   const libraryRoot = join(root, "android/src/main/jniLibs");
   const files = androidRelayFiles
@@ -28,6 +28,7 @@ function staged({ omit = false } = {}) {
       files,
     }),
   );
+  if (corrupt) writeFileSync(join(libraryRoot, androidRelayFiles[0]), "corrupt staged relay");
   return root;
 }
 
@@ -45,5 +46,10 @@ test("rejects a manifest that stages only the emulator ABI", () => {
 test("rejects a staged manifest from another source revision", () => {
   assert.throws(() =>
     verifyAndroidRelayStage({ packageRoot: staged(), sourceRevision: "b".repeat(40) }),
+  );
+});
+test("rejects a staged relay library whose bytes differ from its manifest hash", () => {
+  assert.throws(() =>
+    verifyAndroidRelayStage({ packageRoot: staged({ corrupt: true }), sourceRevision: revision }),
   );
 });

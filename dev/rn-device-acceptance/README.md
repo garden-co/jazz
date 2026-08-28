@@ -2,7 +2,7 @@
 
 This is the first-party **Expo development-build / bare-host** acceptance app for the native relay. It is intentionally not an Expo Go test: native relay code and the trusted fixture must be compiled into the Android APK or iOS simulator app.
 
-The app has one durable native relay and a scenario plan requiring two UI runtimes. It emits newline-delimited `JAZZ_DEVICE_RESULT {json}` protocol messages. A `passed` state is rejected by the protocol unless it includes platform, device, build, and observation-time evidence. Current scenarios are all `todo`; the UI only emits that truthful plan and does not claim a device receipt.
+The app has one durable native relay and a scenario plan requiring two UI runtimes. It emits newline-delimited `JAZZ_DEVICE_RESULT {json}` protocol messages. A `passed` state is rejected by the protocol unless it includes platform, device, build, and observation-time evidence. Only `linked-abi-admission` is currently automated; every other scenario remains `todo` and the UI never emits a receipt for unobserved behavior.
 
 ## Trusted fixture boundary
 
@@ -12,6 +12,7 @@ The Expo config plugin copies and registers the Android template during prebuild
 
 ## Current acceptance plan
 
+- `linked-abi-admission`: installed Android relay admits an opaque scope and reports ABI 3.
 - `local-write-subscription`: UI-A write observed by UI-B through one relay.
 - `reconnect` and `reopen`: connection recovery and durable process/app relaunch.
 - `scope-isolation` and `logout-auth-switch`: separate scope visibility and revocation before replacement.
