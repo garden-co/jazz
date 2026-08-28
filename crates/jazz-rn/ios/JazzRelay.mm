@@ -1,3 +1,4 @@
+#import "JazzRelayModule.h"
 #import "JazzRelay.h"
 
 #if __has_include(<JazzNativeRelay/jazz_native_relay.h>)
