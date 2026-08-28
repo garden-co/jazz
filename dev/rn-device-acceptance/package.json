@@ -9,7 +9,7 @@
     "ios": "expo run:ios",
     "prebuild": "expo prebuild --clean",
     "typecheck": "tsc --noEmit",
-    "test:protocol": "node --experimental-strip-types --test src/protocol.test.ts src/relay-admission.test.ts scripts/device-driver.test.mjs scripts/android-relay-stage.test.mjs scripts/ios-diagnostics.test.mjs scripts/native-host-contract.test.mjs",
+    "test:protocol": "node --experimental-strip-types --test src/protocol.test.ts src/relay-admission.test.ts scripts/device-driver.test.mjs scripts/android-relay-stage.test.mjs scripts/boot-android-emulator.test.mjs scripts/ios-diagnostics.test.mjs scripts/native-host-contract.test.mjs",
     "verify": "pnpm test:protocol && pnpm typecheck",
     "device:android": "node --experimental-strip-types scripts/run-android.mjs",
     "device:ios": "node --experimental-strip-types scripts/run-ios.mjs"
