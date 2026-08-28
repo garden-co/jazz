@@ -59,6 +59,18 @@ not by accumulated view state. `groove/SPEC/INVARIANTS.md::INV-MV-1` and the mai
 differential oracle prove observable equivalence; they do not justify a
 full-state rebuild or full-state diff on the maintained path.
 
+#### Durable settled-program-fact keys
+
+`INV-QUERY-36` — Every settled program fact durable key is exactly one
+versioned, canonical `JPFK` codec value. Its version and variant tags are
+permanent; nested result-member values use the corresponding canonical Groove
+record codec. Recovery MUST reject before mutating resident query state any
+legacy postcard payload, malformed or truncated value, unknown version/tag,
+trailing bytes, non-canonical representation, oversized field, or value beyond
+the codec nesting bound. There is no compatibility decode or on-open rewrite
+for the pre-freeze raw `ViewFactEntry` postcard keys. Add, remove, rewrite, and
+reopen all derive the same exact key bytes. Storage-freeze issue #2249.
+
 The high-level `Db` facade follows the same boundary for every live
 subscription tier. Local subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the

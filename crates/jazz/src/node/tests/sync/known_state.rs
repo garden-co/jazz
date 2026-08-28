@@ -1131,6 +1131,106 @@ fn fast_known_state_fact_survives_storage_reopen() {
 }
 
 #[test]
+fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec() {
+    // Internal storage-boundary coverage: applications cannot observe physical
+    // keys, while this verifies all delta modes survive through the same reopen
+    // path. Codec fixtures cover every fact variant separately.
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let key = BindingViewKey::from_canonical_subscription_key(subscription);
+    let fact = |path: &str| crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
+        crate::protocol::PathCorrelationCoverageEntry {
+            path: path.to_owned(),
+            source_table: "todos".to_owned().into(),
+            source_row: row(42),
+            correlation_key: vec![path.len() as u8],
+            complete: true,
+        },
+    );
+    let update = |reset_result_set, adds, removes| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: adds,
+            program_fact_removes: removes,
+        })
+    };
+    let added = fact("add");
+    reader.apply_sync_message_settled(update(false, vec![added.clone()], vec![])).unwrap();
+    assert_eq!(reader.query.settled_program_facts[&key], BTreeSet::from([added.clone()]));
+    reader.apply_sync_message_settled(update(false, vec![], vec![added])).unwrap();
+    assert!(reader.query.settled_program_facts[&key].is_empty());
+    let rewritten = fact("rewrite");
+    reader.apply_sync_message_settled(update(true, vec![rewritten.clone()], vec![])).unwrap();
+    drop(reader);
+    let reopened = open_node_at(&reader_dir, schema());
+    assert_eq!(reopened.query.settled_program_facts[&key], BTreeSet::from([rewritten]));
+}
+
+#[test]
+fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
+    // Internal recovery-boundary coverage: force a valid persisted fact followed
+    // by a malformed durable key and verify recovery leaves the prior resident
+    // closure untouched rather than publishing a partially decoded prefix.
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let fact = crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
+        crate::protocol::PathCorrelationCoverageEntry {
+            path: "valid".to_owned(),
+            source_table: "todos".to_owned().into(),
+            source_row: row(43),
+            correlation_key: vec![1],
+            complete: true,
+        },
+    );
+    reader
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: vec![fact],
+            program_fact_removes: Vec::new(),
+        }))
+        .unwrap();
+    let expected_facts = reader.query.settled_program_facts.clone();
+    let expected_cursors = reader.query.settled_through_by_binding_view.clone();
+    let corrupt_store = reader
+        .database
+        .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
+        .unwrap();
+    futures::executor::block_on(corrupt_store.set(
+            &[
+                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
+                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
+                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
+                Value::Bytes(vec![0]),
+            ],
+            &[Value::U64(1)],
+        ))
+    .unwrap();
+    assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());
+    assert_eq!(reader.query.settled_program_facts, expected_facts);
+    assert_eq!(reader.query.settled_through_by_binding_view, expected_cursors);
+}
+
+#[test]
 fn known_state_declaration_never_skips_unfated_edge_members() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_edge_dir, mut edge) = open_node_with_uuid(node(7));

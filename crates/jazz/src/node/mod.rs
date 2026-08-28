@@ -2125,9 +2125,7 @@ fn settled_program_fact_key(
     fact: &ViewFactEntry,
 ) -> Result<Vec<Value>, Error> {
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(postcard::to_allocvec(fact).map_err(|_| {
-        Error::InvalidStoredValue("settled program fact must encode")
-    })?));
+    key.push(Value::Bytes(codec::program_fact_storage_bytes(fact)?));
     Ok(key)
 }
 
