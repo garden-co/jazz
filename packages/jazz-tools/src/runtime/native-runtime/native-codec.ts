@@ -637,7 +637,13 @@ export class PostcardWriter {
   }
 
   i64(value: bigint | number): void {
+    if (typeof value === "number" && !Number.isSafeInteger(value)) {
+      throw new Error(`i64 must be a safe integer when passed as a number, got ${value}`);
+    }
     const bigintValue = BigInt(value);
+    if (bigintValue < -(1n << 63n) || bigintValue > (1n << 63n) - 1n) {
+      throw new Error(`i64 out of range: ${bigintValue}`);
+    }
     const encoded = bigintValue < 0n ? (-bigintValue << 1n) - 1n : bigintValue << 1n;
     this.u64Big(encoded);
   }
@@ -653,6 +659,9 @@ export class PostcardWriter {
   }
 
   u32Le(value: number): void {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+      throw new Error(`u32Le must be an unsigned 32-bit integer, got ${value}`);
+    }
     this.chunks.push(
       value & 0xff,
       (value >>> 8) & 0xff,

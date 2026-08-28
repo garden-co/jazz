@@ -1590,6 +1590,9 @@ class OffsetWriter {
   readonly #bytes: number[] = [];
 
   u32Le(value: number): void {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+      throw new Error(`offset must be an unsigned 32-bit integer, got ${value}`);
+    }
     this.#bytes.push(
       value & 0xff,
       (value >>> 8) & 0xff,

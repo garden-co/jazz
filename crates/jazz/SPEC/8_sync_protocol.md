@@ -104,6 +104,9 @@ bytes, or a tenth-byte payload above `1` is malformed rather than a compatible
 alternate encoding. TypeScript decoders that expose a `u64` as a JavaScript
 `number` MUST reject values above `Number.MAX_SAFE_INTEGER`; only fields kept
 as `bigint` may retain the full `u64` domain.
+Writers encode a ZigZag `i64` only from a safe JavaScript `number` or a
+`bigint` in `[-2^63, 2^63-1]`; they MUST reject an unsafe number or either
+out-of-range signed endpoint before emitting bytes.
 The TypeScript WebSocket carrier MUST consume the entire outer batch and the
 entire known `Hello`, `Message`, or `Error` frame whenever it parses or
 classifies that frame; reading only the enum tag is not frame acceptance.
