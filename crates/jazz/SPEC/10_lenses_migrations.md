@@ -31,15 +31,11 @@ Invariant digest:
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
-- `INV-LENS-23`: The catalogue bootstrap kernel is the only hard-coded durable
-  descriptor schema in a storage epoch. Its permanent numeric record kinds,
-  identities, and activation records decode immutable descriptors and lineage
-  metadata only; application tables and ordinary Jazz system tables use the
-  same catalogue-described record machinery.
-- `INV-LENS-24`: A durable schema descriptor is immutable and content-addressed
-  by canonical semantic descriptor bytes. Names, documentation, declaration
-  order, and storage-local aliases are non-identifying; every decoding-relevant
-  field and permanent table/column/enum-variant identity is identifying.
+- `INV-LENS-23`: The `jazz_catalogue` bootstrap kernel uses only the fixed
+  numeric record kinds `0..=7` described in §10.2. Unknown kinds fail closed
+  during discovery and reopen. This freezes the kernel discriminator only; it
+  does not yet freeze descriptor identity or the remaining catalogue payload
+  encodings.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 
 ## Details
@@ -73,18 +69,12 @@ rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
 
 #### Epoch-pinned catalogue kernel
 
-The first bytes needed to open a database cannot themselves depend on an
-application descriptor. Jazz therefore freezes one deliberately tiny
-catalogue kernel per storage epoch. It contains only the typed records needed
-to discover immutable schema descriptors, migration lenses, local alias
-mappings, staged/active lineage receipts, and the current-write pointer. Its
-record kind is a permanent unsigned numeric discriminator, not a user-visible
-string and not an extensible Rust enum: `genesis = 0`, `schema = 1`, `lens =
-2`, `schema_lineage_staged = 3`, `schema_lineage_pending = 4`,
-`schema_lineage_active = 5`, `write_pointer_pending = 6`, and
-`bootstrap_ready = 7`. An unknown kernel kind, malformed field, duplicate
-identity, or incomplete receipt is corruption and fails closed before decode,
-activation, or mutation. Adding a kernel case requires a new storage epoch.
+`jazz_catalogue.kind` is stored as a `U64` and forms the composite primary key
+`(kind, id)` with the record UUID. The current storage epoch permanently maps
+`genesis = 0`, `schema = 1`, `lens = 2`, `schema_lineage_staged = 3`,
+`schema_lineage_pending = 4`, `schema_lineage_active = 5`,
+`write_pointer_pending = 6`, and `bootstrap_ready = 7`. Discovery and reopen
+reject every other numeric kind rather than guessing how to decode it.
 
 The kernel payloads that establish recovery state have their own explicit,
 versioned binary layouts; they are not authoritative JSON. In this epoch,
@@ -108,30 +98,16 @@ pointer revision is `0x0102030405060708`, and whose active sequence is
 Appending even one byte, adding whitespace to the embedded public-schema JSON,
 using an arbitrary pending-pointer row id, duplicating a pending revision,
 truncating a payload, or changing `01` to an unknown version rejects reopen
-before resident catalogue state is replaced. This freezes only
-the envelope and receipt representations; physical mappings, enum registries,
-and full lineage/lens payloads remain separate catalogue work.
+before resident catalogue state is replaced.
 
-That exception is intentionally narrow. The catalogue does **not** become a
-second place to hard-code Jazz internals: all other Jazz system tables live in
-a reserved system namespace and are described, activated, and recovered by the
-same descriptor machinery as application tables. A descriptor has permanent,
-globally stable physical table, column, and enum-variant IDs. Human names and
-documentation may change, and source/declaration order may not define durable
-identity. A storage-local alias is only a compression mapping established
-before data that uses it; it is never a sync identity or an input to a schema
-hash.
-
-`SchemaVersionId` is the hash of a canonical semantic descriptor. The
-canonical bytes include all decoding-relevant type, field-ID, variant-ID,
-default, index, and lineage semantics, and exclude comments, documentation,
-source order, and local aliases. Descriptor payloads are immutable: evolution
-publishes a distinct version and explicit lenses rather than overwriting a
-known descriptor. Publication persists the complete descriptor, lens, local
-mapping, and staged/active receipt in one atomic activation boundary. Recovery
-either reconstructs that exact active prefix deterministically or parks facts
-that name an unknown/incomplete descriptor; it never guesses a descriptor from
-current code or decodes under a different version.
+This freezes the numeric discriminator and primary-key layout plus only the
+schema envelope, bootstrap receipt, pending write-pointer, and active-lineage
+receipt representations described above. It does not freeze the remaining
+catalogue payload codecs, schema-descriptor identity model, physical identity
+allocation, or complete catalogue lifecycle guarantees. Those remain part of
+the catalogue storage settlement tracked by
+[#2037](https://github.com/garden-co/jazz/issues/2037) and
+[#1779](https://github.com/garden-co/jazz/issues/1779).
 
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue

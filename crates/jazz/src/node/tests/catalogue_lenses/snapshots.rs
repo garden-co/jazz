@@ -1262,6 +1262,67 @@ fn reopen_rejects_staged_table_partition_mismatch() {
     );
 }
 
+/// A schema row is independently durable from its activation receipt. Reopen
+/// must recompute its content-derived ID before putting it in the resident
+/// catalogue; matching the row primary key alone is not sufficient.
+#[test]
+fn reopen_rejects_standalone_schema_content_identity_mismatch() {
+    let base = schema();
+    let (dir, mut receiver) = open_node_with_schema(node(0x4c), base.clone());
+    let mut tampered = SchemaVersion::new(base.clone());
+    tampered.id = SchemaVersionId(uuid::Uuid::nil());
+    write_catalogue_record(
+        &mut receiver,
+        b"schema",
+        tampered.id.0,
+        serde_json::to_vec(&tampered).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x4c),
+        base,
+        "catalogue schema id does not match schema payload",
+    );
+}
+
+/// A standalone cross-lens is not covered by a lineage receipt. This planted
+/// durable mutation keeps its key and content ID coherent while removing the
+/// operation that makes the endpoints semantically compatible.
+#[test]
+fn reopen_rejects_standalone_lens_semantic_tamper() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x4d), base.clone());
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    let mut tampered = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .publication
+        .lens
+        .clone();
+    tampered.table_lenses[0].ops.clear();
+    tampered.id = tampered.content_id();
+    write_catalogue_record(
+        &mut receiver,
+        b"lens",
+        tampered.id.0,
+        serde_json::to_vec(&tampered).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x4d),
+        base,
+        "catalogue lens violates trusted semantic invariants",
+    );
+}
+
 /// A dynamic edge without a local catalogue must not manufacture the empty
 /// constructor schema as durable genesis; after its trusted core snapshot it
 /// atomically adopts the core lineage and survives reopen.
