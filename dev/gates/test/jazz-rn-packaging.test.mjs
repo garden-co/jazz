@@ -906,6 +906,14 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       ),
     )?.[1],
   );
+  const nativeSourceFingerprint = createHash("sha256")
+    .update(execFileSync("git", [
+      "ls-tree", "-r", "--full-tree", "HEAD", "--",
+      "Cargo.lock", "Cargo.toml", "crates/groove", "crates/jazz",
+      "crates/jazz-native-relay", "crates/jazz-storage-sqlite",
+      "crates/jazz-rn/scripts/build-relay-artifacts.sh",
+    ], { cwd: sourceRoot, encoding: "utf8" }))
+    .digest("hex");
   const verifier = new URL(
     "../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs",
     import.meta.url,
@@ -970,7 +978,7 @@ ${
     await writeFile(
       destination,
       `${JSON.stringify(
-        { format: 1, nativeRelayAbi, sourceRevision, ...extra, files },
+        { format: 2, nativeRelayAbi, sourceRevision, nativeSourceFingerprint, ...extra, files },
         null,
         2,
       )}\n`,
@@ -1004,6 +1012,23 @@ ${
         stdio: "pipe",
       },
     );
+
+    await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
+      toolchain: { cargoNdk: "4.1.2" },
+      nativeSourceFingerprint: "0".repeat(64),
+    });
+    assert.throws(
+      () => execFileSync(
+        process.execPath,
+        [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+        { env: environment, stdio: "pipe" },
+      ),
+      /native source fingerprint/,
+      "a sealed archive built from a different native source fingerprint is not releasable",
+    );
+    await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
+      toolchain: { cargoNdk: "4.1.2" },
+    });
 
     const simulatorDirectory = join(iosRoot, "ios-arm64_x86_64-simulator");
     await rm(join(simulatorDirectory, "libjazz_native_relay.a"));
