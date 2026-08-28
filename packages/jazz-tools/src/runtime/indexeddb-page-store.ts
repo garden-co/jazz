@@ -1,15 +1,48 @@
 /** Durable IndexedDB metadata/page-store epoch, independent of browser IDB's version. */
 export const INDEXEDDB_BTREE_FORMAT_VERSION = 2;
 export const INDEXEDDB_BTREE_FORMAT_MAGIC = "jazz-idb-tree";
-export const INDEXEDDB_BTREE_DATABASE_VERSION = 2;
+export const INDEXEDDB_BTREE_DATABASE_VERSION = 3;
 
 // These names are part of the physical browser format. Do not rename them
 // without introducing a new durable storage epoch and explicit migration.
 export const INDEXEDDB_BTREE_PAGES_STORE = "pages";
 export const INDEXEDDB_BTREE_METADATA_STORE = "metadata";
+/** The epoch manifest is deliberately outside the ordinary tree metadata plane. */
+export const INDEXEDDB_STORAGE_MANIFEST_STORE = "storage-manifest";
+export const INDEXEDDB_STORAGE_MANIFEST_KEY = "epoch";
 const CURRENT_METADATA_KEY = "current";
 const MIN_PAGE_SIZE = 1024;
 const MAX_PAGE_SIZE = 0x8000_0000;
+export const INDEXEDDB_BTREE_PAGE_SIZE = 16 * 1024;
+export const INDEXEDDB_STORAGE_EPOCH = 1;
+export const INDEXEDDB_PAGE_CHECKSUM = "xxh3-64-le";
+export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
+
+/**
+ * The entire browser physical-open contract. Keep this exact shape pinned:
+ * unknown fields are decode-relevant until a later storage epoch says otherwise.
+ */
+export interface IndexedDbStorageManifest {
+  storageEpoch: typeof INDEXEDDB_STORAGE_EPOCH;
+  adapterId: "jazz-idb-tree";
+  adapterFormatVersion: typeof INDEXEDDB_BTREE_FORMAT_VERSION;
+  requiredCodecIds: readonly ["groove.ordered-kv.v1"];
+  pageSize: typeof INDEXEDDB_BTREE_PAGE_SIZE;
+  pageChecksum: typeof INDEXEDDB_PAGE_CHECKSUM;
+  pageFormatMagic: typeof INDEXEDDB_PAGE_FORMAT_MAGIC;
+  pageFormatVersion: typeof INDEXEDDB_BTREE_FORMAT_VERSION;
+}
+
+export const INDEXEDDB_STORAGE_MANIFEST: IndexedDbStorageManifest = {
+  storageEpoch: INDEXEDDB_STORAGE_EPOCH,
+  adapterId: "jazz-idb-tree",
+  adapterFormatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
+  requiredCodecIds: ["groove.ordered-kv.v1"],
+  pageSize: INDEXEDDB_BTREE_PAGE_SIZE,
+  pageChecksum: INDEXEDDB_PAGE_CHECKSUM,
+  pageFormatMagic: INDEXEDDB_PAGE_FORMAT_MAGIC,
+  pageFormatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
+};
 
 export interface IndexedDbBtreeMetadata {
   formatMagic: typeof INDEXEDDB_BTREE_FORMAT_MAGIC;
@@ -59,14 +92,46 @@ export class IndexedDbPageStore {
     onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void,
   ): Promise<IndexedDbPageStore> {
     const request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
-    request.onupgradeneeded = () => {
+    let rejectedPreSettlementDatabase = false;
+    request.onupgradeneeded = (event) => {
+      if (event.oldVersion !== 0) {
+        // Do not commit even an auxiliary store into an alpha namespace. The
+        // aborted upgrade leaves the prior version and every ordinary page
+        // unchanged before the caller observes the unsupported-epoch error.
+        rejectedPreSettlementDatabase = true;
+        request.result.close();
+        request.transaction?.abort();
+        return;
+      }
       const db = request.result;
       if (!db.objectStoreNames.contains(INDEXEDDB_BTREE_PAGES_STORE))
         db.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
       if (!db.objectStoreNames.contains(INDEXEDDB_BTREE_METADATA_STORE))
         db.createObjectStore(INDEXEDDB_BTREE_METADATA_STORE);
+      if (!db.objectStoreNames.contains(INDEXEDDB_STORAGE_MANIFEST_STORE)) {
+        const manifest = db.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+        if (request.transaction) {
+          manifest.put(INDEXEDDB_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
+        }
+      }
     };
-    return new IndexedDbPageStore(await requestResult(request), name, onInvalidated);
+    let db: IDBDatabase;
+    try {
+      db = await requestResult(request);
+    } catch (error) {
+      if (rejectedPreSettlementDatabase) {
+        throw new Error("Missing or invalid IndexedDB storage epoch manifest");
+      }
+      throw error;
+    }
+    const store = new IndexedDbPageStore(db, name, onInvalidated);
+    try {
+      await store.assertStorageManifest();
+      return store;
+    } catch (error) {
+      store.close();
+      throw error;
+    }
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
@@ -80,6 +145,17 @@ export class IndexedDbPageStore {
     if (value === undefined) return null;
     assertMetadata(value);
     return value;
+  }
+
+  /** Read-only physical-open gate. It always runs before a caller gets a handle. */
+  private async assertStorageManifest(): Promise<void> {
+    const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const done = transactionDone(tx);
+    const value = await requestResult(
+      tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_MANIFEST_KEY),
+    );
+    await done;
+    assertStorageManifest(value);
   }
 
   async readPage(pageId: number): Promise<Uint8Array | null> {
@@ -272,6 +348,7 @@ function assertMetadata(value: unknown): asserts value is IndexedDbBtreeMetadata
     metadata.formatMagic !== INDEXEDDB_BTREE_FORMAT_MAGIC ||
     metadata.formatVersion !== INDEXEDDB_BTREE_FORMAT_VERSION ||
     !isPageSize(metadata.pageSize) ||
+    metadata.pageSize !== INDEXEDDB_BTREE_PAGE_SIZE ||
     !Number.isSafeInteger(metadata.generation) ||
     Number(metadata.generation) < 1 ||
     (metadata.rootPageId !== null && !isPageId(metadata.rootPageId)) ||
@@ -288,7 +365,7 @@ function assertCommit(commit: IndexedDbPageCommit): void {
     throw new Error("Invalid IndexedDB B-tree expected generation");
   }
   const { pageSize, rootPageId, nextPageId } = commit.metadata;
-  if (!isPageSize(pageSize) || !isPageId(nextPageId)) {
+  if (!isPageSize(pageSize) || pageSize !== INDEXEDDB_BTREE_PAGE_SIZE || !isPageId(nextPageId)) {
     throw new Error("Invalid IndexedDB B-tree commit metadata");
   }
   if (rootPageId !== null && (!isPageId(rootPageId) || rootPageId >= nextPageId)) {
@@ -305,6 +382,31 @@ function assertCommit(commit: IndexedDbPageCommit): void {
     if (!isPageId(pageId) || pageId >= nextPageId || pageId === rootPageId || written.has(pageId)) {
       throw new Error("Invalid IndexedDB B-tree deleted page commit");
     }
+  }
+}
+
+function assertStorageManifest(value: unknown): asserts value is IndexedDbStorageManifest {
+  if (!value || typeof value !== "object") {
+    throw new Error("Missing or invalid IndexedDB storage epoch manifest");
+  }
+  const manifest = value as Partial<IndexedDbStorageManifest>;
+  const keys = Object.keys(manifest).sort();
+  const expectedKeys = Object.keys(INDEXEDDB_STORAGE_MANIFEST).sort();
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index]) ||
+    manifest.storageEpoch !== INDEXEDDB_STORAGE_MANIFEST.storageEpoch ||
+    manifest.adapterId !== INDEXEDDB_STORAGE_MANIFEST.adapterId ||
+    manifest.adapterFormatVersion !== INDEXEDDB_STORAGE_MANIFEST.adapterFormatVersion ||
+    manifest.pageSize !== INDEXEDDB_STORAGE_MANIFEST.pageSize ||
+    manifest.pageChecksum !== INDEXEDDB_STORAGE_MANIFEST.pageChecksum ||
+    manifest.pageFormatMagic !== INDEXEDDB_STORAGE_MANIFEST.pageFormatMagic ||
+    manifest.pageFormatVersion !== INDEXEDDB_STORAGE_MANIFEST.pageFormatVersion ||
+    !Array.isArray(manifest.requiredCodecIds) ||
+    manifest.requiredCodecIds.length !== 1 ||
+    manifest.requiredCodecIds[0] !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds[0]
+  ) {
+    throw new Error("Missing or invalid IndexedDB storage epoch manifest");
   }
 }
 
