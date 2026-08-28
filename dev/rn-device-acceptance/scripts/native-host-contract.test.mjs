@@ -164,6 +164,11 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   ]) {
     assert.match(driver, new RegExp(detail));
   }
+  assert.match(driver, /assertDeviceReceipt\(receiptFile\(\), expected\)/);
+  // The sandbox file is the receipt transport. App logs remain diagnostics
+  // only: release React Native logging is not reliable evidence transport.
+  assert.doesNotMatch(driver, /assertDeviceReceipt\(receiptOutput\(\), expected\)/);
+  assert.doesNotMatch(driver, /eventMessage CONTAINS 'JAZZ_DEVICE_RESULT'/);
   const app = read("App.tsx");
   assert.match(app, /await proveAdmittedRelay/);
   assert.match(app, /await recordDeviceReceipt\(result\)/);
