@@ -1364,7 +1364,6 @@ pub struct Database {
 pub struct RuntimeRegistryCheckpoint {
     ivm_runtime: IvmRuntime,
     stored_record_descriptors: BTreeMap<String, BTreeMap<u32, RecordDescriptor>>,
-    poisoned: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

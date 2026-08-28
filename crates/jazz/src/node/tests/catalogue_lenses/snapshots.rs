@@ -236,6 +236,29 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     );
 }
 
+/// A pre-activation failpoint is wholly in-memory and may be retried. By
+/// contrast, once the catalogue batch has reached the storage persistence
+/// boundary, its failure has publication-order consequences that cannot be
+/// rolled back by restoring only the registry. This internal receipt injects
+/// that boundary directly; public callers can only observe the fail-closed
+/// node afterwards.
+#[test]
+fn trusted_catalogue_snapshot_persistence_failure_keeps_runtime_poisoned() {
+    let (mut receiver, storage) = fail_write_many_node();
+    let snapshot = catalogue_snapshot_fixture();
+    storage.fail_nth_following_write_many(1);
+
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    assert_poisoned_node_exposes_nothing(&mut receiver);
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot),
+        Err(Error::CatalogueActivationFailed)
+    ));
+}
+
 #[test]
 fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     // Internal because schema aliases are node-local storage identities; the

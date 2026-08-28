@@ -129,13 +129,15 @@ impl Database {
     /// publications, subscriptions' externally visible delivery state, and
     /// storage are not rebuilt or copied.  Schema admission only changes the
     /// IVM registry and its descriptor cache, so restoring these two pieces
-    /// makes a failed admission observationally invisible to live users.
+    /// makes a pre-publication failed admission observationally invisible to
+    /// live users. It deliberately does **not** restore the database poison
+    /// flag: after a failed durable publication, publication ordering is
+    /// ambiguous and every later entry point must remain fail closed.
     #[doc(hidden)]
     pub fn runtime_registry_checkpoint(&self) -> RuntimeRegistryCheckpoint {
         RuntimeRegistryCheckpoint {
             ivm_runtime: self.ivm_runtime.clone(),
             stored_record_descriptors: self.stored_record_descriptors.borrow().clone(),
-            poisoned: self.poisoned,
         }
     }
 
@@ -145,7 +147,6 @@ impl Database {
     pub fn restore_runtime_registry(&mut self, checkpoint: RuntimeRegistryCheckpoint) {
         self.ivm_runtime = checkpoint.ivm_runtime;
         *self.stored_record_descriptors.borrow_mut() = checkpoint.stored_record_descriptors;
-        self.poisoned = checkpoint.poisoned;
     }
 
     /// Return the live schema for a table.
