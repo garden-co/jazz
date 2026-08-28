@@ -7,7 +7,7 @@ import type { ScenarioResult } from "./protocol";
  * device driver as a green receipt requirement.
  */
 export const scenarioPlan: readonly ScenarioResult[] = [
-  ["linked-abi-admission", "Installed Android relay admits an opaque scope and reports ABI 3"],
+  ["linked-abi-admission", "Installed relay admits an opaque scope and reports ABI 3"],
   ["local-write-subscription", "Two UI runtimes observe a write through one relay"],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
   ["reopen", "Process/app relaunch reopens the durable relay store"],
