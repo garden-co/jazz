@@ -154,8 +154,8 @@ fn decode_branch_bindings(
     data: &[u8],
     offset: &mut usize,
 ) -> Result<Vec<ColumnName>, CatalogueEncodingError> {
-    let count = read_u32(data, offset)?;
-    let mut bindings = Vec::with_capacity(count as usize);
+    let count = read_count(data, offset, "branch_bindings")?;
+    let mut bindings = Vec::with_capacity(count);
     for _ in 0..count {
         bindings.push(ColumnName::new(read_string(data, offset, "branch_column")?));
     }
@@ -184,12 +184,13 @@ fn decode_indexed_columns(
     data: &[u8],
     offset: &mut usize,
 ) -> Result<Option<Vec<ColumnName>>, CatalogueEncodingError> {
-    let count = read_u32(data, offset)?;
-    if count == u32::MAX {
+    let encoded_count = read_u32(data, offset)?;
+    if encoded_count == u32::MAX {
         return Ok(None);
     }
+    let count = bound_count(data, offset, encoded_count, "indexed_columns")?;
 
-    let mut columns = Vec::with_capacity(count as usize);
+    let mut columns = Vec::with_capacity(count);
     let mut previous: Option<String> = None;
     for _ in 0..count {
         let column = read_string(data, offset, "indexed_column")?;
@@ -210,7 +211,7 @@ fn decode_indexed_columns(
 fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     let mut offset = 1;
     let schema_version = data[0];
-    let table_count = read_u32(data, &mut offset)?;
+    let table_count = read_count(data, &mut offset, "schema_tables")?;
 
     let mut schema = Schema::new();
     for _ in 0..table_count {
@@ -234,8 +235,8 @@ fn decode_row_descriptor(
     offset: &mut usize,
     schema_version: u8,
 ) -> Result<RowDescriptor, CatalogueEncodingError> {
-    let count = read_u32(data, offset)?;
-    let mut columns = Vec::with_capacity(count as usize);
+    let count = read_count(data, offset, "row_descriptor_columns")?;
+    let mut columns = Vec::with_capacity(count);
 
     for _ in 0..count {
         columns.push(decode_column_descriptor(data, offset, schema_version)?);
@@ -439,7 +440,7 @@ fn decode_column_type(
             }
         }
         TYPE_ENUM => {
-            let variant_count = read_u32(data, offset)? as usize;
+            let variant_count = read_count(data, offset, "enum_variants")?;
             let mut variants = Vec::with_capacity(variant_count);
             for _ in 0..variant_count {
                 variants.push(read_string(data, offset, "enum_variant")?);
@@ -449,7 +450,7 @@ fn decode_column_type(
         }
         TYPE_SCALAR_ENUM => {
             let name = read_string(data, offset, "scalar_enum_name")?;
-            let variant_count = read_u32(data, offset)? as usize;
+            let variant_count = read_count(data, offset, "scalar_enum_variants")?;
             let mut variants = Vec::with_capacity(variant_count);
             for _ in 0..variant_count {
                 variants.push(read_string(data, offset, "scalar_enum_variant")?);
@@ -458,7 +459,7 @@ fn decode_column_type(
             Ok(ColumnType::ScalarEnum { name, variants })
         }
         TYPE_ENUM_PAYLOAD => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "enum_payload_cases")?;
             let mut cases = Vec::with_capacity(count);
             for _ in 0..count {
                 let name = read_string(data, offset, "enum_case")?;
@@ -473,7 +474,7 @@ fn decode_column_type(
         }
         TYPE_CATALOGUE_ENUM_PAYLOAD => {
             let name = read_string(data, offset, "catalogue_enum_payload_name")?;
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "catalogue_enum_payload_cases")?;
             let mut cases = Vec::with_capacity(count);
             for _ in 0..count {
                 let name = read_string(data, offset, "catalogue_enum_payload_case")?;
@@ -688,14 +689,14 @@ fn decode_current_lens_transform(
 ) -> Result<LensTransform, CatalogueEncodingError> {
     let mut offset = 1;
 
-    let op_count = read_u32(data, &mut offset)?;
-    let mut ops = Vec::with_capacity(op_count as usize);
+    let op_count = read_count(data, &mut offset, "lens_ops")?;
+    let mut ops = Vec::with_capacity(op_count);
     for _ in 0..op_count {
         ops.push(decode_lens_op(data, &mut offset, lens_version)?);
     }
 
-    let draft_count = read_u32(data, &mut offset)?;
-    let mut draft_ops = Vec::with_capacity(draft_count as usize);
+    let draft_count = read_count(data, &mut offset, "lens_draft_ops")?;
+    let mut draft_ops = Vec::with_capacity(draft_count);
     for _ in 0..draft_count {
         draft_ops.push(read_u32(data, &mut offset)? as usize);
     }
@@ -1528,7 +1529,7 @@ pub fn decode_permissions(
     }
 
     let mut offset = 1;
-    let table_count = read_u32(data, &mut offset)?;
+    let table_count = read_count(data, &mut offset, "permissions_tables")?;
     let mut permissions = HashMap::new();
 
     for _ in 0..table_count {
@@ -1913,7 +1914,7 @@ fn decode_policy_expr(
             Ok(PolicyExpr::Cmp { column, op, value })
         }
         POLICY_EXPR_SESSION_CMP => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_session_cmp_path")?;
             let mut path = Vec::with_capacity(count);
             for _ in 0..count {
                 path.push(read_string(data, offset, "policy_session_cmp_path")?);
@@ -1927,7 +1928,7 @@ fn decode_policy_expr(
             Ok(PolicyExpr::IsNull { column })
         }
         POLICY_EXPR_SESSION_IS_NULL => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_session_is_null_path")?;
             let mut path = Vec::with_capacity(count);
             for _ in 0..count {
                 path.push(read_string(data, offset, "policy_session_is_null_path")?);
@@ -1939,7 +1940,7 @@ fn decode_policy_expr(
             Ok(PolicyExpr::IsNotNull { column })
         }
         POLICY_EXPR_SESSION_IS_NOT_NULL => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_session_is_not_null_path")?;
             let mut path = Vec::with_capacity(count);
             for _ in 0..count {
                 path.push(read_string(
@@ -1956,7 +1957,7 @@ fn decode_policy_expr(
             Ok(PolicyExpr::Contains { column, value })
         }
         POLICY_EXPR_SESSION_CONTAINS => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_session_contains_path")?;
             let mut path = Vec::with_capacity(count);
             for _ in 0..count {
                 path.push(read_string(data, offset, "policy_session_contains_path")?);
@@ -1966,7 +1967,7 @@ fn decode_policy_expr(
         }
         POLICY_EXPR_IN => {
             let column = read_string(data, offset, "policy_in_column")?;
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_in_session_path")?;
             let mut session_path = Vec::with_capacity(count);
             for _ in 0..count {
                 session_path.push(read_string(data, offset, "policy_in_session_path")?);
@@ -1978,7 +1979,7 @@ fn decode_policy_expr(
         }
         POLICY_EXPR_IN_LIST => {
             let column = read_string(data, offset, "policy_in_list_column")?;
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_in_list_values")?;
             let mut values = Vec::with_capacity(count);
             for _ in 0..count {
                 values.push(decode_policy_value(data, offset)?);
@@ -1986,12 +1987,12 @@ fn decode_policy_expr(
             Ok(PolicyExpr::InList { column, values })
         }
         POLICY_EXPR_SESSION_IN_LIST => {
-            let path_count = read_u32(data, offset)? as usize;
+            let path_count = read_count(data, offset, "policy_session_in_list_path")?;
             let mut path = Vec::with_capacity(path_count);
             for _ in 0..path_count {
                 path.push(read_string(data, offset, "policy_session_in_list_path")?);
             }
-            let value_count = read_u32(data, offset)? as usize;
+            let value_count = read_count(data, offset, "policy_session_in_list_values")?;
             let mut values = Vec::with_capacity(value_count);
             for _ in 0..value_count {
                 values.push(decode_value(data, offset)?);
@@ -2047,7 +2048,7 @@ fn decode_policy_expr(
             })
         }
         POLICY_EXPR_AND => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_and")?;
             let mut exprs = Vec::with_capacity(count);
             for _ in 0..count {
                 exprs.push(decode_policy_expr(data, offset)?);
@@ -2055,7 +2056,7 @@ fn decode_policy_expr(
             Ok(PolicyExpr::And(exprs))
         }
         POLICY_EXPR_OR => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_or")?;
             let mut exprs = Vec::with_capacity(count);
             for _ in 0..count {
                 exprs.push(decode_policy_expr(data, offset)?);
@@ -2099,7 +2100,7 @@ fn decode_policy_value(
     match tag {
         POLICY_VALUE_LITERAL => Ok(PolicyValue::Literal(decode_value(data, offset)?)),
         POLICY_VALUE_SESSION_REF => {
-            let count = read_u32(data, offset)? as usize;
+            let count = read_count(data, offset, "policy_session_ref_path")?;
             let mut path = Vec::with_capacity(count);
             for _ in 0..count {
                 path.push(read_string(data, offset, "policy_session_ref_path")?);
@@ -2306,16 +2307,16 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
             Ok(Value::Bytea(bytes.to_vec()))
         }
         VALUE_ARRAY => {
-            let count = read_u32(data, offset)?;
-            let mut elements = Vec::with_capacity(count as usize);
+            let count = read_count(data, offset, "value_array")?;
+            let mut elements = Vec::with_capacity(count);
             for _ in 0..count {
                 elements.push(decode_value(data, offset)?);
             }
             Ok(Value::Array(elements))
         }
         VALUE_ROW => {
-            let count = read_u32(data, offset)?;
-            let mut values = Vec::with_capacity(count as usize);
+            let count = read_count(data, offset, "value_row")?;
+            let mut values = Vec::with_capacity(count);
             for _ in 0..count {
                 values.push(decode_value(data, offset)?);
             }
@@ -2323,8 +2324,8 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
         }
         VALUE_ENUM => {
             let case = read_string(data, offset, "enum_value_case")?;
-            let count = read_u32(data, offset)?;
-            let mut values = Vec::with_capacity(count as usize);
+            let count = read_count(data, offset, "value_enum")?;
+            let mut values = Vec::with_capacity(count);
             for _ in 0..count {
                 values.push(decode_value(data, offset)?);
             }
@@ -2439,7 +2440,17 @@ fn read_count(
     offset: &mut usize,
     context: &'static str,
 ) -> Result<usize, CatalogueEncodingError> {
-    let count = read_u32(data, offset)? as usize;
+    let count = read_u32(data, offset)?;
+    bound_count(data, offset, count, context)
+}
+
+fn bound_count(
+    data: &[u8],
+    offset: &usize,
+    count: u32,
+    context: &'static str,
+) -> Result<usize, CatalogueEncodingError> {
+    let count = count as usize;
     // Every nested record/list item has at least one tag byte.  Reject absurd
     // declared cardinalities before Vec::with_capacity can turn corruption into
     // allocation pressure during restart.
@@ -2745,6 +2756,102 @@ mod tests {
             .expect("ExistsRel nested version");
         unknown_nested_version[nested_version + 1] = NESTED_CODEC_VERSION + 1;
         assert!(decode_permissions(&unknown_nested_version).is_err());
+    }
+
+    // These are internal tests because the public failure boundary is the
+    // catalogue scan; here we prove every binary collection decoder rejects a
+    // hostile count before it can reserve memory during that scan.
+    #[test]
+    fn catalogue_payload_counts_are_bounded_before_collection_allocation() {
+        let huge = u32::MAX.to_le_bytes();
+        let with_huge = |tag: u8| [vec![tag], huge.to_vec()].concat();
+        let with_empty_name_and_huge = |tag: u8| [vec![tag, 0, 0, 0, 0], huge.to_vec()].concat();
+
+        let mut offset = 0;
+        assert_count_bound(
+            decode_policy_expr(&with_huge(POLICY_EXPR_SESSION_CMP), &mut offset),
+            "policy_session_cmp_path",
+        );
+        for (tag, context) in [
+            (POLICY_EXPR_SESSION_IS_NULL, "policy_session_is_null_path"),
+            (
+                POLICY_EXPR_SESSION_IS_NOT_NULL,
+                "policy_session_is_not_null_path",
+            ),
+            (POLICY_EXPR_SESSION_CONTAINS, "policy_session_contains_path"),
+            (POLICY_EXPR_AND, "policy_and"),
+            (POLICY_EXPR_OR, "policy_or"),
+        ] {
+            let mut offset = 0;
+            assert_count_bound(decode_policy_expr(&with_huge(tag), &mut offset), context);
+        }
+        let session_in_list_value_count = [
+            vec![POLICY_EXPR_SESSION_IN_LIST],
+            0_u32.to_le_bytes().to_vec(),
+            huge.to_vec(),
+        ]
+        .concat();
+        let mut offset = 0;
+        assert_count_bound(
+            decode_policy_expr(&session_in_list_value_count, &mut offset),
+            "policy_session_in_list_values",
+        );
+        for (tag, context) in [
+            (POLICY_EXPR_IN, "policy_in_session_path"),
+            (POLICY_EXPR_IN_LIST, "policy_in_list_values"),
+        ] {
+            let mut offset = 0;
+            assert_count_bound(
+                decode_policy_expr(&with_empty_name_and_huge(tag), &mut offset),
+                context,
+            );
+        }
+
+        assert_count_bound(
+            decode_permissions(&[PERMISSIONS_VERSION, huge[0], huge[1], huge[2], huge[3]]),
+            "permissions_tables",
+        );
+        assert_count_bound(
+            decode_schema(&[SCHEMA_VERSION, huge[0], huge[1], huge[2], huge[3]]),
+            "schema_tables",
+        );
+        assert_count_bound(
+            decode_lens_transform(&[LENS_VERSION, huge[0], huge[1], huge[2], huge[3]]),
+            "lens_ops",
+        );
+
+        let mut offset = 0;
+        assert_count_bound(
+            decode_column_type(&with_huge(TYPE_ENUM), &mut offset, SCHEMA_VERSION),
+            "enum_variants",
+        );
+        let mut offset = 0;
+        assert_count_bound(
+            decode_value(&with_huge(VALUE_ARRAY), &mut offset),
+            "value_array",
+        );
+        let mut offset = 0;
+        assert_count_bound(
+            decode_policy_value(&with_huge(POLICY_VALUE_SESSION_REF), &mut offset),
+            "policy_session_ref_path",
+        );
+
+        let mut offset = 0;
+        assert!(matches!(
+            decode_policy_expr(&[POLICY_EXPR_SESSION_CMP], &mut offset),
+            Err(CatalogueEncodingError::TruncatedData { .. })
+        ));
+        assert!(matches!(
+            decode_permissions(&[PERMISSIONS_VERSION]),
+            Err(CatalogueEncodingError::TruncatedData { .. })
+        ));
+
+        // A one-item count with no item bytes is the planted-sensitivity case:
+        // it must fail in `read_count`, not after a collection is allocated.
+        assert_count_bound(
+            decode_permissions(&[PERMISSIONS_VERSION, 1, 0, 0, 0]),
+            "permissions_tables",
+        );
     }
 
     #[test]
@@ -3340,5 +3447,16 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn assert_count_bound<T>(result: Result<T, CatalogueEncodingError>, context: &'static str) {
+        match result {
+            Err(CatalogueEncodingError::DecodeError { message }) => assert!(
+                message.contains(context) && message.contains("count exceeds"),
+                "expected bounded count error for {context}, got {message}"
+            ),
+            Err(error) => panic!("expected bounded count error for {context}, got {error}"),
+            Ok(_) => panic!("huge untrusted count unexpectedly decoded for {context}"),
+        }
     }
 }
