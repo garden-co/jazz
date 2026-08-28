@@ -204,9 +204,46 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
             ])),
         )
         .unwrap();
+    let subscription = receiver
+        .subscribe_history("todos")
+        .expect("subscribe before authority bootstrap");
+    assert_eq!(
+        subscription
+            .recv()
+            .expect("initial history snapshot")
+            .deltas
+            .len(),
+        1,
+        "the live subscription starts on the locally authored version"
+    );
+    let runtime_before_snapshot = receiver.groove_runtime_token();
     receiver
         .apply_trusted_catalogue_snapshot_settled(authority.catalogue_snapshot().unwrap())
         .unwrap();
+
+    assert_eq!(
+        receiver.groove_runtime_token(),
+        runtime_before_snapshot,
+        "learning historical authority lineage and permanent identities must not rebuild the active runtime"
+    );
+    receiver
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x6a), 11).cells(BTreeMap::from([
+                ("title".to_owned(), v("after-snapshot")),
+                ("body".to_owned(), v("still-live")),
+            ])),
+        )
+        .unwrap();
+    assert_eq!(
+        subscription
+            .recv()
+            .expect("live subscription after authority bootstrap")
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .count(),
+        1,
+        "the pre-bootstrap subscription remains attached to the live runtime"
+    );
 
     assert_eq!(
         receiver.catalogue.current_schema_version_alias,
@@ -220,6 +257,51 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].schema_version_alias(), local_alias);
     receiver.physical_table_id_for_version(&stored[0]).unwrap();
+
+    // The converse is deliberately not a no-op: policy is part of the active
+    // read schema even though it does not change that schema version's hash.
+    // A trusted same-version semantic change must retire live runtime handles.
+    let mut active_policy_change = authority.catalogue_snapshot().unwrap();
+    active_policy_change
+        .schemas
+        .iter_mut()
+        .find(|schema| schema.id == evolved.id)
+        .expect("authority snapshot contains active schema")
+        .schema
+        .runtime_mut_for_testing()
+        .tables[0]
+        .read_policy = Some(Query::from("todos").filter(eq(col("title"), lit("after-snapshot"))));
+    let runtime_before_active_change = receiver.groove_runtime_token();
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(active_policy_change)
+        .expect("install active-schema semantic change");
+    assert_ne!(
+        receiver.groove_runtime_token(),
+        runtime_before_active_change,
+        "an active read-schema semantic change must rebuild the Groove runtime"
+    );
+
+    // This is a planted runtime-layout change: the authority may never choose
+    // this node-local alias itself, but any path which does change it must
+    // force the same rebuild rather than retaining graphs compiled against the
+    // old record descriptor.
+    let mut changed_active_layout = receiver.catalogue.clone();
+    changed_active_layout
+        .physical_mappings
+        .get_mut(&evolved.id)
+        .expect("active mapping")
+        .tables
+        .get_mut("todos")
+        .expect("active table mapping")
+        .columns
+        .insert("title".to_owned(), PhysicalColumnId(0xfeed));
+    assert!(
+        !super::super::catalogue_ingest::active_runtime_layouts_equal(
+            &receiver.catalogue,
+            &changed_active_layout,
+        ),
+        "a changed active physical column layout is rebuild-relevant"
+    );
 }
 
 #[test]
@@ -542,7 +624,7 @@ fn mergeable_commit_rejects_unadmitted_authored_schema() {
 }
 
 #[test]
-fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefixes() {
+fn trusted_catalogue_snapshot_imports_historical_lineage_without_rebuilding_active_runtime() {
     // A trusted snapshot is a complete authoritative prefix, not a delta. Once
     // its activation commits, reopening must retain enough canonical lineage
     // identity to recognize that same prefix on the next upstream connection.
@@ -555,10 +637,10 @@ fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefi
         .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
     assert_eq!(receiver.active_catalogue_seq(), 1);
-    assert_ne!(
+    assert_eq!(
         receiver.groove_runtime_token(),
         runtime_before_transition,
-        "a v1-to-v2 catalogue transition reconstructs local IVM projections"
+        "a new historical lineage does not alter the active local runtime layout"
     );
 
     let evolved = catalogue_evolved_schema();

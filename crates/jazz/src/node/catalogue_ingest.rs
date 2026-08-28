@@ -7,22 +7,35 @@ struct PlannedCatalogueSnapshot {
     activated_lineages: Vec<StagedSchemaLineage>,
 }
 
-/// Authority manifests supply globally stable identities, while the integer
-/// entries in `tables` remain this node's private physical aliases.  Replacing
-/// a provisional genesis manifest with the authority's first manifest must
-/// not, by itself, tear down a live Groove runtime: its table layouts have not
-/// changed, and a subscription opened before bootstrap remains attached to
-/// that runtime.  Schema/alias layout changes still require the usual rebuild.
-fn physical_mapping_alias_layouts_equal(
-    left: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-    right: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+/// Returns whether a trusted catalogue replacement changes the *live* Groove
+/// runtime's effective input.  The catalogue is deliberately much larger than
+/// that input: it also retains historical authority schemas, lenses, and
+/// permanent identity manifests for validation and history decoding.  Learning
+/// any of those facts must not tear down subscriptions that are compiled only
+/// against this node's active local/read schema and its local physical layout.
+///
+/// The active schema alias and mapping remain part of the runtime contract:
+/// Groove records use the alias as their variant discriminator, while table,
+/// column, and enum registries in `tables` determine their physical layout.
+/// `identities` are global catalogue evidence, not a Groove layout input.
+pub(super) fn active_runtime_layouts_equal(
+    left: &SchemaCatalogue,
+    right: &SchemaCatalogue,
 ) -> bool {
-    left.len() == right.len()
-        && left.iter().all(|(schema, left)| {
-            right
-                .get(schema)
-                .is_some_and(|right| left.tables == right.tables)
-        })
+    if left.current_schema_version_id != right.current_schema_version_id
+        || left.current_schema_version_alias != right.current_schema_version_alias
+        || left.schema != right.schema
+    {
+        return false;
+    }
+
+    let active = left.current_schema_version_id;
+    left.schema_version_aliases.get(&active) == right.schema_version_aliases.get(&active)
+        && left
+            .physical_mappings
+            .get(&active)
+            .zip(right.physical_mappings.get(&active))
+            .is_some_and(|(left, right)| left.tables == right.tables)
 }
 
 fn next_schema_version_alias_in_catalogue(
@@ -70,14 +83,8 @@ where
                 ))
         };
         let planned_genesis = catalogue_genesis(&plan.catalogue)?;
-        let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
-            || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
-            || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
-            || !physical_mapping_alias_layouts_equal(
-                &self.catalogue.physical_mappings,
-                &plan.catalogue.physical_mappings,
-            )
-            || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
+        let runtime_semantics_changed =
+            !active_runtime_layouts_equal(&self.catalogue, &plan.catalogue);
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         let previous_genesis = catalogue_genesis(&previous_catalogue)?;
         // Snapshot replay can install widened mappings after a persistent edge
