@@ -53,6 +53,7 @@ type PostcardReaderLike = {
   bytes(): Uint8Array;
   bool(): boolean;
   readVec<T>(readItem: (reader: PostcardReaderLike) => T): T[];
+  done(): boolean;
 };
 
 type PostcardWriterLike = {
@@ -104,6 +105,7 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
   ) {
     throw new Error("subscription occurrence sidecar length mismatch");
   }
+  assertReaderDone(reader, "subscription delta");
   return delta;
 }
 
@@ -173,7 +175,12 @@ export function readNativeRelationSubscriptionSnapshot(
 ): NativeRelationSubscriptionSnapshot {
   const rootCount = reader.u64();
   const rows = reader.readVec(readNativeRowBatch);
+  assertReaderDone(reader, "relation snapshot");
   return { rootCount, rows };
+}
+
+function assertReaderDone(reader: PostcardReaderLike, payload: string): void {
+  if (!reader.done()) throw new Error(`${payload} has trailing postcard bytes`);
 }
 
 export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedRow {

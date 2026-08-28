@@ -57,6 +57,35 @@ TypeScript subscription result
   schemas, maintained facts, routing fields, and physical carrier choices.
   Their names and layouts are not public compatibility promises.
 
+### Frozen binding byte envelopes
+
+Where a NAPI or WASM host emits a binary subscription payload, it uses the
+shared postcard layout produced by `binding_codec.rs`; TypeScript uses the
+matching production reader. These are exactly one postcard value per binding
+payload: decoders MUST reject trailing bytes rather than treating the input as
+a prefix of a larger carrier (`INV-WIRE-1`). A transport that needs several
+payloads supplies separate byte slices; it does not concatenate them.
+Postcard strings use strict UTF-8 decoding; malformed text is malformed input,
+not a replacement-character-compatible spelling.
+
+The v1 relation snapshot field order is `root_count, rows`; each row batch is
+`table, descriptor, rows`; and each row is `row_id, deleted, raw`. The v1
+subscription delta field order is `added, updated, removed,
+added_occurrence_keys, updated_occurrence_keys, removed_occurrence_keys,
+added_indices, updated_previous_indices, updated_indices, removed_indices`.
+Every occurrence-key and index sidecar is aligned with its corresponding row
+sequence. `removed` entries are `table, row_id`. These positions, postcard
+enum discriminants in nested descriptors, and raw Groove record bytes are
+frozen once emitted: future ABI evolution requires a new explicitly versioned
+envelope, never a reordered field, permissive fallback, or in-place migration.
+
+`binding_codec_golden.json` is the frozen cross-language corpus for this v1
+binding layout. Rust creates the hard-coded semantic cases and exact bytes;
+the TypeScript reader independently decodes them. NAPI and WASM use the same
+Rust producers, so a change needs this corpus, both binding paths, and the
+SPEC decision reviewed together. Terminal operations remain JSON-native
+metadata rather than an alternative row byte layout.
+
 ## Non-negotiable representation rules
 
 1. **Rows are the unit of authorization and sync.** Read policy admits or

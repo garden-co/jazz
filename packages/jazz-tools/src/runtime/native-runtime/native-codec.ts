@@ -13,6 +13,8 @@ import {
   writeValueType,
 } from "./native-row-codec.js";
 
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
 export {
   createRecord,
   decodeRecordBool,
@@ -752,7 +754,7 @@ export class PostcardReader {
   }
 
   string(): string {
-    return new TextDecoder().decode(this.bytes());
+    return fatalUtf8Decoder.decode(this.bytes());
   }
 
   bool(): boolean {
