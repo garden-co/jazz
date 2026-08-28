@@ -99,8 +99,8 @@ use jazz::wire::{
 };
 use jazz_server::AuthConfig;
 use jazz_server::{
-    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
-    TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
+    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend, TEST_JWT_AUDIENCE,
+    TEST_JWT_ISSUER, TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz_storage_rocksdb::{
     Durability as CoreRocksDbDurability, RocksDbStorage as CoreRocksDbStorage,
@@ -4565,6 +4565,16 @@ impl TestJwtIssuer {
         self.jwks_url.clone()
     }
 
+    #[napi(getter)]
+    pub fn issuer(&self) -> String {
+        TEST_JWT_ISSUER.to_owned()
+    }
+
+    #[napi(getter)]
+    pub fn audience(&self) -> String {
+        TEST_JWT_AUDIENCE.to_owned()
+    }
+
     #[napi(js_name = "jwtForUser")]
     pub fn jwt_for_user(
         &self,
@@ -4592,7 +4602,7 @@ impl TestJwtIssuer {
                 // Keep the server test helper's ordinary external-session
                 // default. `None` is reserved for tests that explicitly
                 // exercise an issuer-less bearer, not the NAPI omission case.
-                issuer: options.issuer.or_else(|| Some("urn:jazz:test".to_owned())),
+                issuer: options.issuer.or_else(|| Some(TEST_JWT_ISSUER.to_owned())),
             },
         ))
     }

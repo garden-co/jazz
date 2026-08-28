@@ -22,8 +22,10 @@ use tokio::task::JoinHandle;
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
-const JWT_ISSUER: &str = "urn:jazz:test";
-const JWT_AUDIENCE: &str = "urn:jazz:test-audience";
+/// The issuer configured by the embedded external-JWT test server.
+pub const TEST_JWT_ISSUER: &str = "urn:jazz:test";
+/// The audience configured by the embedded external-JWT test server.
+pub const TEST_JWT_AUDIENCE: &str = "urn:jazz:test-audience";
 
 /// Builder for configuring and starting a [`JazzServer`].
 #[derive(Default)]
@@ -160,7 +162,7 @@ impl Default for TestJwtOptions {
             expires_in: Duration::from_secs(3600),
             // Test helpers mint ordinary external sessions unless a test
             // explicitly exercises a missing or reserved issuer.
-            issuer: Some(JWT_ISSUER.to_owned()),
+            issuer: Some(TEST_JWT_ISSUER.to_owned()),
         }
     }
 }
@@ -212,7 +214,7 @@ impl TestJwtIssuer {
         let claims = JwtClaims {
             sub: sub.to_string(),
             iss: options.issuer,
-            aud: JWT_AUDIENCE.to_owned(),
+            aud: TEST_JWT_AUDIENCE.to_owned(),
             claims,
             exp: now
                 .duration_since(UNIX_EPOCH)
@@ -309,8 +311,8 @@ impl JazzServer {
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_url),
-            jwt_issuer: Some(JWT_ISSUER.to_owned()),
-            jwt_audience: Some(JWT_AUDIENCE.to_owned()),
+            jwt_issuer: Some(TEST_JWT_ISSUER.to_owned()),
+            jwt_audience: Some(TEST_JWT_AUDIENCE.to_owned()),
             allow_local_first_auth: true,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),

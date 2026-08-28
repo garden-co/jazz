@@ -38,6 +38,8 @@ async function startJazzServer(
   const server = await startLocalJazzServer({
     appId: appId ?? "00000000-0000-0000-0000-000000000001",
     jwksUrl: jwtIssuer.jwksUrl,
+    jwtIssuer: jwtIssuer.issuer,
+    jwtAudience: jwtIssuer.audience,
     inMemory: true,
     adminSecret,
     backendSecret,

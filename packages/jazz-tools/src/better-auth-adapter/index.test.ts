@@ -154,6 +154,8 @@ describe("jazzAdapter", () => {
     const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: jwtIssuer.issuer,
+      jwtAudience: jwtIssuer.audience,
     });
     await deployProject({
       serverUrl: server.url,
@@ -169,6 +171,8 @@ describe("jazzAdapter", () => {
       serverUrl: server.url,
       backendSecret: server.backendSecret,
       jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: jwtIssuer.issuer,
+      jwtAudience: jwtIssuer.audience,
     });
 
     try {

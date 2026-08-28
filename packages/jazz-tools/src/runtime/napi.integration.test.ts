@@ -937,6 +937,8 @@ describe("NAPI integration", () => {
       adminSecret,
       schema: encodeNativeSchema(policyGraphSchema),
       jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: jwtIssuer.issuer,
+      jwtAudience: jwtIssuer.audience,
     });
     let context: {
       asBackend(): Db;
@@ -957,6 +959,8 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
         env: "test",
         tier: "global",
       });
@@ -1169,6 +1173,8 @@ describe("NAPI integration", () => {
         adminSecret,
         dataDir,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
       });
       await deployProject({
         serverUrl: server.url,
@@ -1185,6 +1191,8 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
         env: "test",
         tier: "global",
       });
@@ -1270,6 +1278,8 @@ describe("NAPI integration", () => {
         adminSecret,
         dataDir,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
       });
       context = createJazzContext({
         appId,
@@ -1280,6 +1290,8 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
         env: "test",
         tier: "global",
       });

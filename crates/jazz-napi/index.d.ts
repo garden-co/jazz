@@ -180,6 +180,8 @@ export declare class Subscription {
 export declare class TestJwtIssuer {
   static start(): Promise<TestJwtIssuer>
   get jwksUrl(): string
+  get issuer(): string
+  get audience(): string
   jwtForUser(userId: string, claims?: Record<string, unknown> | undefined, options?: { expiresInSeconds?: number; issuer?: string } | undefined): string
   stop(): Promise<void>
 }
