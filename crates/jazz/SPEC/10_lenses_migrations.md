@@ -135,6 +135,36 @@ Swapping the `app_id` and `type` metadata entries or copying that valid `JCAT`
 value under a different key fails before a valid earlier row can become
 resident.
 
+#### Nested server catalogue payloads
+
+The structural schema, migration-lens, and permissions payload families are
+restart-authoritative subrecords of a `JCAT` entry. Epoch 1 accepts only their
+current outer versions (`schema v12`, `lens v5`, and `permissions v2`) and has
+no decoder for the former JSON-bearing versions. Their `ColumnType::Json`
+schema declaration and `PolicyExpr::ExistsRel` relation tree use one nested
+`v1` tagged record/enum algebra: UTF-8 strings and fixed-width integer
+primitives use the same explicit primitive rules as the enclosing catalogue
+codec; every relation variant, predicate, value reference, row-id reference,
+join kind, projection, and recursion bound has a fixed numeric tag. A JSON
+object is a counted record of strictly increasing UTF-8 byte-ordered keys;
+arrays retain their declared order. Thus object source order and serde map
+layout are not identity, while every schema/policy field needed to reconstruct
+the semantic declaration is represented in the bytes.
+
+A nested codec marker other than `v1`, an unknown enum tag, a non-`0|1`
+presence flag, duplicate or unordered JSON object key, malformed number,
+overstated count, outer noncanonical ordering, truncation, or any suffix is
+corruption. Decoders reconstruct and re-encode the full payload before
+returning it; unequal bytes are rejected. Schema recovery additionally
+requires the decoded schema hash, `schema_hash` metadata, and JCAT object ID to
+agree, while a lens requires its source/target hash metadata and derived object
+ID to agree. These checks occur during the complete catalogue scan before a
+resident index is published. For example, the exact v12 JSON-schema fixture
+starts `0c 01 00 00 00 04 00 00 00 64 6f 63 73 ... 0c 01 01 07`; changing the
+last `01` (nested codec version) to `02`, or appending one byte to a valid
+permissions relation payload, rejects reopen rather than selecting a fallback
+or recovering a partial catalogue.
+
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue
 mutations travel as admin-gated

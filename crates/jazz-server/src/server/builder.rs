@@ -1726,6 +1726,80 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn persistent_builder_rejects_nested_catalogue_codec_corruption_before_recovery() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+        let app_id = AppId::from_name("corrupt-nested-catalogue-codec");
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
+            .table(
+                jazz::tools::public_schema::TableSchema::builder("documents").column(
+                    "payload",
+                    jazz::tools::public_schema::ColumnType::Json {
+                        schema: Some(serde_json::json!({"type": "object"})),
+                    },
+                ),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let object_id = schema_hash.to_object_id();
+        let mut content = crate::server::catalogue_payload_codec::encode_schema(&schema);
+        let nested_version = content
+            .windows(3)
+            .position(|window| window == [12, 1, 1])
+            .expect("nested JSON codec marker");
+        content[nested_version + 2] = 2;
+        write_raw_catalogue_entry(
+            &catalogue_path,
+            &CatalogueEntry {
+                object_id,
+                metadata: std::collections::HashMap::from([
+                    (
+                        MetadataKey::Type.to_string(),
+                        ObjectType::CatalogueSchema.to_string(),
+                    ),
+                    (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
+                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
+                    (MetadataKey::PublishedAt.to_string(), "1".to_owned()),
+                ]),
+                content,
+            },
+        );
+
+        let error = ServerBuilder::new(app_id)
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .err()
+            .expect("nested corruption must reject before catalogue recovery becomes resident");
+        assert!(
+            error.contains("decode schema payload")
+                && error.contains(&object_id.to_string())
+                && error.contains("unsupported version"),
+            "startup error retains the nested-codec failure context: {error}"
+        );
+
+        let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
+            .expect("failed startup releases the catalogue RocksDB lock");
+        jazz::db::block_on(storage.delete(
+            "default".to_owned(),
+            crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
+        ))
+        .expect("remove corrupt nested catalogue entry");
+        drop(storage);
+        ServerBuilder::new(app_id)
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("repair permits a fresh atomic catalogue recovery");
+    }
+
     #[test]
     fn owner_drop_stops_the_connector_while_peer_close_reconnects() {
         assert!(matches!(
@@ -1857,7 +1931,7 @@ mod tests {
             let data_dir = tempfile::TempDir::new().expect("temp data dir");
             let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
             let app_id = AppId::from_name("corrupt-schema-publish-time");
-            let object_id = jazz::tools::ObjectId::new();
+            let object_id = schema_hash.to_object_id();
             let mut metadata = std::collections::HashMap::from([
                 (
                     MetadataKey::Type.to_string(),
