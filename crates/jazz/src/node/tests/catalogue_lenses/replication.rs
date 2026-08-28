@@ -394,6 +394,22 @@ fn zero_column_version_claiming_schema(
     .unwrap()
 }
 
+/// Deliberately bypasses `VersionRecord::encode` to model an untrusted
+/// ViewUpdate whose deferred record cannot satisfy even the fixed row receipt.
+/// This stays an internal test because public APIs cannot construct malformed
+/// protocol bytes; the receiver boundary must still turn them into a typed
+/// error rather than reaching infallible accessors.
+fn empty_wire_version_claiming_schema(
+    schema: &JazzSchema,
+    version: &crate::protocol::VersionRecord,
+) -> crate::protocol::VersionRecord {
+    crate::protocol::VersionRecord::new(
+        version.table().to_owned(),
+        schema.version_id(),
+        OwnedRecord::new(Vec::new(), schema.tables[0].wire_record_descriptor()),
+    )
+}
+
 /// A non-reset ViewUpdate stages its history payload in a shared receiver
 /// batch. A malformed row descriptor must reject the frame before that batch
 /// writes either its transaction or version.
@@ -507,6 +523,68 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
         Err(Error::MalformedViewUpdate(
             "row version does not carry the complete descriptor of its authored schema"
         ))
+    ));
+    assert!(reader.query_all_versions().unwrap().is_empty());
+}
+
+/// Direct internal view ingress bypasses `SyncMessage` decoding. It must still
+/// reject a deferred record that would panic in `VersionRecord::row_uuid()`;
+/// malformed protocol input is a typed error and cannot leave history behind.
+#[test]
+fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
+    let base = schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x77), base.clone());
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x77), 1_011).cells(title_cells("bad receipt")),
+    );
+    let update = PeerState::new()
+        .current_rows_update(&mut core, "todos")
+        .unwrap();
+    let mut bundles = version_bundles_for_update(&update);
+    let version = bundles[0].versions[0].clone();
+    bundles[0].versions = vec![empty_wire_version_claiming_schema(&base, &version)];
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through,
+        reset_result_set,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    }) = update
+    else {
+        panic!("expected view update");
+    };
+
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x78), base);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reader
+            .apply_view_update(ViewUpdateParts {
+                subscription,
+                settled_through,
+                defer_settlement: false,
+                reset_result_set,
+                version_carriers: Vec::new(),
+                version_bundles: bundles,
+                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                authorization_progress: None,
+                opening_pending: false,
+                result_member_adds,
+                result_member_removes,
+                terminal_operations,
+                program_fact_adds,
+                program_fact_removes,
+            })
+            .resolve()
+    }));
+    assert!(result.is_ok(), "malformed direct ingress must not panic");
+    assert!(matches!(
+        result.unwrap(),
+        Err(Error::MalformedViewUpdate("malformed version receipt"))
     ));
     assert!(reader.query_all_versions().unwrap().is_empty());
 }
@@ -629,7 +707,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     let mut bundles = version_bundles_for_update(&update);
     assert_eq!(bundles.len(), 2, "one complete bundle per accepted write");
     let malformed = bundles[1].versions[0].clone();
-    bundles[1].versions = vec![zero_column_version_claiming_schema(&base, &malformed)];
+    bundles[1].versions = vec![empty_wire_version_claiming_schema(&base, &malformed)];
     let valid_tx_id = bundles[0].tx.tx_id;
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
@@ -675,9 +753,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
             program_fact_removes,
         }])
         .resolve(),
-        Err(Error::MalformedViewUpdate(
-            "row version does not carry the complete descriptor of its authored schema"
-        ))
+        Err(Error::MalformedViewUpdate("malformed version receipt"))
     ));
     assert_eq!(
         (

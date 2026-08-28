@@ -852,6 +852,15 @@ where
         &self,
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
+        // `VersionRecord` deliberately keeps its physical record lazily
+        // decoded. Every view-shaped ingress path (ordinary view updates,
+        // authorization-scope views after envelope removal, and repair
+        // payloads) therefore has to establish receipt validity before any
+        // code below uses an infallible VersionRecord accessor. Keeping this
+        // at the shared semantic boundary also makes direct internal callers
+        // as safe and atomic as decoded SyncMessage ingress.
+        crate::protocol::validate_version_records(versions)
+            .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
         for version in versions {
             if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
                 || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
