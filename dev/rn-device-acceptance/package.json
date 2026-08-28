@@ -9,10 +9,10 @@
     "ios": "expo run:ios",
     "prebuild": "expo prebuild --clean",
     "typecheck": "tsc --noEmit",
-    "test:protocol": "node --experimental-strip-types --test src/protocol.test.ts",
+    "test:protocol": "node --experimental-strip-types --test src/protocol.test.ts scripts/device-driver.test.mjs",
     "verify": "pnpm test:protocol && pnpm typecheck",
-    "device:android": "node scripts/run-android.mjs",
-    "device:ios": "node scripts/run-ios.mjs"
+    "device:android": "node --experimental-strip-types scripts/run-android.mjs",
+    "device:ios": "node --experimental-strip-types scripts/run-ios.mjs"
   },
   "dependencies": {
     "expo": "^54.0.0",
