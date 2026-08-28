@@ -144,6 +144,37 @@ describe("binding codec golden contract", () => {
       new PostcardReader(Uint8Array.from([...Array(9).fill(0x80), 0x00])).u64BigInt(),
     ).toThrow("postcard u64 is not minimally encoded");
   });
+
+  it("writes only exact signed i64 values and round-trips their ZigZag boundaries", () => {
+    const minI64 = -(1n << 63n);
+    const maxI64 = (1n << 63n) - 1n;
+    for (const value of [minI64, maxI64, -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]) {
+      const writer = new PostcardWriter();
+      writer.i64(value);
+      const reader = new PostcardReader(writer.finish());
+      expect(reader.i64()).toBe(BigInt(value));
+      expect(reader.done()).toBe(true);
+    }
+
+    expect(() => new PostcardWriter().i64(Number.MAX_SAFE_INTEGER + 1)).toThrow(
+      "i64 must be a safe integer when passed as a number",
+    );
+    expect(() => new PostcardWriter().i64(-(Number.MAX_SAFE_INTEGER + 1))).toThrow(
+      "i64 must be a safe integer when passed as a number",
+    );
+    expect(() => new PostcardWriter().i64(minI64 - 1n)).toThrow("i64 out of range");
+    expect(() => new PostcardWriter().i64(maxI64 + 1n)).toThrow("i64 out of range");
+
+    const u32Writer = new PostcardWriter();
+    u32Writer.u32Le(0xffff_ffff);
+    expect(u32Writer.finish()).toEqual(Uint8Array.of(0xff, 0xff, 0xff, 0xff));
+    expect(() => new PostcardWriter().u32Le(-1)).toThrow(
+      "u32Le must be an unsigned 32-bit integer",
+    );
+    expect(() => new PostcardWriter().u32Le(0x1_0000_0000)).toThrow(
+      "u32Le must be an unsigned 32-bit integer",
+    );
+  });
 });
 
 function encodeEmptyRelationSnapshot(rootCount: number | bigint): Uint8Array {
