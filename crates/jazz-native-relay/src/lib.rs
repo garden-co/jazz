@@ -7,22 +7,24 @@
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::c_void;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, ExclusiveTxOps, MergeableTxOps, PeerConnection,
-    PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream, Transport, UpdateOptions,
-    UpsertOptions, block_on,
+    PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream, TickScheduler, TickUrgency,
+    Transport, UpdateOptions, UpsertOptions, block_on,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::MemoryStorage;
@@ -41,6 +43,12 @@ use thiserror::Error;
 /// explain that an OTA update needs a new native development build when it is
 /// incompatible.
 pub const NATIVE_RELAY_ABI_VERSION: u16 = 7;
+
+const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
+const FOREGROUND_WAKE_DEFERRED: u8 = 1;
+const FOREGROUND_WAKE_AFTER: u8 = 2;
+const FOREGROUND_WAKE_CANCELLED: u8 = 3;
+pub type ForegroundWakeCallback = unsafe extern "C" fn(*mut c_void, u64, u8, u64);
 
 const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
 const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
@@ -498,6 +506,25 @@ struct OpenedRelay {
 struct OpenedForeground {
     relay: u64,
     client: u64,
+    wake: Option<ForegroundWakeRegistration>,
+}
+
+#[derive(Clone, Copy)]
+struct ForegroundWakeRegistration {
+    callback: ForegroundWakeCallback,
+    context: usize,
+}
+impl ForegroundWakeRegistration {
+    fn cancelled(self, foreground: u64) {
+        unsafe {
+            (self.callback)(
+                self.context as *mut c_void,
+                foreground,
+                FOREGROUND_WAKE_CANCELLED,
+                0,
+            )
+        }
+    }
 }
 
 impl Default for NativeRelayHost {
@@ -784,6 +811,7 @@ impl NativeRelayHost {
             OpenedForeground {
                 relay: relay_handle,
                 client: client_handle,
+                wake: None,
             },
         );
         Ok(foreground)
@@ -818,10 +846,13 @@ impl NativeRelayHost {
             .ok_or(JazzNativeRelayStatus::InvalidHandle)
     }
 
-    fn close_foreground(&mut self, foreground: u64) -> Result<bool, JazzNativeRelayStatus> {
-        let Some(foreground) = self.foregrounds.remove(&foreground) else {
+    fn close_foreground(&mut self, foreground_handle: u64) -> Result<bool, JazzNativeRelayStatus> {
+        let Some(foreground) = self.foregrounds.remove(&foreground_handle) else {
             return Ok(false);
         };
+        if let Some(wake) = foreground.wake {
+            wake.cancelled(foreground_handle);
+        }
         let Some(opened) = self.relays.remove(&foreground.relay) else {
             return Ok(false);
         };
@@ -838,6 +869,23 @@ impl NativeRelayHost {
                 .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         }
         Ok(true)
+    }
+
+    fn set_foreground_wake_callback(
+        &mut self,
+        foreground: u64,
+        callback: Option<ForegroundWakeCallback>,
+        context: usize,
+    ) -> Result<(), JazzNativeRelayStatus> {
+        let client = self.foreground_client(foreground)?.clone();
+        client
+            .set_foreground_wake_callback(foreground, callback, context)
+            .map_err(relay_status)?;
+        self.foregrounds
+            .get_mut(&foreground)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+            .wake = callback.map(|callback| ForegroundWakeRegistration { callback, context });
+        Ok(())
     }
 
     fn admit_scope(
@@ -1410,6 +1458,33 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_close_attached_foreground(
     }
 }
 
+/// Register or clear the native-to-JavaScript wake sink for one attached
+/// foreground. The callback may only schedule a later platform turn.
+///
+/// # Safety
+/// `lease` must be live. A non-null callback context must remain valid until
+/// this callback is cleared, the foreground is closed/revoked, or the lease is
+/// released.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_set_foreground_wake_callback(
+    lease: *mut JazzNativeRelayHostLease,
+    foreground: u64,
+    callback: Option<ForegroundWakeCallback>,
+    context: *mut c_void,
+) -> JazzNativeRelayStatus {
+    if lease.is_null() || foreground == 0 {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let mut host = match unsafe { (&*lease).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.set_foreground_wake_callback(foreground, callback, context as usize) {
+        Ok(()) => JazzNativeRelayStatus::Ok,
+        Err(status) => status,
+    }
+}
+
 /// Execute one complete postcard [`ForegroundDbCommandRequest`] against an
 /// attached foreground `Db` retained by a private JSI factory.
 ///
@@ -1827,6 +1902,28 @@ pub struct NativeRelayClient {
 }
 
 impl NativeRelayClient {
+    fn set_foreground_wake_callback(
+        &self,
+        foreground: u64,
+        callback: Option<ForegroundWakeCallback>,
+        context: usize,
+    ) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            let client = worker
+                .clients
+                .get(&id)
+                .ok_or(RelayError::UnknownClient(id))?;
+            client.db.set_tick_scheduler(callback.map(|callback| {
+                Rc::new(ForegroundWakeScheduler {
+                    callback,
+                    context,
+                    foreground,
+                }) as Rc<dyn TickScheduler>
+            }));
+            Ok(())
+        })
+    }
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -1984,6 +2081,31 @@ impl NativeRelayClient {
     }
 }
 
+struct ForegroundWakeScheduler {
+    callback: ForegroundWakeCallback,
+    context: usize,
+    foreground: u64,
+}
+impl ForegroundWakeScheduler {
+    fn wake(&self, kind: u8, delay_ms: u64) {
+        unsafe { (self.callback)(self.context as *mut c_void, self.foreground, kind, delay_ms) }
+    }
+}
+impl TickScheduler for ForegroundWakeScheduler {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        self.wake(
+            match urgency {
+                TickUrgency::Immediate => FOREGROUND_WAKE_IMMEDIATE,
+                TickUrgency::Deferred => FOREGROUND_WAKE_DEFERRED,
+            },
+            0,
+        )
+    }
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        self.wake(FOREGROUND_WAKE_AFTER, delay_ms)
+    }
+}
+
 /// Thread-safe handle to one executor-local relay owner.
 #[derive(Clone)]
 pub struct NativeRelay {
@@ -1993,29 +2115,78 @@ pub struct NativeRelay {
 struct RelayInner {
     jobs: Mutex<Option<mpsc::SyncSender<RelayCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
+    liveness: Arc<RelayLiveness>,
     wire: NativeRelayWire,
     sqlite_path: PathBuf,
     schema_version: jazz::ids::SchemaVersionId,
     identity: DbIdentity,
 }
 
-impl Drop for RelayInner {
+struct RelayLiveness {
+    alive: AtomicBool,
+    gate: Mutex<()>,
+}
+impl RelayLiveness {
+    fn new() -> Self {
+        Self {
+            alive: AtomicBool::new(true),
+            gate: Mutex::new(()),
+        }
+    }
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+    fn enter(&self) -> Result<std::sync::MutexGuard<'_, ()>, RelayError> {
+        let guard = self
+            .gate
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay terminal gate"))?;
+        if self.is_alive() {
+            Ok(guard)
+        } else {
+            Err(RelayError::Closed)
+        }
+    }
+    fn mark_terminal(&self) {
+        self.alive.store(false, Ordering::Release);
+    }
+}
+struct OwnerLiveness(Arc<RelayLiveness>);
+impl Drop for OwnerLiveness {
     fn drop(&mut self) {
-        let Some(sender) = self.jobs.lock().ok().and_then(|mut sender| sender.take()) else {
-            return;
-        };
-        let (done_tx, done_rx) = mpsc::channel();
-        // Teardown must not be starved behind a full foreground command
-        // queue. It is allowed to wait for an in-flight command, but never
-        // leaves an owner thread behind merely because the bounded queue was
-        // busy at the instant the last host lease disappeared.
-        let _ = sender.send(RelayCommand::Shutdown(done_tx));
-        let _ = done_rx.recv();
-        if let Ok(mut join) = self.join.lock()
-            && let Some(join) = join.take()
+        self.0.mark_terminal();
+    }
+}
+
+impl RelayInner {
+    fn shutdown(&self) -> Result<(), RelayError> {
+        self.liveness.mark_terminal();
+        let sender = self
+            .jobs
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay command queue"))?
+            .take();
+        if let Some(sender) = sender {
+            let (done_tx, done_rx) = mpsc::channel();
+            if sender.send(RelayCommand::Shutdown(done_tx)).is_ok() {
+                let _ = done_rx.recv();
+            }
+        }
+        if let Some(join) = self
+            .join
+            .lock()
+            .map_err(|_| RelayError::Poisoned("relay owner join"))?
+            .take()
         {
             let _ = join.join();
         }
+        Ok(())
+    }
+}
+
+impl Drop for RelayInner {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
 
@@ -2028,6 +2199,7 @@ impl Drop for RelayInner {
 pub struct NativeRelayWire {
     inbound: Arc<Mutex<BoundedMessageQueue>>,
     outbound: Arc<Mutex<BoundedMessageQueue>>,
+    liveness: Option<Arc<RelayLiveness>>,
 }
 
 impl Default for NativeRelayWire {
@@ -2035,6 +2207,7 @@ impl Default for NativeRelayWire {
         Self {
             inbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
+            liveness: None,
         }
     }
 }
@@ -2111,7 +2284,18 @@ impl BoundedMessageQueue {
 }
 
 impl NativeRelayWire {
+    fn for_owner(liveness: Arc<RelayLiveness>) -> Self {
+        Self {
+            inbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
+            outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
+            liveness: Some(liveness),
+        }
+    }
+    fn enter(&self) -> Result<Option<std::sync::MutexGuard<'_, ()>>, RelayError> {
+        self.liveness.as_ref().map(|l| l.enter()).transpose()
+    }
     pub fn push_inbound(&self, message: SyncMessage) -> Result<(), RelayError> {
+        let _terminal = self.enter()?;
         self.inbound
             .lock()
             .map_err(|_| RelayError::Poisoned("upstream inbound queue"))?
@@ -2119,6 +2303,7 @@ impl NativeRelayWire {
     }
 
     pub fn take_outbound(&self) -> Result<Vec<SyncMessage>, RelayError> {
+        let _terminal = self.enter()?;
         Ok(self
             .outbound
             .lock()
@@ -2144,6 +2329,7 @@ impl NativeRelayWire {
     /// future TurboModule transports these bytes as `ArrayBuffer`/`Uint8Array`,
     /// keeping it thin and shared.
     pub fn take_outbound_encoded(&self) -> Result<Vec<Vec<u8>>, RelayError> {
+        let _terminal = self.enter()?;
         let mut outbound = self
             .outbound
             .lock()
@@ -2201,6 +2387,7 @@ struct QueueTransport {
 
 impl Transport for QueueTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let _terminal = self.wire.enter().map_err(transport_queue_error)?;
         self.wire
             .outbound
             .lock()
@@ -2210,6 +2397,7 @@ impl Transport for QueueTransport {
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
+        let _terminal = self.wire.enter().ok()?;
         self.wire.inbound.lock().ok()?.pop()
     }
 }
@@ -2220,6 +2408,7 @@ struct DuplexTransport {
 
 impl Transport for DuplexTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let _terminal = self.wire.enter().map_err(transport_queue_error)?;
         self.wire
             .outbound
             .lock()
@@ -2229,15 +2418,19 @@ impl Transport for DuplexTransport {
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
+        let _terminal = self.wire.enter().ok()?;
         self.wire.inbound.lock().ok()?.pop()
     }
 }
 
-fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
-    let wire = NativeRelayWire::default();
+fn duplex(
+    liveness: Arc<RelayLiveness>,
+) -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
+    let wire = NativeRelayWire::for_owner(liveness);
     let reverse = NativeRelayWire {
         inbound: Arc::clone(&wire.outbound),
         outbound: Arc::clone(&wire.inbound),
+        liveness: wire.liveness.clone(),
     };
     (
         Box::new(DuplexTransport { wire: wire.clone() }),
@@ -2375,10 +2568,15 @@ struct RelayWorker {
     next_client_id: u64,
     pump_cursor: Option<u64>,
     schema: JazzSchema,
+    liveness: Arc<RelayLiveness>,
 }
 
 impl RelayWorker {
-    fn open(config: RelayOpenConfig, wire: NativeRelayWire) -> Result<Self, RelayError> {
+    fn open(
+        config: RelayOpenConfig,
+        wire: NativeRelayWire,
+        liveness: Arc<RelayLiveness>,
+    ) -> Result<Self, RelayError> {
         let column_families = config.schema.column_families();
         let refs = column_families
             .iter()
@@ -2400,6 +2598,7 @@ impl RelayWorker {
             next_client_id: 1,
             pump_cursor: None,
             schema: config.schema,
+            liveness,
         })
     }
 
@@ -2422,7 +2621,7 @@ impl RelayWorker {
             }))
             .map_err(RelayError::Db)?,
         );
-        let (client_transport, relay_transport, wire) = duplex();
+        let (client_transport, relay_transport, wire) = duplex(Arc::clone(&self.liveness));
         let upstream = block_on(db.connect_upstream(client_transport));
         let served =
             self.persistent
@@ -3017,11 +3216,13 @@ impl NativeRelay {
         let sqlite_path = config.sqlite_path.clone();
         let schema_version = config.schema.version_id();
         let identity = config.identity;
-        let wire = NativeRelayWire::default();
+        let liveness = Arc::new(RelayLiveness::new());
+        let wire = NativeRelayWire::for_owner(Arc::clone(&liveness));
         let (commands, receiver) =
             mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
         let (started_tx, started_rx) = mpsc::channel();
         let owner_wire = wire.clone();
+        let owner_liveness = Arc::clone(&liveness);
         #[cfg(test)]
         if let Some(counter) = &config.thread_start_counter {
             counter.fetch_add(1, Ordering::Relaxed);
@@ -3029,7 +3230,8 @@ impl NativeRelay {
         let join = thread::Builder::new()
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
-                let mut worker = match RelayWorker::open(config, owner_wire) {
+                let _liveness = OwnerLiveness(owner_liveness.clone());
+                let mut worker = match RelayWorker::open(config, owner_wire, owner_liveness) {
                     Ok(worker) => {
                         let _ = started_tx.send(Ok(()));
                         worker
@@ -3058,6 +3260,7 @@ impl NativeRelay {
             inner: Arc::new(RelayInner {
                 jobs: Mutex::new(Some(commands)),
                 join: Mutex::new(Some(join)),
+                liveness,
                 wire,
                 sqlite_path,
                 schema_version,
@@ -3080,6 +3283,10 @@ impl NativeRelay {
 
     pub fn wire(&self) -> NativeRelayWire {
         self.inner.wire.clone()
+    }
+
+    fn is_alive(&self) -> bool {
+        self.inner.liveness.is_alive()
     }
 
     pub fn attach_client(
@@ -3113,18 +3320,30 @@ impl NativeRelay {
         let job: RelayJob = Box::new(move |worker| {
             let _ = response_tx.send(operation(worker));
         });
-        self.inner
-            .jobs
-            .lock()
-            .map_err(|_| RelayError::Poisoned("relay command queue"))?
-            .as_ref()
-            .ok_or(RelayError::Closed)?
-            .try_send(RelayCommand::Run(job))
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => RelayError::OwnerQueueFull,
-                mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
-            })?;
-        response_rx.recv().map_err(|_| RelayError::Closed)?
+        let admitted = {
+            let _terminal = self.inner.liveness.enter()?;
+            self.inner
+                .jobs
+                .lock()
+                .map_err(|_| RelayError::Poisoned("relay command queue"))?
+                .as_ref()
+                .ok_or(RelayError::Closed)?
+                .try_send(RelayCommand::Run(job))
+                .map_err(|error| match error {
+                    mpsc::TrySendError::Full(_) => RelayError::OwnerQueueFull,
+                    mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
+                })
+        };
+        if let Err(error) = admitted {
+            if matches!(error, RelayError::Closed) {
+                self.inner.liveness.mark_terminal();
+            }
+            return Err(error);
+        }
+        response_rx.recv().map_err(|_| {
+            self.inner.liveness.mark_terminal();
+            RelayError::Closed
+        })?
     }
 }
 
@@ -3150,7 +3369,12 @@ impl NativeRelayRegistry {
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
             }
-            return Ok(existing.clone());
+            if existing.is_alive() {
+                return Ok(existing.clone());
+            }
+            let stale = existing.clone();
+            stale.inner.shutdown()?;
+            relays.remove(&config.scope);
         }
         let relay = NativeRelay::spawn(config.clone())?;
         relays.insert(config.scope, relay.clone());
@@ -3158,12 +3382,16 @@ impl NativeRelayRegistry {
     }
 
     pub fn close(&self, scope: &RelayScope) -> Result<bool, RelayError> {
-        Ok(self
+        let mut relays = self
             .relays
             .lock()
-            .map_err(|_| RelayError::Poisoned("relay registry"))?
-            .remove(scope)
-            .is_some())
+            .map_err(|_| RelayError::Poisoned("relay registry"))?;
+        let Some(relay) = relays.get(scope).cloned() else {
+            return Ok(false);
+        };
+        relay.inner.shutdown()?;
+        relays.remove(scope);
+        Ok(true)
     }
 }
 
@@ -5083,5 +5311,32 @@ mod tests {
             worker.join().unwrap();
         }
         unsafe { jazz_native_relay_host_free(host as *mut JazzNativeRelayHost) };
+    }
+
+    #[test]
+    fn terminal_owner_aliases_cannot_reopen_or_run_after_panic() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let relay_config = config(directory.path().join("terminal.sqlite"), Some("alice"));
+        let stale = registry.open(relay_config.clone()).unwrap();
+        assert!(matches!(
+            stale.run::<()>(|_| panic!("planted owner failure")),
+            Err(RelayError::Closed)
+        ));
+        assert!(matches!(stale.pump(), Err(RelayError::Closed)));
+        let replacement = registry.open(relay_config).unwrap();
+        assert!(!Arc::ptr_eq(&stale.inner, &replacement.inner));
+        assert!(replacement.pump().is_ok());
+    }
+
+    #[test]
+    fn closing_a_scope_terminally_retires_held_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let relay_config = config(directory.path().join("close.sqlite"), Some("alice"));
+        let stale = registry.open(relay_config.clone()).unwrap();
+        assert!(registry.close(&relay_config.scope).unwrap());
+        assert!(matches!(stale.pump(), Err(RelayError::Closed)));
+        assert!(registry.open(relay_config).unwrap().pump().is_ok());
     }
 }

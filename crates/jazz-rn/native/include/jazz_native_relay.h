@@ -36,6 +36,7 @@ typedef enum jazz_native_relay_status {
 
 typedef struct jazz_native_relay_host jazz_native_relay_host;
 typedef struct jazz_native_relay_host_lease jazz_native_relay_host_lease;
+typedef void (*jazz_native_relay_foreground_wake_callback)(void *context, uint64_t foreground, uint8_t wake_kind, uint64_t delay_ms);
 jazz_native_relay_host *jazz_native_relay_host_new(void);
 void jazz_native_relay_host_free(jazz_native_relay_host *host);
 /* Retain host state for one JSI factory/runtime. The platform can release its
@@ -108,6 +109,11 @@ jazz_native_relay_status jazz_native_relay_host_lease_close_attached_foreground(
     jazz_native_relay_host_lease *lease,
     uint64_t foreground,
     bool *out_closed);
+jazz_native_relay_status jazz_native_relay_host_lease_set_foreground_wake_callback(
+    jazz_native_relay_host_lease *lease,
+    uint64_t foreground,
+    jazz_native_relay_foreground_wake_callback callback,
+    void *context);
 
 /* Execute one complete postcard foreground NativeDb command against a live
  * attached foreground handle. This is private to native binding adapters: it
