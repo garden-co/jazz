@@ -851,6 +851,20 @@ self.database.finish_persistence(persisted)?;
     ) -> Result<(), Error> {
         let schema = &staged.publication.schema;
         let lens = &staged.publication.lens;
+        // The active receipt retains the canonical staged payload as its
+        // durable witness.  The pending envelope, however, is an obligation
+        // to activate: leaving it behind after this batch commits would make
+        // reopen retain a stale retry candidate beside an already-active
+        // lineage.  Delete it in the same batch that makes the schema, lens,
+        // mapping, and active receipt visible, so an active recovery state
+        // never also carries a stale pending obligation.
+        batch.delete(
+            "jazz_catalogue",
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
+                PrimaryKeyValue::Uuid(staged.publication.id.0),
+            ]),
+        );
         // The active marker only carries an id and sequence. Persist its
         // canonical payload in the same durable activation batch so recovery
         // can prove both the prefix identity and its exact sequence.

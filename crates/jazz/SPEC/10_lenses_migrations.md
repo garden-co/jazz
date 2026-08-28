@@ -19,7 +19,7 @@ Invariant digest:
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
 - `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
 - `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
-- `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; reopen MUST resume staged activation idempotently.
+- `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; one activation batch MUST replace its durable pending obligation with the schema, lens, physical mapping, and active receipt; reopen MUST resume staged activation idempotently.
 - `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator and resolve storage through that schema's durable physical mapping.
 - `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the current write pointer names another schema.
 - `INV-LENS-12`: Natural lens reads MUST select winners from the shared physical lineage before projecting rows into the requested schema.
@@ -244,6 +244,18 @@ Current-pointer messages and child schema bundles whose dependencies are not
 Active park durably across reopen. They retry after each activation, in
 catalogue order; a transient missing dependency is not a terminal rejection and
 never exposes the pointer early.
+
+Activation is a single durable state transition. Its batch removes the pending
+lineage envelope while recording the immutable staged payload, schema, lens,
+physical mapping, and active sequence receipt. The retained staged payload is
+the canonical witness for the active receipt; it is not a live retry queue. A
+crash before that batch leaves only retryable pending/staged evidence and no
+active receipt, while a crash after it leaves only the complete active bundle.
+For example, if an A-authored unit parks
+until the A→B publication arrives, the successful activation drains and
+projects that unit once. A reconnect that retransmits the same unit after reopen
+must observe the already-active lineage and retain one history/current result,
+never a second projection or a stale pending activation.
 
 ### 10.3 Shared physical storage
 

@@ -49,7 +49,10 @@ fn physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata
 #[test]
 fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     // Physical topology and the staged catalogue state are not public API, so
-    // this internal test pins their atomic admission boundary directly.
+    // this internal test pins their atomic admission boundary directly. The
+    // durable pending receipt is likewise recovery-only state, so reopen must
+    // inspect it here; the externally visible retry behavior is covered by
+    // the catalogue-orphan replication receipt below.
     let base = schema();
     let source_id = base.version_id();
     let target = SchemaVersion::new(catalogue_evolved_schema());
@@ -121,6 +124,10 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
 
     let reopened = reopen_node_at(&dir, node(0x2e), base);
     assert!(reopened.catalogue_schemas().contains_key(&target.id));
+    assert!(
+        reopened.catalogue.pending_lineages.is_empty(),
+        "an active receipt must retire its durable pending activation obligation"
+    );
     assert_eq!(
         reopened.catalogue.physical_mappings[&target.id].tables["todos"].table_id,
         reopened.catalogue.physical_mappings[&source_id].tables["todos"].table_id

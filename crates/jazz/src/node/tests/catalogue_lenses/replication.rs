@@ -166,7 +166,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     assert!(
         core.apply_sync_message_settled(SyncMessage::CommitUnit {
             tx: tx.clone(),
-            versions,
+            versions: versions.clone(),
         })
         .unwrap()
         .is_empty()
@@ -237,6 +237,25 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
             .collect::<BTreeMap<_, _>>()
             .get(&row(0x55)),
         Some(&evolved_cells)
+    );
+    // A reconnect can retransmit the exact authoritative unit after the
+    // catalogue activation that originally drained it. The public storage and
+    // projected read receipts remain singular: activation plus retry must not
+    // create a second history record or a second projected current row.
+    reopened
+        .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
+        .unwrap();
+    assert_eq!(reopened.query_table_versions("todos").unwrap().len(), 1);
+    assert_eq!(
+        reopened
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>()
+            .get(&row(0x55)),
+        Some(&evolved_cells),
+        "reconnect retry must preserve the one projected result"
     );
 }
 
