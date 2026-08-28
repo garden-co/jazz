@@ -1275,7 +1275,7 @@ fn reopen_rejects_standalone_schema_content_identity_mismatch() {
         &mut receiver,
         b"schema",
         tampered.id.0,
-        serde_json::to_vec(&tampered).unwrap(),
+        codec::encode_catalogue_schema(&tampered).unwrap(),
     );
     drop(receiver);
 
@@ -1283,7 +1283,7 @@ fn reopen_rejects_standalone_schema_content_identity_mismatch() {
         &dir,
         node(0x4c),
         base,
-        "catalogue schema id does not match schema payload",
+        "catalogue schema content id mismatch",
     );
 }
 
