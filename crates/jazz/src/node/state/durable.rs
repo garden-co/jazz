@@ -761,9 +761,7 @@ where
                     ));
                 }
             };
-            let fact = postcard::from_bytes::<ViewFactEntry>(fact_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled program fact payload must decode")
-            })?;
+            let fact = codec::program_fact_from_storage_bytes(fact_bytes)?;
             self.query
                 .settled_program_facts
                 .entry(binding_view_key)

@@ -1131,6 +1131,52 @@ fn fast_known_state_fact_survives_storage_reopen() {
 }
 
 #[test]
+fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec() {
+    // Internal storage-boundary coverage: applications cannot observe physical
+    // keys, while this verifies all delta modes survive through the same reopen
+    // path. Codec fixtures cover every fact variant separately.
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let key = BindingViewKey::from_canonical_subscription_key(subscription);
+    let fact = |path: &str| crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
+        crate::protocol::PathCorrelationCoverageEntry {
+            path: path.to_owned(),
+            source_table: "todos".to_owned().into(),
+            source_row: row(42),
+            correlation_key: vec![path.len() as u8],
+            complete: true,
+        },
+    );
+    let update = |reset_result_set, adds, removes| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: adds,
+            program_fact_removes: removes,
+        })
+    };
+    let added = fact("add");
+    reader.apply_sync_message_settled(update(false, vec![added.clone()], vec![])).unwrap();
+    assert_eq!(reader.query.settled_program_facts[&key], BTreeSet::from([added.clone()]));
+    reader.apply_sync_message_settled(update(false, vec![], vec![added])).unwrap();
+    assert!(reader.query.settled_program_facts[&key].is_empty());
+    let rewritten = fact("rewrite");
+    reader.apply_sync_message_settled(update(true, vec![rewritten.clone()], vec![])).unwrap();
+    drop(reader);
+    let reopened = open_node_at(&reader_dir, schema());
+    assert_eq!(reopened.query.settled_program_facts[&key], BTreeSet::from([rewritten]));
+}
+
+#[test]
 fn known_state_declaration_never_skips_unfated_edge_members() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_edge_dir, mut edge) = open_node_with_uuid(node(7));

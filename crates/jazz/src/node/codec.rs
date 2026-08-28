@@ -7,7 +7,15 @@
 
 use super::query_engine::{left_field, user_column_field};
 use super::*;
-use crate::protocol::{ResultRowLayer, ResultRowSource, SnapshotRef, SyntheticReplacementToken};
+use crate::protocol::{
+    CompleteTxPayloadCoverageEntry, ContributingMembersEntry, PathCorrelationCoverageEntry,
+    PathHoleState, PointReadEntry, PolicyDecisionEntry, PolicyDecisionOutcomeEntry,
+    PolicyWitnessEntry, PredicateOutputSetEntry, PredicateOutputSetRoleEntry, PredicateReadEntry,
+    ReadFrontierSettledEntry, RelationEdgeEntry, RelationEdgeKind, RelationEdgeRole,
+    ResultMemberPayloadEntry, ResultRowLayer, ResultRowSource, RowVersionRefEntry, SnapshotRef,
+    SourceCoverageEntry, SyntheticReplacementToken, VersionWitnessEntry,
+    ViewCompleteExclusiveCoverageEntry,
+};
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 
@@ -1526,6 +1534,12 @@ pub(super) fn contribution_merge_from_storage_record(
 
 const RESULT_MEMBER_STORAGE_MAGIC: &[u8; 4] = b"JRME";
 const RESULT_MEMBER_STORAGE_VERSION: u8 = 1;
+// This is a durable key codec, not a wire codec.  Tags below are permanent:
+// never renumber or reuse them; introduce a new storage version instead.
+const PROGRAM_FACT_STORAGE_MAGIC: &[u8; 4] = b"JPFK";
+const PROGRAM_FACT_STORAGE_VERSION: u8 = 1;
+const MAX_PROGRAM_FACT_STORAGE_BYTES: usize = 1024 * 1024;
+const MAX_PROGRAM_FACT_NESTING: usize = 32;
 const RESULT_ROW_SOURCE_STORAGE_MAGIC: &[u8; 4] = b"JRSE";
 const RESULT_ROW_SOURCE_STORAGE_VERSION: u8 = 1;
 const RESULT_MEMBER_STORAGE_ENVELOPE_HEADER_LEN: usize = 4 + 1 + 4;
@@ -2353,6 +2367,606 @@ pub(super) fn result_member_from_storage_bytes(encoded: &[u8]) -> Result<ResultM
         ));
     }
     Ok(member)
+}
+
+struct ProgramFactStorageReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ProgramFactStorageReader<'a> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(Error::InvalidStoredValue(
+                "settled program fact encoding is truncated",
+            ))?;
+        let value = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(value)
+    }
+    fn u8(&mut self) -> Result<u8, Error> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, Error> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("length checked"),
+        ))
+    }
+    fn u64(&mut self) -> Result<u64, Error> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("length checked"),
+        ))
+    }
+    fn bytes(&mut self) -> Result<Vec<u8>, Error> {
+        let len = usize::try_from(self.u32()?)
+            .map_err(|_| Error::InvalidStoredValue("settled program fact length is too large"))?;
+        if len > MAX_PROGRAM_FACT_STORAGE_BYTES {
+            return Err(Error::InvalidStoredValue(
+                "settled program fact field is too large",
+            ));
+        }
+        Ok(self.take(len)?.to_vec())
+    }
+    fn string(&mut self) -> Result<String, Error> {
+        String::from_utf8(self.bytes()?)
+            .map_err(|_| Error::InvalidStoredValue("settled program fact string is invalid UTF-8"))
+    }
+    fn uuid(&mut self) -> Result<uuid::Uuid, Error> {
+        Ok(uuid::Uuid::from_bytes(
+            self.take(16)?.try_into().expect("length checked"),
+        ))
+    }
+    fn finish(&self) -> Result<(), Error> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(Error::InvalidStoredValue(
+                "settled program fact encoding has trailing bytes",
+            ))
+        }
+    }
+}
+
+fn program_fact_put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), Error> {
+    bytes.extend_from_slice(
+        &u32::try_from(value)
+            .map_err(|_| Error::InvalidStoredValue("settled program fact length is too large"))?
+            .to_le_bytes(),
+    );
+    Ok(())
+}
+fn program_fact_put_bytes(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), Error> {
+    if value.len() > MAX_PROGRAM_FACT_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact field is too large",
+        ));
+    }
+    program_fact_put_u32(bytes, value.len())?;
+    bytes.extend_from_slice(value);
+    Ok(())
+}
+fn program_fact_put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), Error> {
+    program_fact_put_bytes(bytes, value.as_bytes())
+}
+fn program_fact_put_uuid(bytes: &mut Vec<u8>, value: uuid::Uuid) {
+    bytes.extend_from_slice(value.as_bytes());
+}
+fn program_fact_put_tx(bytes: &mut Vec<u8>, value: TxId) {
+    bytes.extend_from_slice(&value.time.0.to_le_bytes());
+    program_fact_put_uuid(bytes, value.node.0);
+}
+fn program_fact_tx(reader: &mut ProgramFactStorageReader<'_>) -> Result<TxId, Error> {
+    Ok(TxId::new(TxTime(reader.u64()?), NodeUuid(reader.uuid()?)))
+}
+fn program_fact_put_option<T>(
+    bytes: &mut Vec<u8>,
+    value: &Option<T>,
+    put: impl FnOnce(&mut Vec<u8>, &T) -> Result<(), Error>,
+) -> Result<(), Error> {
+    match value {
+        None => bytes.push(0),
+        Some(value) => {
+            bytes.push(1);
+            put(bytes, value)?;
+        }
+    };
+    Ok(())
+}
+fn program_fact_option<T>(
+    reader: &mut ProgramFactStorageReader<'_>,
+    get: impl FnOnce(&mut ProgramFactStorageReader<'_>) -> Result<T, Error>,
+) -> Result<Option<T>, Error> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => get(reader).map(Some),
+        _ => Err(Error::InvalidStoredValue(
+            "settled program fact option tag is invalid",
+        )),
+    }
+}
+
+fn program_fact_put_member(
+    bytes: &mut Vec<u8>,
+    member: &ResultMemberEntry,
+    depth: usize,
+) -> Result<(), Error> {
+    if depth > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact is too deeply nested",
+        ));
+    }
+    program_fact_put_bytes(bytes, &result_member_storage_bytes(member)?)
+}
+fn program_fact_member(
+    reader: &mut ProgramFactStorageReader<'_>,
+    depth: usize,
+) -> Result<ResultMemberEntry, Error> {
+    if depth > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact is too deeply nested",
+        ));
+    }
+    result_member_from_storage_bytes(&reader.bytes()?)
+}
+fn program_fact_put_version(bytes: &mut Vec<u8>, value: &RowVersionRefEntry) -> Result<(), Error> {
+    program_fact_put_tx(bytes, value.tx);
+    program_fact_put_option(bytes, &value.schema_version, |b, v| {
+        program_fact_put_uuid(b, v.0);
+        Ok(())
+    })?;
+    bytes.push(match value.layer {
+        ResultRowLayer::Content => 0,
+        ResultRowLayer::Deletion => 1,
+        ResultRowLayer::ContentOrDeletion => 2,
+    });
+    program_fact_put_option(bytes, &value.batch, |b, v| {
+        program_fact_put_tx(b, *v);
+        Ok(())
+    })?;
+    program_fact_put_option(bytes, &value.branch_or_prefix, |b, v: &Vec<u8>| {
+        program_fact_put_bytes(b, v)
+    })?;
+    program_fact_put_option(bytes, &value.row_digest, |b, v: &Vec<u8>| {
+        program_fact_put_bytes(b, v)
+    })
+}
+fn program_fact_version(
+    reader: &mut ProgramFactStorageReader<'_>,
+) -> Result<RowVersionRefEntry, Error> {
+    let tx = program_fact_tx(reader)?;
+    let schema_version = program_fact_option(reader, |r| Ok(SchemaVersionId(r.uuid()?)))?;
+    let layer = match reader.u8()? {
+        0 => ResultRowLayer::Content,
+        1 => ResultRowLayer::Deletion,
+        2 => ResultRowLayer::ContentOrDeletion,
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "settled program fact row layer tag is invalid",
+            ));
+        }
+    };
+    let batch = program_fact_option(reader, program_fact_tx)?;
+    let branch_or_prefix = program_fact_option(reader, |r| r.bytes())?;
+    let row_digest = program_fact_option(reader, |r| r.bytes())?;
+    Ok(RowVersionRefEntry {
+        tx,
+        schema_version,
+        layer,
+        batch,
+        branch_or_prefix,
+        row_digest,
+    })
+}
+fn program_fact_tier(reader: &mut ProgramFactStorageReader<'_>) -> Result<DurabilityTier, Error> {
+    match reader.u8()? {
+        0 => Ok(DurabilityTier::None),
+        1 => Ok(DurabilityTier::Local),
+        2 => Ok(DurabilityTier::Edge),
+        3 => Ok(DurabilityTier::Global),
+        _ => Err(Error::InvalidStoredValue(
+            "settled program fact durability tag is invalid",
+        )),
+    }
+}
+fn program_fact_put_tier(bytes: &mut Vec<u8>, value: DurabilityTier) {
+    bytes.push(match value {
+        DurabilityTier::None => 0,
+        DurabilityTier::Local => 1,
+        DurabilityTier::Edge => 2,
+        DurabilityTier::Global => 3,
+    });
+}
+
+/// Explicit versioned canonical codec for settled-program-fact durable keys.
+/// Nested result-member values use their own Groove-record codec; no serde
+/// representation of `ProgramFactEntry` is durable.
+pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::with_capacity(128);
+    bytes.extend_from_slice(PROGRAM_FACT_STORAGE_MAGIC);
+    bytes.push(PROGRAM_FACT_STORAGE_VERSION);
+    match fact {
+        ProgramFactEntry::ResultPayload(v) => {
+            bytes.push(0);
+            program_fact_put_member(&mut bytes, &v.member, 1)?;
+            program_fact_put_bytes(&mut bytes, &v.descriptor)?;
+            program_fact_put_bytes(&mut bytes, &v.record)?;
+        }
+        ProgramFactEntry::RelationEdge(v) => {
+            bytes.push(1);
+            program_fact_put_string(&mut bytes, &v.path)?;
+            program_fact_put_string(&mut bytes, v.source_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.source_row.0);
+            program_fact_put_string(&mut bytes, v.target_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.target_row.0);
+            program_fact_put_option(&mut bytes, &v.kind, |b, v| {
+                b.push(match v {
+                    RelationEdgeKind::Include => 0,
+                    RelationEdgeKind::Join => 1,
+                    RelationEdgeKind::Relation => 2,
+                    RelationEdgeKind::Recursive => 3,
+                    RelationEdgeKind::Policy => 4,
+                });
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.source_version, program_fact_put_version)?;
+            program_fact_put_option(&mut bytes, &v.target_version, program_fact_put_version)?;
+            program_fact_put_option(&mut bytes, &v.depth, |b, v| {
+                b.extend_from_slice(&v.to_le_bytes());
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.edge_id, |b, v| program_fact_put_bytes(b, v))?;
+            program_fact_put_option(&mut bytes, &v.branch, |b, v| program_fact_put_bytes(b, v))?;
+            program_fact_put_option(&mut bytes, &v.role, |b, v| {
+                b.push(match v {
+                    RelationEdgeRole::Intermediate => 0,
+                    RelationEdgeRole::Frontier => 1,
+                    RelationEdgeRole::Terminal => 2,
+                });
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.order, |b, v| program_fact_put_bytes(b, v))?;
+            program_fact_put_option(&mut bytes, &v.hole_state, |b, v| {
+                b.push(match v {
+                    PathHoleState::Matched => 0,
+                    PathHoleState::Hole => 1,
+                });
+                Ok(())
+            })?;
+        }
+        ProgramFactEntry::PathCorrelationCoverage(v) => {
+            bytes.push(2);
+            program_fact_put_string(&mut bytes, &v.path)?;
+            program_fact_put_string(&mut bytes, v.source_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.source_row.0);
+            program_fact_put_bytes(&mut bytes, &v.correlation_key)?;
+            bytes.push(u8::from(v.complete));
+        }
+        ProgramFactEntry::SourceCoverage(v) => {
+            bytes.push(3);
+            program_fact_put_string(&mut bytes, &v.source)?;
+            program_fact_put_string(&mut bytes, v.table.as_str())?;
+            program_fact_put_option(&mut bytes, &v.row, |b, v| {
+                program_fact_put_uuid(b, v.0);
+                Ok(())
+            })?;
+            program_fact_put_bytes(&mut bytes, &v.coverage)?;
+        }
+        ProgramFactEntry::ReadFrontierSettled(v) => {
+            bytes.push(4);
+            program_fact_put_string(&mut bytes, &v.scope)?;
+            program_fact_put_tier(&mut bytes, v.tier);
+            program_fact_put_option(&mut bytes, &v.stream, |b, v| program_fact_put_string(b, v))?;
+            program_fact_put_bytes(&mut bytes, &v.frontier)?;
+        }
+        ProgramFactEntry::CompleteTxPayloadCoverage(v) => {
+            bytes.push(5);
+            program_fact_put_tx(&mut bytes, v.tx);
+            program_fact_put_tier(&mut bytes, v.tier);
+            program_fact_put_bytes(&mut bytes, &v.payload_digest)?;
+        }
+        ProgramFactEntry::ViewCompleteExclusiveCoverage(v) => {
+            bytes.push(6);
+            program_fact_put_tx(&mut bytes, v.tx);
+            program_fact_put_string(&mut bytes, &v.scope)?;
+            program_fact_put_option(&mut bytes, &v.result, |b, v| {
+                program_fact_put_member(b, v, 1)
+            })?;
+            program_fact_put_tier(&mut bytes, v.tier);
+            program_fact_put_bytes(&mut bytes, &v.covered_members_digest)?;
+        }
+        ProgramFactEntry::PolicyDecision(v) => {
+            bytes.push(7);
+            program_fact_put_bytes(&mut bytes, &v.decision)?;
+            match &v.outcome {
+                PolicyDecisionOutcomeEntry::Allowed => bytes.push(0),
+                PolicyDecisionOutcomeEntry::Denied => bytes.push(1),
+                PolicyDecisionOutcomeEntry::IndeterminateRequiresInput { input } => {
+                    bytes.push(2);
+                    program_fact_put_string(&mut bytes, input)?
+                }
+                PolicyDecisionOutcomeEntry::RequiresCoverage { scope, frontier } => {
+                    bytes.push(3);
+                    program_fact_put_string(&mut bytes, scope)?;
+                    program_fact_put_bytes(&mut bytes, frontier)?
+                }
+            };
+            program_fact_put_option(&mut bytes, &v.reason, |b, v| program_fact_put_string(b, v))?;
+        }
+        ProgramFactEntry::VersionWitness(v) => {
+            bytes.push(8);
+            program_fact_put_string(&mut bytes, &v.role)?;
+            program_fact_put_version(&mut bytes, &v.version)?;
+            program_fact_put_option(&mut bytes, &v.member, |b, v| {
+                program_fact_put_member(b, v, 1)
+            })?;
+        }
+        ProgramFactEntry::PolicyWitness(v) => {
+            bytes.push(9);
+            program_fact_put_member(&mut bytes, &v.protected, 1)?;
+            program_fact_put_string(&mut bytes, &v.policy_path)?;
+            program_fact_put_version(&mut bytes, &v.witness)?;
+            program_fact_put_option(&mut bytes, &v.edge_kind, |b, v| {
+                b.push(match v {
+                    RelationEdgeKind::Include => 0,
+                    RelationEdgeKind::Join => 1,
+                    RelationEdgeKind::Relation => 2,
+                    RelationEdgeKind::Recursive => 3,
+                    RelationEdgeKind::Policy => 4,
+                });
+                Ok(())
+            })?;
+        }
+        ProgramFactEntry::ContributingMembers(v) => {
+            bytes.push(10);
+            program_fact_put_member(&mut bytes, &v.result, 1)?;
+            program_fact_put_member(&mut bytes, &v.contributor, 1)?;
+            program_fact_put_option(&mut bytes, &v.batch, |b, v| {
+                program_fact_put_tx(b, *v);
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.role, |b, v| program_fact_put_string(b, v))?;
+        }
+        ProgramFactEntry::PredicateRead(v) => {
+            bytes.push(11);
+            bytes.push(match v.role {
+                PredicateOutputSetRoleEntry::Base => 0,
+                PredicateOutputSetRoleEntry::Now => 1,
+            });
+            program_fact_put_uuid(&mut bytes, v.shape_id.0);
+            program_fact_put_uuid(&mut bytes, v.binding_id.0);
+            program_fact_put_bytes(&mut bytes, &v.predicate)?;
+            program_fact_put_bytes(&mut bytes, &v.frontier)?;
+        }
+        ProgramFactEntry::PredicateOutputSet(v) => {
+            bytes.push(12);
+            bytes.push(match v.role {
+                PredicateOutputSetRoleEntry::Base => 0,
+                PredicateOutputSetRoleEntry::Now => 1,
+            });
+            program_fact_put_string(&mut bytes, v.table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.row.0);
+            program_fact_put_version(&mut bytes, &v.version)?;
+            program_fact_put_uuid(&mut bytes, v.shape_id.0);
+            program_fact_put_uuid(&mut bytes, v.binding_id.0);
+        }
+        ProgramFactEntry::PointRead(v) => {
+            bytes.push(13);
+            bytes.push(u8::from(v.present));
+            program_fact_put_string(&mut bytes, v.table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.row.0);
+            program_fact_put_option(&mut bytes, &v.version, program_fact_put_version)?;
+            program_fact_put_uuid(&mut bytes, v.shape_id.0);
+            program_fact_put_uuid(&mut bytes, v.binding_id.0);
+        }
+    }
+    if bytes.len() > MAX_PROGRAM_FACT_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact is too large",
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramFactEntry, Error> {
+    if encoded.len() > MAX_PROGRAM_FACT_STORAGE_BYTES
+        || encoded.len() < 6
+        || &encoded[..4] != PROGRAM_FACT_STORAGE_MAGIC
+        || encoded[4] != PROGRAM_FACT_STORAGE_VERSION
+    {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact encoding is invalid or unsupported",
+        ));
+    }
+    let mut r = ProgramFactStorageReader {
+        bytes: encoded,
+        offset: 5,
+    };
+    let tag = r.u8()?;
+    let role =
+        |r: &mut ProgramFactStorageReader<'_>| -> Result<PredicateOutputSetRoleEntry, Error> {
+            match r.u8()? {
+                0 => Ok(PredicateOutputSetRoleEntry::Base),
+                1 => Ok(PredicateOutputSetRoleEntry::Now),
+                _ => Err(Error::InvalidStoredValue(
+                    "settled program fact role tag is invalid",
+                )),
+            }
+        };
+    let kind = |r: &mut ProgramFactStorageReader<'_>| -> Result<RelationEdgeKind, Error> {
+        match r.u8()? {
+            0 => Ok(RelationEdgeKind::Include),
+            1 => Ok(RelationEdgeKind::Join),
+            2 => Ok(RelationEdgeKind::Relation),
+            3 => Ok(RelationEdgeKind::Recursive),
+            4 => Ok(RelationEdgeKind::Policy),
+            _ => Err(Error::InvalidStoredValue(
+                "settled program fact edge kind tag is invalid",
+            )),
+        }
+    };
+    let edge_role = |r: &mut ProgramFactStorageReader<'_>| -> Result<RelationEdgeRole, Error> {
+        match r.u8()? {
+            0 => Ok(RelationEdgeRole::Intermediate),
+            1 => Ok(RelationEdgeRole::Frontier),
+            2 => Ok(RelationEdgeRole::Terminal),
+            _ => Err(Error::InvalidStoredValue(
+                "settled program fact edge role tag is invalid",
+            )),
+        }
+    };
+    let fact = match tag {
+        0 => ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
+            member: program_fact_member(&mut r, 1)?,
+            descriptor: r.bytes()?,
+            record: r.bytes()?,
+        }),
+        1 => ProgramFactEntry::RelationEdge(RelationEdgeEntry {
+            path: r.string()?,
+            source_table: r.string()?.into(),
+            source_row: RowUuid(r.uuid()?),
+            target_table: r.string()?.into(),
+            target_row: RowUuid(r.uuid()?),
+            kind: program_fact_option(&mut r, kind)?,
+            source_version: program_fact_option(&mut r, program_fact_version)?,
+            target_version: program_fact_option(&mut r, program_fact_version)?,
+            depth: program_fact_option(&mut r, |r| r.u32())?,
+            edge_id: program_fact_option(&mut r, |r| r.bytes())?,
+            branch: program_fact_option(&mut r, |r| r.bytes())?,
+            role: program_fact_option(&mut r, edge_role)?,
+            order: program_fact_option(&mut r, |r| r.bytes())?,
+            hole_state: program_fact_option(&mut r, |r| match r.u8()? {
+                0 => Ok(PathHoleState::Matched),
+                1 => Ok(PathHoleState::Hole),
+                _ => Err(Error::InvalidStoredValue(
+                    "settled program fact hole tag is invalid",
+                )),
+            })?,
+        }),
+        2 => ProgramFactEntry::PathCorrelationCoverage(PathCorrelationCoverageEntry {
+            path: r.string()?,
+            source_table: r.string()?.into(),
+            source_row: RowUuid(r.uuid()?),
+            correlation_key: r.bytes()?,
+            complete: match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact boolean is invalid",
+                    ));
+                }
+            },
+        }),
+        3 => ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
+            source: r.string()?,
+            table: r.string()?.into(),
+            row: program_fact_option(&mut r, |r| Ok(RowUuid(r.uuid()?)))?,
+            coverage: r.bytes()?,
+        }),
+        4 => ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
+            scope: r.string()?,
+            tier: program_fact_tier(&mut r)?,
+            stream: program_fact_option(&mut r, |r| r.string())?,
+            frontier: r.bytes()?,
+        }),
+        5 => ProgramFactEntry::CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry {
+            tx: program_fact_tx(&mut r)?,
+            tier: program_fact_tier(&mut r)?,
+            payload_digest: r.bytes()?,
+        }),
+        6 => ProgramFactEntry::ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry {
+            tx: program_fact_tx(&mut r)?,
+            scope: r.string()?,
+            result: program_fact_option(&mut r, |r| program_fact_member(r, 1))?,
+            tier: program_fact_tier(&mut r)?,
+            covered_members_digest: r.bytes()?,
+        }),
+        7 => {
+            let decision = r.bytes()?;
+            let outcome = match r.u8()? {
+                0 => PolicyDecisionOutcomeEntry::Allowed,
+                1 => PolicyDecisionOutcomeEntry::Denied,
+                2 => PolicyDecisionOutcomeEntry::IndeterminateRequiresInput { input: r.string()? },
+                3 => PolicyDecisionOutcomeEntry::RequiresCoverage {
+                    scope: r.string()?,
+                    frontier: r.bytes()?,
+                },
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact policy outcome tag is invalid",
+                    ));
+                }
+            };
+            ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                decision,
+                outcome,
+                reason: program_fact_option(&mut r, |r| r.string())?,
+            })
+        }
+        8 => ProgramFactEntry::VersionWitness(VersionWitnessEntry {
+            role: r.string()?,
+            version: program_fact_version(&mut r)?,
+            member: program_fact_option(&mut r, |r| program_fact_member(r, 1))?,
+        }),
+        9 => ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
+            protected: program_fact_member(&mut r, 1)?,
+            policy_path: r.string()?,
+            witness: program_fact_version(&mut r)?,
+            edge_kind: program_fact_option(&mut r, kind)?,
+        }),
+        10 => ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
+            result: program_fact_member(&mut r, 1)?,
+            contributor: program_fact_member(&mut r, 1)?,
+            batch: program_fact_option(&mut r, program_fact_tx)?,
+            role: program_fact_option(&mut r, |r| r.string())?,
+        }),
+        11 => ProgramFactEntry::PredicateRead(PredicateReadEntry {
+            role: role(&mut r)?,
+            shape_id: ShapeId(r.uuid()?),
+            binding_id: BindingId(r.uuid()?),
+            predicate: r.bytes()?,
+            frontier: r.bytes()?,
+        }),
+        12 => ProgramFactEntry::PredicateOutputSet(PredicateOutputSetEntry {
+            role: role(&mut r)?,
+            table: r.string()?.into(),
+            row: RowUuid(r.uuid()?),
+            version: program_fact_version(&mut r)?,
+            shape_id: ShapeId(r.uuid()?),
+            binding_id: BindingId(r.uuid()?),
+        }),
+        13 => ProgramFactEntry::PointRead(PointReadEntry {
+            present: match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact boolean is invalid",
+                    ));
+                }
+            },
+            table: r.string()?.into(),
+            row: RowUuid(r.uuid()?),
+            version: program_fact_option(&mut r, program_fact_version)?,
+            shape_id: ShapeId(r.uuid()?),
+            binding_id: BindingId(r.uuid()?),
+        }),
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "settled program fact tag is invalid",
+            ));
+        }
+    };
+    r.finish()?;
+    if program_fact_storage_bytes(&fact)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact encoding is not canonical",
+        ));
+    }
+    Ok(fact)
 }
 
 pub(super) fn transaction_values(
@@ -3634,6 +4248,211 @@ mod result_member_storage_codec_tests {
             id: uuid::Uuid::from_bytes([0x19; 16]),
         };
         row
+    }
+
+    fn fixture_member() -> ResultMemberEntry {
+        ResultMemberEntry::Synthetic {
+            table: "facts".to_owned(),
+            row: vec![0x11],
+            replacement: SyntheticReplacementToken::from_encoded_record(vec![0x12]),
+        }
+    }
+
+    fn fixture_version() -> RowVersionRefEntry {
+        RowVersionRefEntry {
+            tx: tx(31, 0x33),
+            schema_version: Some(SchemaVersionId::from_bytes([0x34; 16])),
+            layer: ResultRowLayer::ContentOrDeletion,
+            batch: Some(tx(32, 0x35)),
+            branch_or_prefix: Some(vec![0x36]),
+            row_digest: Some(vec![0x37]),
+        }
+    }
+
+    // This is necessarily an internal test: raw durable keys are an engine
+    // boundary.  It locks every permanent fact/source/value tag to a fixture;
+    // restart behavior exercises those keys through the public node lifecycle.
+    #[test]
+    fn program_fact_storage_codec_has_permanent_tags_and_exact_fixtures() {
+        let member = fixture_member();
+        let version = fixture_version();
+        let facts = vec![
+            ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: vec![1],
+                record: vec![2],
+            }),
+            ProgramFactEntry::RelationEdge(RelationEdgeEntry {
+                path: "p".into(),
+                source_table: "a".to_owned().into(),
+                source_row: RowUuid::from_bytes([3; 16]),
+                target_table: "b".to_owned().into(),
+                target_row: RowUuid::from_bytes([4; 16]),
+                kind: Some(RelationEdgeKind::Policy),
+                source_version: Some(version.clone()),
+                target_version: Some(version.clone()),
+                depth: Some(5),
+                edge_id: Some(vec![6]),
+                branch: Some(vec![7]),
+                role: Some(RelationEdgeRole::Terminal),
+                order: Some(vec![8]),
+                hole_state: Some(PathHoleState::Hole),
+            }),
+            ProgramFactEntry::PathCorrelationCoverage(PathCorrelationCoverageEntry {
+                path: "p".into(),
+                source_table: "a".to_owned().into(),
+                source_row: RowUuid::from_bytes([9; 16]),
+                correlation_key: vec![10],
+                complete: true,
+            }),
+            ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
+                source: "s".into(),
+                table: "a".to_owned().into(),
+                row: Some(RowUuid::from_bytes([11; 16])),
+                coverage: vec![12],
+            }),
+            ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
+                scope: "s".into(),
+                tier: DurabilityTier::Global,
+                stream: Some("t".into()),
+                frontier: vec![13],
+            }),
+            ProgramFactEntry::CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry {
+                tx: tx(33, 14),
+                tier: DurabilityTier::Edge,
+                payload_digest: vec![15],
+            }),
+            ProgramFactEntry::ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry {
+                tx: tx(34, 16),
+                scope: "s".into(),
+                result: Some(member.clone()),
+                tier: DurabilityTier::Local,
+                covered_members_digest: vec![17],
+            }),
+            ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                decision: vec![18],
+                outcome: PolicyDecisionOutcomeEntry::RequiresCoverage {
+                    scope: "s".into(),
+                    frontier: vec![19],
+                },
+                reason: Some("r".into()),
+            }),
+            ProgramFactEntry::VersionWitness(VersionWitnessEntry {
+                role: "r".into(),
+                version: version.clone(),
+                member: Some(member.clone()),
+            }),
+            ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
+                protected: member.clone(),
+                policy_path: "p".into(),
+                witness: version.clone(),
+                edge_kind: Some(RelationEdgeKind::Recursive),
+            }),
+            ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
+                result: member.clone(),
+                contributor: member.clone(),
+                batch: Some(tx(35, 20)),
+                role: Some("r".into()),
+            }),
+            ProgramFactEntry::PredicateRead(PredicateReadEntry {
+                role: PredicateOutputSetRoleEntry::Now,
+                shape_id: ShapeId(uuid::Uuid::from_bytes([21; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([22; 16])),
+                predicate: vec![23],
+                frontier: vec![24],
+            }),
+            ProgramFactEntry::PredicateOutputSet(PredicateOutputSetEntry {
+                role: PredicateOutputSetRoleEntry::Base,
+                table: "a".to_owned().into(),
+                row: RowUuid::from_bytes([25; 16]),
+                version: version.clone(),
+                shape_id: ShapeId(uuid::Uuid::from_bytes([26; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([27; 16])),
+            }),
+            ProgramFactEntry::PointRead(PointReadEntry {
+                present: true,
+                table: "a".to_owned().into(),
+                row: RowUuid::from_bytes([28; 16]),
+                version: Some(version),
+                shape_id: ShapeId(uuid::Uuid::from_bytes([29; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([30; 16])),
+            }),
+        ];
+        let encoded = facts
+            .iter()
+            .map(|fact| program_fact_storage_bytes(fact).unwrap())
+            .collect::<Vec<_>>();
+        for (tag, (fact, bytes)) in facts.iter().zip(&encoded).enumerate() {
+            assert_eq!(&bytes[..4], PROGRAM_FACT_STORAGE_MAGIC);
+            assert_eq!(bytes[4], PROGRAM_FACT_STORAGE_VERSION);
+            assert_eq!(usize::from(bytes[5]), tag);
+            assert_eq!(program_fact_from_storage_bytes(bytes).unwrap(), *fact);
+        }
+        assert_eq!(
+            encoded
+                .iter()
+                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "eaabad908cc2f66ff0a302dccfd8aacbf619a6b78098a4e22037c4c4befa90e2",
+                "fd88aa550022a04bc6775b5e997d15b8f4e75f9cb26f62b7cb6d9d9aac6c4212",
+                "cc05966da0ecfb3ddbbeb437c3f0466c9757211b4718e005ed98109d0d9e24b0",
+                "090b02e75b1028e4b732d2a1eb56da8d22cac67015ca4b223c3914b62338c753",
+                "85f2bab0a0f503066f669f9482b887b177e3a68cc1e6f7af69343d31795135c2",
+                "cbdf98c6f111efb8b9ffaae39160150cddd7f4ca4b10d7e211e8d23d59104584",
+                "2713fd886f4afc0760389640c4328ef461da65b9371335a71132b7f27dcd01c1",
+                "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
+                "83a2dca82e25b669343ca731c45e9c7872681bd83b7c81180a5feceeb0e69b9e",
+                "eb80886502cf23a0fb3d8bf41679188e5a5f763214c444fa1c44eddc703dd48a",
+                "1a49359e08e4eb9956a55ba4523f511ba0a2b4d3e4edeec6c6399f42a369ba45",
+                "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",
+                "ceca71b78f841cf8ca9387c9cc0c616fd043a5ce5698fb7098c9c5d6a148ad8e",
+                "73b584cebffb48801a204b0c1e5d57e7b1dddc1c40180ffa5497d8981ad5d1b1",
+            ]
+        );
+    }
+
+    #[test]
+    fn program_fact_storage_codec_rejects_legacy_unknown_trailing_and_noncanonical_bytes() {
+        let encoded =
+            program_fact_storage_bytes(&ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                decision: vec![],
+                outcome: PolicyDecisionOutcomeEntry::Allowed,
+                reason: None,
+            }))
+            .unwrap();
+        assert!(
+            program_fact_from_storage_bytes(
+                &postcard::to_allocvec(&ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                    decision: vec![],
+                    outcome: PolicyDecisionOutcomeEntry::Allowed,
+                    reason: None
+                }))
+                .unwrap()
+            )
+            .is_err()
+        );
+        let mut wrong_version = encoded.clone();
+        wrong_version[4] += 1;
+        assert!(program_fact_from_storage_bytes(&wrong_version).is_err());
+        let mut unknown = encoded.clone();
+        unknown[5] = 255;
+        assert!(program_fact_from_storage_bytes(&unknown).is_err());
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(program_fact_from_storage_bytes(&trailing).is_err());
+        let mut noncanonical =
+            program_fact_storage_bytes(&ProgramFactEntry::PointRead(PointReadEntry {
+                present: true,
+                table: "facts".to_owned().into(),
+                row: RowUuid::from_bytes([0; 16]),
+                version: None,
+                shape_id: ShapeId(uuid::Uuid::nil()),
+                binding_id: BindingId(uuid::Uuid::nil()),
+            }))
+            .unwrap();
+        noncanonical[6] = 2;
+        assert!(program_fact_from_storage_bytes(&noncanonical).is_err());
     }
 
     // These stay internal because exact physical key bytes and malformed
