@@ -163,8 +163,11 @@ resident.
 
 The structural schema, migration-lens, and permissions payload families are
 restart-authoritative subrecords of a `JCAT` entry. Epoch 1 accepts only their
-current outer versions (`schema v12`, `lens v5`, and `permissions v2`) and has
-no decoder for the former JSON-bearing versions. Their `ColumnType::Json`
+frozen `v1` outer versions (`schema v1`, `lens v1`, and `permissions v1`,
+including the permissions bundle and head envelopes) and has no decoder for
+the former JSON-bearing versions or pre-freeze outer labels. These outer
+envelope labels are independent of the nested tagged-record `v1` algebra and
+of runtime schema-generation identities. Their `ColumnType::Json`
 schema declaration and `PolicyExpr::ExistsRel` relation tree use one nested
 `v1` tagged record/enum algebra: UTF-8 strings and fixed-width integer
 primitives use the same explicit primitive rules as the enclosing catalogue

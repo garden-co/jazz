@@ -410,6 +410,10 @@
         {
           "path": "crates/jazz-server/src/server/catalogue_storage.rs",
           "anchor": "adapter_catalogue_reopens_only_the_v1_default_cf_layout"
+        },
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "anchor": "storage_epoch_one_catalogue_envelopes_reject_pre_freeze_outer_labels"
         }
       ]
     },

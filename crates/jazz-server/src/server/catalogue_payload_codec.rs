@@ -3,7 +3,9 @@
 //! This module provides deterministic binary serialization for Schema and LensTransform,
 //! enabling content-addressed storage in the catalogue.
 //!
-//! Format uses a version byte prefix for future compatibility.
+//! Each storage-epoch-one payload family begins with its frozen `v1` outer
+//! version byte. Decoders accept that single spelling only: no former outer
+//! labels are aliases or compatibility inputs.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -18,12 +20,12 @@ use jazz::tools::public_schema::{
 
 use jazz::tools::schema_lens::{LensOp, LensTransform};
 
-/// Current encoding version.
-const SCHEMA_VERSION: u8 = 12;
-const LENS_VERSION: u8 = 5;
-const PERMISSIONS_VERSION: u8 = 2;
-const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
-const PERMISSIONS_HEAD_VERSION: u8 = 2;
+/// Frozen storage-epoch-one outer envelope versions.
+const SCHEMA_VERSION: u8 = 1;
+const LENS_VERSION: u8 = 1;
+const PERMISSIONS_VERSION: u8 = 1;
+const PERMISSIONS_BUNDLE_VERSION: u8 = 1;
+const PERMISSIONS_HEAD_VERSION: u8 = 1;
 
 /// Encoding errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2675,9 +2677,15 @@ mod tests {
         let schema_bytes = encode_schema(&schema);
         assert_eq!(
             hex(&schema_bytes),
-            "0c0100000004000000646f637301000000070000007061796c6f61640c010107020000000100000061060200000003040100000031010000007a0100000000ffffffff00000000"
+            "010100000004000000646f637301000000070000007061796c6f61640c010107020000000100000061060200000003040100000031010000007a0100000000ffffffff00000000"
         );
         assert_eq!(decode_schema(&schema_bytes).unwrap(), schema);
+
+        let lens = LensTransform::new();
+        assert_eq!(hex(&encode_lens_transform(&lens)), "010000000000000000");
+        let decoded_lens = decode_lens_transform(&encode_lens_transform(&lens)).unwrap();
+        assert!(decoded_lens.ops.is_empty());
+        assert!(decoded_lens.draft_ops.is_empty());
 
         let rel = RelExpr::Filter {
             input: Box::new(RelExpr::TableScan {
@@ -2697,7 +2705,7 @@ mod tests {
         let permission_bytes = encode_permissions(&permissions);
         assert_eq!(
             hex(&permission_bytes),
-            "020100000004000000646f6373010d010201070000006d656d6265727301010000006d0100080000006f776e65725f696401020200000006000000636c61696d730300000073756200000000000000"
+            "010100000004000000646f6373010d010201070000006d656d6265727301010000006d0100080000006f776e65725f696401020200000006000000636c61696d730300000073756200000000000000"
         );
         assert_eq!(decode_permissions(&permission_bytes).unwrap(), permissions);
     }
@@ -3432,6 +3440,46 @@ mod tests {
         assert!(matches!(
             result,
             Err(CatalogueEncodingError::UnsupportedVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn storage_epoch_one_catalogue_envelopes_reject_pre_freeze_outer_labels() {
+        assert!(matches!(
+            decode_schema(&[12]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 12,
+                expected: 1
+            })
+        ));
+        assert!(matches!(
+            decode_lens_transform(&[5]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 5,
+                expected: 1
+            })
+        ));
+
+        assert!(matches!(
+            decode_permissions(&[2]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 2,
+                expected: 1
+            })
+        ));
+        assert!(matches!(
+            decode_permissions_bundle(&[2]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 2,
+                expected: 1
+            })
+        ));
+        assert!(matches!(
+            decode_permissions_head(&[2]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 2,
+                expected: 1
+            })
         ));
     }
 
