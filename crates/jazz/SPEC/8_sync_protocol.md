@@ -107,7 +107,9 @@ followed by exactly sixteen UUID bytes, then the postcard `u64` authority
 epoch. It is not a bare fixed-width UUID. A carrier MUST consume this complete
 optional endpoint before applying the exact-frame EOF check. Omitting the
 sequence length, accepting a valid Hello plus a suffix, or treating a genuine
-endpoint byte as a suffix is malformed framing, not version compatibility.
+endpoint byte as a suffix is malformed framing, not version compatibility. A
+length other than exactly `16` MUST be rejected even when the declared byte
+sequence and the remaining Hello fields are otherwise well formed.
 
 Postcard enum ordinals are wire data. The v14 baseline freezes these permanent
 discriminants (decimal):
@@ -131,7 +133,11 @@ Feature bits are also permanent: `SyncMessagePayload=1<<0`,
 `PayloadZstd=1<<4`, `MessageFragmentation=1<<5`,
 `AuthorizationScopeReceipts=1<<6`, `AuthorizationScopeViews=1<<7`, and
 `AuxiliaryChunks=1<<8`. `Hello` negotiates only the intersection. A message
-envelope or fragment MUST NOT declare a bit outside that intersection. Exactly
+envelope or fragment MUST NOT declare a bit outside that intersection. Feature
+masks are postcard `u64` values and MUST be decoded and compared across all 64
+bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.
+Any unsupported low or high bit, including `1<<32`, rejects the Hello before
+its accepted mask is converted to a narrower runtime type. Exactly
 one compression bit may be active on an envelope; when both codecs are
 negotiated, an outbound v14 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one

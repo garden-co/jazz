@@ -320,6 +320,58 @@ describe("websocket frame carrier", () => {
     }
   });
 
+  it("rejects malformed authority UUID lengths and unsupported u64 feature bits", async () => {
+    const cases: Array<{ name: string; frame: Uint8Array; error: string }> = [
+      {
+        name: "15-byte authority UUID",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          authorityNode: new Uint8Array(15),
+        }),
+        error: "WireHello.authority.node must be exactly 16 bytes, got 15",
+      },
+      {
+        name: "17-byte authority UUID",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          authorityNode: new Uint8Array(17),
+        }),
+        error: "WireHello.authority.node must be exactly 16 bytes, got 17",
+      },
+      {
+        name: "unsupported low feature bit",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 1n }),
+        error: "server accepted unsupported wire features 0x2",
+      },
+      {
+        name: "unsupported bit 32",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 32n }),
+        error: "server accepted unsupported wire features 0x100000000",
+      },
+      {
+        name: "unsupported high feature bit",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 63n }),
+        error: "server accepted unsupported wire features 0x8000000000000000",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const { carrier, socket } = carrierForTest();
+      socket.emitMessage(encodeWebSocketFrameBatch([testCase.frame]));
+      await expect(carrier.ready(), testCase.name).rejects.toThrow(testCase.error);
+      expect(socket.closed, testCase.name).toBe(true);
+    }
+  });
+
+  it("accepts supported feature masks without losing u64 validation", async () => {
+    for (const features of [0n, BigInt(CLIENT_WIRE_FEATURES)]) {
+      const { carrier, socket } = carrierForTest();
+      socket.emitMessage(
+        encodeWebSocketFrameBatch([encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features })]),
+      );
+      await expect(carrier.ready()).resolves.toMatchObject({ features: Number(features) });
+      carrier.close();
+    }
+  });
+
   it("rejects a v12 server without compatibility negotiation", async () => {
     let socket: MessageWebSocket | undefined;
     const carrier = new WebSocketCarrier({
@@ -659,18 +711,47 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
-function encodeServerHello(epoch: bigint, protocolVersion = WIRE_PROTOCOL_VERSION): Uint8Array {
+function encodeServerHello(
+  epoch: bigint,
+  protocolVersion = WIRE_PROTOCOL_VERSION,
+  options: { features?: number | bigint; authorityNode?: Uint8Array | null } = {},
+): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
   writer.u64(protocolVersion);
   writer.u64(protocolVersion);
-  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(options.features ?? CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
-  writer.some((authority) => {
-    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e));
-    authority.u64(epoch);
-  });
+  const authorityNode =
+    options.authorityNode === undefined
+      ? Uint8Array.from({ length: 16 }, () => 0x5e)
+      : options.authorityNode;
+  if (authorityNode === null) {
+    writer.none();
+  } else {
+    writer.some((authority) => {
+      authority.bytes(authorityNode);
+      authority.u64(epoch);
+    });
+  }
   return writer.finish();
+}
+
+function carrierForTest(): { carrier: WebSocketCarrier; socket: MessageWebSocket } {
+  let socket: MessageWebSocket | undefined;
+  const carrier = new WebSocketCarrier({
+    endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+    peerIdentity: new Uint8Array(16),
+    onFrame: () => {},
+    WebSocket: class extends MessageWebSocket {
+      constructor(url: string) {
+        super(url, (created) => {
+          socket = created;
+        });
+      }
+    },
+  });
+  return { carrier, socket: socket! };
 }
 
 class MessageWebSocket {
