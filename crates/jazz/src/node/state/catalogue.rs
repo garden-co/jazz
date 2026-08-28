@@ -797,7 +797,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(alias.0),
                 Value::Uuid(schema_version.0),
-                Value::Bytes(serde_json::to_vec(mapping)?),
+                Value::Bytes(codec::encode_physical_mapping(mapping)?),
             ],
         );
         Ok(())

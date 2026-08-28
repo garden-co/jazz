@@ -63,11 +63,15 @@ mod variant_case_tests {
         assert_eq!(second.iter().map(|case| case.tag).collect::<Vec<_>>(), [2]);
         validate_physical_variant_cases(&mappings, &aliases).unwrap();
 
-        // The mapping is the payload durably written in jazz_schema_versions;
-        // a JSON round trip models close/reopen of the catalogue row.
-        let encoded = serde_json::to_vec(&mappings).unwrap();
-        let reopened: BTreeMap<SchemaVersionId, SchemaPhysicalMapping> =
-            serde_json::from_slice(&encoded).unwrap();
+        // The mapping is the canonical typed payload durably written in
+        // jazz_schema_versions; its exact round trip models close/reopen.
+        let reopened = mappings
+            .iter()
+            .map(|(version, mapping)| {
+                Ok((*version, codec::decode_physical_mapping(&codec::encode_physical_mapping(mapping)?)?))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()
+            .unwrap();
         assert_eq!(reopened, mappings);
         validate_physical_variant_cases(&reopened, &aliases).unwrap();
     }
@@ -106,6 +110,29 @@ mod variant_case_tests {
             validate_physical_variant_cases(&mappings, &aliases),
             Err(Error::InvalidStoredValue(
                 "physical table maps multiple columns to one id"
+            ))
+        ));
+    }
+
+    #[test]
+    fn reopen_validation_rejects_unknown_enum_case_identity() {
+        // Internal recovery-boundary test: no public catalogue operation can
+        // author a registry case without its schema, but a corrupt durable
+        // payload must never turn that unknown identity into a local tag.
+        let known = schema(1);
+        let unknown = schema(9);
+        let mut mapping = mapping(7, &[("state", 1)]);
+        mapping.tables.get_mut("entries").unwrap().scalar_enum_cases.insert(
+            PhysicalColumnId(1),
+            vec![case(unknown, 0)],
+        );
+        assert!(matches!(
+            validate_physical_mapping_registries(
+                &BTreeMap::from([(known, mapping)]),
+                &BTreeMap::from([(known, SchemaVersionAlias(1))]),
+            ),
+            Err(Error::InvalidStoredValue(
+                "physical enum registry references an unknown schema"
             ))
         ));
     }

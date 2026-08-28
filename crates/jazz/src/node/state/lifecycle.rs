@@ -1757,7 +1757,7 @@ where
             .await?
         {
             let record = raw.record();
-            let mapping: SchemaPhysicalMapping = serde_json::from_slice(
+            let mapping = codec::decode_physical_mapping(
                 record.get_bytes(SchemaVersionAliasRowRecord::FIELD_PHYSICAL_MAPPING_IDX)?,
             )?;
             let schema_version =
@@ -1787,6 +1787,7 @@ where
             physical_mappings.insert(schema_version, mapping);
         }
         validate_physical_variant_cases(&physical_mappings, &schema_version_aliases)?;
+        validate_physical_mapping_registries(&physical_mappings, &schema_version_aliases)?;
         let mut next_physical_table_id = 1;
         let mut next_physical_column_id = 1;
         for mapping in physical_mappings.values() {

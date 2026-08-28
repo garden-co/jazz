@@ -161,6 +161,104 @@ pub(super) fn validate_physical_variant_cases(
     Ok(())
 }
 
+/// Validate physical mapping references after all local schema aliases are
+/// recovered. The bytes codec owns structural canonicality; this pass owns
+/// cross-record references and semantic registry order.
+pub(super) fn validate_physical_mapping_registries(
+    mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    for mapping in mappings.values() {
+        let mut table_ids = BTreeSet::new();
+        for table in mapping.tables.values() {
+            if !table_ids.insert(table.table_id) {
+                return Err(Error::InvalidStoredValue(
+                    "physical mapping aliases multiple tables to one id",
+                ));
+            }
+            let columns = table.columns.values().copied().collect::<BTreeSet<_>>();
+            if columns.len() != table.columns.len() {
+                return Err(Error::InvalidStoredValue(
+                    "physical table maps multiple columns to one id",
+                ));
+            }
+            for field in table.variant_cases.iter().flat_map(|case| &case.fields) {
+                if !table.columns.contains_key(field) {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table variant contains an unknown field",
+                    ));
+                }
+            }
+            validate_enum_registries(&columns, &table.scalar_enum_cases, aliases)?;
+            validate_enum_registries(&columns, &table.payload_enum_cases, aliases)?;
+            validate_nested_enum_registries(&columns, &table.nested_scalar_enum_cases, aliases)?;
+            validate_nested_enum_registries(&columns, &table.nested_payload_enum_cases, aliases)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_enum_registries(
+    columns: &BTreeSet<PhysicalColumnId>,
+    registries: &BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    for (column, cases) in registries {
+        if !columns.contains(column) {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry references an unknown column",
+            ));
+        }
+        validate_enum_cases(cases, aliases)?;
+    }
+    Ok(())
+}
+
+fn validate_nested_enum_registries(
+    columns: &BTreeSet<PhysicalColumnId>,
+    registries: &BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    for (column, paths) in registries {
+        if !columns.contains(column) {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry references an unknown column",
+            ));
+        }
+        for cases in paths.values() {
+            validate_enum_cases(cases, aliases)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_enum_cases(
+    cases: &[GlobalScalarEnumCaseId],
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
+    for case in cases {
+        if !aliases.contains_key(&case.introducing_schema) {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry references an unknown schema",
+            ));
+        }
+        if !seen.insert(case.clone()) {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry repeats a case identity",
+            ));
+        }
+    }
+    if cases.windows(2).any(|pair| {
+        compare_scalar_enum_cases(aliases, &pair[0], &pair[1]).is_gt()
+    }) {
+        return Err(Error::InvalidStoredValue(
+            "physical enum registry has non-canonical case order",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn physical_history_binding(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,

@@ -142,6 +142,13 @@ _Further invariant._ `INV-LOWER-27` — local enum tags are only interned
 representations of schema-qualified case identities; simultaneous sibling ordinal
 allocations cannot alias one another.
 
+_Further invariant._ `INV-LOWER-29` — durable physical mappings use the
+versioned canonical binary codec described in ch. 10. Local physical ids are
+opaque storage handles, while every scalar, payload, and nested enum registry
+persists schema-qualified case identities in authoritative catalogue order;
+recovery rejects malformed, non-canonical, trailing, or unknown-reference
+metadata rather than deriving identity from names, JSON map order, or arrival.
+
 _Further invariant._ `INV-LOWER-28` — enum compatibility is evaluated at the
 source boundary immediately after Global/Ahead currentness selection (or after
 the equivalent historical/branch-key winner materialization), so one-shot and

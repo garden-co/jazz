@@ -499,6 +499,285 @@ const CATALOGUE_SCHEMA_VERSION: u8 = 1;
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
+// This is deliberately independent of the catalogue-record payload versions:
+// physical mappings live in the fixed `jazz_schema_versions` carrier rather
+// than in `jazz_catalogue`.
+const PHYSICAL_MAPPING_VERSION: u8 = 1;
+
+/// Encode node-local physical storage metadata as one typed, canonical value.
+///
+/// The mapping is not a wire identity: table and column ids are opaque local
+/// handles.  The schema-qualified enum case identities inside it are semantic,
+/// and their vector order is the already-authoritative physical tag order.
+pub(super) fn encode_physical_mapping(mapping: &SchemaPhysicalMapping) -> Result<Vec<u8>, Error> {
+    let mut payload = vec![PHYSICAL_MAPPING_VERSION];
+    put_len(
+        &mut payload,
+        mapping.tables.len(),
+        "physical mapping table count",
+    )?;
+    for (table_name, table) in &mapping.tables {
+        put_string(&mut payload, table_name, "physical mapping table name")?;
+        payload.extend_from_slice(&table.table_id.0.to_le_bytes());
+        put_len(
+            &mut payload,
+            table.columns.len(),
+            "physical mapping column count",
+        )?;
+        for (column_name, column_id) in &table.columns {
+            put_string(&mut payload, column_name, "physical mapping column name")?;
+            payload.extend_from_slice(&column_id.0.to_le_bytes());
+        }
+        put_len(
+            &mut payload,
+            table.variant_cases.len(),
+            "physical mapping variant case count",
+        )?;
+        for case in &table.variant_cases {
+            payload.extend_from_slice(&case.tag.to_le_bytes());
+            put_len(
+                &mut payload,
+                case.fields.len(),
+                "physical mapping variant field count",
+            )?;
+            for field in &case.fields {
+                put_string(&mut payload, field, "physical mapping variant field")?;
+            }
+        }
+        encode_direct_enum_registries(&mut payload, &table.scalar_enum_cases)?;
+        encode_direct_enum_registries(&mut payload, &table.payload_enum_cases)?;
+        encode_nested_enum_registries(&mut payload, &table.nested_scalar_enum_cases)?;
+        encode_nested_enum_registries(&mut payload, &table.nested_payload_enum_cases)?;
+    }
+    Ok(payload)
+}
+
+pub(super) fn decode_physical_mapping(payload: &[u8]) -> Result<SchemaPhysicalMapping, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let mut cursor = CataloguePayloadCursor::new(payload, PHYSICAL_MAPPING_VERSION, CONTEXT)?;
+    let table_count = cursor.u32()?;
+    let mut tables = BTreeMap::new();
+    let mut previous_table = None;
+    for _ in 0..table_count {
+        let table_name = cursor.string()?;
+        require_strictly_increasing(previous_table.as_deref(), &table_name, CONTEXT)?;
+        previous_table = Some(table_name.clone());
+        let table_id = PhysicalTableId(cursor.u64()?);
+        if table_id.0 == 0 {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        let column_count = cursor.u32()?;
+        let mut columns = BTreeMap::new();
+        let mut previous_column = None;
+        for _ in 0..column_count {
+            let name = cursor.string()?;
+            require_strictly_increasing(previous_column.as_deref(), &name, CONTEXT)?;
+            previous_column = Some(name.clone());
+            let id = PhysicalColumnId(cursor.u64()?);
+            if id.0 == 0 || columns.insert(name, id).is_some() {
+                return Err(Error::InvalidStoredValue(CONTEXT));
+            }
+        }
+        let variant_count = cursor.u32()?;
+        // Do not reserve an attacker-controlled count before checking that
+        // the corresponding entries exist in the exact-consumed payload.
+        let mut variant_cases = Vec::new();
+        for _ in 0..variant_count {
+            let tag = cursor.u32()?;
+            let field_count = cursor.u32()?;
+            let mut fields = BTreeSet::new();
+            let mut previous_field = None;
+            for _ in 0..field_count {
+                let field = cursor.string()?;
+                require_strictly_increasing(previous_field.as_deref(), &field, CONTEXT)?;
+                previous_field = Some(field.clone());
+                if !fields.insert(field) {
+                    return Err(Error::InvalidStoredValue(CONTEXT));
+                }
+            }
+            variant_cases.push(PhysicalVariantCase { tag, fields });
+        }
+        let scalar_enum_cases = decode_direct_enum_registries(&mut cursor)?;
+        let payload_enum_cases = decode_direct_enum_registries(&mut cursor)?;
+        let nested_scalar_enum_cases = decode_nested_enum_registries(&mut cursor)?;
+        let nested_payload_enum_cases = decode_nested_enum_registries(&mut cursor)?;
+        if tables
+            .insert(
+                table_name,
+                TablePhysicalMapping {
+                    table_id,
+                    columns,
+                    variant_cases,
+                    scalar_enum_cases,
+                    payload_enum_cases,
+                    nested_scalar_enum_cases,
+                    nested_payload_enum_cases,
+                },
+            )
+            .is_some()
+        {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+    }
+    cursor.finish()?;
+    Ok(SchemaPhysicalMapping { tables })
+}
+
+fn put_len(payload: &mut Vec<u8>, length: usize, context: &'static str) -> Result<(), Error> {
+    let length = u32::try_from(length).map_err(|_| Error::InvalidStoredValue(context))?;
+    payload.extend_from_slice(&length.to_le_bytes());
+    Ok(())
+}
+
+fn put_string(payload: &mut Vec<u8>, value: &str, context: &'static str) -> Result<(), Error> {
+    put_len(payload, value.len(), context)?;
+    payload.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn encode_case_id(payload: &mut Vec<u8>, case: &GlobalScalarEnumCaseId) {
+    payload.extend_from_slice(case.introducing_schema.0.as_bytes());
+    payload.push(case.introducing_ordinal);
+}
+
+fn encode_cases(payload: &mut Vec<u8>, cases: &[GlobalScalarEnumCaseId]) -> Result<(), Error> {
+    put_len(payload, cases.len(), "physical mapping enum case count")?;
+    for case in cases {
+        encode_case_id(payload, case);
+    }
+    Ok(())
+}
+
+fn encode_direct_enum_registries(
+    payload: &mut Vec<u8>,
+    registries: &BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
+) -> Result<(), Error> {
+    put_len(
+        payload,
+        registries.len(),
+        "physical mapping direct registry count",
+    )?;
+    for (column_id, cases) in registries {
+        payload.extend_from_slice(&column_id.0.to_le_bytes());
+        encode_cases(payload, cases)?;
+    }
+    Ok(())
+}
+
+fn encode_nested_enum_registries(
+    payload: &mut Vec<u8>,
+    registries: &BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>,
+) -> Result<(), Error> {
+    put_len(
+        payload,
+        registries.len(),
+        "physical mapping nested registry count",
+    )?;
+    for (column_id, paths) in registries {
+        payload.extend_from_slice(&column_id.0.to_le_bytes());
+        put_len(
+            payload,
+            paths.len(),
+            "physical mapping nested registry path count",
+        )?;
+        for (path, cases) in paths {
+            put_string(payload, path, "physical mapping nested registry path")?;
+            encode_cases(payload, cases)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_case_id(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<GlobalScalarEnumCaseId, Error> {
+    Ok(GlobalScalarEnumCaseId {
+        introducing_schema: SchemaVersionId(cursor.uuid()?),
+        introducing_ordinal: cursor.u8()?,
+    })
+}
+
+fn decode_cases(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let count = cursor.u32()?;
+    // The count is untrusted durable input; grow only after each full case is
+    // present rather than reserving arbitrary memory for a truncated payload.
+    let mut cases = Vec::new();
+    let mut unique = BTreeSet::new();
+    for _ in 0..count {
+        let case = decode_case_id(cursor)?;
+        if !unique.insert(case.clone()) {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        cases.push(case);
+    }
+    Ok(cases)
+}
+
+fn decode_direct_enum_registries(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let count = cursor.u32()?;
+    let mut registries = BTreeMap::new();
+    let mut previous = None;
+    for _ in 0..count {
+        let id = PhysicalColumnId(cursor.u64()?);
+        if id.0 == 0 || previous.is_some_and(|previous| id <= previous) {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        previous = Some(id);
+        if registries.insert(id, decode_cases(cursor)?).is_some() {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+    }
+    Ok(registries)
+}
+
+fn decode_nested_enum_registries(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let count = cursor.u32()?;
+    let mut registries = BTreeMap::new();
+    let mut previous_column = None;
+    for _ in 0..count {
+        let id = PhysicalColumnId(cursor.u64()?);
+        if id.0 == 0 || previous_column.is_some_and(|previous| id <= previous) {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        previous_column = Some(id);
+        let path_count = cursor.u32()?;
+        let mut paths = BTreeMap::new();
+        let mut previous_path = None;
+        for _ in 0..path_count {
+            let path = cursor.string()?;
+            require_strictly_increasing(previous_path.as_deref(), &path, CONTEXT)?;
+            previous_path = Some(path.clone());
+            if paths.insert(path, decode_cases(cursor)?).is_some() {
+                return Err(Error::InvalidStoredValue(CONTEXT));
+            }
+        }
+        if registries.insert(id, paths).is_some() {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+    }
+    Ok(registries)
+}
+
+fn require_strictly_increasing(
+    previous: Option<&str>,
+    value: &str,
+    context: &'static str,
+) -> Result<(), Error> {
+    if previous.is_some_and(|previous| previous >= value) {
+        Err(Error::InvalidStoredValue(context))
+    } else {
+        Ok(())
+    }
+}
 
 pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>, Error> {
     let public_schema = serde_json::to_vec(schema.schema.public_schema())
@@ -656,9 +935,25 @@ impl<'a> CataloguePayloadCursor<'a> {
         Ok(u64::from_le_bytes(bytes))
     }
 
-    fn sized_bytes(&mut self) -> Result<&'a [u8], Error> {
+    fn u32(&mut self) -> Result<u32, Error> {
         let bytes: [u8; 4] = self.bytes(4)?.try_into().expect("exact u32 width");
-        self.bytes(u32::from_le_bytes(bytes) as usize)
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u8(&mut self) -> Result<u8, Error> {
+        Ok(self.bytes(1)?[0])
+    }
+
+    fn string(&mut self) -> Result<String, Error> {
+        let bytes = self.sized_bytes()?;
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| Error::InvalidStoredValue(self.context))
+    }
+
+    fn sized_bytes(&mut self) -> Result<&'a [u8], Error> {
+        let length = self.u32()? as usize;
+        self.bytes(length)
     }
 
     fn finish(self) -> Result<(), Error> {
@@ -683,6 +978,109 @@ mod catalogue_payload_tests {
 
     fn schema_id(value: u128) -> SchemaVersionId {
         SchemaVersionId(uuid::Uuid::from_u128(value))
+    }
+
+    fn mapping_fixture() -> SchemaPhysicalMapping {
+        let case = |byte, ordinal| GlobalScalarEnumCaseId {
+            introducing_schema: SchemaVersionId(uuid::Uuid::from_bytes([byte; 16])),
+            introducing_ordinal: ordinal,
+        };
+        SchemaPhysicalMapping {
+            tables: BTreeMap::from([(
+                "items".to_owned(),
+                TablePhysicalMapping {
+                    table_id: PhysicalTableId(7),
+                    columns: BTreeMap::from([("state".to_owned(), PhysicalColumnId(11))]),
+                    variant_cases: vec![PhysicalVariantCase {
+                        tag: 3,
+                        fields: BTreeSet::from(["state".to_owned()]),
+                    }],
+                    scalar_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        vec![case(0x11, 2)],
+                    )]),
+                    payload_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        vec![case(0x22, 1)],
+                    )]),
+                    nested_scalar_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        BTreeMap::from([("root/array".to_owned(), vec![case(0x33, 0)])]),
+                    )]),
+                    nested_payload_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        BTreeMap::from([("root/case/canonical".to_owned(), vec![case(0x44, 3)])]),
+                    )]),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn physical_mapping_payload_has_exact_typed_v1_fixture_and_round_trips() {
+        let mapping = mapping_fixture();
+        let expected = [
+            &[1, 1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"items",
+            &[7, 0, 0, 0, 0, 0, 0, 0],
+            &[1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"state",
+            &[11, 0, 0, 0, 0, 0, 0, 0],
+            &[1, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"state",
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
+            &[0x11; 16],
+            &[2],
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
+            &[0x22; 16],
+            &[1],
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 10, 0, 0, 0][..],
+            b"root/array",
+            &[1, 0, 0, 0][..],
+            &[0x33; 16],
+            &[0],
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 19, 0, 0, 0][..],
+            b"root/case/canonical",
+            &[1, 0, 0, 0][..],
+            &[0x44; 16],
+            &[3],
+        ]
+        .concat();
+        let encoded = encode_physical_mapping(&mapping).unwrap();
+        assert_eq!(encoded, expected);
+        assert_eq!(decode_physical_mapping(&encoded).unwrap(), mapping);
+    }
+
+    #[test]
+    fn physical_mapping_payload_rejects_unknown_malformed_trailing_and_noncanonical_forms() {
+        let valid = encode_physical_mapping(&mapping_fixture()).unwrap();
+        for malformed in [
+            vec![],
+            vec![2],
+            valid[..valid.len() - 1].to_vec(),
+            [valid.clone(), vec![0]].concat(),
+        ] {
+            assert!(
+                decode_physical_mapping(&malformed).is_err(),
+                "{malformed:?}"
+            );
+        }
+
+        // Two otherwise empty tables deliberately appear in reverse byte order.
+        // Decoder rejection is sensitive to replacing its strict-order check
+        // with BTreeMap insertion (which would silently normalize the bytes).
+        let noncanonical = [
+            &[1, 2, 0, 0, 0, 1, 0, 0, 0][..],
+            b"z",
+            &[1, 0, 0, 0, 0, 0, 0, 0],
+            &[0; 20],
+            &[1, 0, 0, 0],
+            b"a",
+            &[2, 0, 0, 0, 0, 0, 0, 0],
+            &[0; 20],
+        ]
+        .concat();
+        assert!(decode_physical_mapping(&noncanonical).is_err());
     }
 
     #[test]

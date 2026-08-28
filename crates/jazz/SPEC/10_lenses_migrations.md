@@ -276,6 +276,20 @@ rollback exposure. The legacy logical `(table, schema-version)` registry
 `jazz_partitions` no longer exists; durable `jazz_schema_versions` mappings are
 the complete reopen input.
 
+`jazz_schema_versions.physical_mapping` is a typed, versioned, exact-consumed
+binary payload, not JSON or a Rust-layout serialization. It canonically orders
+logical table names, column names, registry column ids, nested occurrence paths,
+and variant fields; malformed UTF-8, duplicate/out-of-order keys, unknown format
+versions, truncation, and trailing bytes fail closed at catalogue recovery.
+The stored `PhysicalTableId` and `PhysicalColumnId` values remain opaque
+**node-local** storage handles: their numerical allocation order and the names
+used to find them are never wire or semantic identities. A schema-qualified enum
+case is instead `(introducing SchemaVersionId, introducing authored ordinal)`;
+the durable registry vector is its authoritative physical-tag order, validated
+against the recovered alias/catalogue prefix and never inferred from map order,
+local ordinal, or receipt arrival order. There is intentionally no legacy JSON
+reader or in-place migration for this pre-freeze format.
+
 Once activation begins, any registration or Active-marker failure puts the node
 in a fail-stop catalogue state: it must not continue serving against the
 temporarily installed in-memory schema. Reopen resumes the durable Staged
