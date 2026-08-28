@@ -68,7 +68,6 @@ fn main() {
 
         let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -79,10 +78,8 @@ fn main() {
         else {
             panic!("expected one view update");
         };
-        let mut expanded_bundles = version_bundles.clone();
-        expanded_bundles.extend(
-            expand_version_carriers(version_carriers).expect("expand benchmark version carriers"),
-        );
+        let expanded_bundles =
+            expand_version_carriers(version_carriers).expect("expand benchmark version carriers");
         let emitted_bundles = expanded_bundles.len();
         let expected_bundles = rows - known_count;
         assert_eq!(emitted_bundles, expected_bundles);

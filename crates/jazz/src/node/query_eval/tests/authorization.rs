@@ -801,13 +801,12 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         )
         .expect("serve normal-member message include/order snapshot")
         .expect("normal-member message include/order snapshot is ready");
-    let normal_versions = normal_update
-        .expand_version_carriers_for_receive()
-        .expect("expand normal-member message include/order payloads");
     if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        version_bundles, ..
-    }) = &normal_versions
+        version_carriers, ..
+    }) = &normal_update
     {
+        let version_bundles = crate::protocol::expand_version_carriers(version_carriers)
+            .expect("expand normal-member message include/order payloads");
         let (profile_bundle, profile_version) = version_bundles
             .iter()
             .find_map(|bundle| {
@@ -837,7 +836,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         panic!("expected normal-member view update")
     }
     let missing = normal_client
-        .missing_known_state_row_version_refs(&normal_versions)
+        .missing_known_state_row_version_refs(&normal_update)
         .expect("inspect normal-member message include/order repair requirements");
     assert!(
         missing.is_empty(),
@@ -860,7 +859,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             .expect("apply normal-member message include/order repair payloads");
     }
     normal_client
-        .apply_sync_message_settled(normal_versions)
+        .apply_sync_message_settled(normal_update)
         .expect("client applies normal-member message include/order snapshot");
     assert!(
         normal_client

@@ -758,7 +758,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let tx_b = commit_core_owner_fixture(&mut core, row_uuid, author_b, "owned by B", 11);
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        version_bundles,
+        version_carriers,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs, ..
@@ -770,7 +770,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     else {
         panic!("expected view update");
     };
-    assert!(version_bundles.is_empty());
+    assert!(version_carriers.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
     assert!(result_member_adds.is_empty());
     assert_eq!(

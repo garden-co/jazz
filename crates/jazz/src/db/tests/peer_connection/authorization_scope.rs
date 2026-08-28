@@ -858,7 +858,6 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             settled_through: GlobalTime(settled_through),
             reset_result_set: true,
             version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 opening_pending,
                 ..Default::default()

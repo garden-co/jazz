@@ -27,16 +27,9 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
-            version_bundles,
             ..
-        }) => {
-            let mut bundles = version_bundles.clone();
-            bundles.extend(
-                crate::protocol::expand_version_carriers(version_carriers)
-                    .expect("test update carriers should expand"),
-            );
-            bundles
-        }
+        }) => crate::protocol::expand_version_carriers(version_carriers)
+            .expect("test update carriers should expand"),
         _ => Vec::new(),
     }
 }
@@ -963,7 +956,6 @@ impl PerNodeKnowledge {
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -981,7 +973,6 @@ impl PerNodeKnowledge {
         // instruction for the Plan 5 close-out seed 2210401 diagnosis.
         let empty_reset = *reset_result_set
             && version_carriers.is_empty()
-            && version_bundles.is_empty()
             && peer_payload_inventory.complete_tx_payloads.is_empty()
             && result_member_adds.is_empty()
             && result_member_removes.is_empty()
@@ -1084,7 +1075,6 @@ fn assert_global_rows_match_known_oracle(
 fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<RocksDbStorage>) {
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        version_bundles: _,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,

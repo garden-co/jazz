@@ -54,8 +54,10 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                version_bundles,
+            )
+            .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
             opening_pending: false,
@@ -201,8 +203,10 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                version_bundles,
+            )
+            .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
             opening_pending: false,
@@ -251,8 +255,10 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                version_bundles,
+            )
+            .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
             opening_pending: false,
@@ -279,7 +285,6 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             defer_settlement: false,
             reset_result_set: false,
             version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],
             authorization_progress: None,
             opening_pending: false,

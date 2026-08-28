@@ -1563,7 +1563,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
-        version_bundles,
+        version_carriers,
         ..
     }) = update
     else {
@@ -1571,7 +1571,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
     };
     assert!(reset_result_set);
     assert!(result_member_adds.is_empty());
-    assert!(version_bundles.is_empty());
+    assert!(version_carriers.is_empty());
 }
 
 #[test]

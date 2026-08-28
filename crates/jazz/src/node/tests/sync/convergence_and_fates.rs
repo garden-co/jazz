@@ -19,7 +19,6 @@ fn view_updates_drop_unknown_usage_site_bindings() {
             settled_through: GlobalTime(0),
             reset_result_set: false,
             version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
@@ -524,7 +523,6 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             settled_through: GlobalTime(0),
             reset_result_set: true,
             version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 opening_pending: true,
                 ..Default::default()
@@ -546,8 +544,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: true,
-            version_carriers: Vec::new(),
-            version_bundles: vec![VersionBundle {
+            version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
                 scope: crate::protocol::VersionBundleScope::CompleteTransaction,
                 tx: Transaction {
                     tx_id: bad_tx,
@@ -566,7 +563,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(7)),
                 durability: DurabilityTier::Edge,
-            }],
+            })],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 opening_pending: false,
                 ..Default::default()
@@ -597,7 +594,6 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             settled_through: GlobalTime(1),
             reset_result_set: true,
             version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),

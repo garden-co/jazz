@@ -125,7 +125,6 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
                 settled_through: GlobalTime(1),
                 reset_result_set: true,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -646,8 +645,10 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             subscription,
             settled_through: GlobalTime(1),
             reset_result_set: true,
-            version_carriers: Vec::new(),
-            version_bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                version_bundles,
+            )
+            .expect("test bundles form valid carriers"),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),

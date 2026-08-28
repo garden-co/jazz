@@ -3136,7 +3136,6 @@ where
                                     settled_through: self.node.borrow().committed_global_time(),
                                     reset_result_set: true,
                                     version_carriers: Vec::new(),
-                                    version_bundles: Vec::new(),
                                     peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                                         opening_pending: true,
                                         ..Default::default()
@@ -3953,7 +3952,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             settled_through,
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -3966,7 +3964,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             defer_settlement: false,
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: peer_payload_inventory.authorization_progress,
             opening_pending: peer_payload_inventory.opening_pending,
@@ -4754,7 +4751,6 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             settled_through,
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -4766,10 +4762,9 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
-            version_bundles.len()
-                + expand_version_carriers(version_carriers)
-                    .map(|bundles| bundles.len())
-                    .unwrap_or_default(),
+            expand_version_carriers(version_carriers)
+                .map(|bundles| bundles.len())
+                .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
             result_member_adds.len(),
             result_member_removes.len(),
@@ -5212,7 +5207,6 @@ pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -5222,7 +5216,6 @@ pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
         }) => {
             !reset_result_set
                 && version_carriers.is_empty()
-                && version_bundles.is_empty()
                 && peer_payload_inventory.complete_tx_payloads.is_empty()
                 && result_member_adds.is_empty()
                 && result_member_removes.is_empty()

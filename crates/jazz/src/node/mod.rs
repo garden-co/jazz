@@ -1819,7 +1819,6 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) defer_settlement: bool,
     pub(crate) reset_result_set: bool,
     pub(crate) version_carriers: Vec<VersionCarrier>,
-    pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
     pub(crate) authorization_progress: Option<u64>,
     pub(crate) opening_pending: bool,

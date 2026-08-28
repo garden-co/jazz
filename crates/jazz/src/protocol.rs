@@ -237,8 +237,6 @@ pub struct ViewUpdatePayload {
     pub reset_result_set: bool,
     /// Compact carriers for versions referenced by this update.
     pub version_carriers: Vec<VersionCarrier>,
-    /// Explicit version bundles required by this update.
-    pub version_bundles: Vec<VersionBundle>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
     /// Result members added by the update.
@@ -600,20 +598,6 @@ impl SyncMessage {
             Self::ViewUpdate(view) | Self::AuthorizationScopeView { view, .. } => Some(view),
             _ => None,
         }
-    }
-
-    /// Expand packed view-update carriers into `version_bundles` for legacy paths/tests.
-    pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
-        if let Self::ViewUpdate(ViewUpdatePayload {
-            version_carriers,
-            version_bundles,
-            ..
-        }) = &mut self
-        {
-            version_bundles.extend(expand_version_carriers(version_carriers)?);
-            version_carriers.clear();
-        }
-        Ok(self)
     }
 }
 
@@ -1211,7 +1195,7 @@ pub struct VersionBundleRef<'a> {
 }
 
 impl<'a> VersionBundleRef<'a> {
-    /// Materialize this borrowed view into the legacy owned bundle shape.
+    /// Materialize this borrowed view into an owned bundle.
     pub fn to_owned_bundle(self) -> VersionBundle {
         VersionBundle {
             tx: self.tx.clone(),

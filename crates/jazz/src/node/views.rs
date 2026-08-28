@@ -145,12 +145,10 @@ fn validate_version_subset(
     Ok(())
 }
 
-fn version_bundle_refs_for_carriers<'a>(
-    version_bundles: &'a [VersionBundle],
-    version_carriers: &'a [VersionCarrier],
-) -> Result<Vec<VersionBundleRef<'a>>, Error> {
-    let mut refs = Vec::with_capacity(version_bundles.len() + version_carriers.len());
-    refs.extend(version_bundles.iter().map(VersionBundle::as_ref));
+fn version_bundle_refs_for_carriers(
+    version_carriers: &[VersionCarrier],
+) -> Result<Vec<VersionBundleRef<'_>>, Error> {
+    let mut refs = Vec::with_capacity(version_carriers.len());
     for carrier in version_carriers {
         refs.extend(
             carrier
@@ -921,7 +919,6 @@ where
                 settled_through: self.clock.committed_global_time,
                 reset_result_set: false,
                 version_carriers,
-                version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: peer_payload_inventory_refs,
                     authorization_progress: None,
@@ -970,10 +967,7 @@ where
             if update.reset_result_set {
                 initial_hydration_binding_views.insert(binding_view_key);
             }
-            let version_bundle_refs = version_bundle_refs_for_carriers(
-                &update.version_bundles,
-                &update.version_carriers,
-            )?;
+            let version_bundle_refs = version_bundle_refs_for_carriers(&update.version_carriers)?;
             all_bundle_refs.extend(version_bundle_refs.iter().copied());
             let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
             if update.reset_result_set
@@ -1085,9 +1079,7 @@ where
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
         for update in updates {
-            for bundle in
-                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
-            {
+            for bundle in version_bundle_refs_for_carriers(&update.version_carriers)? {
                 // This preflight runs before bulk-reset selection, alias
                 // allocation, clock advancement, or receiver staging. The
                 // shared transaction boundary keeps view payloads from being
@@ -1110,7 +1102,6 @@ where
             defer_settlement,
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_complete_tx_payload_refs,
             authorization_progress,
             opening_pending,
@@ -1134,8 +1125,7 @@ where
                             if matches!(payload.member, ResultMemberEntry::Synthetic { .. })
                     )
                 });
-        let version_bundle_refs =
-            version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
+        let version_bundle_refs = version_bundle_refs_for_carriers(&version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
             Ok(binding_view_key) => binding_view_key,
             Err(Error::InvalidStoredValue(
@@ -1701,9 +1691,7 @@ where
         &self,
         update: &ViewUpdateParts,
     ) -> Result<(), Error> {
-        for bundle in
-            version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
-        {
+        for bundle in version_bundle_refs_for_carriers(&update.version_carriers)? {
             validate_received_view_bundle_global_time_durability(
                 bundle.global_time,
                 bundle.durability,

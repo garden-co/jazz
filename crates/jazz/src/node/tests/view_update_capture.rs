@@ -528,8 +528,8 @@ fn assert_retraction_without_replacement_leak(
     old_tx_id: TxId,
     unreadable_tx_id: TxId,
 ) {
+    let version_bundles = version_bundles_for_update(update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,

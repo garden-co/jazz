@@ -499,8 +499,8 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
             settled_through,
             defer_settlement: false,
             reset_result_set,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
@@ -558,8 +558,8 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
             subscription,
             settled_through,
             reset_result_set,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -712,8 +712,8 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
             settled_through,
             defer_settlement: false,
             reset_result_set: true,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,
@@ -788,8 +788,8 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles: bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
             opening_pending: false,

@@ -15,12 +15,10 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 14 combines the v13 Groove canonical large-scalar descriptor and
-/// canonical `[iss,sub]` author encoding with Unix-millisecond public row
-/// provenance. The packed HLC remains internal ordering state and is never
-/// protocol data. This is an intentional breaking baseline: a v13 peer would
-/// interpret provenance payloads differently, so negotiation rejects it.
-pub const WIRE_PROTOCOL_VERSION: u16 = 14;
+/// Version 15 removes the transitional duplicate `ViewUpdate.version_bundles`
+/// field. Version payloads now have one canonical representation through
+/// `version_carriers`; negotiation rejects v14 before payload decoding.
+pub const WIRE_PROTOCOL_VERSION: u16 = 15;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -743,7 +741,7 @@ mod tests {
         ChunkRequestEntry, PermissionAdviceAction, PermissionAdviceRequestId, RegisterShapeOptions,
         ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
         VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
-        build_version_bundle_runs_from_singletons,
+        build_version_bundle_runs_from_singletons, expand_version_carriers,
     };
     use crate::protocol_limits::{MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_WIRE_FRAME_BYTES};
     use crate::query::{BindingId, Query, ShapeId};
@@ -1114,7 +1112,7 @@ mod tests {
     fn shared_view_update_payload_preserves_postcard_shape() {
         #[allow(dead_code)]
         #[derive(serde::Serialize)]
-        enum LegacySyncMessage {
+        enum FlatSyncMessage {
             V0,
             V1,
             V2,
@@ -1134,7 +1132,6 @@ mod tests {
                 settled_through: GlobalTime,
                 reset_result_set: bool,
                 version_carriers: Vec<VersionCarrier>,
-                version_bundles: Vec<VersionBundle>,
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory,
                 result_member_adds: Vec<crate::protocol::ResultMemberEntry>,
                 result_member_removes: Vec<crate::protocol::ResultMemberEntry>,
@@ -1147,12 +1144,11 @@ mod tests {
         let SyncMessage::ViewUpdate(payload) = view_update_with_carriers(Vec::new()) else {
             unreachable!()
         };
-        let legacy = LegacySyncMessage::ViewUpdate {
+        let flat = FlatSyncMessage::ViewUpdate {
             subscription: payload.subscription,
             settled_through: payload.settled_through,
             reset_result_set: payload.reset_result_set,
             version_carriers: payload.version_carriers.clone(),
-            version_bundles: payload.version_bundles.clone(),
             peer_payload_inventory: payload.peer_payload_inventory.clone(),
             result_member_adds: payload.result_member_adds.clone(),
             result_member_removes: payload.result_member_removes.clone(),
@@ -1164,7 +1160,7 @@ mod tests {
 
         assert_eq!(
             encode_sync_message(&current).unwrap(),
-            postcard::to_allocvec(&legacy).unwrap(),
+            postcard::to_allocvec(&flat).unwrap(),
             "a newtype struct is postcard-transparent relative to the former struct variant"
         );
     }
@@ -1188,17 +1184,13 @@ mod tests {
         assert_eq!(decode_sync_message(&encoded).unwrap(), message);
 
         assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
-        let expanded = message.expand_version_carriers_for_receive().unwrap();
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            version_carriers,
-            version_bundles,
-            ..
-        }) = expanded
+            version_carriers, ..
+        }) = message
         else {
             panic!("expected view update");
         };
-        assert!(version_carriers.is_empty());
-        assert_eq!(version_bundles, bundles);
+        assert_eq!(expand_version_carriers(&version_carriers).unwrap(), bundles);
     }
 
     #[test]
@@ -1211,14 +1203,13 @@ mod tests {
         let encoded = encode_sync_message(&message).unwrap();
 
         assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
-        let expanded = message.expand_version_carriers_for_receive().unwrap();
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-            version_bundles, ..
-        }) = expanded
+            version_carriers, ..
+        }) = message
         else {
             panic!("expected view update");
         };
-        assert_eq!(version_bundles, bundles);
+        assert_eq!(expand_version_carriers(&version_carriers).unwrap(), bundles);
     }
 
     #[test]
@@ -1333,7 +1324,6 @@ mod tests {
             settled_through: GlobalTime(500),
             reset_result_set: false,
             version_carriers,
-            version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
@@ -1607,7 +1597,6 @@ mod tests {
                     settled_through: GlobalTime(10_000 + i),
                     reset_result_set: false,
                     version_carriers: Vec::new(),
-                    version_bundles: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     result_member_adds: vec![member],
                     result_member_removes: Vec::new(),
@@ -1695,7 +1684,6 @@ mod tests {
                 settled_through: GlobalTime(7),
                 reset_result_set: true,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: None,
@@ -1772,7 +1760,6 @@ mod tests {
             settled_through: GlobalTime(7),
             reset_result_set: true,
             version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: vec![tx_id],
                 authorization_progress: None,
@@ -1835,11 +1822,11 @@ mod tests {
     }
 
     #[test]
-    fn wire_v14_rejects_v13_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 14);
+    fn wire_v15_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 15);
         let remote = WireHello {
-            min_protocol_version: 13,
-            max_protocol_version: 13,
+            min_protocol_version: 14,
+            max_protocol_version: 14,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD,
             role: WirePeerRole::Core,
             authority: None,
@@ -1858,24 +1845,24 @@ mod tests {
     }
 
     #[test]
-    fn wire_v14_rejects_v12_peer_before_payload_decode() {
-        let v12_peer = WireHello {
-            min_protocol_version: 12,
-            max_protocol_version: 12,
+    fn wire_v15_rejects_v14_peer_before_payload_decode() {
+        let v14_peer = WireHello {
+            min_protocol_version: 14,
+            max_protocol_version: 14,
             features: current_wire_features(),
             role: WirePeerRole::Core,
             authority: None,
         };
 
         let error = negotiate_wire(
-            &v12_peer,
+            &v14_peer,
             WIRE_PROTOCOL_VERSION,
             WIRE_PROTOCOL_VERSION,
             current_wire_features(),
         )
-        .expect_err("v12 encoding must fail during the v14 handshake");
+        .expect_err("v14 encoding must fail during the v15 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 14);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 15);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

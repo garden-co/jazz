@@ -390,7 +390,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 settled_through: GlobalTime(7),
                 reset_result_set: true,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: Some(9),
@@ -411,7 +410,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 settled_through: GlobalTime(8),
                 reset_result_set: false,
                 version_carriers: mixed_version_carriers(schema_version, author),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -428,7 +426,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 settled_through: GlobalTime(9),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -651,7 +648,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v14",
+        fixture_set: "jazz-wire-message-frames-v15",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

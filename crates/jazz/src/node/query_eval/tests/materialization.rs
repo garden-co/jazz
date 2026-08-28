@@ -817,7 +817,6 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         version_carriers,
-        version_bundles,
         result_member_adds,
         result_member_removes,
         program_fact_adds,
@@ -863,11 +862,8 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         .count();
     assert_eq!(outgoing_contributor_adds, 1);
     assert_eq!(outgoing_contributor_removes, 1);
-    let mut replacement_bundles = version_bundles.clone();
-    replacement_bundles.extend(
-        crate::protocol::expand_version_carriers(version_carriers)
-            .expect("expand replacement contributor bundles"),
-    );
+    let replacement_bundles = crate::protocol::expand_version_carriers(version_carriers)
+        .expect("expand replacement contributor bundles");
     assert_eq!(
         replacement_bundles
             .iter()

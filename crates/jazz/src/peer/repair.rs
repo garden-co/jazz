@@ -134,7 +134,6 @@ impl PeerState {
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -144,7 +143,7 @@ impl PeerState {
             return;
         };
 
-        let singleton_bundles = view_update_singleton_bundles(version_carriers, version_bundles);
+        let singleton_bundles = view_update_singleton_bundles(version_carriers);
         self.metrics.view_updates_out += 1;
         self.metrics.version_bundles_out += singleton_bundles.len() as u64;
         self.metrics.complete_tx_payload_refs_out +=

@@ -422,7 +422,6 @@ impl PeerState {
                 settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -595,7 +594,6 @@ impl PeerState {
                 settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -672,9 +670,8 @@ impl PeerState {
             let bundle_count = match &update {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     version_carriers,
-                    version_bundles,
                     ..
-                }) => view_update_singleton_bundles(version_carriers, version_bundles).len(),
+                }) => view_update_singleton_bundles(version_carriers).len(),
                 _ => 0,
             };
             let drain_reads = drain_reads.expect("trace reads captured");
@@ -939,7 +936,6 @@ impl PeerState {
                     settled_through: binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set,
                     version_carriers: Vec::new(),
-                    version_bundles: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     result_member_adds: Vec::new(),
                     result_member_removes: previous_member_result_set.iter().cloned().collect(),
@@ -1137,9 +1133,8 @@ impl PeerState {
             let bundle_count = match &update {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     version_carriers,
-                    version_bundles,
                     ..
-                }) => view_update_singleton_bundles(version_carriers, version_bundles).len(),
+                }) => view_update_singleton_bundles(version_carriers).len(),
                 _ => 0,
             };
             let open_reads = open_reads.expect("trace reads captured");
@@ -1467,7 +1462,6 @@ impl PeerState {
                 ),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: source_adds,
                 result_member_removes: source_removes,

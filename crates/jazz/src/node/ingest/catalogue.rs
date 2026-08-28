@@ -76,26 +76,6 @@ where
             if self.catalogue_activation_failed {
                 return Err(Error::CatalogueActivationFailed);
             }
-            let message = message
-                .expand_version_carriers_for_receive()
-                .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
-            if message.validate_version_carriers().is_err() {
-                return match &message {
-                    SyncMessage::CommitUnit { tx, .. } => self
-                        .reject_malformed_commit(
-                            tx.clone(),
-                            "malformed version receipt".to_owned(),
-                        )
-                        .await
-                        .map(PublicationOutcome::settled),
-                    SyncMessage::ViewUpdate(_)
-                    | SyncMessage::AuthorizationScopeView { .. }
-                    | SyncMessage::RowVersionPayloads { .. } => Err(Error::MalformedViewUpdate(
-                        "malformed version receipt",
-                    )),
-                    _ => Err(Error::UnsupportedSyncMessage("malformed version receipt")),
-                };
-            }
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
@@ -294,7 +274,6 @@ where
                     settled_through,
                     reset_result_set,
                     version_carriers,
-                    version_bundles,
                     peer_payload_inventory,
                     result_member_adds,
                     result_member_removes,
@@ -308,7 +287,6 @@ where
                         defer_settlement: false,
                         reset_result_set,
                         version_carriers,
-                        version_bundles,
                         peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                         authorization_progress: peer_payload_inventory.authorization_progress,
                         opening_pending: peer_payload_inventory.opening_pending,
@@ -511,27 +489,6 @@ where
         } else {
             if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
                 Self::validate_migration_lens_between(lens, source, schema)?;
-                let identity_history = self.physical_identity_history_for_candidate(
-                    publication.schema.id,
-                    Some(publication.id),
-                );
-                let source_identities = &self
-                    .catalogue
-                    .physical_mappings
-                    .get(&lens.source)
-                    .ok_or(Error::InvalidCatalogueUpdate(
-                        "source physical identity manifest missing",
-                    ))?
-                    .identities;
-                source_identities
-                    .validate_evolution_to_with_history(
-                        &source.schema,
-                        &publication.physical_identities,
-                        &schema.schema,
-                        lens,
-                        identity_history,
-                    )
-                    .map_err(Error::InvalidCatalogueUpdate)?;
                 Self::validate_lineage_table_partition(
                     &source.schema,
                     &schema.schema,
@@ -621,27 +578,6 @@ where
                     &publication.new_tables,
                     &publication.dropped_tables,
                 )
-            })
-            .and_then(|()| {
-                let identity_history = self.physical_identity_history_for_candidate(
-                    publication.schema.id,
-                    Some(publication.id),
-                );
-                self.catalogue
-                    .physical_mappings
-                    .get(&publication.lens.source)
-                    .ok_or(Error::InvalidCatalogueUpdate(
-                        "source physical identity manifest missing",
-                    ))?
-                    .identities
-                    .validate_evolution_to_with_history(
-                        &source.schema,
-                        &publication.physical_identities,
-                        &publication.schema.schema,
-                        &publication.lens,
-                        identity_history,
-                    )
-                    .map_err(Error::InvalidCatalogueUpdate)
             });
             if validation.is_err() {
                 self.remove_pending_schema_lineage(next, publication.id)
@@ -667,7 +603,6 @@ where
             } else {
                 let fresh = allocate_provisional_physical_mapping(
                     &publication.schema.schema,
-                    publication.physical_identities.clone(),
                     &mut self.catalogue.next_physical_table_id,
                     &mut self.catalogue.next_physical_column_id,
                 )?;
@@ -1036,25 +971,7 @@ where
         source: &SchemaVersion,
         target: &SchemaVersion,
     ) -> Result<(), Error> {
-        let mut seen_sources = BTreeSet::new();
-        let mut seen_targets = BTreeSet::new();
-        for pair in lens.table_lenses.windows(2) {
-            if (&pair[0].source_table, &pair[0].target_table)
-                >= (&pair[1].source_table, &pair[1].target_table)
-            {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "table lenses must be canonically ordered and unique",
-                ));
-            }
-        }
         for table_lens in &lens.table_lenses {
-            if !seen_sources.insert(&table_lens.source_table)
-                || !seen_targets.insert(&table_lens.target_table)
-            {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "table lens endpoints must be bijective",
-                ));
-            }
             let source_table = source
                 .schema
                 .tables
@@ -1128,7 +1045,7 @@ where
                         column.name = to.clone();
                         columns.insert(to.clone(), column);
                     }
-                    LensOp::AddColumn { column, default } => {
+                    LensOp::AddColumn { column, .. } => {
                         if columns.contains_key(column) {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "added column already exists",
@@ -1142,14 +1059,6 @@ where
                             .ok_or(Error::InvalidCatalogueUpdate(
                                 "added column is absent from target",
                             ))?;
-                        groove::records::RecordDescriptor::new([(
-                            "default",
-                            target_column.column_type.clone(),
-                        )])
-                        .create(std::slice::from_ref(default))
-                        .map_err(|_| Error::InvalidCatalogueUpdate(
-                            "added column default does not match target type",
-                        ))?;
                         columns.insert(column.clone(), target_column);
                         if target_bindings.contains(column) && columns[column].default.is_none() {
                             return Err(Error::InvalidCatalogueUpdate(
@@ -1157,23 +1066,12 @@ where
                             ));
                         }
                     }
-                    LensOp::DropColumn { column, backwards_default } => {
+                    LensOp::DropColumn { column, .. } => {
                         if branch_columns.contains(column) {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "table branch columns cannot be removed",
                             ));
                         }
-                        let source_column = columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
-                            "dropped column is absent from source",
-                        ))?;
-                        groove::records::RecordDescriptor::new([(
-                            "default",
-                            source_column.column_type.clone(),
-                        )])
-                        .create(std::slice::from_ref(backwards_default))
-                        .map_err(|_| Error::InvalidCatalogueUpdate(
-                            "dropped column default does not match source type",
-                        ))?;
                         if columns.remove(column).is_none() {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "dropped column is absent from source",
@@ -1347,10 +1245,6 @@ where
                 "schema lineage publication id mismatch",
             ));
         }
-        publication
-            .physical_identities
-            .validate_for_schema(&publication.schema.schema)
-            .map_err(Error::InvalidCatalogueUpdate)?;
         if publication.schema.id != publication.schema.schema.version_id() {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema id does not match schema payload",
