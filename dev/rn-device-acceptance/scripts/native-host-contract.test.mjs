@@ -130,19 +130,35 @@ printf '%s' "$first" > "$JAZZ_AVD_TRANSCRIPT"
 `,
     { mode: 0o755 },
   );
-  execFileSync("bash", [path.join(root, "scripts/create-android-avd.sh"), "acceptance", "system-images;android-35;google_apis;x86_64"], {
-    env: { ...process.env, JAZZ_DEVICE_AVDMANAGER: avdmanager, JAZZ_AVD_TRANSCRIPT: transcript },
-  });
+  execFileSync(
+    "bash",
+    [
+      path.join(root, "scripts/create-android-avd.sh"),
+      "acceptance",
+      "system-images;android-35;google_apis;x86_64",
+    ],
+    {
+      env: { ...process.env, JAZZ_DEVICE_AVDMANAGER: avdmanager, JAZZ_AVD_TRANSCRIPT: transcript },
+    },
+  );
   assert.equal(fs.readFileSync(transcript, "utf8"), "no");
   assert.throws(() =>
-    execFileSync("bash", [path.join(root, "scripts/create-android-avd.sh"), "acceptance", "system-images;android-35;google_apis;x86_64"], {
-      env: {
-        ...process.env,
-        JAZZ_DEVICE_AVDMANAGER: avdmanager,
-        JAZZ_AVD_TRANSCRIPT: transcript,
-        JAZZ_AVD_REQUIRE_SECOND_PROMPT: "1",
+    execFileSync(
+      "bash",
+      [
+        path.join(root, "scripts/create-android-avd.sh"),
+        "acceptance",
+        "system-images;android-35;google_apis;x86_64",
+      ],
+      {
+        env: {
+          ...process.env,
+          JAZZ_DEVICE_AVDMANAGER: avdmanager,
+          JAZZ_AVD_TRANSCRIPT: transcript,
+          JAZZ_AVD_REQUIRE_SECOND_PROMPT: "1",
+        },
       },
-    }),
+    ),
   );
 });
 
