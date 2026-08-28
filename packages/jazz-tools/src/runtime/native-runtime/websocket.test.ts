@@ -16,6 +16,7 @@ import {
   encodeWebSocketPrelude,
   encodeWebSocketFrameBatch,
   isWireHello,
+  isWireError,
   isWireMessage,
   peerIdentityForWebSocketAuth,
 } from "./websocket.js";
@@ -43,6 +44,12 @@ describe("websocket frame carrier", () => {
       [1, 2, 3],
       [4, 5],
     ]);
+
+    const suffixed = Uint8Array.from([...encodeWebSocketFrameBatch(frames), 0]);
+    expect(new PostcardReader(suffixed).readVec((reader) => reader.bytes())).toHaveLength(2);
+    expect(() => decodeWebSocketFrameBatch(suffixed)).toThrow(
+      "websocket frame batch has trailing postcard bytes",
+    );
   });
 
   // This is intentionally transport-level: the public Db API cannot expose
@@ -270,6 +277,10 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES);
     expect(reader.u64()).toBe(0);
     expect(reader.option((authority) => authority.bytes(false))).toBeUndefined();
+
+    const suffixed = Uint8Array.from([...hello, 0]);
+    expect(new PostcardReader(suffixed).u64()).toBe(0);
+    expect(() => isWireHello(suffixed)).toThrow("WireFrame::Hello has trailing postcard bytes");
   });
 
   it("rejects a v12 server without compatibility negotiation", async () => {
@@ -462,11 +473,18 @@ describe("websocket frame carrier", () => {
   });
 
   it("decodes structured wire error frames", () => {
-    expect(decodeWireError(encodeWireError(3, 1, "bad credentials"))).toEqual({
+    const encoded = encodeWireError(3, 1, "bad credentials");
+    expect(isWireError(encoded)).toBe(true);
+    expect(decodeWireError(encoded)).toEqual({
       code: "auth_failed",
       retry: "after_auth",
       message: "bad credentials",
     });
+
+    const suffixed = Uint8Array.from([...encoded, 0]);
+    expect(new PostcardReader(suffixed).u64()).toBe(2);
+    expect(() => isWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
+    expect(() => decodeWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
@@ -503,6 +521,21 @@ describe("websocket frame carrier", () => {
     );
 
     expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
+    for (const candidate of manifest.fixtures) {
+      const candidateFrame = hexToBytes(candidate.frame_hex);
+      expect(isWireMessage(candidateFrame), candidate.name).toBe(true);
+      expect(
+        bytesEqual(
+          decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([candidateFrame]))[0]!,
+          candidateFrame,
+        ),
+        candidate.name,
+      ).toBe(true);
+      const suffixed = Uint8Array.from([...candidateFrame, 0]);
+      expect(() => isWireMessage(suffixed), candidate.name).toThrow(
+        "WireFrame::Message has trailing postcard bytes",
+      );
+    }
     expect(fixture?.name).toBe("view_update_mixed_version_carrier_runs");
     expect(fixture?.message_family).toBe("ViewUpdate");
 

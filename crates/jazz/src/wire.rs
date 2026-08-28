@@ -1420,6 +1420,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dual_compression_negotiation_gives_outbound_lz4_precedence() {
+        let both = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
+
+        assert_eq!(WireCompression::from_features(both), WireCompression::Lz4);
+        assert_eq!(
+            outbound_wire_compression_from_features(both),
+            WireCompression::Lz4,
+            "the outbound envelope must carry only the selected LZ4 bit"
+        );
+    }
+
     #[cfg(feature = "transport-compression-zstd")]
     #[test]
     fn zstd_stream_decoder_rejects_corrupt_compressed_payload() {
