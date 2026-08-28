@@ -554,7 +554,9 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
                 contains([input.as_ref() as *const GraphBuilder], &contains_collect)
             }
             GraphBuilder::Union { inputs } => contains(
-                inputs.iter().map(|input| input as *const GraphBuilder),
+                inputs
+                    .iter()
+                    .map(|input| input.as_ref() as *const GraphBuilder),
                 &contains_collect,
             ),
             GraphBuilder::Join { left, right, .. }

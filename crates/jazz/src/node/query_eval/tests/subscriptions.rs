@@ -22,7 +22,9 @@ fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => graph_contains_point_scan(input),
-        GraphBuilder::Union { inputs } => inputs.iter().any(graph_contains_point_scan),
+        GraphBuilder::Union { inputs } => {
+            inputs.iter().any(|input| graph_contains_point_scan(input))
+        }
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }
         | GraphBuilder::AntiJoin { left, right, .. } => {

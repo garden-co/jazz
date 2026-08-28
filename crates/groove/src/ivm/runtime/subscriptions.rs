@@ -4,7 +4,7 @@ use super::evaluation_session::EvaluationInputs;
 use super::*;
 use crate::storage::OwnedStorage;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 /// Stable handle returned to callers for subscription management.
@@ -872,7 +872,7 @@ fn bound_routed_multisink_graph(
             .map(|predicate| input.as_ref().clone().filter(predicate))
             .unwrap_or_else(|| input.as_ref().clone());
         return GraphBuilder::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(collect),
         };
     }
@@ -910,7 +910,12 @@ pub(super) fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => 1 + count_builder_nodes(input),
-        GraphBuilder::Union { inputs } => 1 + inputs.iter().map(count_builder_nodes).sum::<usize>(),
+        GraphBuilder::Union { inputs } => {
+            1 + inputs
+                .iter()
+                .map(|input| count_builder_nodes(input))
+                .sum::<usize>()
+        }
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }
         | GraphBuilder::AntiJoin { left, right, .. } => {
@@ -936,7 +941,9 @@ pub(super) fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => builder_contains_binding_source(input),
-        GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_binding_source),
+        GraphBuilder::Union { inputs } => inputs
+            .iter()
+            .any(|input| builder_contains_binding_source(input)),
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }
         | GraphBuilder::AntiJoin { left, right, .. } => {
@@ -1064,7 +1071,7 @@ fn lift_literal_filter(
             if let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? {
                 return Ok(Some(LiftedLiteralFilter {
                     graph: GraphBuilder::Filter {
-                        input: Box::new(lifted.graph),
+                        input: Arc::new(lifted.graph),
                         predicate: predicate.clone(),
                         comparison: *comparison,
                     },
@@ -1084,7 +1091,7 @@ fn lift_literal_filter(
             {
                 if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
                     let joined = GraphBuilder::Join {
-                        left: Box::new(lifted.graph),
+                        left: Arc::new(lifted.graph),
                         right: right.clone(),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
@@ -1105,7 +1112,7 @@ fn lift_literal_filter(
                 if let Some(lifted) = lift_literal_filter(runtime, right, binding_field)? {
                     let joined = GraphBuilder::Join {
                         left: left.clone(),
-                        right: Box::new(lifted.graph),
+                        right: Arc::new(lifted.graph),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
                         comparison: *comparison,
@@ -1236,7 +1243,7 @@ fn lift_literal_filter(
             );
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::Project {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     fields,
                 },
                 value: lifted.value,
@@ -1252,7 +1259,7 @@ fn lift_literal_filter(
             if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
                 let original_output = runtime.infer_builder_output(graph)?;
                 let joined = GraphBuilder::Join {
-                    left: Box::new(lifted.graph),
+                    left: Arc::new(lifted.graph),
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
@@ -1272,7 +1279,7 @@ fn lift_literal_filter(
                 let original_output = runtime.infer_builder_output(graph)?;
                 let joined = GraphBuilder::Join {
                     left: left.clone(),
-                    right: Box::new(lifted.graph),
+                    right: Arc::new(lifted.graph),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
                     comparison: *comparison,
@@ -1301,7 +1308,7 @@ fn lift_literal_filter(
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::AntiJoin {
-                    left: Box::new(lifted.graph),
+                    left: Arc::new(lifted.graph),
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
@@ -1322,7 +1329,7 @@ fn lift_literal_filter(
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::SemiJoin {
-                    left: Box::new(lifted.graph),
+                    left: Arc::new(lifted.graph),
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
@@ -1339,7 +1346,7 @@ fn lift_literal_filter(
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::UnwrapNullable {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     field: field.clone(),
                 },
                 value: lifted.value,
@@ -1355,7 +1362,7 @@ fn lift_literal_filter(
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::Unnest {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     array_field: array_field.clone(),
                     element_field: element_field.clone(),
                 },
@@ -1374,7 +1381,7 @@ fn lift_literal_filter(
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::ArgMaxBy {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     order_cols: order_cols.clone(),
                 },
@@ -1393,7 +1400,7 @@ fn lift_literal_filter(
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::ArgMinBy {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     order_cols: order_cols.clone(),
                 },
@@ -1415,7 +1422,7 @@ fn lift_literal_filter(
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::TopBy {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     order_cols: order_cols.clone(),
                     tie_cols: tie_cols.clone(),
@@ -1438,7 +1445,7 @@ fn lift_literal_filter(
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::Aggregate {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     aggregates: aggregates.clone(),
                 },
@@ -1592,7 +1599,7 @@ fn project_to_output_with_binding(
         binding_project_source(&graph, binding_field),
     );
     Ok(GraphBuilder::Project {
-        input: Box::new(graph),
+        input: Arc::new(graph),
         fields,
     })
 }
@@ -1706,7 +1713,7 @@ fn propagate_binding_through_frontier(
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::Filter {
-                input: Box::new(input),
+                input: Arc::new(input),
                 predicate: predicate.clone(),
                 comparison: *comparison,
             })
@@ -1721,7 +1728,7 @@ fn propagate_binding_through_frontier(
                 binding_project_source(&input, binding_field),
             );
             Some(GraphBuilder::Project {
-                input: Box::new(input),
+                input: Arc::new(input),
                 fields,
             })
         }
@@ -1729,7 +1736,7 @@ fn propagate_binding_through_frontier(
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::UnwrapNullable {
-                input: Box::new(input),
+                input: Arc::new(input),
                 field: field.clone(),
             })
         }
@@ -1741,7 +1748,7 @@ fn propagate_binding_through_frontier(
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::Unnest {
-                input: Box::new(input),
+                input: Arc::new(input),
                 array_field: array_field.clone(),
                 element_field: element_field.clone(),
             })
@@ -1764,8 +1771,8 @@ fn propagate_binding_through_frontier(
                 propagate_binding_through_frontier(right, frontier, binding_field, binding_type)
                     .unwrap_or_else(|| (**right).clone());
             Some(GraphBuilder::Join {
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Arc::new(left),
+                right: Arc::new(right),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
                 comparison: *comparison,
@@ -1781,7 +1788,7 @@ fn propagate_binding_through_frontier(
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::SemiJoin {
-                left: Box::new(left),
+                left: Arc::new(left),
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
@@ -1798,7 +1805,7 @@ fn propagate_binding_through_frontier(
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::AntiJoin {
-                left: Box::new(left),
+                left: Arc::new(left),
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
@@ -1831,8 +1838,8 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             frontier,
             max_iters,
         } => GraphBuilder::Recursive {
-            seed: Box::new(replace_binding_shape(*seed, shape)),
-            step: Box::new(replace_binding_shape(*step, shape)),
+            seed: Arc::new(replace_binding_shape(seed.as_ref().clone(), shape)),
+            step: Arc::new(replace_binding_shape(step.as_ref().clone(), shape)),
             frontier,
             max_iters,
         },
@@ -1841,16 +1848,16 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             predicate,
             comparison,
         } => GraphBuilder::Filter {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             predicate,
             comparison,
         },
         GraphBuilder::Project { input, fields } => GraphBuilder::Project {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             fields,
         },
         GraphBuilder::UnwrapNullable { input, field } => GraphBuilder::UnwrapNullable {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             field,
         },
         GraphBuilder::Unnest {
@@ -1858,7 +1865,7 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             array_field,
             element_field,
         } => GraphBuilder::Unnest {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             array_field,
             element_field,
         },
@@ -1867,7 +1874,7 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             group_cols,
             order_cols,
         } => GraphBuilder::ArgMaxBy {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             group_cols,
             order_cols,
         },
@@ -1876,7 +1883,7 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             group_cols,
             order_cols,
         } => GraphBuilder::ArgMinBy {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             group_cols,
             order_cols,
         },
@@ -1888,7 +1895,7 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             offset,
             limit,
         } => GraphBuilder::TopBy {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             group_cols,
             order_cols,
             tie_cols,
@@ -1900,14 +1907,14 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             group_cols,
             aggregates,
         } => GraphBuilder::Aggregate {
-            input: Box::new(replace_binding_shape(*input, shape)),
+            input: Arc::new(replace_binding_shape(input.as_ref().clone(), shape)),
             group_cols,
             aggregates,
         },
         GraphBuilder::Union { inputs } => GraphBuilder::Union {
             inputs: inputs
                 .into_iter()
-                .map(|input| replace_binding_shape(input, shape))
+                .map(|input| Arc::new(replace_binding_shape(input.as_ref().clone(), shape)))
                 .collect(),
         },
         GraphBuilder::Join {
@@ -1917,8 +1924,8 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             right_on,
             comparison,
         } => GraphBuilder::Join {
-            left: Box::new(replace_binding_shape(*left, shape)),
-            right: Box::new(replace_binding_shape(*right, shape)),
+            left: Arc::new(replace_binding_shape(left.as_ref().clone(), shape)),
+            right: Arc::new(replace_binding_shape(right.as_ref().clone(), shape)),
             left_on,
             right_on,
             comparison,
@@ -1930,8 +1937,8 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             right_on,
             comparison,
         } => GraphBuilder::SemiJoin {
-            left: Box::new(replace_binding_shape(*left, shape)),
-            right: Box::new(replace_binding_shape(*right, shape)),
+            left: Arc::new(replace_binding_shape(left.as_ref().clone(), shape)),
+            right: Arc::new(replace_binding_shape(right.as_ref().clone(), shape)),
             left_on,
             right_on,
             comparison,
@@ -1943,8 +1950,8 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             right_on,
             comparison,
         } => GraphBuilder::AntiJoin {
-            left: Box::new(replace_binding_shape(*left, shape)),
-            right: Box::new(replace_binding_shape(*right, shape)),
+            left: Arc::new(replace_binding_shape(left.as_ref().clone(), shape)),
+            right: Arc::new(replace_binding_shape(right.as_ref().clone(), shape)),
             left_on,
             right_on,
             comparison,
