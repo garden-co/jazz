@@ -465,12 +465,27 @@ where
         table: &str,
         row: RowUuid,
         made_by: AuthorSubject,
-        cells: RowCells,
+        mut cells: RowCells,
     ) -> Result<TxId, Error> {
-        let cells = self.apply_insert_defaults(table, cells)?;
+        let (write_schema, write_schema_version) = self.current_write_schema_for_query()?;
+        let table_schema = write_schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))?;
+        for column in &table_schema.columns {
+            if !cells.contains_key(&column.name)
+                && let Some(default) = &column.default
+            {
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, default),
+                );
+            }
+        }
         let published = crate::db::block_on(
             self.node.node.borrow_mut().commit_mergeable_in_schema(
-                self.schema_version_id,
+                write_schema_version,
                 MergeableCommit::new(table, row, self.next_now_ms())
                     .made_by(made_by)
                     .cells(cells),

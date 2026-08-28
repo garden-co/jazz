@@ -2845,7 +2845,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
             ),
             (
                 "authored_columns".to_owned(),
-                ValueType::Nullable(Box::new(ValueType::Bytes)),
+                ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
             ),
             ("created_by".to_owned(), ValueType::String),
             ("created_at".to_owned(), ValueType::U64),

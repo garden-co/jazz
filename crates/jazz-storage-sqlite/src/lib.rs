@@ -12,13 +12,26 @@ use std::path::{Path, PathBuf};
 
 use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
-    ScanDirection, ScanRequest, StorageCursor, StorageFactory, StorageFuture, StorageScan, Value,
-    validate_physical_storage_names,
+    ScanDirection, ScanRequest, StorageCursor, StorageEpochManifest, StorageFactory, StorageFuture,
+    StorageScan, Value, validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const FORMAT: &[u8] = b"jazz-groove-ordered-kv";
 const FORMAT_VERSION: i64 = 1;
+/// `JAZZ` in the SQLite application-id header field. This identifies the
+/// database before its tables or blobs are interpreted.
+const APPLICATION_ID: i64 = 0x4a41_5a5a;
+/// SQLite's schema-facing version for the ordered-KV physical layout.
+const USER_VERSION: i64 = 1;
+/// An immutable identity for the v1 DDL, stored beside the format marker so a
+/// same-shaped foreign database cannot be silently adopted.
+const DDL_ID: &[u8] = b"jazz-groove-ordered-kv-ddl-v1";
+const EPOCH_MANIFEST_KEY: &str = "epoch_manifest";
+const META_DDL: &str = "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT";
+const COLUMN_FAMILIES_DDL: &str =
+    "CREATE TABLE column_families (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT";
+const KV_DDL: &str = "CREATE TABLE kv (cf INTEGER NOT NULL, k BLOB NOT NULL, v BLOB NOT NULL, PRIMARY KEY (cf, k)) WITHOUT ROWID, STRICT";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Local persistence policy for the SQLite WAL.
@@ -126,6 +139,20 @@ impl SqliteStorage {
         }
         let mut connection = Connection::open(&path).map_err(backend)?;
         connection.busy_timeout(BUSY_TIMEOUT).map_err(backend)?;
+        let objects: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+            .map_err(backend)?;
+        if objects == 0 {
+            // A table-free SQLite file is not necessarily ours: another
+            // application can already have claimed its physical header. Only
+            // the neutral SQLite header is a fresh root we may adopt.
+            Self::validate_neutral_empty_header(&connection)?;
+            Self::create_schema(&mut connection)?;
+        } else {
+            // Validation is deliberately before WAL/synchronous setup: an
+            // incompatible store must fail before this adapter changes it.
+            Self::validate_schema(&connection)?;
+        }
         let mode: String = connection
             .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
             .map_err(backend)?;
@@ -141,15 +168,6 @@ impl SqliteStorage {
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(backend)?;
 
-        let objects: i64 = connection
-            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
-            .map_err(backend)?;
-        if objects == 0 {
-            Self::create_schema(&mut connection)?;
-        } else {
-            Self::validate_schema(&connection)?;
-        }
-
         let storage = Self {
             path,
             durability,
@@ -161,28 +179,63 @@ impl SqliteStorage {
         Ok(storage)
     }
 
+    fn validate_neutral_empty_header(connection: &Connection) -> Result<(), Error> {
+        let application_id: i64 = connection
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .map_err(backend)?;
+        let user_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(backend)?;
+        if application_id != 0 || user_version != 0 {
+            return Err(Error::InvalidStorageLayout(
+                "table-free sqlite root has a non-neutral application_id or user_version"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn create_schema(connection: &mut Connection) -> Result<(), Error> {
+        let manifest = sqlite_manifest()?.encode()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend)?;
         transaction
-            .execute_batch(
-                "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT;\
-                 CREATE TABLE column_families (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT;\
-                 CREATE TABLE kv (cf INTEGER NOT NULL, k BLOB NOT NULL, v BLOB NOT NULL, \
-                    PRIMARY KEY (cf, k)) WITHOUT ROWID, STRICT;",
-            )
+            .execute_batch(&format!("{META_DDL};{COLUMN_FAMILIES_DDL};{KV_DDL};"))
+            .map_err(backend)?;
+        transaction
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .map_err(backend)?;
+        transaction
+            .pragma_update(None, "user_version", USER_VERSION)
             .map_err(backend)?;
         transaction
             .execute(
-                "INSERT INTO meta (key, value) VALUES ('format', ?1), ('format_version', ?2)",
-                params![FORMAT, FORMAT_VERSION.to_be_bytes().to_vec()],
+                "INSERT INTO meta (key, value) VALUES \
+                 ('format', ?1), ('format_version', ?2), ('ddl_id', ?3), ('epoch_manifest', ?4)",
+                params![
+                    FORMAT,
+                    FORMAT_VERSION.to_be_bytes().to_vec(),
+                    DDL_ID,
+                    manifest
+                ],
             )
             .map_err(backend)?;
         transaction.commit().map_err(backend)
     }
 
     fn validate_schema(connection: &Connection) -> Result<(), Error> {
+        let application_id: i64 = connection
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .map_err(backend)?;
+        let user_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(backend)?;
+        if application_id != APPLICATION_ID || user_version != USER_VERSION {
+            return Err(Error::InvalidStorageLayout(
+                "unsupported sqlite application_id or user_version".to_owned(),
+            ));
+        }
         let mut statement = connection
             .prepare(
                 "SELECT type, name FROM sqlite_master \
@@ -217,6 +270,9 @@ impl SqliteStorage {
             "column_families",
             &[("id", "INTEGER", 1), ("name", "TEXT", 0)],
         )?;
+        validate_table_ddl(connection, "meta", META_DDL)?;
+        validate_table_ddl(connection, "column_families", COLUMN_FAMILIES_DDL)?;
+        validate_table_ddl(connection, "kv", KV_DDL)?;
         validate_table_columns(
             connection,
             "kv",
@@ -242,11 +298,33 @@ impl SqliteStorage {
             .ok_or_else(|| {
                 Error::InvalidStorageLayout("missing sqlite format version".to_owned())
             })?;
-        if format != FORMAT || version.as_slice() != FORMAT_VERSION.to_be_bytes() {
+        let ddl_id = connection
+            .query_row("SELECT value FROM meta WHERE key = 'ddl_id'", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .optional()
+            .map_err(backend)?
+            .ok_or_else(|| Error::InvalidStorageLayout("missing sqlite DDL identity".to_owned()))?;
+        let epoch_manifest = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [EPOCH_MANIFEST_KEY],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(backend)?
+            .ok_or_else(|| {
+                Error::InvalidStorageLayout("missing sqlite epoch manifest".to_owned())
+            })?;
+        if format != FORMAT
+            || version.as_slice() != FORMAT_VERSION.to_be_bytes()
+            || ddl_id != DDL_ID
+        {
             return Err(Error::InvalidStorageLayout(
                 "unsupported sqlite ordered-kv format".to_owned(),
             ));
         }
+        sqlite_manifest()?.admit_existing(&epoch_manifest)?;
         Ok(())
     }
 
@@ -362,6 +440,22 @@ impl SqliteStorage {
     }
 }
 
+fn sqlite_manifest() -> Result<StorageEpochManifest, Error> {
+    StorageEpochManifest::epoch_1(
+        "sqlite",
+        1,
+        ["groove.ordered-kv.v1"],
+        BTreeMap::from([
+            (
+                "application-id".to_owned(),
+                APPLICATION_ID.to_be_bytes().to_vec(),
+            ),
+            ("ddl-id".to_owned(), DDL_ID.to_vec()),
+            ("key-order".to_owned(), b"unsigned-lexicographic".to_vec()),
+        ]),
+    )
+}
+
 fn validate_table_columns(
     connection: &Connection,
     table: &str,
@@ -393,6 +487,23 @@ fn validate_table_columns(
     {
         return Err(Error::InvalidStorageLayout(format!(
             "sqlite table {table} columns do not match jazz ordered-kv v1"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_table_ddl(connection: &Connection, table: &str, expected: &str) -> Result<(), Error> {
+    let actual = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(backend)?;
+    if actual.as_deref() != Some(expected) {
+        return Err(Error::InvalidStorageLayout(format!(
+            "sqlite table {table} DDL does not match jazz ordered-kv v1"
         )));
     }
     Ok(())

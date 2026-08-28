@@ -7,7 +7,9 @@
 //! value encoding live in [`super`]; callers use these macros to keep storage
 //! rows typed at module boundaries.
 
-use super::{BorrowedRecord, Error, RecordDescriptor, Value, ValueType, decode_value};
+use super::{
+    BorrowedRecord, EnumValue, Error, OwnedRecord, RecordDescriptor, Value, ValueType, decode_value,
+};
 
 pub use paste;
 
@@ -25,6 +27,7 @@ pub enum FieldKind {
     Uuid,
     String,
     Enum,
+    PayloadEnum,
     Tuple,
     Array,
     Nullable,
@@ -46,6 +49,7 @@ impl FieldKind {
                 | (Self::Uuid, ValueType::Uuid)
                 | (Self::String, ValueType::String)
                 | (Self::Enum, ValueType::EnumTag(_))
+                | (Self::PayloadEnum, ValueType::Enum(_))
                 | (Self::Tuple, ValueType::Tuple(_))
                 | (Self::Array, ValueType::Array(_))
                 | (Self::Nullable, ValueType::Nullable(_))
@@ -378,6 +382,37 @@ impl RecordField for Value {
         decode_value(bytes, value_type)
     }
 }
+
+macro_rules! impl_value_record_field {
+    ($ty:ty, $variant:ident, $kind:expr) => {
+        impl RecordField for $ty {
+            fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error> {
+                let field = record.field(idx)?;
+                let bytes = record.field_bytes_unchecked(idx)?;
+                Self::read_raw(bytes, &field.value_type)
+            }
+
+            fn to_value(&self) -> Value {
+                Value::$variant(self.clone())
+            }
+
+            const COLUMN_KIND: FieldKind = $kind;
+
+            fn read_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
+                match decode_value(bytes, value_type)? {
+                    Value::$variant(value) => Ok(value),
+                    _ => Err(Error::TypeMismatch {
+                        expected: value_type.clone(),
+                    }),
+                }
+            }
+        }
+    };
+}
+
+impl_value_record_field!(Vec<Value>, Array, FieldKind::Array);
+impl_value_record_field!(OwnedRecord, Record, FieldKind::Record);
+impl_value_record_field!(EnumValue, Enum, FieldKind::PayloadEnum);
 
 impl<T: RecordField> RecordField for Option<T> {
     fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error> {

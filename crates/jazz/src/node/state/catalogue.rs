@@ -872,11 +872,11 @@ self.database.finish_persistence(persisted)?;
                 return Ok(alias);
             }
         }
-        let alias = NodeAlias(max_alias + 1);
-        self.node_aliases.insert(node_uuid, alias);
-        if node_uuid == self.node_uuid {
-            self.self_node_alias = Some(alias);
-        }
+        let alias = NodeAlias(
+            max_alias
+                .checked_add(1)
+                .ok_or(Error::InvalidStoredValue("node alias exhausted"))?,
+        );
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_nodes",
@@ -885,6 +885,14 @@ self.database.finish_persistence(persisted)?;
         let applied = self.database.apply_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
+        // This mapping is a durable prerequisite for every later row that
+        // contains the compact alias.  Do not leave an in-memory alias behind
+        // if resident application or ordered persistence fails: the caller may
+        // only observe it after its catalogue row is durable.
+        self.node_aliases.insert(node_uuid, alias);
+        if node_uuid == self.node_uuid {
+            self.self_node_alias = Some(alias);
+        }
         Ok(alias)
     }
 

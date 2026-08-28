@@ -97,6 +97,20 @@ mod variant_case_tests {
     }
 
     #[test]
+    fn reopen_validation_rejects_duplicate_physical_column_ids() {
+        let v1 = schema(1);
+        let aliases = BTreeMap::from([(v1, SchemaVersionAlias(1))]);
+        let mappings = BTreeMap::from([(v1, mapping(7, &[("id", 1), ("body", 1)]))]);
+
+        assert!(matches!(
+            validate_physical_variant_cases(&mappings, &aliases),
+            Err(Error::InvalidStoredValue(
+                "physical table maps multiple columns to one id"
+            ))
+        ));
+    }
+
+    #[test]
     fn nested_enum_epoch_accepts_only_append_only_case_growth() {
         let value_type = |variants: &[&str]| {
             records::ValueType::EnumTag(

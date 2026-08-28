@@ -100,7 +100,11 @@ describe("JazzProvider — stable config deps", () => {
 
     const result = render(
       <Wrapper
-        config={{ appId: "app-1", serverUrl: "https://jazz.example.com", secret: "anon" }}
+        config={{
+          appId: "app-1",
+          serverUrl: "https://jazz.example.com",
+          secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }}
       />,
     );
     await act(async () => Promise.resolve());

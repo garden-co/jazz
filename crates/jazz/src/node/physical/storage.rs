@@ -2,6 +2,276 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn authored_column_ids_for_names(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        columns: Option<&BTreeSet<String>>,
+    ) -> Result<Option<BTreeSet<PhysicalColumnId>>, Error> {
+        let Some(columns) = columns else {
+            return Ok(None);
+        };
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .ok_or(Error::InvalidStoredValue(
+                "authored columns physical table mapping missing",
+            ))?;
+        columns
+            .iter()
+            .map(|column| {
+                mapping
+                    .columns
+                    .get(column)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "authored column physical mapping missing",
+                    ))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map(Some)
+    }
+
+    pub(super) fn authored_column_names_for_ids(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        columns: Option<&BTreeSet<PhysicalColumnId>>,
+    ) -> Result<Option<BTreeSet<String>>, Error> {
+        let Some(columns) = columns else {
+            return Ok(None);
+        };
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .ok_or(Error::InvalidStoredValue(
+                "authored columns physical table mapping missing",
+        ))?;
+        let mut names_by_id = BTreeMap::new();
+        for (name, id) in &mapping.columns {
+            if names_by_id.insert(*id, name.clone()).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "physical table maps multiple authored columns to one id",
+                ));
+            }
+        }
+        columns
+            .iter()
+            .map(|column| {
+                names_by_id.get(column).cloned().ok_or(Error::InvalidStoredValue(
+                    "stored authored column id is absent from its schema mapping",
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map(Some)
+    }
+
+    /// Translate a logical contribution table at the local storage boundary.
+    /// Physical ids are deliberately node-local and never cross the
+    /// transaction/wire boundary.
+    pub(super) fn contribution_table_id_for_storage(
+        &self,
+        table: &str,
+    ) -> Result<PhysicalTableId, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| mapping.tables.get(table))
+            .map(|mapping| mapping.table_id);
+        if let Some(id) = current {
+            return Ok(id);
+        }
+
+        let ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table).map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        match ids.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "contribution physical table mapping missing",
+            )),
+            1 => Ok(*ids.first().expect("one physical table id")),
+            _ => Err(Error::InvalidStoredValue(
+                "contribution logical table maps to multiple physical ids",
+            )),
+        }
+    }
+
+    /// Resolve an on-disk contribution table id to the active logical name,
+    /// falling back to an unambiguous retained spelling during recovery.
+    pub(super) fn contribution_table_name_for_storage(
+        &self,
+        table: PhysicalTableId,
+    ) -> Result<String, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| {
+                mapping
+                    .tables
+                    .iter()
+                    .find_map(|(name, candidate)| (candidate.table_id == table).then(|| name.clone()))
+            });
+        if let Some(name) = current {
+            return Ok(name);
+        }
+
+        let names = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| {
+                mapping
+                    .tables
+                    .iter()
+                    .filter(|(_, candidate)| candidate.table_id == table)
+                    .map(|(name, _)| name.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        match names.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "stored contribution physical table id is absent from the catalogue",
+            )),
+            1 => Ok(names.into_iter().next().expect("one logical table name")),
+            _ => Err(Error::InvalidStoredValue(
+                "stored contribution physical table id maps to multiple logical names",
+            )),
+        }
+    }
+
+    /// Translate a logical contribution coordinate at the local storage
+    /// boundary. Physical column ids are deliberately node-local and must
+    /// never leak into the transaction wire representation.
+    pub(super) fn contribution_column_id_for_storage(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<PhysicalColumnId, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| mapping.tables.get(table))
+            .and_then(|mapping| mapping.columns.get(column))
+            .copied();
+        if let Some(id) = current {
+            return Ok(id);
+        }
+
+        let ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table))
+            .filter_map(|mapping| mapping.columns.get(column).copied())
+            .collect::<BTreeSet<_>>();
+        match ids.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "contribution physical column mapping missing",
+            )),
+            1 => Ok(*ids.first().expect("one physical column id")),
+            _ => Err(Error::InvalidStoredValue(
+                "contribution logical column maps to multiple physical ids",
+            )),
+        }
+    }
+
+    /// Resolve an on-disk contribution column id into the logical name used by
+    /// the runtime and replicated transaction payload. Prefer the active
+    /// schema so a retained physical id follows an ordinary compatible column
+    /// rename; fall back to one retained historical mapping only when the
+    /// logical table is no longer present in the active schema.
+    pub(super) fn contribution_column_name_for_storage(
+        &self,
+        table: &str,
+        column: PhysicalColumnId,
+    ) -> Result<String, Error> {
+        let current = self
+            .catalogue
+            .physical_mappings
+            .get(&self.catalogue.current_schema_version_id)
+            .and_then(|mapping| mapping.tables.get(table))
+            .and_then(|mapping| {
+                mapping
+                    .columns
+                    .iter()
+                    .find_map(|(name, id)| (*id == column).then(|| name.clone()))
+            });
+        if let Some(name) = current {
+            return Ok(name);
+        }
+
+        let names = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table))
+            .flat_map(|mapping| {
+                mapping
+                    .columns
+                    .iter()
+                    .filter(|(_, id)| **id == column)
+                    .map(|(name, _)| name.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        match names.len() {
+            0 => Err(Error::InvalidStoredValue(
+                "stored contribution physical column id is absent from its table mapping",
+            )),
+            1 => Ok(names.into_iter().next().expect("one logical column name")),
+            _ => Err(Error::InvalidStoredValue(
+                "stored contribution physical column id maps to multiple logical names",
+            )),
+        }
+    }
+
+    pub(super) fn contribution_merge_storage_value(
+        &self,
+        provenance: Option<&ContributionMergeProvenance>,
+    ) -> Result<Value, Error> {
+        super::codec::contribution_merge_storage_value(
+            provenance,
+            |table| self.contribution_table_id_for_storage(table),
+            |table, column| self.contribution_column_id_for_storage(table, column),
+        )
+    }
+
+    pub(super) fn contribution_merge_from_storage_record(
+        &self,
+        record: OwnedRecord,
+    ) -> Result<ContributionMergeProvenance, Error> {
+        super::codec::contribution_merge_from_storage_record(
+            record,
+            |table| self.contribution_table_name_for_storage(table),
+            |table, column| self.contribution_column_name_for_storage(table, column),
+        )
+    }
+
+    pub(super) fn authored_columns_for_version(
+        &self,
+        version: &VersionRow,
+    ) -> Result<Option<BTreeSet<String>>, Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "authored columns schema version alias missing",
+            ))?;
+        let ids = version.authored_column_ids()?;
+        self.authored_column_names_for_ids(
+            schema_version,
+            version.table(),
+            ids.as_ref(),
+        )
+    }
+
     pub(super) fn prepared_physical_write_plan(
         &mut self,
         schema_version: SchemaVersionId,

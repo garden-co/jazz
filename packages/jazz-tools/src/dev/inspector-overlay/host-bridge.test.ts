@@ -142,7 +142,7 @@ describe("installInspectorHost", () => {
         appId: "a",
         dbName: "a",
         serverUrl: "http://server",
-        secret: "seed",
+        secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         cookieSession: { user_id: "u1" },
         adminSecret: "adm",
       }),
@@ -152,7 +152,7 @@ describe("installInspectorHost", () => {
     expect(config).toMatchObject({
       appId: "a",
       serverUrl: "http://server",
-      secret: "seed",
+      secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       adminSecret: "adm",
       driver: { type: "persistent", dbName: "a" },
     });

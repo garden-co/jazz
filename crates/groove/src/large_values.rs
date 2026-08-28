@@ -2081,10 +2081,12 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
     let enum_value = match value {
         StoredScalar::Primitive(bytes) => {
             validate_logical(kind, bytes)?;
+            let fields = primitive_payload_schema(kind)
+                .ordered_values([(PRIMITIVE_VALUE_FIELD, primitive_value(kind, bytes.clone()))])?;
             EnumValue::create(
                 2,
                 schema.case(2).map_err(|_| Error::MalformedScalar)?.payload,
-                &[primitive_value(kind, bytes.clone())],
+                &fields,
             )
             .map_err(|_| Error::MalformedScalar)?
         }
@@ -2155,10 +2157,9 @@ pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<Stor
         .map_err(|_| Error::MalformedScalar)?;
     match value.tag() {
         2 => {
-            let [value] = values.as_slice() else {
-                return Err(Error::MalformedScalar);
-            };
-            primitive_bytes(kind, value).map(StoredScalar::Primitive)
+            let mut fields = primitive_payload_schema(kind).decode_values(&values)?;
+            let value = take_durable_large_value_field(&mut fields, PRIMITIVE_VALUE_FIELD)?;
+            primitive_bytes(kind, &value).map(StoredScalar::Primitive)
         }
         3 => decode_chunked_values(kind, &values).map(StoredScalar::Chunked),
         _ => Err(Error::MalformedScalar),
@@ -2176,10 +2177,9 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
                 .bind(payload)
                 .to_values()
                 .map_err(|_| Error::MalformedScalar)?;
-            let [value] = values.as_slice() else {
-                return Err(Error::MalformedScalar);
-            };
-            if primitive_bytes(kind, value).is_err()
+            let mut fields = primitive_payload_schema(kind).decode_values(&values)?;
+            let value = take_durable_large_value_field(&mut fields, PRIMITIVE_VALUE_FIELD)?;
+            if primitive_bytes(kind, &value).is_err()
                 || descriptor
                     .create(&values)
                     .map_err(|_| Error::MalformedScalar)?
@@ -2188,7 +2188,7 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
                 return Err(Error::MalformedScalar);
             }
             let span = descriptor
-                .field_span(payload, 0)
+                .field_span(payload, usize::from(PRIMITIVE_VALUE_FIELD - 1))
                 .map_err(|_| Error::MalformedScalar)?;
             Ok(&payload[span])
         }
@@ -2235,40 +2235,89 @@ fn stored_scalar_value_type(kind: LargeValueKind) -> &'static ValueType {
     value_type.get_or_init(|| ValueType::Enum(Box::new(stored_scalar_schema(kind).clone())))
 }
 
+pub(crate) fn node_ref_descriptor() -> RecordDescriptor {
+    node_ref_record_schema().descriptor
+}
+
+fn node_ref_record_schema() -> &'static DurableLargeValueRecordSchema {
+    static SCHEMA: OnceLock<DurableLargeValueRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_large_value_record_descriptor([
+            (
+                NODE_REF_OBJECT_HASH_FIELD,
+                "object_hash",
+                ValueType::raw_bytes(),
+            ),
+            (NODE_REF_LOCATOR_FIELD, "locator", ValueType::raw_bytes()),
+        ])
+    })
+}
+
+pub(crate) fn node_ref_value(node_ref: &NodeRef) -> Value {
+    let descriptor = node_ref_descriptor();
+    Value::Record(crate::records::OwnedRecord::new(
+        encode_node_ref(node_ref).expect("NodeRef fields always match their physical descriptor"),
+        descriptor,
+    ))
+}
+
+pub(crate) fn node_ref_from_value(value: &Value) -> Result<NodeRef, Error> {
+    let Value::Record(record) = value else {
+        return Err(Error::MalformedScalar);
+    };
+    let values = record.to_values().map_err(|_| Error::MalformedScalar)?;
+    node_ref_from_values(&values)
+}
+
+fn node_ref_from_values(values: &[Value]) -> Result<NodeRef, Error> {
+    let mut fields = node_ref_record_schema().decode_values(values)?;
+    Ok(NodeRef {
+        object_hash: ContentHash(raw_bytes(&take_durable_large_value_field(
+            &mut fields,
+            NODE_REF_OBJECT_HASH_FIELD,
+        )?)?),
+        locator: Locator(raw_bytes(&take_durable_large_value_field(
+            &mut fields,
+            NODE_REF_LOCATOR_FIELD,
+        )?)?),
+    })
+}
+
+/// Encode a physical chunk identity through the same canonical Groove record
+/// used by indirect scalar roots.
+pub(crate) fn encode_node_ref(node_ref: &NodeRef) -> Result<Vec<u8>, Error> {
+    let values = node_ref_record_schema().ordered_values([
+        (
+            NODE_REF_OBJECT_HASH_FIELD,
+            Value::Bytes(node_ref.object_hash.0.to_vec()),
+        ),
+        (
+            NODE_REF_LOCATOR_FIELD,
+            Value::Bytes(node_ref.locator.0.to_vec()),
+        ),
+    ])?;
+    node_ref_descriptor()
+        .create(&values)
+        .map_err(|_| Error::MalformedScalar)
+}
+
+/// Decode and canonically validate a physical chunk identity.
+pub(crate) fn decode_node_ref(encoded: &[u8]) -> Result<NodeRef, Error> {
+    let descriptor = node_ref_descriptor();
+    let values = descriptor
+        .bind(encoded)
+        .to_values()
+        .map_err(|_| Error::MalformedScalar)?;
+    let node_ref = node_ref_from_values(&values)?;
+    if encode_node_ref(&node_ref)? != encoded {
+        return Err(Error::MalformedScalar);
+    }
+    Ok(node_ref)
+}
+
 fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
-    let primitive = RecordDescriptor::new([(
-        "value",
-        match kind {
-            LargeValueKind::Bytes => ValueType::raw_bytes(),
-            LargeValueKind::String | LargeValueKind::Json => ValueType::raw_string(),
-        },
-    )]);
-    let root = RecordDescriptor::new([
-        ("object_hash", ValueType::raw_bytes()),
-        ("locator", ValueType::raw_bytes()),
-    ]);
-    let edit = RecordDescriptor::new([
-        ("offset", ValueType::U64),
-        ("delete_length", ValueType::U64),
-        ("insert_bytes", ValueType::raw_bytes()),
-        ("utf16_offset", ValueType::U64),
-        ("delete_utf16_length", ValueType::U64),
-        ("insert_utf16_length", ValueType::U64),
-    ]);
-    let chunked = RecordDescriptor::new([
-        ("format_version", ValueType::U8),
-        ("logical_hash", ValueType::raw_bytes()),
-        ("root", ValueType::Record(Box::new(root))),
-        ("byte_length", ValueType::U64),
-        (
-            "utf16_length",
-            ValueType::Nullable(Box::new(ValueType::U64)),
-        ),
-        (
-            "edit_tail",
-            ValueType::Array(Box::new(ValueType::Record(Box::new(edit)))),
-        ),
-    ]);
+    let primitive = primitive_payload_schema(kind).descriptor;
+    let chunked = large_value_ref_payload_descriptor();
     EnumSchema::new(
         match kind {
             LargeValueKind::Bytes => "groove.internal.stored_scalar.bytes",
@@ -2294,6 +2343,307 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
         ],
     )
     .expect("fixed internal stored-scalar enum schema is valid")
+}
+
+fn primitive_payload_schema(kind: LargeValueKind) -> &'static DurableLargeValueRecordSchema {
+    static BYTES: OnceLock<DurableLargeValueRecordSchema> = OnceLock::new();
+    static STRING: OnceLock<DurableLargeValueRecordSchema> = OnceLock::new();
+    static JSON: OnceLock<DurableLargeValueRecordSchema> = OnceLock::new();
+    let schema = match kind {
+        LargeValueKind::Bytes => &BYTES,
+        LargeValueKind::String => &STRING,
+        LargeValueKind::Json => &JSON,
+    };
+    schema.get_or_init(|| {
+        durable_large_value_record_descriptor([(
+            PRIMITIVE_VALUE_FIELD,
+            "value",
+            match kind {
+                LargeValueKind::Bytes => ValueType::raw_bytes(),
+                LargeValueKind::String | LargeValueKind::Json => ValueType::raw_string(),
+            },
+        )])
+    })
+}
+
+fn large_value_edit_descriptor() -> RecordDescriptor {
+    large_value_edit_schema().descriptor
+}
+
+fn large_value_edit_schema() -> &'static DurableLargeValueRecordSchema {
+    static SCHEMA: OnceLock<DurableLargeValueRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_large_value_record_descriptor([
+            (EDIT_OFFSET_FIELD, "offset", ValueType::U64),
+            (EDIT_DELETE_LENGTH_FIELD, "delete_length", ValueType::U64),
+            (
+                EDIT_INSERT_BYTES_FIELD,
+                "insert_bytes",
+                ValueType::raw_bytes(),
+            ),
+            (EDIT_UTF16_OFFSET_FIELD, "utf16_offset", ValueType::U64),
+            (
+                EDIT_DELETE_UTF16_LENGTH_FIELD,
+                "delete_utf16_length",
+                ValueType::U64,
+            ),
+            (
+                EDIT_INSERT_UTF16_LENGTH_FIELD,
+                "insert_utf16_length",
+                ValueType::U64,
+            ),
+        ])
+    })
+}
+
+fn large_value_ref_payload_descriptor() -> RecordDescriptor {
+    large_value_ref_payload_schema().descriptor
+}
+
+fn large_value_ref_payload_schema() -> &'static DurableLargeValueRecordSchema {
+    static SCHEMA: OnceLock<DurableLargeValueRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_large_value_record_descriptor([
+            (
+                LARGE_VALUE_REF_FORMAT_VERSION_FIELD,
+                "format_version",
+                ValueType::U8,
+            ),
+            (
+                LARGE_VALUE_REF_LOGICAL_HASH_FIELD,
+                "logical_hash",
+                ValueType::raw_bytes(),
+            ),
+            (
+                LARGE_VALUE_REF_ROOT_FIELD,
+                "root",
+                ValueType::Record(Box::new(node_ref_descriptor())),
+            ),
+            (
+                LARGE_VALUE_REF_BYTE_LENGTH_FIELD,
+                "byte_length",
+                ValueType::U64,
+            ),
+            (
+                LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
+                "utf16_length",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ),
+            (
+                LARGE_VALUE_REF_EDIT_TAIL_FIELD,
+                "edit_tail",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(
+                    large_value_edit_descriptor(),
+                )))),
+            ),
+        ])
+    })
+}
+
+const NODE_REF_OBJECT_HASH_FIELD: u16 = 1;
+const NODE_REF_LOCATOR_FIELD: u16 = 2;
+const PRIMITIVE_VALUE_FIELD: u16 = 1;
+const EDIT_OFFSET_FIELD: u16 = 1;
+const EDIT_DELETE_LENGTH_FIELD: u16 = 2;
+const EDIT_INSERT_BYTES_FIELD: u16 = 3;
+const EDIT_UTF16_OFFSET_FIELD: u16 = 4;
+const EDIT_DELETE_UTF16_LENGTH_FIELD: u16 = 5;
+const EDIT_INSERT_UTF16_LENGTH_FIELD: u16 = 6;
+const LARGE_VALUE_REF_FORMAT_VERSION_FIELD: u16 = 1;
+const LARGE_VALUE_REF_LOGICAL_HASH_FIELD: u16 = 2;
+const LARGE_VALUE_REF_ROOT_FIELD: u16 = 3;
+const LARGE_VALUE_REF_BYTE_LENGTH_FIELD: u16 = 4;
+const LARGE_VALUE_REF_UTF16_LENGTH_FIELD: u16 = 5;
+const LARGE_VALUE_REF_EDIT_TAIL_FIELD: u16 = 6;
+
+#[derive(Clone)]
+struct DurableLargeValueRecordSchema {
+    slots: Vec<DurableLargeValueRecordSlot>,
+    descriptor: RecordDescriptor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurableLargeValueRecordSlot {
+    Known(u16),
+    Reserved(u16),
+}
+
+impl DurableLargeValueRecordSchema {
+    fn ordered_values(
+        &self,
+        input_values: impl IntoIterator<Item = (u16, Value)>,
+    ) -> Result<Vec<Value>, Error> {
+        let mut values = BTreeMap::<u16, Value>::new();
+        for (id, value) in input_values {
+            if values.insert(id, value).is_some() {
+                return Err(Error::MalformedScalar);
+            }
+        }
+        let mut ordered = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            match slot {
+                DurableLargeValueRecordSlot::Known(id) => {
+                    ordered.push(values.remove(id).ok_or(Error::MalformedScalar)?)
+                }
+                DurableLargeValueRecordSlot::Reserved(_) => {
+                    ordered.push(Value::Nullable(None));
+                }
+            }
+        }
+        if values.is_empty() {
+            Ok(ordered)
+        } else {
+            Err(Error::MalformedScalar)
+        }
+    }
+
+    fn decode_values(&self, values: &[Value]) -> Result<BTreeMap<u16, Value>, Error> {
+        if values.len() != self.slots.len() {
+            return Err(Error::MalformedScalar);
+        }
+        let mut fields = BTreeMap::new();
+        for (slot, value) in self.slots.iter().zip(values) {
+            match slot {
+                DurableLargeValueRecordSlot::Known(id) => {
+                    fields.insert(*id, value.clone());
+                }
+                DurableLargeValueRecordSlot::Reserved(_)
+                    if matches!(value, Value::Nullable(None)) => {}
+                DurableLargeValueRecordSlot::Reserved(_) => return Err(Error::MalformedScalar),
+            }
+        }
+        Ok(fields)
+    }
+}
+
+fn take_durable_large_value_field(
+    fields: &mut BTreeMap<u16, Value>,
+    id: u16,
+) -> Result<Value, Error> {
+    fields.remove(&id).ok_or(Error::MalformedScalar)
+}
+
+/// Construct a fixed engine-owned record layout from permanent, one-based
+/// positional field IDs. Source declaration order is normalized, but numeric
+/// IDs are actual record ordinals: skipped IDs become canonical empty nullable
+/// slots and are never compacted away.
+fn durable_large_value_record_descriptor(
+    fields: impl IntoIterator<Item = (u16, &'static str, ValueType)>,
+) -> DurableLargeValueRecordSchema {
+    let mut fields = fields.into_iter().collect::<Vec<_>>();
+    fields.sort_by_key(|(id, _, _)| *id);
+    assert!(
+        fields.iter().all(|(id, _, _)| *id != 0),
+        "large-value durable field IDs start at one"
+    );
+    assert!(
+        fields.windows(2).all(|fields| fields[0].0 != fields[1].0),
+        "large-value record has duplicate durable field IDs"
+    );
+    let max_field_id = fields
+        .last()
+        .expect("large-value record must have at least one field")
+        .0;
+    let mut fields = fields.into_iter().peekable();
+    let mut slots = Vec::with_capacity(usize::from(max_field_id));
+    let mut descriptor_fields = Vec::with_capacity(usize::from(max_field_id));
+    for slot_id in 1..=max_field_id {
+        match fields.peek() {
+            Some((id, _, _)) if *id == slot_id => {
+                let (_, name, value_type) = fields.next().expect("peeked field must exist");
+                slots.push(DurableLargeValueRecordSlot::Known(slot_id));
+                descriptor_fields.push((format!("f{slot_id:04}_{name}"), value_type));
+            }
+            _ => {
+                slots.push(DurableLargeValueRecordSlot::Reserved(slot_id));
+                descriptor_fields.push((
+                    format!("f{slot_id:04}_reserved"),
+                    ValueType::Nullable(Box::new(ValueType::raw_bytes())),
+                ));
+            }
+        }
+    }
+    debug_assert!(fields.next().is_none());
+    DurableLargeValueRecordSchema {
+        slots,
+        descriptor: RecordDescriptor::new(descriptor_fields),
+    }
+}
+
+const LARGE_VALUE_REF_BYTES_TAG: u8 = 0;
+const LARGE_VALUE_REF_STRING_TAG: u8 = 1;
+const LARGE_VALUE_REF_JSON_TAG: u8 = 2;
+
+fn large_value_ref_schema() -> &'static EnumSchema {
+    static SCHEMA: OnceLock<EnumSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let payload = large_value_ref_payload_descriptor();
+        let cases = [
+            (LARGE_VALUE_REF_BYTES_TAG, EnumCase::new("Bytes", payload)),
+            (LARGE_VALUE_REF_STRING_TAG, EnumCase::new("String", payload)),
+            (LARGE_VALUE_REF_JSON_TAG, EnumCase::new("Json", payload)),
+        ];
+        assert!(
+            cases
+                .iter()
+                .enumerate()
+                .all(|(index, (tag, _))| usize::from(*tag) == index)
+        );
+        EnumSchema::new(
+            "groove.internal.large_value_ref",
+            cases.map(|(_, case)| case),
+        )
+        .expect("fixed internal large-value-ref enum schema is valid")
+    })
+}
+
+pub(crate) fn large_value_ref_value_type() -> &'static ValueType {
+    static VALUE_TYPE: OnceLock<ValueType> = OnceLock::new();
+    VALUE_TYPE.get_or_init(|| ValueType::Enum(Box::new(large_value_ref_schema().clone())))
+}
+
+pub(crate) fn large_value_ref_value(value: &LargeValueRef) -> Result<Value, Error> {
+    validate_descriptor(value)?;
+    let tag = u32::from(large_value_kind_tag(value.kind));
+    let payload = large_value_ref_schema()
+        .case(tag)
+        .map_err(|_| Error::MalformedScalar)?
+        .payload;
+    let value = EnumValue::create(tag, payload, &chunked_values(value))
+        .map_err(|_| Error::MalformedScalar)?;
+    Ok(Value::Enum(value))
+}
+
+pub(crate) fn large_value_ref_from_value(value: &Value) -> Result<LargeValueRef, Error> {
+    let Value::Enum(value) = value else {
+        return Err(Error::MalformedScalar);
+    };
+    let kind =
+        large_value_kind_from_tag(u8::try_from(value.tag()).map_err(|_| Error::MalformedScalar)?)?;
+    let values = value
+        .record()
+        .to_values()
+        .map_err(|_| Error::MalformedScalar)?;
+    decode_chunked_values(kind, &values)
+}
+
+pub(crate) fn encode_large_value_ref(value: &LargeValueRef) -> Result<Vec<u8>, Error> {
+    crate::records::encode_single_field_value(
+        &large_value_ref_value(value)?,
+        large_value_ref_value_type(),
+    )
+    .map_err(|_| Error::MalformedScalar)
+}
+
+#[cfg(test)]
+pub(crate) fn decode_large_value_ref(encoded: &[u8]) -> Result<LargeValueRef, Error> {
+    let value = crate::records::decode_single_field_value(encoded, large_value_ref_value_type())
+        .map_err(|_| Error::MalformedScalar)?;
+    let decoded = large_value_ref_from_value(&value)?;
+    if encode_large_value_ref(&decoded)? != encoded {
+        return Err(Error::MalformedScalar);
+    }
+    Ok(decoded)
 }
 
 fn primitive_value(kind: LargeValueKind, bytes: Vec<u8>) -> Value {
@@ -2328,68 +2678,91 @@ fn raw_bytes(value: &Value) -> Result<[u8; 32], Error> {
 }
 
 fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
-    let root = RecordDescriptor::new([
-        ("object_hash", ValueType::raw_bytes()),
-        ("locator", ValueType::raw_bytes()),
-    ]);
-    let edit = RecordDescriptor::new([
-        ("offset", ValueType::U64),
-        ("delete_length", ValueType::U64),
-        ("insert_bytes", ValueType::raw_bytes()),
-        ("utf16_offset", ValueType::U64),
-        ("delete_utf16_length", ValueType::U64),
-        ("insert_utf16_length", ValueType::U64),
-    ]);
-    vec![
-        Value::U8(value.format_version),
-        Value::Bytes(value.logical_hash.0.to_vec()),
-        Value::Record(crate::records::OwnedRecord::new(
-            root.create(&[
-                Value::Bytes(value.root.object_hash.0.to_vec()),
-                Value::Bytes(value.root.locator.0.to_vec()),
-            ])
-            .expect("internal root record"),
-            root,
-        )),
-        Value::U64(value.byte_length),
-        Value::Nullable(value.utf16_length.map(|value| Box::new(Value::U64(value)))),
-        Value::Array(
-            value
-                .edit_tail
-                .iter()
-                .map(|edit_value| {
-                    Value::Record(crate::records::OwnedRecord::new(
-                        edit.create(&[
-                            Value::U64(edit_value.offset),
-                            Value::U64(edit_value.delete_length),
-                            Value::Bytes(edit_value.insert_bytes.clone()),
-                            Value::U64(edit_value.utf16_offset),
-                            Value::U64(edit_value.delete_utf16_length),
-                            Value::U64(edit_value.insert_utf16_length),
-                        ])
-                        .expect("internal edit record"),
-                        edit,
-                    ))
-                })
-                .collect(),
-        ),
-    ]
+    large_value_ref_payload_schema()
+        .ordered_values([
+            (
+                LARGE_VALUE_REF_FORMAT_VERSION_FIELD,
+                Value::U8(value.format_version),
+            ),
+            (
+                LARGE_VALUE_REF_LOGICAL_HASH_FIELD,
+                Value::Bytes(value.logical_hash.0.to_vec()),
+            ),
+            (LARGE_VALUE_REF_ROOT_FIELD, node_ref_value(&value.root)),
+            (
+                LARGE_VALUE_REF_BYTE_LENGTH_FIELD,
+                Value::U64(value.byte_length),
+            ),
+            (
+                LARGE_VALUE_REF_UTF16_LENGTH_FIELD,
+                Value::Nullable(value.utf16_length.map(|value| Box::new(Value::U64(value)))),
+            ),
+            (
+                LARGE_VALUE_REF_EDIT_TAIL_FIELD,
+                Value::Array(
+                    value
+                        .edit_tail
+                        .iter()
+                        .map(|edit_value| {
+                            let fields = large_value_edit_schema()
+                                .ordered_values([
+                                    (EDIT_OFFSET_FIELD, Value::U64(edit_value.offset)),
+                                    (
+                                        EDIT_DELETE_LENGTH_FIELD,
+                                        Value::U64(edit_value.delete_length),
+                                    ),
+                                    (
+                                        EDIT_INSERT_BYTES_FIELD,
+                                        Value::Bytes(edit_value.insert_bytes.clone()),
+                                    ),
+                                    (EDIT_UTF16_OFFSET_FIELD, Value::U64(edit_value.utf16_offset)),
+                                    (
+                                        EDIT_DELETE_UTF16_LENGTH_FIELD,
+                                        Value::U64(edit_value.delete_utf16_length),
+                                    ),
+                                    (
+                                        EDIT_INSERT_UTF16_LENGTH_FIELD,
+                                        Value::U64(edit_value.insert_utf16_length),
+                                    ),
+                                ])
+                                .expect("all internal edit fields are present");
+                            Value::Record(crate::records::OwnedRecord::new(
+                                large_value_edit_descriptor()
+                                    .create(&fields)
+                                    .expect("internal edit record"),
+                                large_value_edit_descriptor(),
+                            ))
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+        .expect("all internal large-value reference fields are present")
 }
 
 fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<LargeValueRef, Error> {
-    let [
-        Value::U8(format_version),
-        logical_hash,
-        Value::Record(root),
-        Value::U64(byte_length),
-        Value::Nullable(utf16_length),
-        Value::Array(edits),
-    ] = values
+    let mut fields = large_value_ref_payload_schema().decode_values(values)?;
+    let Value::U8(format_version) =
+        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_FORMAT_VERSION_FIELD)?
     else {
         return Err(Error::MalformedScalar);
     };
-    let root_values = root.to_values().map_err(|_| Error::MalformedScalar)?;
-    let [object_hash, locator] = root_values.as_slice() else {
+    let logical_hash =
+        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_LOGICAL_HASH_FIELD)?;
+    let root = take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_ROOT_FIELD)?;
+    let Value::U64(byte_length) =
+        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_BYTE_LENGTH_FIELD)?
+    else {
+        return Err(Error::MalformedScalar);
+    };
+    let Value::Nullable(utf16_length) =
+        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_UTF16_LENGTH_FIELD)?
+    else {
+        return Err(Error::MalformedScalar);
+    };
+    let Value::Array(edits) =
+        take_durable_large_value_field(&mut fields, LARGE_VALUE_REF_EDIT_TAIL_FIELD)?
+    else {
         return Err(Error::MalformedScalar);
     };
     let utf16_length = match utf16_length.as_deref() {
@@ -2402,36 +2775,52 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
         let Value::Record(edit) = value else {
             return Err(Error::MalformedScalar);
         };
-        let fields = edit.to_values().map_err(|_| Error::MalformedScalar)?;
-        let [
-            Value::U64(offset),
-            Value::U64(delete_length),
-            Value::Bytes(insert_bytes),
-            Value::U64(utf16_offset),
-            Value::U64(delete_utf16_length),
-            Value::U64(insert_utf16_length),
-        ] = fields.as_slice()
+        let values = edit.to_values().map_err(|_| Error::MalformedScalar)?;
+        let mut fields = large_value_edit_schema().decode_values(&values)?;
+        let Value::U64(offset) = take_durable_large_value_field(&mut fields, EDIT_OFFSET_FIELD)?
+        else {
+            return Err(Error::MalformedScalar);
+        };
+        let Value::U64(delete_length) =
+            take_durable_large_value_field(&mut fields, EDIT_DELETE_LENGTH_FIELD)?
+        else {
+            return Err(Error::MalformedScalar);
+        };
+        let Value::Bytes(insert_bytes) =
+            take_durable_large_value_field(&mut fields, EDIT_INSERT_BYTES_FIELD)?
+        else {
+            return Err(Error::MalformedScalar);
+        };
+        let Value::U64(utf16_offset) =
+            take_durable_large_value_field(&mut fields, EDIT_UTF16_OFFSET_FIELD)?
+        else {
+            return Err(Error::MalformedScalar);
+        };
+        let Value::U64(delete_utf16_length) =
+            take_durable_large_value_field(&mut fields, EDIT_DELETE_UTF16_LENGTH_FIELD)?
+        else {
+            return Err(Error::MalformedScalar);
+        };
+        let Value::U64(insert_utf16_length) =
+            take_durable_large_value_field(&mut fields, EDIT_INSERT_UTF16_LENGTH_FIELD)?
         else {
             return Err(Error::MalformedScalar);
         };
         edit_tail.push(ReplaceEdit {
-            offset: *offset,
-            delete_length: *delete_length,
-            insert_bytes: insert_bytes.clone(),
-            utf16_offset: *utf16_offset,
-            delete_utf16_length: *delete_utf16_length,
-            insert_utf16_length: *insert_utf16_length,
+            offset,
+            delete_length,
+            insert_bytes,
+            utf16_offset,
+            delete_utf16_length,
+            insert_utf16_length,
         });
     }
     let value = LargeValueRef {
         kind,
-        format_version: *format_version,
-        logical_hash: ContentHash(raw_bytes(logical_hash)?),
-        root: NodeRef {
-            object_hash: ContentHash(raw_bytes(object_hash)?),
-            locator: Locator(raw_bytes(locator)?),
-        },
-        byte_length: *byte_length,
+        format_version,
+        logical_hash: ContentHash(raw_bytes(&logical_hash)?),
+        root: node_ref_from_value(&root)?,
+        byte_length,
         utf16_length,
         edit_tail,
     };
@@ -2441,17 +2830,17 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
 
 fn large_value_kind_tag(kind: LargeValueKind) -> u8 {
     match kind {
-        LargeValueKind::Bytes => 0,
-        LargeValueKind::String => 1,
-        LargeValueKind::Json => 2,
+        LargeValueKind::Bytes => LARGE_VALUE_REF_BYTES_TAG,
+        LargeValueKind::String => LARGE_VALUE_REF_STRING_TAG,
+        LargeValueKind::Json => LARGE_VALUE_REF_JSON_TAG,
     }
 }
 
 fn large_value_kind_from_tag(tag: u8) -> Result<LargeValueKind, Error> {
     match tag {
-        0 => Ok(LargeValueKind::Bytes),
-        1 => Ok(LargeValueKind::String),
-        2 => Ok(LargeValueKind::Json),
+        LARGE_VALUE_REF_BYTES_TAG => Ok(LargeValueKind::Bytes),
+        LARGE_VALUE_REF_STRING_TAG => Ok(LargeValueKind::String),
+        LARGE_VALUE_REF_JSON_TAG => Ok(LargeValueKind::Json),
         _ => Err(Error::MalformedScalar),
     }
 }
@@ -4561,6 +4950,188 @@ pub(crate) fn shared_child_dag_fixture() -> PreparedLargeValue {
 mod tests {
     use super::*;
 
+    #[test]
+    fn node_ref_codec_reuses_the_stored_scalar_root_record() {
+        let node_ref = NodeRef {
+            object_hash: ContentHash([7; 32]),
+            locator: Locator::from_seed(b"canonical NodeRef codec"),
+        };
+        let encoded = encode_node_ref(&node_ref).unwrap();
+
+        assert_eq!(decode_node_ref(&encoded).unwrap(), node_ref);
+
+        let value_ref = LargeValueRef {
+            kind: LargeValueKind::Bytes,
+            format_version: FORMAT_VERSION,
+            logical_hash: ContentHash([11; 32]),
+            root: node_ref,
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        };
+        let Value::Record(stored_root) = &chunked_values(&value_ref)[2] else {
+            panic!("stored scalar root must be a record");
+        };
+        assert_eq!(stored_root.raw(), encoded);
+
+        let malformed = node_ref_descriptor()
+            .create(&[Value::Bytes(vec![0; 31]), Value::Bytes(vec![0; 32])])
+            .unwrap();
+        assert_eq!(decode_node_ref(&malformed), Err(Error::MalformedScalar));
+    }
+
+    // This is an intentionally internal physical-codec receipt. Application
+    // rows cannot construct these engine-owned descriptors; the test freezes
+    // the slot contract that makes future storage-format changes explicit.
+    #[test]
+    fn durable_large_value_field_ids_are_physical_slots() {
+        fn encode(
+            schema: &DurableLargeValueRecordSchema,
+            fields: impl IntoIterator<Item = (u16, Value)>,
+        ) -> Vec<u8> {
+            let values = schema.ordered_values(fields).unwrap();
+            schema.descriptor.create(&values).unwrap()
+        }
+        fn to_hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        fn assert_renumber_is_physical(
+            before_schema: &DurableLargeValueRecordSchema,
+            after_schema: &DurableLargeValueRecordSchema,
+            before_fields: Vec<(u16, Value)>,
+            after_fields: Vec<(u16, Value)>,
+        ) -> (Vec<u8>, Vec<u8>) {
+            let before = encode(before_schema, before_fields);
+            let after = encode(after_schema, after_fields);
+            assert_ne!(before, after, "renumbering changes canonical bytes");
+            assert!(
+                after_schema
+                    .descriptor
+                    .bind(&before)
+                    .to_values()
+                    .map_err(|_| ())
+                    .and_then(|old_values| after_schema.decode_values(&old_values).map_err(|_| ()))
+                    .is_err(),
+                "a renumbered schema must reject the old record slots"
+            );
+            (before, after)
+        }
+
+        let locator_at_two = durable_large_value_record_descriptor([
+            (1, "object_hash", ValueType::U64),
+            (2, "locator", ValueType::U64),
+        ]);
+        let locator_at_two_reordered = durable_large_value_record_descriptor([
+            (2, "locator", ValueType::U64),
+            (1, "object_hash", ValueType::U64),
+        ]);
+        let locator_at_three = durable_large_value_record_descriptor([
+            (1, "object_hash", ValueType::U64),
+            (3, "locator", ValueType::U64),
+        ]);
+        let locator_two = encode(&locator_at_two, [(1, Value::U64(7)), (2, Value::U64(11))]);
+        assert_eq!(
+            locator_two,
+            encode(
+                &locator_at_two_reordered,
+                [(2, Value::U64(11)), (1, Value::U64(7))],
+            ),
+            "source declaration order is not physical"
+        );
+        let (locator_two, locator_three) = assert_renumber_is_physical(
+            &locator_at_two,
+            &locator_at_three,
+            vec![(1, Value::U64(7)), (2, Value::U64(11))],
+            vec![(1, Value::U64(7)), (3, Value::U64(11))],
+        );
+        assert_eq!(to_hex(&locator_two), "07000000000000000b00000000000000");
+        assert_eq!(to_hex(&locator_three), "07000000000000000b0000000000000000");
+
+        let edit_at_three = durable_large_value_record_descriptor([
+            (1, "offset", ValueType::U64),
+            (2, "delete_length", ValueType::U64),
+            (3, "insert_bytes", ValueType::U64),
+        ]);
+        let edit_at_four = durable_large_value_record_descriptor([
+            (1, "offset", ValueType::U64),
+            (2, "delete_length", ValueType::U64),
+            (4, "insert_bytes", ValueType::U64),
+        ]);
+        let (edit_three, edit_four) = assert_renumber_is_physical(
+            &edit_at_three,
+            &edit_at_four,
+            vec![
+                (1, Value::U64(17)),
+                (2, Value::U64(19)),
+                (3, Value::U64(23)),
+            ],
+            vec![
+                (1, Value::U64(17)),
+                (2, Value::U64(19)),
+                (4, Value::U64(23)),
+            ],
+        );
+        assert_eq!(
+            to_hex(&edit_three),
+            "110000000000000013000000000000001700000000000000"
+        );
+        assert_eq!(
+            to_hex(&edit_four),
+            "11000000000000001300000000000000170000000000000000"
+        );
+
+        let reference_at_three = durable_large_value_record_descriptor([
+            (1, "format_version", ValueType::U64),
+            (2, "logical_hash", ValueType::U64),
+            (3, "root", ValueType::U64),
+        ]);
+        let reference_at_four = durable_large_value_record_descriptor([
+            (1, "format_version", ValueType::U64),
+            (2, "logical_hash", ValueType::U64),
+            (4, "root", ValueType::U64),
+        ]);
+        let (reference_three, reference_four) = assert_renumber_is_physical(
+            &reference_at_three,
+            &reference_at_four,
+            vec![
+                (1, Value::U64(29)),
+                (2, Value::U64(31)),
+                (3, Value::U64(37)),
+            ],
+            vec![
+                (1, Value::U64(29)),
+                (2, Value::U64(31)),
+                (4, Value::U64(37)),
+            ],
+        );
+        assert_eq!(
+            to_hex(&reference_three),
+            "1d000000000000001f000000000000002500000000000000"
+        );
+        assert_eq!(
+            to_hex(&reference_four),
+            "1d000000000000001f00000000000000250000000000000000"
+        );
+
+        let nonempty_reserved = locator_at_three
+            .descriptor
+            .create(&[
+                Value::U64(7),
+                Value::Nullable(Some(Box::new(Value::Bytes(vec![1])))),
+                Value::U64(11),
+            ])
+            .unwrap();
+        let values = locator_at_three
+            .descriptor
+            .bind(&nonempty_reserved)
+            .to_values()
+            .unwrap();
+        assert!(
+            locator_at_three.decode_values(&values).is_err(),
+            "reserved slots must remain canonical empty nulls"
+        );
+    }
+
     struct PreparedProvider {
         chunks: std::collections::BTreeMap<Locator, (ContentHash, bytes::Bytes)>,
     }
@@ -4889,6 +5460,18 @@ mod tests {
         .unwrap();
         let mut values = chunked_values(value);
         values[0] = Value::U8(1);
+        // This deliberately constructs the superseded v12 descriptor, whose
+        // field names predate the current numeric field identities. The
+        // receipt must prove those legacy bytes still fail closed rather than
+        // accidentally reusing current helper descriptors.
+        values[2] = Value::Record(crate::records::OwnedRecord::new(
+            root.create(&[
+                Value::Bytes(value.root.object_hash.0.to_vec()),
+                Value::Bytes(value.root.locator.0.to_vec()),
+            ])
+            .unwrap(),
+            root,
+        ));
         let value = EnumValue::create(1, schema.case(1).unwrap().payload, &values).unwrap();
         crate::records::encode_single_field_value(
             &Value::Enum(value),

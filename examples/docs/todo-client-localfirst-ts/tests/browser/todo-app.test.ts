@@ -292,12 +292,12 @@ describe("Vanilla TS Todo App E2E", () => {
     const { container: el1, db: db1 } = await mountWithDb({
       appId: APP_ID,
       serverUrl,
-      secret: "IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68",
+      secret: "jazz-auth-v1:IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68",
     });
     const { container: el2, db: db2 } = await mountWithDb({
       appId: APP_ID,
       serverUrl,
-      secret: "C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE",
+      secret: "jazz-auth-v1:C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE",
     });
 
     await waitFor(

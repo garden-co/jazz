@@ -2116,9 +2116,7 @@ fn settled_result_member_key(
     member: &ResultMemberEntry,
 ) -> Result<Vec<Value>, Error> {
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(postcard::to_allocvec(member).map_err(
-        |_| Error::InvalidStoredValue("settled result member must encode"),
-    )?));
+    key.push(Value::Bytes(codec::result_member_storage_bytes(member)?));
     Ok(key)
 }
 

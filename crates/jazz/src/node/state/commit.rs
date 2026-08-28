@@ -105,25 +105,33 @@ where
                     .clone()
                     .unwrap_or_else(|| commit.cells.keys().cloned().collect());
                 for column in authored {
+                    let column_type = table
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == column)
+                        .expect("authored column exists")
+                        .column_type
+                        .clone();
                     let components = match table.merge_strategy(&column) {
                         MergeStrategy::Lww => vec![ContributionComponent::Column(column)],
-                        MergeStrategy::Counter => {
-                            vec![ContributionComponent::Operation(column.into_bytes())]
-                        }
+                        MergeStrategy::Counter => vec![ContributionComponent::Operation {
+                            column,
+                            identity: Vec::new(),
+                        }],
                         MergeStrategy::GSet => match commit.cells.get(&column) {
                             Some(Value::Array(elements)) => elements
                                 .iter()
                                 .map(|element| {
-                                    postcard::to_allocvec(&(column.as_str(), element)).map(
-                                        ContributionComponent::Operation,
+                                    encode_contribution_gset_identity(
+                                        &column_type,
+                                        element,
                                     )
+                                    .map(|identity| ContributionComponent::Operation {
+                                        column: column.clone(),
+                                        identity,
+                                    })
                                 })
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|_| {
-                                    Error::InvalidMergeableCommit(
-                                        "g-set contribution operation must encode",
-                                    )
-                                })?,
+                                .collect::<Result<Vec<_>, _>>()?,
                             _ => {
                                 return Err(Error::InvalidMergeableCommit(
                                     "g-set calculated merge value must be an array",
@@ -261,16 +269,9 @@ where
         for (_, commit) in &commits {
             commit.validate()?;
         }
-        self.prepare_and_stage_large_commit_values(&mut commits).await?;
-        let staged_ids = commits
-            .iter()
-            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
-            .collect::<BTreeSet<_>>();
-        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
-        let user_metadata_json = commits[0].1.user_metadata_json.clone();
         let tx = Transaction {
             tx_id,
             kind: TxKind::Mergeable,
@@ -283,9 +284,16 @@ where
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
-            user_metadata_json,
+            user_metadata_json: commits[0].1.user_metadata_json.clone(),
             contribution_merge,
         };
+        let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
+        self.prepare_and_stage_large_commit_values(&mut commits).await?;
+        let staged_ids = commits
+            .iter()
+            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
+            .collect::<BTreeSet<_>>();
+        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
         let mut batch = self.database.open_batch();
         for (_, commit) in &commits {
@@ -301,6 +309,7 @@ where
                 Fate::Pending,
                 None,
                 self.authored_commit_durability,
+                contribution_merge,
             ),
         );
         let mut stored_versions = Vec::new();
@@ -436,6 +445,11 @@ where
                     .clone()
                     .unwrap_or_else(|| cells.keys().cloned().collect()),
             );
+            let authored_column_ids = self.authored_column_ids_for_names(
+                write_schema_version,
+                &table_schema.name,
+                authored_columns.as_ref(),
+            )?;
             let history_descriptor = if commit.deletion.is_none() {
                 Some(
                     self.prepared_physical_write_plan(
@@ -463,7 +477,7 @@ where
                     updated_by: commit.made_by,
                     updated_at: provenance_at,
                     cells,
-                    authored_columns,
+                    authored_columns: authored_column_ids,
                     deletion: commit.deletion,
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)

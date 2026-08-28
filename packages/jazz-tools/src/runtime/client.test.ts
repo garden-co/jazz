@@ -383,12 +383,12 @@ describe("JazzClient transaction query plumbing", () => {
     );
 
     expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
-      branch_view: { head: { values: { workspace: [15, 14] } } },
+      branch_view: { head: { values: { workspace: [1, 4, 7, 0, 0, 0] } } },
     });
     expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
       branch_view: {
-        head: { values: { workspace: [15, 14] } },
-        base: { Current: { values: { workspace: [15, 2] } } },
+        head: { values: { workspace: [1, 4, 7, 0, 0, 0] } },
+        base: { Current: { values: { workspace: [1, 4, 1, 0, 0, 0] } } },
       },
     });
   });
@@ -418,12 +418,12 @@ describe("JazzClient transaction query plumbing", () => {
       read_view: {
         source: {
           BranchView: {
-            head: { values: { workspace: [15, 14] } },
+            head: { values: { workspace: [1, 4, 7, 0, 0, 0] } },
             base: {
               Current: {
                 values: {
-                  workspace: [15, 2],
-                  tenant: [9, 16, ...Array(16).fill(0x42)],
+                  workspace: [1, 4, 1, 0, 0, 0],
+                  tenant: [1, 7, ...Array(16).fill(0x42)],
                 },
               },
             },
@@ -449,7 +449,7 @@ describe("JazzClient transaction query plumbing", () => {
       read_view: {
         source: {
           BranchView: {
-            head: { values: { branch: [6, 5, 100, 114, 97, 102, 116] } },
+            head: { values: { branch: [1, 6, 2, 100, 114, 97, 102, 116] } },
           },
         },
       },

@@ -1,5 +1,6 @@
 import { entropyToMnemonic, mnemonicToEntropy } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { formatAuthSecret, parseAuthSecret } from "./auth-secret-codec.js";
 
 export type RecoveryPhraseErrorCode =
   | "invalid-word"
@@ -18,26 +19,8 @@ export class RecoveryPhraseError extends Error {
 
 const WORDSET = new Set(wordlist);
 
-function base64urlToBytes(input: string): Uint8Array {
-  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
-  const padding = normalized.length % 4;
-  const padded = padding === 0 ? normalized : normalized + "=".repeat(4 - padding);
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function bytesToBase64url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
 function normalize(phrase: string): string[] {
-  const trimmed = phrase.trim();
+  const trimmed = phrase.normalize("NFKD").trim();
   if (trimmed.length === 0) return [];
   return trimmed.toLowerCase().split(/\s+/u);
 }
@@ -47,19 +30,11 @@ export const RecoveryPhrase = {
     if (typeof secret !== "string") {
       throw new RecoveryPhraseError("invalid-secret", "Secret must be a string");
     }
-    let bytes: Uint8Array;
     try {
-      bytes = base64urlToBytes(secret);
+      return entropyToMnemonic(parseAuthSecret(secret), wordlist);
     } catch {
-      throw new RecoveryPhraseError("invalid-secret", "Secret is not valid base64url");
+      throw new RecoveryPhraseError("invalid-secret", "Secret is not a canonical Jazz auth secret");
     }
-    if (bytes.length !== 32) {
-      throw new RecoveryPhraseError(
-        "invalid-secret",
-        `Secret must decode to 32 bytes, got ${bytes.length}`,
-      );
-    }
-    return entropyToMnemonic(bytes, wordlist);
   },
 
   toSecret(phrase: string): string {
@@ -89,6 +64,6 @@ export const RecoveryPhrase = {
       }
       throw new RecoveryPhraseError("invalid-length", message);
     }
-    return bytesToBase64url(bytes);
+    return formatAuthSecret(bytes);
   },
 };

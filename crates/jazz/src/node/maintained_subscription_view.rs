@@ -7,9 +7,10 @@ use groove::records::{
 };
 
 use super::codec::{
-    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
-    history_values_from_parts, nullable_value, owned_record_from_storage_values_with_descriptor,
-    register_values_from_parts, tx_ids_from_value, version_tx_id_from_aliases,
+    VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
+    deletion_event_from_value, history_values_from_parts, nullable_value,
+    owned_record_from_storage_values_with_descriptor, register_values_from_parts,
+    tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -23,7 +24,7 @@ use crate::protocol::{
     BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
     ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
-use crate::schema::TableSchema;
+use crate::schema::{RuntimeSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::TxId;
@@ -1489,14 +1490,16 @@ fn decode_typed_version_witness(
     let tx_time = TxTime(record_u64_idx(record, plan.tx_time_idx)?);
     let branch_key = match plan.branch_idx {
         Some(idx) => match record.get_idx(idx)? {
-            Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
-                super::Error::InvalidStoredValue("maintained witness branch key is invalid")
-            })?,
-            Value::Nullable(None) => BranchKey::default(),
-            Value::Nullable(Some(value)) => match *value {
-                Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
+            Value::Bytes(bytes) => RuntimeSchema::decode_persisted_branch_key(table, &bytes)
+                .map_err(|_| {
                     super::Error::InvalidStoredValue("maintained witness branch key is invalid")
                 })?,
+            Value::Nullable(None) => BranchKey::default(),
+            Value::Nullable(Some(value)) => match *value {
+                Value::Bytes(bytes) => RuntimeSchema::decode_persisted_branch_key(table, &bytes)
+                    .map_err(|_| {
+                        super::Error::InvalidStoredValue("maintained witness branch key is invalid")
+                    })?,
                 _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),
             },
             _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),
@@ -1513,14 +1516,7 @@ fn decode_typed_version_witness(
     }
     let authored_columns = if layer == VersionLayer::Content {
         nullable_value(record.get_idx(plan.authored_columns_idx)?)?
-            .map(|value| match value {
-                Value::Bytes(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
-                    super::Error::InvalidStoredValue("authored columns must be valid JSON")
-                }),
-                _ => Err(super::Error::InvalidStoredValue(
-                    "authored columns must be bytes",
-                )),
-            })
+            .map(authored_column_ids_from_value)
             .transpose()?
     } else {
         None
@@ -2065,8 +2061,8 @@ mod tests {
 
     use super::*;
     use crate::ids::{NodeUuid, SchemaVersionAlias};
-    use crate::node::Error;
     use crate::node::codec::{VersionRow, VersionRowParts};
+    use crate::node::{Error, PhysicalColumnId};
     use crate::protocol::ResultRowEntry;
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::TxTime;
@@ -2475,7 +2471,7 @@ mod tests {
                 updated_by: AuthorSubject::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
-                authored_columns: Some(BTreeSet::from(["title".to_owned()])),
+                authored_columns: Some(BTreeSet::from([PhysicalColumnId(1)])),
                 deletion: None,
             },
             None,

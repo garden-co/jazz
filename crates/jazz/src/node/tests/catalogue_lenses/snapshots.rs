@@ -217,6 +217,209 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
 }
 
 #[test]
+fn authored_columns_cross_nodes_with_different_physical_column_ids() {
+    // Physical column ids are deliberately node-local. This internal wire-
+    // boundary test makes the same evolved schema allocate `body` differently
+    // on each node, then verifies that logical names cross the wire and each
+    // side persists only its own id.
+    let base = schema();
+    let filler = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("scratch", PublicColumnType::Text),
+        ),
+    ));
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let (_authority_dir, mut authority) = open_node_with_schema(node(0x63), base.clone());
+    publish_schema_lineage(
+        &mut authority,
+        filler.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            filler.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "scratch".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    publish_schema_lineage(
+        &mut authority,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorSubject::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .unwrap();
+
+    let (receiver_dir, mut receiver) =
+        open_node_with_schema(node(0x64), evolved.schema.clone());
+    let receiver_body_id =
+        receiver.catalogue.physical_mappings[&evolved.id].tables["todos"].columns["body"];
+    let authority_body_id =
+        authority.catalogue.physical_mappings[&evolved.id].tables["todos"].columns["body"];
+    assert_ne!(authority_body_id, receiver_body_id);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(authority.catalogue_snapshot().unwrap())
+        .unwrap();
+    assert_eq!(
+        receiver.catalogue.physical_mappings[&evolved.id].tables["todos"].columns["body"],
+        receiver_body_id
+    );
+
+    let (tx_id, unit) = authority
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x65), 10)
+                .cells(BTreeMap::from([("body".to_owned(), v("authored"))]))
+                .authored_columns(BTreeSet::from(["body".to_owned()])),
+        )
+        .unwrap();
+    receiver.apply_sync_message_settled(unit).unwrap();
+    let stored = receiver.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(stored[0].authored_column_ids().unwrap(), Some(BTreeSet::from([receiver_body_id])));
+    assert_eq!(
+        receiver
+            .version_record_from_row(&stored[0])
+            .unwrap()
+            .authored_columns(),
+        Some(&BTreeSet::from(["body".to_owned()]))
+    );
+    drop(receiver);
+
+    let mut reopened = reopen_node_at(&receiver_dir, node(0x64), evolved.schema);
+    let stored = reopened.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(
+        reopened
+            .version_record_from_row(&stored[0])
+            .unwrap()
+            .authored_columns(),
+        Some(&BTreeSet::from(["body".to_owned()]))
+    );
+}
+
+#[test]
+fn authored_columns_follow_a_renamed_column_through_wire_and_reopen() {
+    // Internal because physical ids are local storage aliases. The public
+    // contract under test is that a v1 `title` patch and a v2 `name` patch
+    // retain their authored schema names on the wire while sharing one local
+    // physical-column identity across the rename.
+    let base = schema();
+    let renamed_schema = evolved_todos_name_body_schema();
+    let renamed = SchemaVersion::new(renamed_schema.clone());
+    let (authority_dir, mut authority) = open_node_with_schema(node(0x66), base.clone());
+    let (old_tx, old_unit) = authority
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x67), 10)
+                .cells(BTreeMap::from([("title".to_owned(), v("old"))]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    publish_schema_lineage(
+        &mut authority,
+        renamed.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                    LensOp::AddColumn {
+                        column: "body".to_owned(),
+                        default: v(""),
+                    },
+                ],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorSubject::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: renamed.id,
+            },
+        })
+        .unwrap();
+    let (new_tx, new_unit) = authority
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x68), 11)
+                .cells(BTreeMap::from([("name".to_owned(), v("new"))]))
+                .authored_columns(BTreeSet::from(["name".to_owned()])),
+        )
+        .unwrap();
+
+    let title_id = authority.catalogue.physical_mappings[&base.version_id()].tables["todos"]
+        .columns["title"];
+    let name_id = authority.catalogue.physical_mappings[&renamed.id].tables["todos"].columns["name"];
+    assert_eq!(title_id, name_id, "a compatible rename retains the column id");
+    for (tx_id, logical_name) in [(old_tx, "title"), (new_tx, "name")] {
+        let stored = authority.query_versions_for_tx(tx_id).unwrap().remove(0);
+        assert_eq!(stored.authored_column_ids().unwrap(), Some(BTreeSet::from([title_id])));
+        assert_eq!(
+            authority.version_record_from_row(&stored).unwrap().authored_columns(),
+            Some(&BTreeSet::from([logical_name.to_owned()])),
+        );
+    }
+
+    let (receiver_dir, mut receiver) = open_node_with_schema(node(0x69), renamed_schema.clone());
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(authority.catalogue_snapshot().unwrap())
+        .unwrap();
+    receiver.apply_sync_message_settled(old_unit).unwrap();
+    receiver.apply_sync_message_settled(new_unit).unwrap();
+    drop(receiver);
+    drop(authority);
+
+    let mut reopened_authority = reopen_node_at(&authority_dir, node(0x66), base);
+    let mut reopened_receiver = reopen_node_at(&receiver_dir, node(0x69), renamed_schema);
+    for node in [&mut reopened_authority, &mut reopened_receiver] {
+        for (tx_id, logical_name) in [(old_tx, "title"), (new_tx, "name")] {
+            let stored = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+            assert_eq!(
+                node.version_record_from_row(&stored).unwrap().authored_columns(),
+                Some(&BTreeSet::from([logical_name.to_owned()])),
+            );
+        }
+    }
+}
+
+#[test]
 fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     // Internal because settled result-set installation is a sync receiver
     // boundary; schema projection itself is asserted through the query API.
@@ -465,6 +668,32 @@ fn dynamic_edge_reopen_fails_closed_on_unknown_catalogue_kernel_kind() {
         assert!(fresh_dynamic_edge_open(temp_dir.path(), node(0xa0)).is_err(),
             "open attempt {attempt} must reject an unknown catalogue kernel kind");
     }
+}
+
+/// This is an internal storage-boundary receipt: the public API cannot expose
+/// the epoch bootstrap row directly.  Pin every byte identity here so a future
+/// Rust enum reorder cannot silently reinterpret an existing catalogue.
+#[test]
+fn catalogue_kernel_kind_fixture_is_exact_and_closed() {
+    use crate::node::codec::CatalogueRecordKind;
+
+    let fixture = [
+        (CatalogueRecordKind::Genesis, 0),
+        (CatalogueRecordKind::Schema, 1),
+        (CatalogueRecordKind::Lens, 2),
+        (CatalogueRecordKind::SchemaLineageStaged, 3),
+        (CatalogueRecordKind::SchemaLineagePending, 4),
+        (CatalogueRecordKind::SchemaLineageActive, 5),
+        (CatalogueRecordKind::WritePointerPending, 6),
+        (CatalogueRecordKind::BootstrapReady, 7),
+    ];
+
+    for (kind, bytes) in fixture {
+        assert_eq!(kind.key(), bytes, "epoch-pinned kind fixture changed");
+        assert_eq!(CatalogueRecordKind::from_key(bytes).unwrap(), kind);
+    }
+    assert!(CatalogueRecordKind::from_key(8).is_err());
+    assert!(CatalogueRecordKind::from_key(u64::MAX).is_err());
 }
 
 fn delete_catalogue_pointer(node: &mut NodeState<RocksDbStorage>, revision: u64) {

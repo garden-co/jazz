@@ -1698,6 +1698,7 @@ where
             .copied()
             .unwrap_or(0);
         let mut schema_version_aliases = BTreeMap::new();
+        let mut schema_version_for_alias = BTreeMap::new();
         let mut physical_mappings = BTreeMap::new();
         for raw in meta_database
             .primary_key_scan_raw("jazz_schema_versions", &[])
@@ -1711,7 +1712,26 @@ where
                 SchemaVersionId(record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?);
             let alias =
                 SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
+            // Schema aliases become Groove variant tags in physical storage.
+            // Check the narrowing boundary on recovery even if this particular
+            // mapping happens to carry a previously materialized variant case.
+            groove_variant_tag(alias)?;
+            if let Some(existing) = schema_version_aliases.get(&schema_version) {
+                if *existing != alias {
+                    return Err(Error::InvalidStoredValue(
+                        "schema version has conflicting durable aliases",
+                    ));
+                }
+            }
+            if let Some(existing) = schema_version_for_alias.get(&alias) {
+                if *existing != schema_version {
+                    return Err(Error::InvalidStoredValue(
+                        "schema alias maps to multiple durable schema versions",
+                    ));
+                }
+            }
             schema_version_aliases.insert(schema_version, alias);
+            schema_version_for_alias.insert(alias, schema_version);
             physical_mappings.insert(schema_version, mapping);
         }
         validate_physical_variant_cases(&physical_mappings, &schema_version_aliases)?;

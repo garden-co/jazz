@@ -13,6 +13,7 @@ import {
   useJazzClient,
   useLocalFirstAuth,
   useSession,
+  type AuthSecretStore,
   type DbConfig,
   type JazzClient,
   type ReactNativeSqliteConnection,
@@ -27,6 +28,8 @@ const app = schema.defineApp({
 });
 
 const sqliteStorage: ReactNativeSqliteStorageDriver = new UnimplementedSqliteStorageDriver();
+
+declare const authSecretStore: AuthSecretStore;
 
 const config: DbConfig = {
   appId: "rn-typecheck",
@@ -53,6 +56,7 @@ function Hooks({ children }: { children: ReactNode }) {
   const auth = useLocalFirstAuth({
     key: "rn-auth-key",
     appId: "rn-typecheck",
+    store: authSecretStore,
   });
   const todos = useAll(app.todos);
   const suspenseTodos = useAllSuspense(app.todos);

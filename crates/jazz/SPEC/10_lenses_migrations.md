@@ -31,15 +31,16 @@ Invariant digest:
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
-- `INV-LENS-22`: The catalogue bootstrap kernel is the only hard-coded durable
+- `INV-LENS-23`: The catalogue bootstrap kernel is the only hard-coded durable
   descriptor schema in a storage epoch. Its permanent numeric record kinds,
   identities, and activation records decode immutable descriptors and lineage
   metadata only; application tables and ordinary Jazz system tables use the
   same catalogue-described record machinery.
-- `INV-LENS-23`: A durable schema descriptor is immutable and content-addressed
+- `INV-LENS-24`: A durable schema descriptor is immutable and content-addressed
   by canonical semantic descriptor bytes. Names, documentation, declaration
   order, and storage-local aliases are non-identifying; every decoding-relevant
   field and permanent table/column/enum-variant identity is identifying.
+- `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 
 ## Details
 
@@ -195,6 +196,47 @@ descriptor registry are durable local storage state and are recovered before
 any payload is decoded. They never appear in a public value or on the wire.
 An alias or mapping remains retained while any retained history, current row,
 branch-local row, snapshot, or rejected payload can name it.
+
+Every content-history row also has nullable `authored_columns` metadata. When
+present, its sole durable spelling is a Groove `Array<U64>` containing strictly
+increasing, nonzero local `PhysicalColumnId`s. It is not JSON-in-bytes, a
+logical-name payload, or an alternate serialized collection. The same typed
+field is copied into derived ahead/global content-current carriers only after
+resolving every id through the row's exact authored schema and logical table;
+zero, noncanonical order, type mismatch, or an absent mapping fails closed
+before the derived write. `None` is the deliberately conservative
+legacy/lens-payload fallback: every present cell is treated as authored.
+
+`VersionRecord` remains portable and carries logical authored column names.
+Local authoring and incoming wire ingest map those names to the receiving
+node's physical ids; exporting a stored row maps the ids back through its
+stored schema/table mapping. A compatible `RenameColumn` therefore retains one
+physical id while `v1.title` and `v2.name` remain their respective authored
+wire names. This epoch intentionally does not accept the former JSON-in-bytes
+storage spelling.
+
+Contribution-merge provenance is likewise logical on the transaction/wire
+surface, but its durable `jazz_transactions` coordinate is a standard Groove
+record with nonzero `physical_table_id: U64` and a permanent component enum:
+`column` has tag 0 and the one-field record `{ physical_column_id: U64 }`,
+`operation` has tag 1 and `{ physical_column_id: U64, identity: Bytes }`, and
+`register` has tag 2 and an empty record. The field order and enum tags are
+durable. The storage boundary resolves a logical `(table, column)` to those
+local ids when writing and resolves the ids back to the active logical
+spellings when reading. Compatible table and column lens renames retain the
+same ids; recovery consults retained mappings when the active spelling has
+changed.
+
+An operation identity is strategy-owned rather than opaque provenance:
+`Counter` uses exactly an empty `identity`, while `GSet` uses exactly the
+canonical one-field Groove record `{ element: <the declared array element
+type> }`. The receiving node validates the table/column ownership, content
+layer, merge strategy, enum tag, payload shape, and canonical identity bytes
+at remote admission and again while reopening durable state, before any
+derived mutation or resident state. Zero, unknown, ambiguous, malformed,
+trailing, or noncanonical contribution payloads fail closed. This is local
+storage identity only: API and wire records never expose physical ids or a
+private postcard contribution encoding.
 
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { PasskeyBackupError, BrowserPasskeyBackup } from "./passkey-backup.js";
+import { formatAuthSecret } from "./auth-secret-codec.js";
 
 // Build a minimal authenticatorData buffer. The flags byte lives at offset 32.
 // UP = bit 0 (0x01), UV = bit 2 (0x04). Both set = 0x05.
@@ -27,7 +28,7 @@ describe("PasskeyBackupError", () => {
       "WebAuthn is not supported in this browser",
     );
     expect(new PasskeyBackupError("invalid-secret").message).toBe(
-      "Secret must be a 32-byte base64url string",
+      "Secret must be a canonical Jazz auth secret",
     );
     expect(new PasskeyBackupError("create-failed").message).toBe(
       "Failed to create passkey credential",
@@ -64,7 +65,7 @@ describe("BrowserPasskeyBackup.backup — not-supported", () => {
     vi.stubGlobal("navigator", {});
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
     await expect(
-      pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Alice"),
+      pb.backup("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Alice"),
     ).rejects.toMatchObject({
       code: "not-supported",
     });
@@ -74,7 +75,7 @@ describe("BrowserPasskeyBackup.backup — not-supported", () => {
     vi.stubGlobal("navigator", undefined);
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
     await expect(
-      pb.backup("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Alice"),
+      pb.backup("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Alice"),
     ).rejects.toMatchObject({
       code: "not-supported",
     });
@@ -98,7 +99,7 @@ describe("BrowserPasskeyBackup.backup — invalid-secret", () => {
     vi.stubGlobal("navigator", { credentials: { create: vi.fn() } });
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
     // 16 zero bytes as base64url
-    await expect(pb.backup("AAAAAAAAAAAAAAAAAAAAAA", "Alice")).rejects.toMatchObject({
+    await expect(pb.backup("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAA", "Alice")).rejects.toMatchObject({
       code: "invalid-secret",
     });
   });
@@ -110,12 +111,15 @@ describe("BrowserPasskeyBackup.backup — invalid-secret", () => {
     const bytes = new Uint8Array(33);
     let bin = "";
     for (const b of bytes) bin += String.fromCharCode(b);
-    const tooLong = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const tooLong = `jazz-auth-v1:${btoa(bin)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "")}`;
     await expect(pb.backup(tooLong, "Alice")).rejects.toMatchObject({ code: "invalid-secret" });
   });
 });
 
-const VALID_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32 zero bytes
+const VALID_SECRET = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32 zero bytes
 
 describe("BrowserPasskeyBackup.backup — credentials.create", () => {
   afterEach(() => {
@@ -402,7 +406,7 @@ describe("BrowserPasskeyBackup.restore — happy path", () => {
     const pb = new BrowserPasskeyBackup({ appName: "Test App", appHostname: "test.example" });
     const secret = await pb.restore();
     // 32 zero bytes → base64url
-    expect(secret).toBe("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    expect(secret).toBe("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
   });
 
   it("passes rpId and userVerification: required to credentials.get", async () => {
@@ -443,9 +447,7 @@ describe("BrowserPasskeyBackup round-trip", () => {
     // Generate a random 32-byte secret
     const rawBytes = new Uint8Array(32);
     crypto.getRandomValues(rawBytes);
-    let bin = "";
-    for (const b of rawBytes) bin += String.fromCharCode(b);
-    const originalSecret = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const originalSecret = formatAuthSecret(rawBytes);
 
     vi.stubGlobal("navigator", { credentials: { create: mockCreate, get: vi.fn() } });
 

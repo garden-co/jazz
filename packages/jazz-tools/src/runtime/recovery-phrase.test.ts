@@ -1,14 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { RecoveryPhrase, RecoveryPhraseError } from "./recovery-phrase.js";
 
-const ZERO_SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const ZERO_SECRET = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const ZERO_PHRASE =
   "abandon abandon abandon abandon abandon abandon abandon abandon " +
   "abandon abandon abandon abandon abandon abandon abandon abandon " +
   "abandon abandon abandon abandon abandon abandon abandon art";
 
 describe("RecoveryPhrase.fromSecret", () => {
-  it("encodes a 32-byte base64url secret as 24 BIP39 English words", () => {
+  it("encodes the canonical 32-byte Jazz secret as 24 BIP39 English words", () => {
     const phrase = RecoveryPhrase.fromSecret(ZERO_SECRET);
     expect(phrase.split(" ")).toHaveLength(24);
     expect(phrase).toBe(ZERO_PHRASE);
@@ -35,7 +35,10 @@ describe("RecoveryPhrase round-trip", () => {
       crypto.getRandomValues(bytes);
       let binary = "";
       for (const b of bytes) binary += String.fromCharCode(b);
-      const secret = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const secret = `jazz-auth-v1:${btoa(binary)
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "")}`;
 
       const phrase = RecoveryPhrase.fromSecret(secret);
       expect(RecoveryPhrase.toSecret(phrase)).toBe(secret);
@@ -72,6 +75,10 @@ describe("RecoveryPhrase.toSecret — normalization", () => {
     const weird = VALID_PHRASE.split(" ").join("  \n\t");
     expect(RecoveryPhrase.toSecret(weird)).toBeTypeOf("string");
   });
+
+  it("normalizes BIP-39 NFKD input", () => {
+    expect(RecoveryPhrase.toSecret(VALID_PHRASE.normalize("NFKD"))).toBe(ZERO_SECRET);
+  });
 });
 
 describe("RecoveryPhrase.toSecret — errors", () => {
@@ -97,12 +104,12 @@ describe("RecoveryPhrase.toSecret — errors", () => {
 });
 
 describe("RecoveryPhrase.fromSecret — errors", () => {
-  it("throws invalid-secret for a non-base64url string", () => {
+  it("throws invalid-secret for an unversioned base64url string", () => {
     expectCode(() => RecoveryPhrase.fromSecret("this is not base64url!!!"), "invalid-secret");
   });
 
-  it("throws invalid-secret for a base64url string that decodes to !=32 bytes", () => {
-    const tooShort = "AAAAAAAAAAAAAAAAAAAAAA";
+  it("throws invalid-secret for a versioned payload that decodes to !=32 bytes", () => {
+    const tooShort = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAA";
     expectCode(() => RecoveryPhrase.fromSecret(tooShort), "invalid-secret");
   });
 

@@ -989,6 +989,9 @@ where
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
+            // This helper is also called directly by reset fast paths; do not
+            // rely on their outer ViewUpdate preflight for durable admission.
+            self.admit_contribution_merge_for_storage(bundle.tx)?;
             validate_received_view_bundle_global_time_durability(
                 bundle.global_time,
                 bundle.durability,
@@ -1123,6 +1126,9 @@ where
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
             applied_global_times.push(global_time);
+            let contribution_merge = self.contribution_merge_storage_value(
+                tx.contribution_merge.as_ref(),
+            )?;
             batch.insert(
                 "jazz_transactions",
                 // A reset may bulk-load only the view-authorized rows of an
@@ -1136,6 +1142,7 @@ where
                     first.global_time,
                     first.durability,
                     view_scoped,
+                    contribution_merge,
                 ),
             );
 
@@ -1162,9 +1169,15 @@ where
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
                 let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
+                let authored_column_ids = self.authored_column_ids_for_names(
+                    author_schema,
+                    version.table(),
+                    version.authored_columns(),
+                )?;
                 let stored = VersionRow::from_wire_with_schema_version(
                     &source_table_schema,
                     version,
+                    authored_column_ids,
                     tx_node_alias,
                     schema_version_alias,
                     tx.tx_id.time,
