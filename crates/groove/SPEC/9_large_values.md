@@ -238,36 +238,36 @@ is exactly the preceding bytes with its leading `00` enum tag replaced by `03`.
 validation MUST fail closed before a malformed physical representation can
 change lifecycle state or disclose an authenticated child capability.
 
-V2 dispatch is joint: the outer descriptor's `format_version` is selected
+V1 dispatch is joint: the outer descriptor's `format_version` is selected
 before its root record, every nested edit record, or the `Chunked = 3`
 stored-scalar payload is interpreted. The schema-known scalar kind still
 supplies bytes/string/JSON context; it is not a version selector and never
 supplies a client-controlled kind tag. A future version therefore needs one
 reviewed descriptor/edit/scalar decoder as well as its node decoder. It MUST
-NOT reuse V2's edit-coordinate validation simply because the outer enum tag is
+NOT reuse V1's edit-coordinate validation simply because the outer enum tag is
 unchanged.
 
 The raw dispatch preflight reads only the canonical outer enum tag and the
 first fixed `format_version:u8` descriptor payload byte. It does not bind the
 descriptor record, calculate variable-field spans, decode a root `NodeRef`, or
 decode an edit before selecting the codec. Therefore an unknown/future version
-with a truncated or deliberately non-V2 nested layout fails as
-`UnsupportedFormat`, rather than as a V2 malformed record. Once V2 is selected,
+with a truncated or deliberately non-V1 nested layout fails as
+`UnsupportedFormat`, rather than as a V1 malformed record. Once V1 is selected,
 the full current descriptor/edit/scalar payload is decoded and exactly
-re-encoded; V2 malformed or trailing bytes still fail closed.
+re-encoded; V1 malformed or trailing bytes still fail closed.
 
 Staged-root receipts and pending-upload journals store the canonical complete
 `LargeValueRef` encoding as an opaque `bytes` metadata field (nullable bytes
 for an unbound pending descriptor), not as a nested generic descriptor value.
 On every recovery/read path Groove runs that byte field through the same raw
 preflight and codec decoder before it interprets root or edit fields. The
-`future_descriptor_metadata_fails_before_v2_binding_without_mutation` reopen
+`future_descriptor_metadata_fails_before_v1_binding_without_mutation` reopen
 receipt installs a future outer tag/version plus invalid nested bytes in both
 journals, requires `UnsupportedFormat`, and proves the durable records remain
-byte-identical after rejection. No metadata reader may create a V2 decoding
+byte-identical after rejection. No metadata reader may create a V1 decoding
 bypass by embedding a descriptor inside another record.
 
-V2's content-defined profile is permanent format data:
+V1's content-defined profile is permanent format data:
 
 ```text
 leaf minimum / target / maximum = 16,384 / 65,536 / 262,144 bytes
@@ -284,14 +284,14 @@ on the short mask; at/after target they cut on the long mask; the stated hard
 maximum always cuts. These values include the gear construction, not merely
 the visible size constants. They cannot be tuned, seeded from a runtime RNG,
 or changed for one backend without a new immutable format version.
-`v2_content_defined_profile_manifest_is_permanent` freezes gear vectors,
+`v1_content_defined_profile_manifest_is_permanent` freezes gear vectors,
 short- and long-mask leaf ranges over a deterministic multi-megabyte input,
 the no-match hard maximum, UTF-8 boundary repair, and every object/logical hash
 of a multi-branch grouping manifest. This is a planted sensitivity receipt:
 changing either mask or any gear parameter changes at least one frozen range
 or branch object/logical hash.
 
-V2 JSON is literal validated UTF-8 source, never a normalized serialization.
+V1 JSON is literal validated UTF-8 source, never a normalized serialization.
 Its canonical receipt uses the exact source
 `{"literal":"\\uD83D\\uDE42","dup":1,"dup":2,"n":-0,"scientific":1e+00,"text":"\\u00e9"}`;
 the leaf bytes, object hash, and logical hash are respectively
@@ -303,7 +303,7 @@ parsed object read has ordinary last-duplicate-key behavior, retains negative
 zero, and decodes the Unicode escapes. The exact descriptor and scalar
 fixtures for a whole-document replacement containing literal `🙂` and `é` are
 authoritatively exercised by
-`v2_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical`.
+`v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical`.
 They prove exact re-encoding, trailing-byte rejection, malformed UTF-8/JSON
 rejection, whole-value-only JSON edits, UTF-8-to-UTF-16 metric agreement, and
 tail consolidation back to an empty-tail immutable root.

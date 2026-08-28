@@ -305,7 +305,7 @@ fn staged_large_value_schema() -> &'static DurableMetadataRecordSchema {
                 "value_ref",
                 // Keep the canonical descriptor as opaque bytes at the
                 // metadata envelope boundary. Its own raw decoder must select
-                // format before inspecting V2 root/edit layout.
+                // format before inspecting V1 root/edit layout.
                 records::ValueType::raw_bytes(),
             ),
             (

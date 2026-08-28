@@ -69,9 +69,9 @@ and integrity validation have one implementation in Groove. Jazz MUST treat the
 descriptor and all nodes as opaque values except for the root locator/hash fields
 required to bind authorization and lifecycle.
 
-### Frozen V2 JSON and chunking boundary
+### Frozen V1 JSON and chunking boundary
 
-Jazz's JSON columns inherit Groove V2's literal-source contract. A JSON scalar
+Jazz's JSON columns inherit Groove V1's literal-source contract. A JSON scalar
 is syntactically validated UTF-8 source; Jazz neither normalizes object key
 order, duplicate keys, numeric spelling, escape spelling, nor Unicode before
 staging or publication. Parsed reads use Groove's ordinary JSON semantics
@@ -80,11 +80,11 @@ do not rewrite the stored bytes. JSON mutation remains a complete replacement
 lowered to the same bounded byte-edit tail as all other large scalars; Jazz
 must not add an object-like patch, merge, or locator API at this boundary.
 
-The descriptor's V2 format selector jointly governs its root, nested edit
+The descriptor's V1 format selector jointly governs its root, nested edit
 records, and schema-known `Chunked = 3` physical scalar arm before Groove
 interprets any of them. Groove reads only the outer enum tag and fixed version
 byte before dispatch, so a future version with malformed current-layout nested
-bytes fails `UnsupportedFormat` without being decoded as V2. The permanent V2 FastCDC/content-defined-grouping
+bytes fails `UnsupportedFormat` without being decoded as V1. The permanent V1 FastCDC/content-defined-grouping
 profile is owned by Groove and applies identically to in-memory, RocksDB,
 SQLite/OPFS/IDB, and remote byte-plane adapters. A backend cannot tune chunk
 boundaries or use locator layout to alter logical identity. The authoritative
@@ -95,7 +95,7 @@ Groove spec §9.2 and its named hard-coded codec tests.
 The same boundary applies to recovery: Groove's staged receipt and pending
 upload metadata retain opaque canonical descriptor bytes and delegate their
 decode to the shared raw dispatcher. Jazz cannot observe, repair, or reinterpret
-those bytes. A future-format malformed receipt is rejected before any V2 nested
+those bytes. A future-format malformed receipt is rejected before any V1 nested
 metadata decoding and remains durable-but-unconsumed for a future explicitly
 supported format; recovery reads do not mutate it.
 
@@ -103,7 +103,7 @@ Remaining lifecycle scope is intentionally unchanged: Jazz still owns
 authorization, staging expiry/admission, atomic owner-row publication,
 retention, and cross-backend durability verification; Groove still owns
 locators, node traversal, integrity, edit replay, materialization, and
-collection mechanics. This V2 decision adds no migration/backcompat decoder,
+collection mechanics. This V1 decision adds no migration/backcompat decoder,
 no new backend locator format, and no cross-backend fixture corpus. Those
 physical-adapter compatibility fixtures remain tracked separately under the
 storage-freeze corpus work rather than being inferred from this codec receipt.

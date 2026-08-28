@@ -542,10 +542,10 @@ fn large_value_metadata_records_are_canonical_groove_records() {
 
 // This internal reopen receipt protects the metadata envelope boundary. The
 // descriptor bytes are intentionally a future selector followed by a payload
-// that cannot possibly bind as V2; reads must return the selector failure and
+// that cannot possibly bind as V1; reads must return the selector failure and
 // leave both persisted journals untouched for a future implementation.
 #[futures_test::test]
-async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
+async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",
         [ColumnSchema::new("id", ColumnType::U64)],
@@ -630,7 +630,7 @@ async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 3")
         ),
-        "staged journal must dispatch before V2 binding"
+        "staged journal must dispatch before V1 binding"
     );
     assert!(
         matches!(
@@ -638,7 +638,7 @@ async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 3")
         ),
-        "pending journal must dispatch before V2 binding"
+        "pending journal must dispatch before V1 binding"
     );
     assert_eq!(
         storage
