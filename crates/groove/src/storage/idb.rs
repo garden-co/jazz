@@ -10,7 +10,8 @@ use idb_tree::{IdbTree, Options, PageStore, WriteOperation};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
-    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, key_codec,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, WriteManyOutcome,
+    key_codec,
 };
 
 // A noisy neighbouring tab must not turn a single logical write into an
@@ -351,7 +352,7 @@ where
                 }
                 ScanBounds::Prefix(prefix) => {
                     let start = self.encoded_key(&cf, &prefix)?;
-                    let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
+                    let end = super::prefix_successor(&start).unwrap_or_else(|| vec![0xff]);
                     (start, end)
                 }
             };
@@ -374,7 +375,7 @@ where
             let _guard = self.mutation_gate.lock().await;
             self.ensure_ready().await?;
             let start = self.encoded_key(&cf, &prefix)?;
-            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
+            let end = super::prefix_successor(&start).unwrap_or_else(|| vec![0xff]);
             let row = self
                 .tree()
                 .range_reverse(&start, &end, 1)
@@ -421,6 +422,21 @@ where
             self.ensure_ready().await?;
             self.write_many_replaying_generation_conflicts(&operations)
                 .await
+        })
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            if let Err(error) = self.prevalidate_write_many(&operations) {
+                return WriteManyOutcome::Uncommitted(error);
+            }
+            match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
         })
     }
 
@@ -707,6 +723,7 @@ mod tests {
                 storage.clone(),
             )
             .await;
+            super::super::conformance::invalid_batch_is_proven_uncommitted(storage.clone()).await;
             super::super::conformance::reopen_preserves_data_and_adds_families(storage).await;
         });
     }

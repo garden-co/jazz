@@ -24,7 +24,8 @@ use serde::Serialize;
 use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
     ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageEpochManifest,
-    StorageFactory, StorageFuture, StorageScan, Value, validate_physical_storage_names,
+    StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
+    validate_physical_storage_names,
 };
 
 trait RocksResultExt<T> {
@@ -817,9 +818,7 @@ impl OrderedKvStorage for RocksDbStorage {
             let (start, upper_bound, prefix) = match bounds {
                 ScanBounds::Range { start, end } => (start, Some(end), None),
                 ScanBounds::Prefix(prefix) => {
-                    let mut upper_bound = prefix.clone();
-                    let upper_bound =
-                        advance_prefix_upper_bound(&mut upper_bound).then_some(upper_bound);
+                    let upper_bound = groove::storage::prefix_successor(&prefix);
                     (prefix.clone(), upper_bound, Some(prefix))
                 }
             };
@@ -921,21 +920,32 @@ impl OrderedKvStorage for RocksDbStorage {
         })
     }
 
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            for operation in &operations {
+                let cf = match operation {
+                    OwnedWriteOperation::Set { cf, .. }
+                    | OwnedWriteOperation::Delete { cf, .. } => cf,
+                };
+                if cf != "default"
+                    && let Err(error) = self.cf_handle(cf)
+                {
+                    return WriteManyOutcome::Uncommitted(error);
+                }
+            }
+            match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
+        })
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         Some(self.column_families.iter().cloned().collect())
     }
-}
-
-fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
-    for byte in prefix.iter_mut().rev() {
-        if *byte != u8::MAX {
-            *byte += 1;
-            return true;
-        }
-        *byte = 0;
-    }
-
-    false
 }
 
 #[cfg(test)]
@@ -1310,6 +1320,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rocks = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         let memory = MemoryStorage::new(&["records"]).expect("valid memory storage families");
+        ready(groove::storage::conformance::persistence_order_and_batch_atomicity(&rocks));
+        ready(
+            groove::storage::conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(
+                &rocks,
+            ),
+        );
+        ready(groove::storage::conformance::invalid_batch_is_proven_uncommitted(&rocks));
         assert_eq!(
             ready(rocks.put_if_absent(
                 "records".to_owned(),
@@ -1419,6 +1436,13 @@ mod tests {
             ready(reopened.get("records".to_owned(), b"must-not-leak".to_vec())).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn generic_reopen_conformance_preserves_data_and_adds_families() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(groove::storage::conformance::reopen_preserves_data_and_adds_families(storage));
     }
 
     #[test]

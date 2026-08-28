@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use super::{
     ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage,
     ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, WriteManyOutcome,
-    key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -59,7 +58,7 @@ impl MemoryStorageCursor {
                     .collect(),
                 (ScanBounds::Prefix(prefix), ScanDirection::Reverse, None) => {
                     let start = Bound::Included(prefix.clone());
-                    let end = key_codec::prefix_upper_bound(prefix)
+                    let end = super::prefix_successor(prefix)
                         .map(Bound::Excluded)
                         .unwrap_or(Bound::Unbounded);
                     values
@@ -347,7 +346,7 @@ impl OrderedKvStorage for MemoryStorage {
     ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
         Box::pin(async move {
             self.with_cf(&cf, |values| {
-                if let Some(upper) = key_codec::prefix_upper_bound(&prefix) {
+                if let Some(upper) = super::prefix_successor(&prefix) {
                     values
                         .range(prefix..upper)
                         .next_back()

@@ -1,7 +1,5 @@
 use futures::executor::block_on;
-use groove::storage::{
-    Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest, collect_scan,
-};
+use groove::storage::{Error, OrderedKvStorage, ScanRequest, collect_scan};
 use jazz_storage_sqlite::SqliteStorage;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -112,67 +110,10 @@ fn ordered_prefix_range_atomic_batch_and_reopen_contract() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let storage = open(&dir);
-        storage
-            .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
-            .await
-            .unwrap();
-        storage
-            .set("records".into(), b"user:10".to_vec(), b"ten".to_vec())
-            .await
-            .unwrap();
-        storage
-            .set("records".into(), b"user:1".to_vec(), b"one".to_vec())
-            .await
-            .unwrap();
-        assert_eq!(
-            storage
-                .prefix("records".into(), b"user:".to_vec())
-                .await
-                .unwrap(),
-            vec![
-                (b"user:1".to_vec(), b"one".to_vec()),
-                (b"user:10".to_vec(), b"ten".to_vec()),
-                (b"user:2".to_vec(), b"two".to_vec()),
-            ]
-        );
-        let error = storage
-            .write_many(vec![
-                OwnedWriteOperation::Set {
-                    cf: "records".into(),
-                    key: b"user:3".to_vec(),
-                    value: b"three".to_vec(),
-                },
-                OwnedWriteOperation::Set {
-                    cf: "missing".into(),
-                    key: b"user:4".to_vec(),
-                    value: b"four".to_vec(),
-                },
-            ])
-            .await
-            .unwrap_err();
-        assert!(matches!(error, Error::ColumnFamilyNotFound(name) if name == "missing"));
-        assert_eq!(
-            storage
-                .get("records".into(), b"user:3".to_vec())
-                .await
-                .unwrap(),
-            None
-        );
-        let storage = storage
-            .reopen(vec!["records".into(), "indices".into()])
-            .await
-            .unwrap();
-        storage
-            .set("indices".into(), b"name:one".to_vec(), b"1".to_vec())
-            .await
-            .unwrap();
-        assert_eq!(
-            storage
-                .get("records".into(), b"user:1".to_vec())
-                .await
-                .unwrap(),
-            Some(b"one".to_vec())
-        );
+        groove::storage::conformance::persistence_order_and_batch_atomicity(&storage).await;
+        groove::storage::conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(&storage).await;
+        groove::storage::conformance::invalid_batch_is_proven_uncommitted(&storage).await;
+        groove::storage::conformance::reopen_preserves_data_and_adds_families(storage).await;
     });
 }
 

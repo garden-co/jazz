@@ -43,6 +43,16 @@ pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 
+/// Return the smallest unsigned-lexicographic key strictly after every key
+/// beginning with `prefix`.
+///
+/// `[0x12, 0xff]` therefore has successor `[0x13]`. A prefix consisting only
+/// of `0xff` has no finite successor; scans must retain their prefix predicate
+/// while traversing to the end of the column family.
+pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    key_codec::increment_bytes(prefix)
+}
+
 /// Maximum UTF-8 byte length of an application-owned storage name.
 ///
 /// The bound is part of the cross-backend storage contract: IndexedDB frames
@@ -1965,11 +1975,15 @@ impl From<crate::records::Error> for Error {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod conformance {
+/// Backend-neutral ordered-KV conformance scenarios.
+///
+/// These test the raw storage seam. Raw cursors are deliberately non-snapshot:
+/// stable repeatable evaluation belongs to the higher-level evaluator.
+#[cfg(any(test, feature = "test"))]
+pub mod conformance {
     use super::*;
 
-    pub(crate) async fn persistence_order_and_batch_atomicity<S>(storage: S)
+    pub async fn persistence_order_and_batch_atomicity<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
@@ -2015,8 +2029,16 @@ pub(crate) mod conformance {
 
         let error = storage
             .write_many(vec![
-                OwnedWriteOperation::set("records", b"user:3", b"three"),
-                OwnedWriteOperation::set("missing", b"user:4", b"four"),
+                OwnedWriteOperation::Set {
+                    cf: "records".into(),
+                    key: b"user:3".to_vec(),
+                    value: b"three".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "missing".into(),
+                    key: b"user:4".to_vec(),
+                    value: b"four".to_vec(),
+                },
             ])
             .await
             .unwrap_err();
@@ -2031,8 +2053,15 @@ pub(crate) mod conformance {
 
         storage
             .write_many(vec![
-                OwnedWriteOperation::set("records", b"user:3", b"three"),
-                OwnedWriteOperation::delete("records", b"user:2"),
+                OwnedWriteOperation::Set {
+                    cf: "records".into(),
+                    key: b"user:3".to_vec(),
+                    value: b"three".to_vec(),
+                },
+                OwnedWriteOperation::Delete {
+                    cf: "records".into(),
+                    key: b"user:2".to_vec(),
+                },
             ])
             .await
             .unwrap();
@@ -2049,7 +2078,7 @@ pub(crate) mod conformance {
         );
     }
 
-    pub(crate) async fn reopen_preserves_data_and_adds_families<S>(storage: S)
+    pub async fn reopen_preserves_data_and_adds_families<S>(storage: S)
     where
         S: ReopenableStorage + 'static,
     {
@@ -2080,7 +2109,7 @@ pub(crate) mod conformance {
         );
     }
 
-    pub(crate) async fn atomic_conditionals_preserve_winners_and_reject_stale_deletes<S>(storage: S)
+    pub async fn atomic_conditionals_preserve_winners_and_reject_stale_deletes<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
@@ -2131,6 +2160,26 @@ pub(crate) mod conformance {
             Some(b"reinstalled".to_vec())
         );
     }
+
+    /// Invalid operations are rejected before an atomic submission begins.
+    /// This is intentionally below the public database API: only an adapter
+    /// can prove the pre-commit acknowledgement classification.
+    pub async fn invalid_batch_is_proven_uncommitted<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        let outcome = storage
+            .write_many_outcome(vec![OwnedWriteOperation::Set {
+                cf: "missing".into(),
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+            }])
+            .await;
+        assert!(matches!(
+            outcome,
+            WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(name)) if name == "missing"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2145,6 +2194,12 @@ mod tests {
             validate_physical_storage_name(&"a".repeat(MAX_APPLICATION_STORAGE_NAME_BYTES + 1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn prefix_successor_is_the_exact_unsigned_lexicographic_bound() {
+        assert_eq!(prefix_successor(&[0x12, 0xff]), Some(vec![0x13]));
+        assert_eq!(prefix_successor(&[0xff, 0xff]), None);
     }
     use crate::records::{ScalarEnumSchema, Value, ValueType};
     use std::cell::Cell;
@@ -3665,10 +3720,10 @@ mod tests {
 
     #[futures_test::test]
     async fn memory_storage_conditionals_are_atomic_and_aba_safe() {
-        conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(
-            MemoryStorage::new(&["records"]).expect("valid memory storage families"),
-        )
-        .await;
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
+        conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(storage.clone())
+            .await;
+        conformance::invalid_batch_is_proven_uncommitted(storage).await;
     }
 
     #[futures_test::test]

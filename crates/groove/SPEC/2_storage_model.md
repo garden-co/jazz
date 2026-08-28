@@ -161,8 +161,9 @@ shared `JSM1` manifest. IndexedDB currently validates its adapter-private
 manifest; therefore it is not covered by the epoch-1 physical-open receipt.
 That remaining acceptance item stays explicitly tracked by #2160.
 
-The only ordering property groove requires from the backing store is
-lexicographic byte order. A range `ScanRequest` returns keys in that order and
+The only ordering property groove requires from the backing store is unsigned
+lexicographic byte order: bytes compare as `0x00 < ... < 0xff`, never as signed
+integers, locale text, or a backend-native collation. A range `ScanRequest` returns keys in that order and
 includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
 writes are atomic: `write_many` applies every operation in the batch or none of
 them; if any operation is invalid, no operation partially applies
@@ -227,6 +228,14 @@ bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor
 batches and stops physical traversal rather than merely truncating a materialized
 result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families.
+
+For a finite prefix bound, the exclusive upper key is the exact unsigned-byte
+successor: increment the rightmost byte below `0xff` and truncate every later
+byte. Thus `[0x12, 0xff]` has upper bound `[0x13]`; an all-`0xff` prefix has no
+finite upper bound and must be filtered by its prefix predicate through the end
+of the family. Raw storage cursors are not snapshots: concurrent writes may
+affect later cursor batches. Repeatable evaluation is a higher-level session
+guarantee and is intentionally not imposed on this backend seam.
 
 ### Column-family namespace admission
 

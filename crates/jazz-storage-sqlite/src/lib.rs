@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
     ScanDirection, ScanRequest, StorageCursor, StorageEpochManifest, StorageFactory, StorageFuture,
-    StorageScan, Value, validate_physical_storage_names,
+    StorageScan, Value, WriteManyOutcome, validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -702,7 +702,7 @@ impl OrderedKvStorage for SqliteStorage {
             } = request;
             let (start, end) = match bounds {
                 ScanBounds::Prefix(prefix) => {
-                    let end = prefix_upper_bound(&prefix);
+                    let end = groove::storage::prefix_successor(&prefix);
                     (prefix, end)
                 }
                 ScanBounds::Range { start, end } => (start, Some(end)),
@@ -826,6 +826,27 @@ impl OrderedKvStorage for SqliteStorage {
         })
     }
 
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            for operation in &operations {
+                let cf = match operation {
+                    OwnedWriteOperation::Set { cf, .. }
+                    | OwnedWriteOperation::Delete { cf, .. } => cf,
+                };
+                if let Err(error) = self.cf_id(cf) {
+                    return WriteManyOutcome::Uncommitted(error);
+                }
+            }
+            match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
+        })
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         Some(self.column_families.borrow().keys().cloned().collect())
     }
@@ -843,17 +864,6 @@ fn backend(error: impl std::fmt::Display) -> Error {
         backend: "sqlite",
         message: error.to_string(),
     }
-}
-
-fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    let mut result = prefix.to_vec();
-    while let Some(last) = result.pop() {
-        if last != u8::MAX {
-            result.push(last + 1);
-            return Some(result);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = fal
 serde = { version = "1.0.228", features = ["derive"] }
 
 [dev-dependencies]
+groove = { workspace = true, features = ["test"] }
 tempfile = "3.27.0"
 futures-test = "0.3"
 jazz-benchmark-guard = { path = "../benchmark-guard" }
