@@ -1119,7 +1119,7 @@ where
                         column.name = to.clone();
                         columns.insert(to.clone(), column);
                     }
-                    LensOp::AddColumn { column, .. } => {
+                    LensOp::AddColumn { column, default } => {
                         if columns.contains_key(column) {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "added column already exists",
@@ -1133,6 +1133,14 @@ where
                             .ok_or(Error::InvalidCatalogueUpdate(
                                 "added column is absent from target",
                             ))?;
+                        groove::records::RecordDescriptor::new([(
+                            "default",
+                            target_column.column_type.clone(),
+                        )])
+                        .create(std::slice::from_ref(default))
+                        .map_err(|_| Error::InvalidCatalogueUpdate(
+                            "added column default does not match target type",
+                        ))?;
                         columns.insert(column.clone(), target_column);
                         if target_bindings.contains(column) && columns[column].default.is_none() {
                             return Err(Error::InvalidCatalogueUpdate(
@@ -1140,12 +1148,23 @@ where
                             ));
                         }
                     }
-                    LensOp::DropColumn { column, .. } => {
+                    LensOp::DropColumn { column, backwards_default } => {
                         if branch_columns.contains(column) {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "table branch columns cannot be removed",
                             ));
                         }
+                        let source_column = columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
+                            "dropped column is absent from source",
+                        ))?;
+                        groove::records::RecordDescriptor::new([(
+                            "default",
+                            source_column.column_type.clone(),
+                        )])
+                        .create(std::slice::from_ref(backwards_default))
+                        .map_err(|_| Error::InvalidCatalogueUpdate(
+                            "dropped column default does not match source type",
+                        ))?;
                         if columns.remove(column).is_none() {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "dropped column is absent from source",

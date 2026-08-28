@@ -1368,7 +1368,10 @@ mod catalogue_payload_tests {
             // a lineage can become resident.
             {
                 let mut wrong = exact.clone();
-                wrong[13] ^= 1;
+                // staged v1 + sequence + publication length precede the
+                // publication's own version byte; byte 14 is its first ID
+                // byte, not byte 13.
+                wrong[14] ^= 1;
                 wrong
             },
         ] {
