@@ -1836,11 +1836,12 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 writer
                     .tx_read(tx_id, "todos", rows[rng.choose(rows.len())])
                     .unwrap();
+                let parent_row = rows[rng.choose(rows.len())];
                 writer
                     .tx_write(
                         tx_id,
                         "todos",
-                        rows[rng.choose(rows.len())],
+                        parent_row,
                         owner_cells_with_author(
                             owner,
                             format!("parent-{commits_started}-{}", rng.next_u64() % 1_000),
@@ -1854,7 +1855,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let parent_ref = settle_published(writer, parent_publication).unwrap();
                 let child_commit = MergeableCommit::new(
                     "todos",
-                    rows[rng.choose(rows.len())],
+                    parent_row,
                     1_300 + rng.choose(12) as u64,
                 )
                 .parents(vec![parent_ref])

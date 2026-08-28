@@ -1543,7 +1543,7 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
         parent = parent_tx;
         child = node
             .commit_mergeable_settled(
-                MergeableCommit::new("todos", row(2), 11)
+                MergeableCommit::new("todos", row(1), 11)
                     .parents(vec![parent])
                     .cells(title_cells("child")),
             )
@@ -2189,7 +2189,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
         .unwrap();
     let child = core
         .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(2), 11)
+            MergeableCommit::new("todos", row(1), 11)
                 .parents(vec![parent])
                 .cells(title_cells("child")),
         )

@@ -960,6 +960,14 @@ where
                 .ingest_known_transaction(tx, versions, fate, global_time, durability)
                 .await;
         }
+        if let Some(complete_parent_versions) = self.complete_parent_versions(&tx, &versions).await?
+        {
+            self.preflight_complete_parent_batch(
+                batch,
+                &[(tx.tx_id, complete_parent_versions)],
+            )
+            .await?;
+        }
         let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
@@ -1101,10 +1109,27 @@ where
             .cloned()
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
-        self.sync_metrics.receiver_bulk_ingest_commits += 1;
-        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
+
+        let mut complete_parents = Vec::new();
+        for (tx_bundles, tx, _) in &eligible {
+            let versions = tx_bundles
+                .iter()
+                .flat_map(|bundle| bundle.versions.iter().cloned())
+                .collect::<Vec<_>>();
+            if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
+                complete_parents.push((tx.tx_id, versions));
+            }
+        }
+        let complete_parent_tx_ids = complete_parents
+            .iter()
+            .map(|(tx_id, _)| *tx_id)
+            .collect::<BTreeSet<_>>();
 
         let mut batch = self.database.open_batch();
+        self.preflight_complete_parent_batch(&mut batch, &complete_parents)
+            .await?;
+        self.sync_metrics.receiver_bulk_ingest_commits += 1;
+        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
         let version_count = eligible
             .iter()
             .flat_map(|(tx_bundles, _, _)| tx_bundles)
@@ -1262,6 +1287,8 @@ where
         for global_time in applied_global_times {
             self.record_applied_global_time(global_time);
         }
+        self.settle_completed_parent_batch(&complete_parent_tx_ids)
+            .await?;
         Ok(loaded_tx_ids)
     }
 }

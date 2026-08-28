@@ -518,3 +518,123 @@ fn changed_merge_semantics_start_a_new_physical_column_epoch() {
     assert_eq!(target.table_id, source.table_id);
     assert_ne!(target.columns["value"], source.columns["value"]);
 }
+
+/// An authority may advance its write schema while a client still has an
+/// exclusive transaction authored under the prior schema. The table's logical
+/// name can have changed, but the content and deletion CAS parents must still
+/// be compared against the shared physical registers.
+#[test]
+fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
+    let base = schema();
+    let renamed_schema = renamed_tasks_schema();
+    let renamed = SchemaVersion::new(renamed_schema);
+    let (_client_dir, mut accepted_client) = open_node_with_schema(node(0x61), base.clone());
+    let (_stale_client_dir, mut stale_client) = open_node_with_schema(node(0x64), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x62), base.clone());
+    let target_row = row(0x63);
+
+    // Seed both independent registers. A replacement plus restore must CAS
+    // the original content parent and the original deletion parent separately.
+    for commit in [
+        MergeableCommit::new("todos", target_row, 10).cells(title_cells("base")),
+        MergeableCommit::new("todos", target_row, 11).deletion(DeletionEvent::Deleted),
+    ] {
+        let (published, unit) = accepted_client.commit_mergeable_unit(commit).unwrap();
+        settle_published(&mut accepted_client, published).unwrap();
+        let [fate] = core
+            .apply_sync_message_settled(unit.clone())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        stale_client.apply_sync_message_settled(unit).unwrap();
+        stale_client.apply_sync_message_settled(fate.clone()).unwrap();
+        accepted_client.apply_sync_message_settled(fate).unwrap();
+    }
+
+    let accepted = OpenTransactionId::new();
+    let stale = OpenTransactionId::new();
+    for (client, tx) in [(&mut accepted_client, accepted), (&mut stale_client, stale)] {
+        client.open_exclusive(tx).unwrap();
+        client
+            .tx_write(tx, "todos", target_row, title_cells("replacement"), None)
+            .unwrap();
+        client
+            .tx_write(
+                tx,
+                "todos",
+                target_row,
+                BTreeMap::<String, Value>::new(),
+                Some(DeletionEvent::Restored),
+            )
+            .unwrap();
+    }
+
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorSubject::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .unwrap();
+
+    let (_accepted_id, accepted_unit) = accepted_client
+        .commit_exclusive_settled(accepted, AuthorSubject::SYSTEM, 12)
+        .unwrap();
+    let [accepted_fate] = core
+        .apply_sync_message_settled(accepted_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        accepted_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    // Planted stale-parent sensitivity: the second old-schema transaction has
+    // exactly the pre-rename parents, so it must be rejected after the first
+    // one advanced both shared physical registers.
+    let (_stale_id, stale_unit) = stale_client
+        .commit_exclusive_settled(stale, AuthorSubject::SYSTEM, 13)
+        .unwrap();
+    let [stale_fate] = core
+        .apply_sync_message_settled(stale_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        stale_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            ..
+        }
+    ));
+}

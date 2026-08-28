@@ -1958,12 +1958,11 @@ pub struct BranchKey {
 }
 
 impl BranchKey {
-    /// Canonical bytes used as the physical branch-local row-key prefix.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        assert!(
-            self.values.windows(2).all(|pair| pair[0].0 < pair[1].0),
-            "branch keys require strictly ordered unique column names"
-        );
+    /// Check and encode the physical branch-local row-key prefix.
+    pub fn try_canonical_bytes(&self) -> Result<Vec<u8>, BranchCodecError> {
+        if !self.is_canonical() {
+            return Err(BranchCodecError::InvalidEnvelope);
+        }
         let mut bytes = Vec::new();
         bytes.push(BRANCH_KEY_CODEC_VERSION);
         put_branch_component_len(&mut bytes, self.values.len());
@@ -1973,7 +1972,13 @@ impl BranchKey {
             put_branch_component_len(&mut bytes, value.0.len());
             bytes.extend(&value.0);
         }
-        bytes
+        Ok(bytes)
+    }
+
+    /// Canonical bytes for an already-validated key.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        self.try_canonical_bytes()
+            .expect("branch keys must be canonical before serialization")
     }
 
     /// Decode a persisted exact branch key.
@@ -1993,6 +1998,9 @@ impl BranchKey {
             let name = std::str::from_utf8(name)
                 .map_err(|_| BranchCodecError::InvalidEnvelope)?
                 .to_owned();
+            if name.is_empty() {
+                return Err(BranchCodecError::InvalidEnvelope);
+            }
             let value_len = take_branch_component_len(&mut cursor)?;
             let value = BranchColumnValue(take_branch_component(&mut cursor, value_len)?.to_vec());
             value.decode()?;
@@ -2005,6 +2013,15 @@ impl BranchKey {
             return Err(BranchCodecError::InvalidEnvelope);
         }
         Ok(Self { values })
+    }
+
+    /// Whether this key has the one portable ordering and value encoding.
+    pub fn is_canonical(&self) -> bool {
+        self.values.windows(2).all(|pair| pair[0].0 < pair[1].0)
+            && self
+                .values
+                .iter()
+                .all(|(name, value)| !name.is_empty() && value.decode().is_ok())
     }
 }
 

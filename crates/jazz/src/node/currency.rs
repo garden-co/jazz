@@ -543,36 +543,28 @@ where
         Ok(versions)
     }
 
-    /// Return the versions authored by one transaction for one physical row.
-    ///
-    /// Unlike [`Self::query_versions_for_tx`], this deliberately visits only
-    /// the requested table's physical history sources. It still uses the
-    /// transaction index rather than a branch-local primary key so callers
-    /// validating a causal parent can observe versions from every branch.
-    pub(super) async fn query_versions_for_tx_physical_row(
+    pub(super) async fn query_versions_for_tx_physical_coordinate(
         &mut self,
         tx_id: TxId,
-        schema_version: SchemaVersionId,
-        table: &str,
+        physical_table_id: PhysicalTableId,
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
-        let requested_table_id = self.physical_table_id_for_schema(schema_version, table)?;
         if let Some(cached) = self.query.tx_versions_cache.get(&tx_id) {
-            let table_aliases = self
+            let aliases = self
                 .catalogue
                 .physical_mappings
                 .iter()
                 .flat_map(|(schema_version, mapping)| {
                     let schema_alias = self.catalogue.schema_version_aliases.get(schema_version);
                     mapping.tables.iter().filter_map(move |(table, mapping)| {
-                        (mapping.table_id == requested_table_id)
+                        (mapping.table_id == physical_table_id)
                             .then(|| schema_alias.copied().map(|alias| (alias, table.clone())))
                             .flatten()
                     })
                 })
                 .collect::<BTreeSet<_>>();
             let mut versions = Vec::new();
-            for (schema_alias, table) in table_aliases {
+            for (schema_alias, table) in aliases {
                 versions.extend(cached.versions_for_schema_table_row(
                     schema_alias,
                     &table,
@@ -581,57 +573,18 @@ where
             }
             return Ok(versions);
         }
-        let Some(tx) = self.query_transaction(tx_id).await? else {
-            return Ok(Vec::new());
-        };
-        let mut versions = Vec::new();
-        for storage_table in [
-            physical_history_table_name(requested_table_id),
-            SHARED_DELETION_HISTORY_TABLE.to_owned(),
-        ] {
-            let raws = self
-                .database
-                .index_scan_raw(
-                    &storage_table,
-                    "by_tx",
-                    &[Value::U64(tx_id.time.0), Value::U64(tx.node_alias.0)],
-                )
-                .await?
-                .into_iter()
-                .map(|raw| raw.owned_record())
-                .collect::<Vec<_>>();
-            for raw in raws {
-                if storage_table == SHARED_DELETION_HISTORY_TABLE
-                    && PhysicalTableId(
-                        raw.borrowed()
-                            .get_u64(SharedDeletionHistoryRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
-                    ) != requested_table_id
-                {
-                    continue;
-                }
-                let row_uuid_index = if storage_table == SHARED_DELETION_HISTORY_TABLE {
-                    SharedDeletionHistoryRowRecord::FIELD_ROW_UUID_IDX
-                } else {
-                    HistoryRowRecord::FIELD_ROW_UUID_IDX
-                };
-                if RowUuid(raw.borrowed().get_uuid(row_uuid_index)?) != row_uuid {
-                    continue;
-                }
-                let requested_table = if storage_table == SHARED_DELETION_HISTORY_TABLE {
-                    ""
-                } else {
-                    table
-                };
-                let version =
-                    self.decode_history_owned_record(requested_table, &storage_table, raw)?;
-                if self.physical_table_id_for_version(&version)? == requested_table_id {
-                    #[cfg(test)]
-                    record_parent_version_lookup_materialized_rows(1);
-                    versions.push(version);
-                }
+        let versions = self.query_versions_for_tx(tx_id).await?;
+        let mut matching = Vec::new();
+        for version in versions {
+            if version.row_uuid() == row_uuid
+                && self.physical_table_id_for_version(&version)? == physical_table_id
+            {
+                #[cfg(test)]
+                record_parent_version_lookup_materialized_rows(1);
+                matching.push(version);
             }
         }
-        Ok(versions)
+        Ok(matching)
     }
 
     pub(super) async fn query_versions_for_tx_rows_by_alias(
@@ -849,11 +802,13 @@ where
                 .chain(shared[2..].iter().cloned())
                 .collect::<Vec<_>>();
             let logical = OwnedRecord::new(descriptor.create(&logical_values)?, descriptor);
-            return Ok(VersionRow {
+            let version = VersionRow {
                 table: groove::Intern::new(table),
                 branch_key,
                 record: logical,
-            });
+            };
+            version.validate_canonical()?;
+            return Ok(version);
         }
         let record_view = record.borrowed();
         let is_deletion = record_view.descriptor().field_index("_deletion").is_some();
@@ -907,7 +862,7 @@ where
             TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?)
         };
         let _ = TxId::new(tx_time, tx_node);
-        Ok(VersionRow {
+        let version = VersionRow {
             table: groove::Intern::new(table),
             branch_key: RuntimeSchema::decode_persisted_branch_key(
                 &table_schema,
@@ -919,7 +874,9 @@ where
             )
             .map_err(|_| Error::InvalidStoredValue("invalid stored branch key"))?,
             record: OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
-        })
+        };
+        version.validate_canonical()?;
+        Ok(version)
     }
 
     pub(super) async fn query_transaction(

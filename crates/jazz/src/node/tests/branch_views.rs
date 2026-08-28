@@ -33,6 +33,94 @@ fn branch_selector(byte: u8) -> BranchSelector {
 }
 
 #[test]
+fn known_history_parent_must_match_exact_branch_for_local_and_replicated_versions() {
+    let schema = branch_view_schema();
+    let (_dir, mut core) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x40; 16]), schema.clone());
+    let owner = AuthorSubject::for_test_bytes([0x41; 16]);
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
+    let row_uuid = row(0x42);
+    let first_branch = branch_selector(0x43);
+    let second_branch = branch_selector(0x44);
+    let cells = |title| {
+        BTreeMap::from([
+            ("title".to_owned(), v(title)),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        ])
+    };
+    let parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(first_branch.clone())
+                .cells(cells("parent")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 11)
+                .branch(second_branch.clone())
+                .parents(vec![parent])
+                .cells(cells("wrong local branch")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    let table = &schema.tables[0];
+    let (second_key, branch_cells) = schema
+        .project_branch_selector(table, &second_branch)
+        .expect("canonical second branch");
+    let mut remote_cells = branch_cells;
+    remote_cells.extend(cells("wrong replicated branch"));
+    let remote = VersionRecord::from_cells(
+        table,
+        schema.version_id(),
+        row_uuid,
+        vec![parent],
+        owner,
+        12,
+        owner,
+        12,
+        &remote_cells,
+        None,
+    )
+    .unwrap()
+    .with_branch_key(second_key);
+    let error = core
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: TxId::new(TxTime::from(12), node(0x45)),
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: owner,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![remote],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        )
+    ));
+}
+
+#[test]
 fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     let schema = branch_view_schema();
     let (_dir, mut node) =
@@ -194,7 +282,7 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
     let base = branch_selector(0x4c);
     let head = branch_selector(0x4d);
     let owner = AuthorSubject::for_test_bytes([0x4e; 16]);
-    let base_tx = node
+    let _base_tx = node
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(base.clone())
@@ -208,11 +296,10 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 15)
                 .branch(base.clone())
-                .parents(vec![base_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
-    node.commit_mergeable_settled(
+    let head_delete = node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 20)
             .branch(head.clone())
             .deletion(DeletionEvent::Deleted),
@@ -258,6 +345,7 @@ fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
             .branch(head)
+            .parents(vec![head_delete])
             .deletion(DeletionEvent::Restored),
     )
     .unwrap();
@@ -483,7 +571,7 @@ fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
                 .cells(cells("sibling other branch")),
         ])
         .unwrap();
-    let valid_child = node
+    let _valid_child = node
         .commit_mergeable_settled(
             MergeableCommit::new("todos", target, 20)
                 .branch(branch_a.clone())
@@ -492,13 +580,12 @@ fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
         )
         .unwrap();
 
-    // Deletion and restore parents use the shared deletion history table, so
-    // retain the normal same-row/branch chain through both lifecycle layers.
+    // Content and deletion history are independent. The first deletion starts
+    // its own chain; the restore then continues that deletion-register chain.
     let deletion_parent = node
         .commit_mergeable_settled(
             MergeableCommit::new("todos", target, 30)
                 .branch(branch_a.clone())
-                .parents(vec![valid_child])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();

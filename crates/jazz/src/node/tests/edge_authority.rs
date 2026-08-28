@@ -194,7 +194,6 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
     let delete = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 30)
-                .parents(vec![update_tx.tx_id])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap()
@@ -208,12 +207,12 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
     let restored_content = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 40)
-                .parents(vec![delete_tx.tx_id])
+                .parents(vec![update_tx.tx_id])
                 .cells(title_cells("restored")),
         )
         .unwrap()
         .1;
-    let (restored_content_tx, _, _) = edge_accept_mergeable_unit(&mut edge, restored_content);
+    let (_restored_content_tx, _, _) = edge_accept_mergeable_unit(&mut edge, restored_content);
     assert!(edge
         .current_rows("todos", DurabilityTier::Edge)
         .unwrap()
@@ -222,7 +221,7 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
     let restore = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 50)
-                .parents(vec![restored_content_tx.tx_id])
+                .parents(vec![delete_tx.tx_id])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap()

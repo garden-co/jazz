@@ -365,6 +365,10 @@ where
                 TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
                 parent_node,
             );
+            // Validate the persisted row-version coordinate even though the
+            // in-memory rejection graph only needs TxIds. Otherwise a corrupt
+            // pending constraint could silently survive reopen.
+            let _ = pending_edge_coordinate_from_record(record)?;
             pending_edges.push((child, parent));
         }
         for (child, parent) in pending_edges {

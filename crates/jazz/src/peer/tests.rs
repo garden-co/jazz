@@ -1842,7 +1842,6 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
-                .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1850,7 +1849,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![delete_tx])
+                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -1858,7 +1857,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![restored_content_tx])
+                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
@@ -1926,7 +1925,6 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
-                .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1934,7 +1932,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![delete_tx])
+                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -1942,7 +1940,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![restored_content_tx])
+                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
@@ -2010,15 +2008,18 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
-                .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
     accept_edge(&mut core, delete_tx);
     let restore_tx = core
         .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", row_uuid, 1_002).cells(title_cells("restored")),
-            MergeableCommit::new("todos", row_uuid, 1_003).deletion(DeletionEvent::Restored),
+            MergeableCommit::new("todos", row_uuid, 1_002)
+                .parents(vec![original_tx])
+                .cells(title_cells("restored")),
+            MergeableCommit::new("todos", row_uuid, 1_003)
+                .parents(vec![delete_tx])
+                .deletion(DeletionEvent::Restored),
         ])
         .unwrap();
     accept_edge(&mut core, restore_tx);

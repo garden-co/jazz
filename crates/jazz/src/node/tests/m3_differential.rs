@@ -439,38 +439,46 @@ fn churn_row(index: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
+type LayerParents = BTreeMap<RowUuid, (Option<TxId>, Option<TxId>)>;
+
 fn accept_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     core: &mut NodeState<S>,
-    parents: &mut BTreeMap<RowUuid, TxId>,
+    parents: &mut LayerParents,
     row_uuid: RowUuid,
     made_at: u64,
     cells: BTreeMap<String, Value>,
 ) {
     let mut commit = MergeableCommit::new("docs", row_uuid, made_at).cells(cells);
-    if let Some(parent) = parents.get(&row_uuid).copied() {
+    if let Some(parent) = parents.get(&row_uuid).and_then(|(content, _)| *content) {
         commit = commit.parents(vec![parent]);
     }
     let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
-    parents.insert(row_uuid, tx_id);
+    parents
+        .entry(row_uuid)
+        .or_default()
+        .0 = Some(tx_id);
 }
 
 fn delete_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     core: &mut NodeState<S>,
-    parents: &mut BTreeMap<RowUuid, TxId>,
+    parents: &mut LayerParents,
     row_uuid: RowUuid,
     made_at: u64,
 ) {
-    let parent = parents[&row_uuid];
+    let mut commit = MergeableCommit::new("docs", row_uuid, made_at)
+        .deletion(DeletionEvent::Deleted);
+    if let Some(parent) = parents.get(&row_uuid).and_then(|(_, deletion)| *deletion) {
+        commit = commit.parents(vec![parent]);
+    }
     let tx_id = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("docs", row_uuid, made_at)
-                .parents(vec![parent])
-                .deletion(DeletionEvent::Deleted),
-        )
+        .commit_mergeable_settled(commit)
         .unwrap();
     core.accept_global_for_test(tx_id).unwrap();
-    parents.insert(row_uuid, tx_id);
+    parents
+        .entry(row_uuid)
+        .or_default()
+        .1 = Some(tx_id);
 }
 
 #[test]
@@ -766,11 +774,14 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     assert!(!maintained_rows.is_empty());
 
     for row_uuid in [row(0x11), row(0x12), row(0x14)] {
-        if let Some(parent) = latest_tx_for_row(&mut core, "docs", row_uuid) {
+        if core
+            .local_content_winner_tx_id("docs", row_uuid)
+            .unwrap()
+            .is_some()
+        {
             accept_global(
                 &mut core,
                 MergeableCommit::new("docs", row_uuid, 100 + row_uuid.0.as_bytes()[0] as u64)
-                    .parents(vec![parent])
                     .deletion(DeletionEvent::Deleted),
             );
         }
@@ -1375,9 +1386,11 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     );
 }
 
+type TableLayerParents = BTreeMap<(&'static str, RowUuid), (Option<TxId>, Option<TxId>)>;
+
 fn m3_differential_parent_map(
     core: &mut NodeState<RocksDbStorage>,
-) -> BTreeMap<(&'static str, RowUuid), TxId> {
+) -> TableLayerParents {
     let mut parents = BTreeMap::new();
     for table in [
         "docs",
@@ -1388,9 +1401,13 @@ fn m3_differential_parent_map(
         "doc_access",
     ] {
         for row in core.current_rows(table, DurabilityTier::Global).unwrap() {
-            if let Some(tx) = latest_tx_for_row(core, table, row.row_uuid()) {
-                parents.insert((table, row.row_uuid()), tx);
-            }
+            let content = core
+                .local_content_winner_tx_id(table, row.row_uuid())
+                .unwrap();
+            let deletion = core
+                .local_deletion_winner_tx_id(table, row.row_uuid())
+                .unwrap();
+            parents.insert((table, row.row_uuid()), (content, deletion));
         }
     }
     parents
@@ -1438,42 +1455,47 @@ fn team_edge_commit(
 
 fn accept_with_parent(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
     made_at: u64,
     cells: BTreeMap<String, Value>,
 ) -> TxId {
     let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
-    if let Some(parent) = parents.get(&(table, row_uuid)).copied() {
+    if let Some(parent) = parents
+        .get(&(table, row_uuid))
+        .and_then(|(content, _)| *content)
+    {
         commit = commit.parents(vec![parent]);
     }
     let tx = accept_global(core, commit);
-    parents.insert((table, row_uuid), tx);
+    parents.entry((table, row_uuid)).or_default().0 = Some(tx);
     tx
 }
 
 fn delete_with_parent(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
     made_at: u64,
 ) -> TxId {
-    let parent = parents[&(table, row_uuid)];
-    let tx = accept_global(
-        core,
-        MergeableCommit::new(table, row_uuid, made_at)
-            .parents(vec![parent])
-            .deletion(DeletionEvent::Deleted),
-    );
-    parents.insert((table, row_uuid), tx);
+    let mut commit = MergeableCommit::new(table, row_uuid, made_at)
+        .deletion(DeletionEvent::Deleted);
+    if let Some(parent) = parents
+        .get(&(table, row_uuid))
+        .and_then(|(_, deletion)| *deletion)
+    {
+        commit = commit.parents(vec![parent]);
+    }
+    let tx = accept_global(core, commit);
+    parents.entry((table, row_uuid)).or_default().1 = Some(tx);
     tx
 }
 
 fn add_visible_doc(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     step: u64,
 ) {
     let row_uuid = row(0x90 + step as u8);
@@ -1500,7 +1522,7 @@ fn add_visible_doc(
 
 fn add_hidden_doc(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     step: u64,
 ) {
     accept_with_parent(
@@ -1515,7 +1537,7 @@ fn add_hidden_doc(
 
 fn revoke_edge_access(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     step: u64,
 ) {
     delete_with_parent(core, parents, "group_access_edges", row(0x42), 160 + step);
@@ -1523,7 +1545,7 @@ fn revoke_edge_access(
 
 fn grant_edge_access(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     step: u64,
 ) {
     accept_with_parent(
@@ -1544,7 +1566,7 @@ fn grant_edge_access(
 
 fn delete_visible_child(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     step: u64,
 ) {
     delete_with_parent(core, parents, "children", row(0x71), 200 + step);
@@ -1552,7 +1574,7 @@ fn delete_visible_child(
 
 fn restore_visible_child(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     step: u64,
 ) {
     accept_with_parent(
@@ -1570,7 +1592,7 @@ fn restore_visible_child(
 
 fn update_created_at_match(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut TableLayerParents,
     step: u64,
 ) {
     accept_with_parent(
@@ -1591,17 +1613,6 @@ fn update_created_at_match(
             23,
         ),
     );
-}
-
-fn latest_tx_for_row(
-    core: &mut NodeState<RocksDbStorage>,
-    table: &str,
-    row_uuid: RowUuid,
-) -> Option<TxId> {
-    core.row_history(table, row_uuid)
-        .unwrap()
-        .last()
-        .map(|row| row.tx_id())
 }
 
 fn one_shot_rows<S: OrderedKvStorage>(

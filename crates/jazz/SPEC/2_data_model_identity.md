@@ -198,6 +198,52 @@ Unix milliseconds. UUID object identities retain their newtype encodings;
 canonical `[iss,sub]` JSON strings. Node-local aliases live in `jazz_nodes` /
 `jazz_schema_versions` and are rebuilt from those tables on recovery.
 
+### 2.7.1 Settled history layout and canonical receipts
+
+The authoritative identity of one immutable row version is exactly
+`(PhysicalTableId, BranchKey, RowUuid, Layer, TxId)`. `Layer` is either content
+or deletion; it is part of the identity even though a deletion is physically
+stored in the shared deletion table. `PhysicalTableId` is a local storage
+coordinate only, while `BranchKey`, `RowUuid`, and `TxId` retain their canonical
+portable meanings. A parent is only a `TxId` within that same enclosing
+table/branch/row/layer coordinate. Parent lists are strictly sorted and unique;
+cross-coordinate parents are rejected rather than inferred or re-routed.
+When a child arrives before its parent, the pending receipt durably carries the
+child's full expected coordinate alongside that `TxId`; arrival of a
+multi-version parent satisfies it only by an exact coordinate match. A
+different row, branch, table, or layer rejects the pending child rather than
+leaving an unconstrained causal edge behind. A deliberately partial
+view-scoped transaction receipt is not proof of mismatch. This includes an
+already-accepted partial child: its durable constraint survives reopen and
+remains while parent fragments are incomplete. A complete parent receipt is
+preflighted against the assembled existing and incoming versions before any of
+that completion is persisted. An exact match clears the constraint for an
+already-accepted child; a mismatch is a typed connection/repair error and does
+not rewrite that child's immutable accepted fate. Pending children retain the
+edge so the ordinary rejection-cascade machinery settles them after the parent
+becomes complete. These preflight and post-persistence rules apply identically
+to ordinary ingest, initial-reset bulk loading, and coalesced receiver batches;
+bulk loading is not a weaker history-admission boundary.
+
+`BranchKey` bytes use the frozen engine-owned codec in SPEC 11: a versioned,
+length-delimited, strictly increasing `(column name, canonical typed value
+bytes)` sequence, with no duplicate or empty names and no trailing or alternate
+bytes accepted on decode. The typed value envelope and Groove payload must each
+round-trip canonically. This is the only settled branch-key representation used
+in history primary keys, shared deletion keys, current/index prefixes, reopen,
+and rebuild; legacy serde/postcard shapes are never guessed.
+
+Accepted transactions, immutable version rows, and their atomically persisted
+fate/durability are authority state. Current winners, visibility rows, global
+change/index rows, and materialized views are derived accelerators: they are
+discardable and must rebuild from accepted immutable history. Rejected foreign
+versions never enter that history; an origin's retry payload belongs to a
+separate local retry store. Tests pin the canonical branch bytes and rejection
+of unordered, duplicate, and trailing forms in
+`protocol::tests::branch_key_canonical_bytes_are_exact_and_reject_noncanonical_forms`;
+branch-view, deletion, concurrent-winner, and recovery suites are the
+accepted/reopen/rebuild receipts for the same coordinate.
+
 **Lowered tables.** `lower_to_groove()` produces:
 
 - _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical

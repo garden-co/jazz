@@ -821,6 +821,10 @@ groove::define_record! {
         1 => child_node_id: NodeAlias,
         2 => parent_time: TxTime,
         3 => parent_node_id: NodeAlias,
+        4 => physical_table_id: u64,
+        5 => branch_key: Vec<u8>,
+        6 => row_uuid: RowUuid,
+        7 => layer: Vec<u8>,
     }
 }
 
@@ -1092,6 +1096,16 @@ impl VersionRow {
         tx_time: TxTime,
         _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
+        if !version.branch_key().is_canonical() {
+            return Err(Error::InvalidMergeableCommit(
+                "row version branch key is not canonical",
+            ));
+        }
+        if version.parents().windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(Error::InvalidMergeableCommit(
+                "row version parents must be sorted and unique",
+            ));
+        }
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
             (
                 table.register_storage_table(),
@@ -1169,13 +1183,21 @@ impl VersionRow {
     }
 
     pub(super) fn parents(&self) -> Vec<TxId> {
+        self.checked_parents()
+            .expect("valid canonical parent tx ids")
+    }
+
+    pub(super) fn validate_canonical(&self) -> Result<(), Error> {
+        validate_canonical_version_parts(&self.branch_key, &self.checked_parents()?)
+    }
+
+    fn checked_parents(&self) -> Result<Vec<TxId>, Error> {
         let idx = if self.is_register_record() {
             RegisterRowRecord::FIELD_PARENTS_IDX
         } else {
             HistoryRowRecord::FIELD_PARENTS_IDX
         };
-        tx_ids_from_value(self.record.borrowed().get_idx(idx).expect("valid parents"))
-            .expect("valid parent tx ids")
+        tx_ids_from_value(self.record.borrowed().get_idx(idx)?)
     }
 
     pub(super) fn created_by(&self) -> AuthorSubject {
@@ -1498,6 +1520,14 @@ pub(super) fn version_tx_id_from_aliases(
 pub(super) enum VersionLayer {
     Content,
     Deletion,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ParentCoordinate {
+    pub(super) physical_table_id: PhysicalTableId,
+    pub(super) branch_key: BranchKey,
+    pub(super) row_uuid: RowUuid,
+    pub(super) layer: VersionLayer,
 }
 
 impl VersionLayer {
@@ -3438,13 +3468,20 @@ pub(super) fn pending_edge_values(
     child: TxId,
     parent_alias: NodeAlias,
     parent: TxId,
-) -> Vec<Value> {
-    vec![
+    coordinate: &ParentCoordinate,
+) -> Result<Vec<Value>, Error> {
+    Ok(vec![
         Value::U64(child.time.0),
         Value::U64(child_alias.0),
         Value::U64(parent.time.0),
         Value::U64(parent_alias.0),
-    ]
+        Value::U64(coordinate.physical_table_id.0),
+        Value::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
+            Error::InvalidMergeableCommit("pending parent coordinate branch key is not canonical")
+        })?),
+        Value::Uuid(coordinate.row_uuid.0),
+        Value::Bytes(version_layer_string(coordinate.layer).into_bytes()),
+    ])
 }
 
 pub(super) fn pending_edge_primary_key(
@@ -3452,13 +3489,47 @@ pub(super) fn pending_edge_primary_key(
     child: TxId,
     parent_alias: NodeAlias,
     parent: TxId,
-) -> PrimaryKeyValue {
-    PrimaryKeyValue::Composite(vec![
+    coordinate: &ParentCoordinate,
+) -> Result<PrimaryKeyValue, Error> {
+    Ok(PrimaryKeyValue::Composite(vec![
         PrimaryKeyValue::U64(child.time.0),
         PrimaryKeyValue::U64(child_alias.0),
         PrimaryKeyValue::U64(parent.time.0),
         PrimaryKeyValue::U64(parent_alias.0),
-    ])
+        PrimaryKeyValue::U64(coordinate.physical_table_id.0),
+        PrimaryKeyValue::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
+            Error::InvalidStoredValue("pending parent coordinate branch key is invalid")
+        })?),
+        PrimaryKeyValue::Uuid(coordinate.row_uuid.0),
+        PrimaryKeyValue::Bytes(version_layer_string(coordinate.layer).into_bytes()),
+    ]))
+}
+
+pub(super) fn pending_edge_coordinate_from_record(
+    record: BorrowedRecord<'_>,
+) -> Result<ParentCoordinate, Error> {
+    let layer = match record.get_bytes(PendingEdgeRowRecord::FIELD_LAYER_IDX)? {
+        b"content" => VersionLayer::Content,
+        b"deletion" => VersionLayer::Deletion,
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "pending parent coordinate layer is invalid",
+            ));
+        }
+    };
+    Ok(ParentCoordinate {
+        physical_table_id: PhysicalTableId(
+            record.get_u64(PendingEdgeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
+        ),
+        branch_key: BranchKey::from_canonical_bytes(
+            record.get_bytes(PendingEdgeRowRecord::FIELD_BRANCH_KEY_IDX)?,
+        )
+        .map_err(|_| {
+            Error::InvalidStoredValue("pending parent coordinate branch key is invalid")
+        })?,
+        row_uuid: RowUuid(record.get_uuid(PendingEdgeRowRecord::FIELD_ROW_UUID_IDX)?),
+        layer,
+    })
 }
 
 pub(super) fn rejected_version_values(
@@ -4445,9 +4516,35 @@ pub(super) fn expect_uuid(value: Value, field: &'static str) -> Result<uuid::Uui
 
 pub(super) fn tx_ids_from_value(value: Value) -> Result<Vec<TxId>, Error> {
     match value {
-        Value::Array(values) => values.into_iter().map(tx_id_from_value).collect(),
+        Value::Array(values) => {
+            let parents = values
+                .into_iter()
+                .map(tx_id_from_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_parent_tx_ids(&parents)?;
+            Ok(parents)
+        }
         _ => Err(Error::InvalidStoredValue("parents must be array")),
     }
+}
+
+pub(super) fn validate_parent_tx_ids(parents: &[TxId]) -> Result<(), Error> {
+    if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(Error::InvalidMergeableCommit(
+            "row version parents must be sorted and unique",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_canonical_version_parts(
+    branch_key: &BranchKey,
+    parents: &[TxId],
+) -> Result<(), Error> {
+    branch_key
+        .try_canonical_bytes()
+        .map_err(|_| Error::InvalidMergeableCommit("row version branch key is not canonical"))?;
+    validate_parent_tx_ids(parents)
 }
 
 pub(super) fn merge_heads_value(heads: &BTreeSet<TxId>) -> Value {

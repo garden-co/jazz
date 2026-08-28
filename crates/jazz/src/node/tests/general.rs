@@ -1683,3 +1683,593 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
         vec![(row, title_cells("parent"))]
     );
 }
+
+#[test]
+fn local_history_rejects_noncanonical_parent_order_before_persistence() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x71));
+    let later = TxId::new(TxTime::from(20), node(0x01));
+    let earlier = TxId::new(TxTime::from(10), node(0x01));
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x71), 30)
+                .parents(vec![later, earlier])
+                .cells(title_cells("must not reorder durable parents")),
+        ),
+        Err(Error::InvalidMergeableCommit("row version parents must be sorted and unique"))
+    ));
+    assert!(core.row_history("todos", row(0x71)).unwrap().is_empty());
+}
+
+#[test]
+fn remote_history_rejects_noncanonical_parent_order_before_parking() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x76));
+    let tx_id = TxId::new(TxTime::from(30), node(0x77));
+    let later = TxId::new(TxTime::from(20), node(0x01));
+    let earlier = TxId::new(TxTime::from(10), node(0x01));
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row(0x76),
+            vec![later, earlier],
+            title_cells("must reject before parking"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        core.transaction_record(tx_id).unwrap().fate,
+        Fate::Rejected(RejectionReason::MalformedCommit(ref detail))
+            if detail == "row version parents must be sorted and unique"
+    ));
+}
+
+#[test]
+fn known_parent_must_match_exact_row_coordinate_and_layer() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x72));
+    let content_parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 10).cells(title_cells("parent")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x73), 11)
+                .parents(vec![content_parent])
+                .cells(title_cells("wrong row")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    let deletion_parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 12)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x72), 13)
+                .parents(vec![deletion_parent])
+                .cells(title_cells("wrong layer")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    // A mergeable transaction may still atomically write unrelated rows; the
+    // transaction envelope supplies that atomicity, so no cross-row parent is
+    // available (or needed) to encode a general dependency.
+    let multi_row = core
+        .commit_mergeable_many_settled(vec![
+            MergeableCommit::new("todos", row(0x72), 14)
+                .parents(vec![content_parent])
+                .cells(title_cells("same-row successor")),
+            MergeableCommit::new("todos", row(0x74), 14)
+                .cells(title_cells("independent atomic member")),
+        ])
+        .unwrap();
+    let versions = core.query_versions_for_tx(multi_row).unwrap();
+    assert_eq!(versions.len(), 2);
+    assert!(versions.iter().any(|version| {
+        version.row_uuid() == row(0x72) && version.parents() == vec![content_parent]
+    }));
+    assert!(versions
+        .iter()
+        .any(|version| version.row_uuid() == row(0x74) && version.parents().is_empty()));
+}
+
+#[test]
+fn known_parent_must_match_exact_physical_table_for_local_and_replicated_versions() {
+    let schema = todos_notes_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0x7a), schema.clone());
+    let row_uuid = row(0x7a);
+    let parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("parent")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("notes", row_uuid, 11)
+                .parents(vec![parent])
+                .cells(BTreeMap::from([("body".to_owned(), v("wrong table"))])),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    let notes = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "notes")
+        .expect("notes table");
+    let remote = VersionRecord::from_cells(
+        notes,
+        schema.version_id(),
+        row_uuid,
+        vec![parent],
+        AuthorSubject::SYSTEM,
+        12,
+        AuthorSubject::SYSTEM,
+        12,
+        &BTreeMap::from([("body".to_owned(), v("replicated wrong table"))]),
+        None,
+    )
+    .unwrap();
+    let error = core
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: TxId::new(TxTime::from(12), node(0x7b)),
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![remote],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        )
+    ));
+}
+
+#[test]
+fn unknown_parent_constraint_rejects_child_when_wrong_parent_row_arrives() {
+    let schema = schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&dir, schema.clone());
+    let child_row = row(0x73);
+    let parent = TxId::new(TxTime::from(40), node(0x74));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", child_row, 50)
+                .parents(vec![parent])
+                .cells(title_cells("constrained pending child")),
+        )
+        .unwrap();
+    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
+
+    core.database.close().unwrap();
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(1), schema);
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row(0x75),
+            Vec::new(),
+            title_cells("wrong parent coordinate"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(
+        core.transaction_record(child).unwrap().fate,
+        Fate::Rejected(RejectionReason::CausalityViolation),
+        "arrival of a parent transaction with only another row must resolve the durable constraint"
+    );
+}
+
+#[test]
+fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
+    let schema = todos_notes_schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&dir, schema.clone());
+    let row_uuid = row(0x7c);
+    let parent = TxId::new(TxTime::from(40), node(0x7d));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row_uuid, 50)
+                .parents(vec![parent])
+                .cells(BTreeMap::from([("body".to_owned(), v("constrained child"))])),
+        )
+        .unwrap();
+    core.database.close().unwrap();
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(1), schema);
+    let todos = core
+        .catalogue
+        .catalogue_schemas
+        .get(&core.catalogue.current_schema_version_id)
+        .expect("current schema")
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("todos table")
+        .clone();
+    let parent_version = VersionRecord::from_cells(
+        &todos,
+        core.catalogue.current_schema_version_id,
+        row_uuid,
+        Vec::new(),
+        AuthorSubject::SYSTEM,
+        40,
+        AuthorSubject::SYSTEM,
+        40,
+        &title_cells("wrong physical table"),
+        None,
+    )
+    .unwrap();
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![parent_version],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(
+        core.transaction_record(child).unwrap().fate,
+        Fate::Rejected(RejectionReason::CausalityViolation)
+    );
+}
+
+#[test]
+fn unknown_parent_constraint_survives_matching_parent_arrival() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x78));
+    let row_uuid = row(0x78);
+    let parent = TxId::new(TxTime::from(40), node(0x79));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 50)
+                .parents(vec![parent])
+                .cells(title_cells("constrained pending child")),
+        )
+        .unwrap();
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![version_record(
+            row_uuid,
+            Vec::new(),
+            title_cells("matching parent coordinate"),
+            None,
+        )],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "a matching parent does not erase a pending child's rejection-cascade edge"
+    );
+}
+
+#[test]
+fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wrong_completion() {
+    let schema = schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut reader = open_node_at(&dir, schema.clone());
+    let parent = TxId::new(TxTime::from(70), node(0x82));
+    let child = TxId::new(TxTime::from(80), node(0x83));
+    let child_row = row(0x84);
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                child_row,
+                vec![parent],
+                title_cells("accepted partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    reader.database.close().unwrap();
+    drop(reader);
+    let mut reader = reopen_node_at(&dir, node(1), schema);
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "accepted-child coordinate constraint must survive reopen"
+    );
+
+    let wrong_partial = version_record(
+        row(0x85),
+        Vec::new(),
+        title_cells("partial wrong parent row"),
+        None,
+    );
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial.clone()],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "a wrong partial parent fragment is inconclusive"
+    );
+
+    let wrong_completion = version_record(
+        row(0x86),
+        Vec::new(),
+        title_cells("second wrong parent row"),
+        None,
+    );
+    let error = reader
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 2,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial, wrong_completion],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::ConflictingCommitUnit(tx) if tx == parent));
+    assert!(reader
+        .query_transaction(parent)
+        .unwrap()
+        .unwrap()
+        .view_scoped_cardinality);
+    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 1);
+    assert_eq!(
+        reader.transaction_record(child).unwrap().fate,
+        Fate::Accepted,
+        "an already-accepted partial child is immutable"
+    );
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "failed completion must not erase the durable constraint"
+    );
+}
+
+#[test]
+fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
+    let (_dir, mut reader) = open_node_with_uuid(node(0x87));
+    let parent = TxId::new(TxTime::from(70), node(0x88));
+    let child = TxId::new(TxTime::from(80), node(0x89));
+    let child_row = row(0x8a);
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                child_row,
+                vec![parent],
+                title_cells("accepted partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    let wrong_partial = version_record(
+        row(0x8b),
+        Vec::new(),
+        title_cells("partial sibling"),
+        None,
+    );
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial.clone()],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    let matching = version_record(
+        child_row,
+        Vec::new(),
+        title_cells("matching parent coordinate"),
+        None,
+    );
+    reader
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 2,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial, matching],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+
+    let stored_parent = reader.query_transaction(parent).unwrap().unwrap();
+    assert!(!stored_parent.view_scoped_cardinality);
+    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 2);
+    assert!(reader
+        .database
+        .primary_key_scan_raw("jazz_pending_edges", &[])
+        .unwrap()
+        .is_empty());
+    assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
+}
