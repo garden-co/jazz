@@ -2061,6 +2061,46 @@ where
                 "durable genesis is incorrectly published as a lineage target",
             ));
         }
+        // Parked descendants may legally retain an identity first minted by
+        // the bundle now being recovered. They are not prior issuance history
+        // for that bundle; unrelated parked/staged bundles remain reserved.
+        let history_for = |candidate: SchemaVersionId,
+                           omit: crate::ids::SchemaLineagePublicationId| {
+            let mut parents = BTreeMap::new();
+            for lineage in active.values().chain(staged.values()) {
+                parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+            }
+            for lineage in pending.values() {
+                parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+            }
+            let is_descendant = |schema: SchemaVersionId| {
+                let mut cursor = schema;
+                let mut visited = BTreeSet::new();
+                while visited.insert(cursor) {
+                    let Some(parent) = parents.get(&cursor).copied() else {
+                        return false;
+                    };
+                    if parent == candidate {
+                        return true;
+                    }
+                    cursor = parent;
+                }
+                false
+            };
+            mappings
+                .iter()
+                .filter(|(schema, _)| **schema != candidate)
+                .map(|(_, mapping)| mapping.identities.clone())
+                .chain(staged.values().filter(|lineage| {
+                    lineage.publication.id != omit
+                        && !is_descendant(lineage.publication.schema.id)
+                }).map(|lineage| lineage.publication.physical_identities.clone()))
+                .chain(pending.values().filter(|lineage| {
+                    lineage.publication.id != omit
+                        && !is_descendant(lineage.publication.schema.id)
+                }).map(|lineage| lineage.publication.physical_identities.clone()))
+                .collect::<Vec<_>>()
+        };
         for (schema_id, mapping) in mappings {
             if *schema_id == *root {
                 continue;
@@ -2081,11 +2121,12 @@ where
             )?;
             source_mapping
                 .identities
-                .validate_evolution_to(
+                .validate_evolution_to_with_history(
                     &source.schema,
                     &publication.physical_identities,
                     &publication.schema.schema,
                     &publication.lens,
+                    history_for(publication.schema.id, publication.id),
                 )
                 .map_err(|_| Error::InvalidStoredValue("durable identity publication evolution is invalid"))?;
         }
@@ -2110,11 +2151,12 @@ where
             )?;
             source_mapping
                 .identities
-                .validate_evolution_to(
+                .validate_evolution_to_with_history(
                     &source.schema,
                     &lineage.publication.physical_identities,
                     &lineage.publication.schema.schema,
                     &lineage.publication.lens,
+                    history_for(lineage.publication.schema.id, lineage.publication.id),
                 )
                 .map_err(|_| Error::InvalidStoredValue("pending identity publication evolution is invalid"))?;
         }

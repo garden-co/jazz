@@ -239,6 +239,84 @@ fn pending_lineage_reserves_its_target_and_sequence() {
 }
 
 #[test]
+fn global_identity_retirement_rejects_multihop_reuse_live_and_after_reopen() {
+    // v1 -> v2 adds `body`; v2 -> v3 drops it; v3 -> v4 adds a new `body`.
+    // The forged v4 publication attempts to recycle v2's now-retired column
+    // UUID. It must fail both on live admission and after recovery has rebuilt
+    // only the canonical catalogue mappings plus parked receipts.
+    let v1 = schema();
+    let v2 = SchemaVersion::new(catalogue_evolved_schema());
+    let v3 = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("archived", PublicColumnType::Boolean),
+        ),
+    ));
+    let v4 = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("archived", PublicColumnType::Boolean)
+                .column("body", PublicColumnType::Text),
+        ),
+    ));
+    let (dir, mut core) = open_node_with_schema(node(0xd2), v1.clone());
+    let p2 = core.author_schema_lineage_publication(
+        v2.clone(),
+        MigrationLens::new(
+            v1.version_id(), v2.id,
+            vec![TableLens { source_table: "todos".to_owned(), target_table: "todos".to_owned(), ops: vec![LensOp::AddColumn { column: "body".to_owned(), default: Value::String(String::new()) }] }],
+        ),
+        Vec::<String>::new(), Vec::<String>::new(),
+    ).unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM, catalogue_seq: 1, publication: Box::new(p2.clone()),
+    }).unwrap();
+    let p3 = core.author_schema_lineage_publication(
+        v3.clone(),
+        MigrationLens::new(
+            v2.id, v3.id,
+            vec![TableLens { source_table: "todos".to_owned(), target_table: "todos".to_owned(), ops: vec![
+                LensOp::DropColumn { column: "body".to_owned(), backwards_default: Value::String(String::new()) },
+                LensOp::AddColumn { column: "archived".to_owned(), default: Value::Bool(false) },
+            ] }],
+        ),
+        Vec::<String>::new(), Vec::<String>::new(),
+    ).unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM, catalogue_seq: 2, publication: Box::new(p3.clone()),
+    }).unwrap();
+
+    let mut forged = SchemaLineagePublication::author_from_prior(
+        &p3.schema.schema,
+        &p3.physical_identities,
+        v4.clone(),
+        MigrationLens::new(
+            v3.id, v4.id,
+            vec![TableLens { source_table: "todos".to_owned(), target_table: "todos".to_owned(), ops: vec![LensOp::AddColumn { column: "body".to_owned(), default: Value::String(String::new()) }] }],
+        ),
+        Vec::<String>::new(), Vec::<String>::new(),
+    ).unwrap();
+    forged.physical_identities.tables.get_mut("todos").unwrap().columns.get_mut("body").unwrap().id =
+        p2.physical_identities.tables["todos"].columns["body"].id;
+    forged.id = forged.content_id();
+    let message = || SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM, catalogue_seq: 3, publication: Box::new(forged.clone()),
+    };
+    assert!(matches!(
+        core.apply_trusted_catalogue_message_settled(message()),
+        Err(Error::InvalidCatalogueUpdate("physical retired identity reused across lineage"))
+    ));
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0xd2), v1);
+    assert!(matches!(
+        reopened.apply_trusted_catalogue_message_settled(message()),
+        Err(Error::InvalidCatalogueUpdate("physical retired identity reused across lineage"))
+    ));
+}
+
+#[test]
 fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging() {
     let base = schema();
     let target = SchemaVersion::new(catalogue_evolved_schema());

@@ -383,11 +383,16 @@ where
                     "trusted catalogue snapshot source identities missing",
                 ))?
                 .identities
-                .validate_evolution_to(
+                .validate_evolution_to_with_history(
                     &source.schema,
                     &publication.physical_identities,
                     &publication.schema.schema,
                     &publication.lens,
+                    planned
+                        .physical_mappings
+                        .values()
+                        .map(|mapping| mapping.identities.clone())
+                        .collect::<Vec<_>>(),
                 )
                 .map_err(Error::InvalidCatalogueUpdate)?;
             Self::validate_lineage_table_partition(

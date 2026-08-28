@@ -37,6 +37,7 @@ Invariant digest:
   does not yet freeze descriptor identity or the remaining catalogue payload
   encodings.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
+- `INV-LENS-24`: A global physical UUID is permanently issued across the whole durable catalogue lineage. Admission, pending/staged replay, snapshot installation, reopen, and authority allocation MUST reject or avoid reusing any retired table, column epoch, or recursive enum-occurrence UUID; only an exact compatible source-to-target coordinate may retain its UUID.
 
 ## Details
 
@@ -293,9 +294,13 @@ Each immutable publication carries an authority-allocated
 `PhysicalIdentityManifest`. `GlobalPhysicalTableId`,
 `GlobalPhysicalColumnId`, and `GlobalPhysicalEnumVariantId` are permanent UUID
 identities. The authority constructs a publication from the active source
-publication plus the proposed schema and lens: mapped entities retain UUIDs and
-genuinely new tables, column epochs, and recursive enum variants receive fresh
-UUIDs. There is no separate allocation protocol. Names, documentation,
+publication plus the proposed schema and lens while replaying every active,
+staged, and parked durable manifest as issuance history: mapped entities retain
+UUIDs and genuinely new tables, column epochs, and recursive enum variants
+receive fresh UUIDs absent from that entire history. There is no separate
+allocation protocol or retirement ledger: retained historical schema mappings
+and parked/staged publication payloads are the canonical reservation set.
+Names, documentation,
 structural paths, authored positions, and source order are lookup coordinates,
 never identity; same-shaped siblings therefore remain distinct. Canonical
 manifest bytes participate in the publication content id and travel in lineage
@@ -304,9 +309,10 @@ publications, while the authority snapshot carries the genesis manifest.
 An identity is never returned to an allocation pool. A dropped table or column,
 an incompatible replacement epoch, and every enum UUID recursively beneath it
 are permanently retired: a later new table, column, or enum occurrence MUST
-receive a UUID absent from the entire source manifest, not merely from the
-currently mapped target paths. Only the exact compatible mapped coordinate may
-retain its UUID (including the shared prefix of its recursive enum occurrences).
+receive a UUID absent from every preceding durable or reserved manifest, not
+merely from its immediate source manifest or the currently mapped target paths.
+Only the exact compatible mapped coordinate may retain its UUID (including the
+shared prefix of its recursive enum occurrences).
 
 A pure rename of a physically compatible column retains its UUID. Any
 incompatible epoch (changed value representation, merge strategy, or

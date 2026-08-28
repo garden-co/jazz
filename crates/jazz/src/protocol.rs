@@ -3442,6 +3442,29 @@ impl PhysicalIdentityManifest {
         Ok(evolved)
     }
 
+    /// Mint a descendant descriptor while reserving every UUID ever durably
+    /// observed by this catalogue.  The manifest itself remains the complete
+    /// canonical durable representation: old schema mappings retain the
+    /// retired UUIDs, so no second, lossy "retirement ledger" is necessary.
+    fn evolve_with_history(
+        &self,
+        source: &JazzSchema,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        new_tables: &BTreeSet<String>,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+    ) -> Result<Self, &'static str> {
+        let mut evolved = self.evolve(source, target, lens, new_tables)?;
+        let inherited = self.inherited_uuids(source, &evolved, target, lens)?;
+        let mut reserved = BTreeSet::new();
+        for manifest in history {
+            reserved.extend(manifest.all_identity_uuids());
+        }
+        evolved.remint_fresh_collisions(&inherited, &mut reserved);
+        evolved.validate_for_schema(target)?;
+        Ok(evolved)
+    }
+
     /// Validate that a target manifest preserves every mapped permanent UUID.
     /// Fresh UUID values are unconstrained except by target-wide uniqueness.
     pub fn validate_evolution_to(
@@ -3451,6 +3474,22 @@ impl PhysicalIdentityManifest {
         target: &JazzSchema,
         lens: &MigrationLens,
     ) -> Result<(), &'static str> {
+        self.validate_evolution_to_with_history(source, target_manifest, target, lens, [])
+    }
+
+    /// Like [`Self::validate_evolution_to`], but also guards against UUIDs
+    /// retired by any older catalogue descriptor.  The caller obtains this
+    /// history by replaying the canonical durable schema mappings and any
+    /// parked/staged publication manifests; no separate mutable allocator
+    /// state may decide identity reuse.
+    pub fn validate_evolution_to_with_history(
+        &self,
+        source: &JazzSchema,
+        target_manifest: &Self,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+    ) -> Result<(), &'static str> {
         self.validate_for_schema(source)?;
         target_manifest.validate_for_schema(target)?;
         // A UUID is a permanent catalogue identity, not an alias that may be
@@ -3459,7 +3498,31 @@ impl PhysicalIdentityManifest {
         // coordinates below explicitly carve out the only permitted reuse.
         // This includes source tables and columns that the lens dropped or
         // replaced, and every recursive enum occurrence beneath them.
-        let source_uuids = self.all_identity_uuids();
+        let inherited_uuids = self.inherited_uuids(source, target_manifest, target, lens)?;
+        let mut reserved_uuids = self.all_identity_uuids();
+        for manifest in history {
+            reserved_uuids.extend(manifest.all_identity_uuids());
+        }
+        let target_uuids = target_manifest.all_identity_uuids();
+        if reserved_uuids
+            .intersection(&target_uuids)
+            .any(|uuid| !inherited_uuids.contains(uuid))
+        {
+            return Err("physical retired identity reused across lineage");
+        }
+        Ok(())
+    }
+
+    /// The exact source-to-target coordinates permitted to retain their UUID.
+    /// Any other UUID observed in a target is a new allocation and must not
+    /// collide with the durable catalogue history.
+    fn inherited_uuids(
+        &self,
+        source: &JazzSchema,
+        target_manifest: &Self,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+    ) -> Result<BTreeSet<uuid::Uuid>, &'static str> {
         let mut inherited_uuids = BTreeSet::new();
         for table_lens in &lens.table_lenses {
             let source_table = self
@@ -3562,14 +3625,43 @@ impl PhysicalIdentityManifest {
                 }
             }
         }
-        let target_uuids = target_manifest.all_identity_uuids();
-        if source_uuids
-            .intersection(&target_uuids)
-            .any(|uuid| !inherited_uuids.contains(uuid))
-        {
-            return Err("physical retired identity reused across lineage");
+        Ok(inherited_uuids)
+    }
+
+    fn remint_fresh_collisions(
+        &mut self,
+        inherited: &BTreeSet<uuid::Uuid>,
+        reserved: &mut BTreeSet<uuid::Uuid>,
+    ) {
+        let mint = |reserved: &mut BTreeSet<uuid::Uuid>| loop {
+            let uuid = uuid::Uuid::new_v4();
+            if reserved.insert(uuid) {
+                break uuid;
+            }
+        };
+        for table in self.tables.values_mut() {
+            if !inherited.contains(&table.id.0) && reserved.contains(&table.id.0) {
+                table.id.0 = mint(reserved);
+            } else {
+                reserved.insert(table.id.0);
+            }
+            for column in table.columns.values_mut() {
+                if !inherited.contains(&column.id.0) && reserved.contains(&column.id.0) {
+                    column.id.0 = mint(reserved);
+                } else {
+                    reserved.insert(column.id.0);
+                }
+                for variants in column.enum_variants.values_mut() {
+                    for variant in variants {
+                        if !inherited.contains(&variant.0) && reserved.contains(&variant.0) {
+                            variant.0 = mint(reserved);
+                        } else {
+                            reserved.insert(variant.0);
+                        }
+                    }
+                }
+            }
         }
-        Ok(())
     }
 
     /// All durable UUIDs in this descriptor, across tables, column epochs,
@@ -3752,16 +3844,41 @@ impl SchemaLineagePublication {
         new_tables: impl IntoIterator<Item = impl Into<String>>,
         dropped_tables: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self, &'static str> {
+        Self::author_from_prior_with_history(
+            source_schema,
+            source_identities,
+            std::iter::once(source_identities.clone()),
+            schema,
+            lens,
+            new_tables,
+            dropped_tables,
+        )
+    }
+
+    /// Authority-only descendant construction with the complete durable
+    /// catalogue history available.  The convenience constructor above is
+    /// deliberately retained for isolated fixtures; live authorities must
+    /// pass all active, staged, and parked manifests here.
+    pub fn author_from_prior_with_history(
+        source_schema: &JazzSchema,
+        source_identities: &PhysicalIdentityManifest,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, &'static str> {
         let new_tables = new_tables.into_iter().map(Into::into).collect::<Vec<_>>();
         let dropped_tables = dropped_tables
             .into_iter()
             .map(Into::into)
             .collect::<Vec<_>>();
-        let physical_identities = source_identities.evolve(
+        let physical_identities = source_identities.evolve_with_history(
             source_schema,
             &schema.schema,
             &lens,
             &new_tables.iter().cloned().collect(),
+            history,
         )?;
         let mut publication = Self {
             id: SchemaLineagePublicationId(uuid::Uuid::nil()),
@@ -4747,6 +4864,168 @@ mod tests {
             ),
             Err("physical retired identity reused across lineage")
         );
+    }
+
+    #[test]
+    fn physical_identity_history_retires_table_column_and_nested_enum_across_multiple_hops() {
+        let nested_enum = |variants: &[&str]| PublicColumnType::Array {
+            element: Box::new(PublicColumnType::ScalarEnum {
+                name: "phase".to_owned(),
+                variants: variants.iter().map(|value| (*value).to_owned()).collect(),
+            }),
+        };
+        let v1_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", nested_enum(&["draft", "ready"])),
+                )
+                .table(TableSchemaBuilder::new("retired").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let v1 = SchemaVersion::new(v1_schema.clone());
+        let v1_identities = PhysicalIdentityManifest::allocate(&v1_schema);
+        let v2_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", nested_enum(&["archived"])),
+                )
+                .build(),
+        )
+        .unwrap();
+        let v2 = SchemaVersion::new(v2_schema.clone());
+        let lens_12 = MigrationLens::new(
+            v1.id,
+            v2.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "phase".to_owned(),
+                    transform: "replace-enum-epoch".to_owned(),
+                }],
+            }],
+        );
+        let publication_2 = SchemaLineagePublication::author_from_prior_with_history(
+            &v1.schema,
+            &v1_identities,
+            [v1_identities.clone()],
+            v2.clone(),
+            lens_12,
+            std::iter::empty::<String>(),
+            ["retired"],
+        )
+        .unwrap();
+
+        let v3_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", nested_enum(&["archived"]))
+                        .column("other", nested_enum(&["new"])),
+                )
+                .table(TableSchemaBuilder::new("returning").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let v3 = SchemaVersion::new(v3_schema.clone());
+        let lens_23 = MigrationLens::new(
+            v2.id,
+            v3.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "other".to_owned(),
+                    default: Value::Array(Vec::new()),
+                }],
+            }],
+        );
+        let publication_3 = SchemaLineagePublication::author_from_prior_with_history(
+            &v2.schema,
+            &publication_2.physical_identities,
+            [
+                v1_identities.clone(),
+                publication_2.physical_identities.clone(),
+            ],
+            v3.clone(),
+            lens_23.clone(),
+            ["returning"],
+            std::iter::empty::<String>(),
+        )
+        .unwrap();
+
+        // Re-introducing a table, a prior incompatible epoch, or a recursive
+        // child UUID after an intervening publication is invalid even though
+        // none is present in v2's current mapped coordinates.
+        let retired_table = v1_identities.tables["retired"].id;
+        let retired_column = v1_identities.tables["items"].columns["phase"].id;
+        let retired_nested =
+            v1_identities.tables["items"].columns["phase"].enum_variants["root/array"][0];
+        for forged in [
+            {
+                let mut manifest = publication_3.physical_identities.clone();
+                manifest.tables.get_mut("returning").unwrap().id = retired_table;
+                manifest
+            },
+            {
+                let mut manifest = publication_3.physical_identities.clone();
+                manifest
+                    .tables
+                    .get_mut("items")
+                    .unwrap()
+                    .columns
+                    .get_mut("other")
+                    .unwrap()
+                    .id = retired_column;
+                manifest
+            },
+            {
+                let mut manifest = publication_3.physical_identities.clone();
+                manifest
+                    .tables
+                    .get_mut("items")
+                    .unwrap()
+                    .columns
+                    .get_mut("other")
+                    .unwrap()
+                    .enum_variants
+                    .get_mut("root/array")
+                    .unwrap()[0] = retired_nested;
+                manifest
+            },
+        ] {
+            assert_eq!(
+                publication_2
+                    .physical_identities
+                    .validate_evolution_to_with_history(
+                        &v2.schema,
+                        &forged,
+                        &v3.schema,
+                        &lens_23,
+                        [
+                            v1_identities.clone(),
+                            publication_2.physical_identities.clone()
+                        ],
+                    ),
+                Err("physical retired identity reused across lineage")
+            );
+        }
+        publication_2
+            .physical_identities
+            .validate_evolution_to_with_history(
+                &v2.schema,
+                &publication_3.physical_identities,
+                &v3.schema,
+                &lens_23,
+                [v1_identities, publication_2.physical_identities.clone()],
+            )
+            .unwrap();
     }
 
     #[test]

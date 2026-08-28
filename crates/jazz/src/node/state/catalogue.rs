@@ -2,10 +2,108 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Author a descendant lineage from this authority's active source
-    /// manifest. This is the only NodeState construction path for a
+    /// Every durable or durably reserved authority manifest known to this
+    /// node.  Historical mappings are retained by catalogue recovery, while
+    /// staged and pending envelopes reserve their UUIDs before activation.
+    pub(super) fn physical_identity_history(&self) -> Vec<PhysicalIdentityManifest> {
+        self.physical_identity_history_except(None)
+    }
+
+    /// As [`Self::physical_identity_history`] but omits the publication being
+    /// validated. A parked bundle reserves its UUIDs against *other* bundles;
+    /// treating its own new identities as already retired would incorrectly
+    /// reject every pending activation.
+    pub(super) fn physical_identity_history_except(
+        &self,
+        omit: Option<crate::ids::SchemaLineagePublicationId>,
+    ) -> Vec<PhysicalIdentityManifest> {
+        self.catalogue
+            .physical_mappings
+            .values()
+            .map(|mapping| mapping.identities.clone())
+            .chain(
+                self.catalogue
+                    .staged_lineages
+                    .values()
+                    .filter(|staged| Some(staged.publication.id) != omit)
+                    .map(|staged| staged.publication.physical_identities.clone()),
+            )
+            .chain(
+                self.catalogue
+                    .pending_lineages
+                    .values()
+                    .filter(|pending| Some(pending.publication.id) != omit)
+                    .map(|pending| pending.publication.physical_identities.clone()),
+            )
+            .collect()
+    }
+
+    /// Reservation history for admitting `candidate_schema`. Descendant parked
+    /// envelopes are excluded: they are allowed to inherit identities minted
+    /// by this candidate, even when they arrived out of order. Unrelated
+    /// parked/staged envelopes remain reservations and therefore cannot claim
+    /// one of its new UUIDs first.
+    pub(super) fn physical_identity_history_for_candidate(
+        &self,
+        candidate_schema: SchemaVersionId,
+        omit: Option<crate::ids::SchemaLineagePublicationId>,
+    ) -> Vec<PhysicalIdentityManifest> {
+        let mut parents = BTreeMap::new();
+        for lineage in self.catalogue.active_lineages_by_target.values() {
+            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+        }
+        for lineage in self.catalogue.staged_lineages.values() {
+            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+        }
+        for lineage in self.catalogue.pending_lineages.values() {
+            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+        }
+        let is_descendant = |schema: SchemaVersionId| {
+            let mut cursor = schema;
+            let mut visited = BTreeSet::new();
+            while visited.insert(cursor) {
+                let Some(parent) = parents.get(&cursor).copied() else {
+                    return false;
+                };
+                if parent == candidate_schema {
+                    return true;
+                }
+                cursor = parent;
+            }
+            false
+        };
+        self.catalogue
+            .physical_mappings
+            .values()
+            .map(|mapping| mapping.identities.clone())
+            .chain(
+                self.catalogue
+                    .staged_lineages
+                    .values()
+                    .filter(|staged| {
+                        Some(staged.publication.id) != omit
+                            && !is_descendant(staged.publication.schema.id)
+                    })
+                    .map(|staged| staged.publication.physical_identities.clone()),
+            )
+            .chain(
+                self.catalogue
+                    .pending_lineages
+                    .values()
+                    .filter(|pending| {
+                        Some(pending.publication.id) != omit
+                            && !is_descendant(pending.publication.schema.id)
+                    })
+                    .map(|pending| pending.publication.physical_identities.clone()),
+            )
+            .collect()
+    }
+
+    /// Author a descendant lineage from this authority's complete durable
+    /// catalogue history. This is the only NodeState construction path for a
     /// non-genesis publication: it preserves mapped physical UUIDs and mints
-    /// identities only for genuinely new entities.
+    /// identities only for genuinely new entities, never identities retired
+    /// by older active, staged, or parked publications.
     pub fn author_schema_lineage_publication(
         &self,
         schema: SchemaVersion,
@@ -28,9 +126,11 @@ where
                 "schema lineage source identities are missing",
             ))?
             .identities;
-        SchemaLineagePublication::author_from_prior(
+        let history = self.physical_identity_history();
+        SchemaLineagePublication::author_from_prior_with_history(
             &source.schema,
             identities,
+            history,
             schema,
             lens,
             new_tables,
