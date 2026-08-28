@@ -1,5 +1,5 @@
 #import <React/RCTBridgeModule.h>
-#import <JazzNativeRelay/JazzRelay.h>
+#import <JazzRn/JazzRelay.h>
 
 /** Development-build-only trusted fixture. Configuration is a compile-time
  * test fixture; JS is given only the opaque random admission capability. */
