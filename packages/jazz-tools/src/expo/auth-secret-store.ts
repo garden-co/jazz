@@ -21,6 +21,16 @@ export interface ExpoAuthSecretStoreOptions extends AuthSecretScope {
   secureStore?: ExpoSecureStoreLike;
 }
 
+/** State shared by every adapter instance addressing one SecureStore key. */
+type SecretOperationState = {
+  cachedPromise: Promise<string> | null;
+  operationTail: Promise<void>;
+};
+
+function newSecretOperationState(): SecretOperationState {
+  return { cachedPromise: null, operationTail: Promise.resolve() };
+}
+
 function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): string {
   if (options.key) {
     return options.key;
@@ -31,18 +41,49 @@ function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): str
 
 export class ExpoAuthSecretStore implements AuthSecretStore {
   private static globalInstances = new Map<string, ExpoAuthSecretStore>();
+  private static globalOperationStates = new Map<string, SecretOperationState>();
   private static storageScopedInstances = new WeakMap<
     ExpoSecureStoreLike,
     Map<string, ExpoAuthSecretStore>
   >();
+  private static storageScopedOperationStates = new WeakMap<
+    ExpoSecureStoreLike,
+    Map<string, SecretOperationState>
+  >();
   private readonly key: string;
   private readonly store: ExpoSecureStoreLike;
-  private cachedPromise: Promise<string> | null = null;
-  private operationTail: Promise<void> = Promise.resolve();
+  private readonly operationState: SecretOperationState;
 
   constructor(options: ExpoAuthSecretStoreOptions = {}) {
     this.key = resolveExpoAuthSecretKey(options);
     this.store = options.secureStore ?? { getItemAsync, setItemAsync, deleteItemAsync };
+    this.operationState = ExpoAuthSecretStore.getOperationState(this.key, options.secureStore);
+  }
+
+  private static getOperationState(
+    key: string,
+    secureStore: ExpoSecureStoreLike | undefined,
+  ): SecretOperationState {
+    if (!secureStore) {
+      let state = ExpoAuthSecretStore.globalOperationStates.get(key);
+      if (!state) {
+        state = newSecretOperationState();
+        ExpoAuthSecretStore.globalOperationStates.set(key, state);
+      }
+      return state;
+    }
+
+    let states = ExpoAuthSecretStore.storageScopedOperationStates.get(secureStore);
+    if (!states) {
+      states = new Map<string, SecretOperationState>();
+      ExpoAuthSecretStore.storageScopedOperationStates.set(secureStore, states);
+    }
+    let state = states.get(key);
+    if (!state) {
+      state = newSecretOperationState();
+      states.set(key, state);
+    }
+    return state;
   }
 
   static getDefault(options: ExpoAuthSecretStoreOptions = {}): ExpoAuthSecretStore {
@@ -71,47 +112,49 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
     return instance;
   }
 
-  async loadSecret(): Promise<string | null> {
-    const secret = await this.store.getItemAsync(this.key);
-    if (secret === null) return null;
-    parseAuthSecret(secret);
-    return secret;
+  loadSecret(): Promise<string | null> {
+    return this.serialize(async () => {
+      const secret = await this.store.getItemAsync(this.key);
+      if (secret === null) return null;
+      parseAuthSecret(secret);
+      return secret;
+    });
   }
 
   saveSecret(secret: string): Promise<void> {
     parseAuthSecret(secret);
     const saving = this.serialize(() => this.store.setItemAsync(this.key, secret));
     const cached = saving.then(() => secret);
-    this.cachedPromise = cached;
+    this.operationState.cachedPromise = cached;
     void cached.catch(() => {
-      if (this.cachedPromise === cached) {
-        this.cachedPromise = null;
+      if (this.operationState.cachedPromise === cached) {
+        this.operationState.cachedPromise = null;
       }
     });
     return saving;
   }
 
   clearSecret(): Promise<void> {
-    this.cachedPromise = null;
+    this.operationState.cachedPromise = null;
     return this.serialize(() => this.store.deleteItemAsync(this.key));
   }
 
   getOrCreateSecret(): Promise<string> {
-    if (!this.cachedPromise) {
+    if (!this.operationState.cachedPromise) {
       const pending = this.serialize(() => this.getOrCreateSecretInternal());
-      this.cachedPromise = pending;
+      this.operationState.cachedPromise = pending;
       void pending.catch(() => {
-        if (this.cachedPromise === pending) {
-          this.cachedPromise = null;
+        if (this.operationState.cachedPromise === pending) {
+          this.operationState.cachedPromise = null;
         }
       });
     }
-    return this.cachedPromise;
+    return this.operationState.cachedPromise;
   }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.operationTail.then(operation);
-    this.operationTail = result.then(
+    const result = this.operationState.operationTail.then(operation);
+    this.operationState.operationTail = result.then(
       () => undefined,
       () => undefined,
     );

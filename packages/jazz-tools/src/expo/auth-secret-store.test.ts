@@ -151,4 +151,21 @@ describe("ExpoAuthSecretStore operation ordering", () => {
     expect(events.at(-1)).toBe("clear");
     expect(value()).toBeNull();
   });
+
+  it("serializes direct instances sharing one physical SecureStore key", async () => {
+    const { secureStore, firstRead, events, value } = controlledStore();
+    const first = new ExpoAuthSecretStore({ secureStore });
+    const second = new ExpoAuthSecretStore({ secureStore });
+    const creating = first.getOrCreateSecret();
+    await vi.waitFor(() => expect(secureStore.getItemAsync).toHaveBeenCalledOnce());
+
+    const importedSecret = generateAuthSecret();
+    const saving = second.saveSecret(importedSecret);
+    firstRead.resolve(null);
+    await Promise.all([creating, saving]);
+
+    expect(events.at(-1)).toBe(`save:${importedSecret}`);
+    expect(value()).toBe(importedSecret);
+    expect(await first.getOrCreateSecret()).toBe(importedSecret);
+  });
 });

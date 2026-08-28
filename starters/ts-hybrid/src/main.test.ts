@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Session = {
   isPending: boolean;
@@ -32,6 +32,17 @@ const mocks = vi.hoisted(() => {
       session = next;
       return [...subscribers].map((listener) => listener(next));
     },
+    reset() {
+      session = { isPending: false, data: null };
+      subscribers.clear();
+      createDb.mockReset();
+      getOrCreateSecret.mockReset();
+      fetchToken.mockReset();
+      setDb.mockReset();
+      mountApp.mockReset().mockImplementation(() => ({ setDb, destroy: vi.fn() }));
+      useSession.get.mockClear();
+      useSession.subscribe.mockClear();
+    },
   };
 });
 
@@ -57,16 +68,28 @@ function signedIn(name: string): Session {
 }
 
 function dbHandle() {
+  const authListeners = new Set<(state: { error?: string }) => void>();
   return {
-    onAuthChanged: vi.fn(),
+    onAuthChanged: vi.fn((listener: (state: { error?: string }) => void) => {
+      authListeners.add(listener);
+      return () => authListeners.delete(listener);
+    }),
     updateAuthToken: vi.fn(),
     shutdown: vi.fn(async () => {}),
+    emitAuth(state: { error?: string }) {
+      for (const listener of authListeners) listener(state);
+    },
   };
 }
 
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+beforeEach(() => {
+  vi.resetModules();
+  mocks.reset();
 });
 
 describe("hybrid auth Db ownership", () => {
@@ -104,14 +127,87 @@ describe("hybrid auth Db ownership", () => {
     );
 
     await Promise.all(mocks.emit({ isPending: false, data: null }));
+    await vi.waitFor(() => expect(mocks.setDb).toHaveBeenCalledWith(logoutDb));
     await Promise.all(mocks.emit(signedIn("newer")));
     olderDbOpen.resolve(olderSignInDb);
     await olderSignIn;
+    await vi.waitFor(() => expect(mocks.setDb).toHaveBeenCalledWith(newerSignInDb));
 
     expect(mocks.setDb.mock.calls.map(([db]) => db)).toEqual([logoutDb, newerSignInDb]);
     expect(initialDb.shutdown).toHaveBeenCalledOnce();
     expect(logoutDb.shutdown).toHaveBeenCalledOnce();
     expect(olderSignInDb.shutdown).toHaveBeenCalledOnce();
     expect(newerSignInDb.shutdown).not.toHaveBeenCalled();
+  });
+
+  it("refreshes only the current Db when an older session's request settles", async () => {
+    const initialDb = dbHandle();
+    const signedInDb = dbHandle();
+    const staleRefresh = deferred<{ data: { token: string } | null; error: null }>();
+    const currentRefresh = deferred<{ data: { token: string } | null; error: null }>();
+    let localOpenCount = 0;
+
+    mocks.getOrCreateSecret.mockResolvedValue("local-secret");
+    mocks.fetchToken
+      .mockImplementationOnce(() => staleRefresh.promise)
+      .mockResolvedValueOnce({ data: { token: "sign-in-token" }, error: null })
+      .mockImplementationOnce(() => currentRefresh.promise);
+    mocks.createDb.mockImplementation((config: { jwtToken?: string }) => {
+      if (config.jwtToken === "sign-in-token") return Promise.resolve(signedInDb);
+      localOpenCount += 1;
+      return Promise.resolve(initialDb);
+    });
+
+    vi.stubEnv("VITE_JAZZ_APP_ID", "test-app");
+    vi.stubEnv("VITE_JAZZ_SERVER_URL", "https://sync.test");
+    vi.stubGlobal("document", { getElementById: vi.fn(() => ({})) });
+    await import("./main.js");
+    await vi.waitFor(() => expect(mocks.mountApp).toHaveBeenCalledWith({}, initialDb));
+
+    initialDb.emitAuth({ error: "expired" });
+    await vi.waitFor(() => expect(mocks.fetchToken).toHaveBeenCalledTimes(1));
+    await Promise.all(mocks.emit(signedIn("signed-in")));
+    await vi.waitFor(() => expect(mocks.setDb).toHaveBeenCalledWith(signedInDb));
+
+    staleRefresh.resolve({ data: { token: "stale-token" }, error: null });
+    await Promise.resolve();
+    expect(signedInDb.updateAuthToken).not.toHaveBeenCalled();
+
+    signedInDb.emitAuth({ error: "expired" });
+    await vi.waitFor(() => expect(mocks.fetchToken).toHaveBeenCalledTimes(3));
+    currentRefresh.resolve({ data: { token: "current-token" }, error: null });
+    await vi.waitFor(() =>
+      expect(signedInDb.updateAuthToken).toHaveBeenCalledWith("current-token"),
+    );
+    expect(initialDb.updateAuthToken).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a session change that happens while the initial Db is opening", async () => {
+    const initialDb = dbHandle();
+    const signedInDb = dbHandle();
+    const initialOpen = deferred<typeof initialDb>();
+
+    mocks.getOrCreateSecret.mockResolvedValue("local-secret");
+    mocks.fetchToken.mockResolvedValue({ data: { token: "sign-in-token" }, error: null });
+    mocks.createDb.mockImplementation((config: { jwtToken?: string }) => {
+      return config.jwtToken === "sign-in-token"
+        ? Promise.resolve(signedInDb)
+        : initialOpen.promise;
+    });
+
+    vi.stubEnv("VITE_JAZZ_APP_ID", "test-app");
+    vi.stubEnv("VITE_JAZZ_SERVER_URL", "https://sync.test");
+    vi.stubGlobal("document", { getElementById: vi.fn(() => ({})) });
+    await import("./main.js");
+    await vi.waitFor(() => expect(mocks.createDb).toHaveBeenCalledOnce());
+
+    // No session listener exists until the initial Db is ready. The final
+    // current-session read must still observe this sign-in.
+    mocks.emit(signedIn("signed-in"));
+    initialOpen.resolve(initialDb);
+
+    await vi.waitFor(() => expect(mocks.mountApp).toHaveBeenCalledWith({}, initialDb));
+    await vi.waitFor(() => expect(mocks.setDb).toHaveBeenCalledWith(signedInDb));
+    expect(initialDb.shutdown).toHaveBeenCalledOnce();
   });
 });
