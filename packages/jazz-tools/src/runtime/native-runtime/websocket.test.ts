@@ -283,6 +283,43 @@ describe("websocket frame carrier", () => {
     expect(() => isWireHello(suffixed)).toThrow("WireFrame::Hello has trailing postcard bytes");
   });
 
+  it("decodes exact Rust-produced Hello frames and rejects only true suffixes", async () => {
+    const manifest = rustWireHelloFixtureManifest();
+
+    for (const fixture of manifest.fixtures) {
+      const frame = hexToBytes(fixture.frame_hex);
+      expect(isWireHello(frame), fixture.name).toBe(true);
+      expect(() => isWireHello(Uint8Array.from([...frame, 0])), fixture.name).toThrow(
+        "WireFrame::Hello has trailing postcard bytes",
+      );
+
+      if (fixture.role !== 1) continue;
+      let socket: MessageWebSocket | undefined;
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: () => {},
+        WebSocket: class extends MessageWebSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created;
+            });
+          }
+        },
+      });
+      socket!.emitMessage(encodeWebSocketFrameBatch([frame]));
+      const negotiated = await carrier.ready();
+      expect(negotiated.features, fixture.name).toBe(fixture.features);
+      expect(negotiated.authority?.node, fixture.name).toEqual(
+        fixture.authority_node_hex ? hexToBytes(fixture.authority_node_hex) : undefined,
+      );
+      expect(negotiated.authority?.epoch, fixture.name).toBe(
+        fixture.authority_epoch === null ? undefined : BigInt(fixture.authority_epoch),
+      );
+      carrier.close();
+    }
+  });
+
   it("rejects a v12 server without compatibility negotiation", async () => {
     let socket: MessageWebSocket | undefined;
     const carrier = new WebSocketCarrier({
@@ -566,6 +603,17 @@ type RustWireFixtureManifest = {
   }>;
 };
 
+type RustWireHelloFixtureManifest = {
+  fixtures: Array<{
+    name: string;
+    features: number;
+    role: number;
+    authority_node_hex: string | null;
+    authority_epoch: number | null;
+    frame_hex: string;
+  }>;
+};
+
 function rustWireFixtureManifest(): RustWireFixtureManifest {
   return JSON.parse(
     readFileSync(
@@ -573,6 +621,15 @@ function rustWireFixtureManifest(): RustWireFixtureManifest {
       "utf8",
     ),
   ) as RustWireFixtureManifest;
+}
+
+function rustWireHelloFixtureManifest(): RustWireHelloFixtureManifest {
+  return JSON.parse(
+    readFileSync(
+      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames.json", import.meta.url),
+      "utf8",
+    ),
+  ) as RustWireHelloFixtureManifest;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -610,10 +667,7 @@ function encodeServerHello(epoch: bigint, protocolVersion = WIRE_PROTOCOL_VERSIO
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {
-    authority.bytes(
-      Uint8Array.from({ length: 16 }, () => 0x5e),
-      false,
-    );
+    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e));
     authority.u64(epoch);
   });
   return writer.finish();

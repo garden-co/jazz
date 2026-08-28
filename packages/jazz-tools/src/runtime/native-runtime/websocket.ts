@@ -340,7 +340,7 @@ function readWireHelloBodyExact(reader: PostcardReader): {
   const features = reader.u64();
   const role = reader.u64();
   const authority = reader.option((value) => ({
-    node: value.bytes(false),
+    node: value.bytes(),
     epoch: value.u64BigInt(),
   }));
   assertReaderDone(reader, "WireFrame::Hello");
