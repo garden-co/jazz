@@ -127,7 +127,6 @@ jobs:
           echo "IOS_SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
           xcrun simctl boot "${udid}" 2>/dev/null || true
           xcrun simctl bootstatus "${udid}" -b
-          xcrun simctl spawn "${udid}" log erase --all
       - name: Build the staged app for that simulator
         run: |
           xcodebuild -workspace JazzRNdeviceacceptance.xcworkspace -scheme JazzRNdeviceacceptance -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_UDID}" -derivedDataPath "${JAZZ_DEVICE_DERIVED_DATA}" build

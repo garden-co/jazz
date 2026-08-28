@@ -25,6 +25,8 @@ simctl([
   runNonce,
   "-JazzDeviceBuildFingerprint",
   buildFingerprint,
+  "-JazzDeviceDeviceIdentifier",
+  udid,
 ]);
 const receiptOutput = () =>
   simctl([
