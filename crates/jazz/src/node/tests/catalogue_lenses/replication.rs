@@ -23,7 +23,7 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    ).expect("valid migration lens");
     let publication = core
         .author_schema_lineage_publication(
             payload.clone(),
@@ -91,7 +91,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    ).expect("valid migration lens");
 
     let publication = core
         .author_schema_lineage_publication(
@@ -112,7 +112,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         source.id,
         SchemaVersionId::from_bytes([0x99; 16]),
         Vec::new(),
-    );
+    ).expect("valid migration lens");
     let unknown_result = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishLens {
         author: AuthorSubject::SYSTEM,
         lens: unknown,
@@ -206,7 +206,7 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -337,7 +337,7 @@ fn catalogue_arrival_rejects_incomplete_row_claiming_evolved_schema() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -411,7 +411,7 @@ fn catalogue_arrival_drops_incomplete_relay_row_without_failing_publication() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

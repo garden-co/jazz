@@ -492,7 +492,7 @@ fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         MigrationLens::new(
             v2.version_id(),
             v3.version_id(),
@@ -510,7 +510,7 @@ fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         MigrationLens::new(
             v3.version_id(),
             v4.version_id(),
@@ -522,7 +522,7 @@ fn s7_schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     to: "search_name".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
     ];
     ([v1, v2, v3, v4], lenses)
 }

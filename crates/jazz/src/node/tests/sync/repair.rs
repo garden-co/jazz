@@ -306,7 +306,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )
@@ -532,7 +532,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             original.version_id(),
             without_tasks_version.id,
             Vec::new(),
-        ),
+        ).expect("valid migration lens"),
         ["notes"],
         ["tasks"],
     )
@@ -548,7 +548,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
                 target_table: "notes".to_owned(),
                 ops: Vec::new(),
             }],
-        ),
+        ).expect("valid migration lens"),
         ["tasks"],
         Vec::<String>::new(),
     )

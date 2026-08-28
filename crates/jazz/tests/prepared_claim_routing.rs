@@ -1206,7 +1206,8 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
                 ops: Vec::new(),
             },
         ],
-    );
+    )
+    .expect("valid migration lens");
     let publication = db
         .author_schema_lineage_publication(
             v2.clone(),
@@ -1331,7 +1332,8 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
                 ops: Vec::new(),
             },
         ],
-    );
+    )
+    .expect("valid migration lens");
     let publication = db
         .author_schema_lineage_publication(
             v2.clone(),
@@ -1478,7 +1480,8 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
                 }],
             },
         ],
-    );
+    )
+    .expect("valid migration lens");
     let publication = db
         .author_schema_lineage_publication(
             v2.clone(),

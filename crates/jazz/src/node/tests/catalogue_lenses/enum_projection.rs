@@ -51,7 +51,7 @@ fn enum_identity_lens(source: SchemaVersionId, target: SchemaVersionId) -> Migra
                 transform: "jazz.identity".to_owned(),
             }],
         }],
-    )
+    ).expect("valid migration lens")
 }
 
 /// Earlier catalogue introductions retain their physical scalar-enum tags
@@ -237,7 +237,7 @@ fn direct_payload_enum_append_activates_and_recovers() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -324,7 +324,7 @@ fn incompatible_scalar_enum_epoch_activates_and_recovers() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -391,7 +391,7 @@ fn retired_scalar_enum_uuid_is_quarantined_without_catalogue_mutation() {
                 },
             ],
         }],
-    );
+    ).expect("valid migration lens");
     let (dir, mut core) = open_node_with_schema(node(0x7c), base.clone());
     let source_variant = core.catalogue.physical_mappings[&base.version_id()].identities.tables
         ["items"]
@@ -443,7 +443,7 @@ fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
     };
     let base = schema(false); let evolved = SchemaVersion::new(schema(true));
     let (_dir, mut core) = open_node_with_schema(node(0x76), base.clone());
-    publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(base.version_id(), evolved.id, vec![TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] }]), Vec::<String>::new(), Vec::<String>::new()).unwrap();
+    publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(base.version_id(), evolved.id, vec![TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] }]).expect("valid migration lens"), Vec::<String>::new(), Vec::<String>::new()).unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorSubject::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
     let payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
     let unknown = row(0x76);
@@ -495,7 +495,7 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -570,7 +570,7 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -651,7 +651,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -832,7 +832,7 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -905,7 +905,7 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
                 transform: "jazz.identity".to_owned(),
             }],
         }],
-    );
+    ).expect("valid migration lens");
     publish_schema_lineage(
         &mut core,
         evolved.clone(),
@@ -1042,7 +1042,7 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1360,7 +1360,7 @@ fn enum_projection_requirement_none_allows_unused_relation_enum() {
             TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![] },
             TableLens { source_table: "states".into(), target_table: "states".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] },
         ],
-    ), Vec::<String>::new(), Vec::<String>::new()).unwrap();
+    ).expect("valid migration lens"), Vec::<String>::new(), Vec::<String>::new()).unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorSubject::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
     let state = row(0x79);
     core.commit_mergeable_settled(MergeableCommit::new("states", state, 1).cells(BTreeMap::from([("status".into(), Value::EnumTag(1))]))).unwrap();
@@ -1403,7 +1403,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        )
+        ).expect("valid migration lens")
     };
     publish_schema_lineage(
         &mut core,

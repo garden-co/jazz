@@ -212,7 +212,8 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
                             default: Value::String("from-lens-default".to_owned()),
                         }],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
             )
@@ -291,7 +292,8 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
                             },
                         ],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
             )
@@ -389,7 +391,8 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
                             to: "people".to_owned(),
                         }],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
             )
@@ -434,7 +437,8 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
                             },
                         ],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
             )
@@ -641,7 +645,8 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
                         ops: Vec::new(),
                     },
                 ],
-            ),
+            )
+            .expect("valid migration lens"),
             Vec::<String>::new(),
             Vec::<String>::new(),
         )

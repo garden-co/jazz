@@ -1783,7 +1783,8 @@ mod authorization_scope_compiler_tests {
                                 default: Value::String(String::new()),
                             }],
                         }],
-                    ),
+                    )
+                    .expect("valid migration lens"),
                     Vec::<String>::new(),
                     Vec::<String>::new(),
                 )
@@ -1902,7 +1903,8 @@ mod authorization_scope_compiler_tests {
                                 },
                             ],
                         }],
-                    ),
+                    )
+                    .expect("valid migration lens"),
                     Vec::<String>::new(),
                     Vec::<String>::new(),
                 )

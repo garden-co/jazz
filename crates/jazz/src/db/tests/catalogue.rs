@@ -81,7 +81,8 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     let publication = db
         .author_schema_lineage_publication(
             schema_version.clone(),
@@ -208,7 +209,8 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
                 transform: "jazz.identity".to_owned(),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     let enum_publication = db
         .author_schema_lineage_publication(
             middle.clone(),
@@ -254,7 +256,8 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     let column_publication = db
         .author_schema_lineage_publication(
             latest.clone(),
@@ -355,7 +358,8 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     let owner_publication = db
         .author_schema_lineage_publication(
             owner_payload.clone(),
@@ -453,7 +457,8 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     let publication = core
         .author_schema_lineage_publication(
             schema_version.clone(),

@@ -32,7 +32,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -147,7 +147,7 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
                     to: "tasks".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -257,7 +257,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
                     to: "tasks".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         ["tasks"],
     )

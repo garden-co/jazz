@@ -94,7 +94,8 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
                 default: large_default,
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     let publication = authority
         .author_schema_lineage_publication(
             evolved.clone(),

@@ -730,7 +730,7 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

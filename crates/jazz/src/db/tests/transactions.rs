@@ -263,7 +263,8 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
                         to: "summary".to_owned(),
                     }],
                 }],
-            ),
+            )
+            .expect("valid migration lens"),
             Vec::<String>::new(),
             Vec::<String>::new(),
         )

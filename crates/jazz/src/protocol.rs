@@ -3980,8 +3980,19 @@ impl MigrationLens {
     pub fn new(
         source: SchemaVersionId,
         target: SchemaVersionId,
-        table_lenses: Vec<TableLens>,
-    ) -> Self {
+        mut table_lenses: Vec<TableLens>,
+    ) -> Result<Self, &'static str> {
+        table_lenses.sort_by(|left, right| {
+            (&left.source_table, &left.target_table)
+                .cmp(&(&right.source_table, &right.target_table))
+        });
+        validate_protocol_lens_defaults(&table_lenses)?;
+        if table_lenses.windows(2).any(|pair| {
+            (&pair[0].source_table, &pair[0].target_table)
+                == (&pair[1].source_table, &pair[1].target_table)
+        }) {
+            return Err("duplicate migration lens table coordinate");
+        }
         let mut lens = Self {
             id: MigrationLensId(uuid::Uuid::nil()),
             source,
@@ -3989,7 +4000,7 @@ impl MigrationLens {
             table_lenses,
         };
         lens.id = lens.content_id();
-        lens
+        Ok(lens)
     }
 
     /// Return the content-addressed id implied by this payload.
@@ -4001,13 +4012,48 @@ impl MigrationLens {
     }
 }
 
+fn validate_protocol_lens_defaults(table_lenses: &[TableLens]) -> Result<(), &'static str> {
+    fn valid(value: &Value) -> bool {
+        match value {
+            Value::Large(_) | Value::Record(_) | Value::Enum(_) => false,
+            Value::Tuple(values) | Value::Array(values) => values.iter().all(valid),
+            Value::Nullable(Some(value)) => valid(value),
+            _ => true,
+        }
+    }
+    for table in table_lenses {
+        for op in &table.ops {
+            match op {
+                LensOp::AddColumn { default, .. } if !valid(default) => {
+                    return Err(
+                        "migration lens defaults cannot contain storage-only or descriptor-less values",
+                    );
+                }
+                LensOp::DropColumn {
+                    backwards_default, ..
+                } if !valid(backwards_default) => {
+                    return Err(
+                        "migration lens defaults cannot contain storage-only or descriptor-less values",
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, "jazz-migration-lens-v1");
     bytes.extend_from_slice(lens.source.as_bytes());
     bytes.extend_from_slice(lens.target.as_bytes());
-    put_len(&mut bytes, lens.table_lenses.len());
-    for table_lens in &lens.table_lenses {
+    let mut table_lenses = lens.table_lenses.iter().collect::<Vec<_>>();
+    table_lenses.sort_by(|left, right| {
+        (&left.source_table, &left.target_table).cmp(&(&right.source_table, &right.target_table))
+    });
+    put_len(&mut bytes, table_lenses.len());
+    for table_lens in table_lenses {
         put_str(&mut bytes, &table_lens.source_table);
         put_str(&mut bytes, &table_lens.target_table);
         put_len(&mut bytes, table_lens.ops.len());
@@ -4044,7 +4090,7 @@ pub(crate) fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens,
         });
     }
     c.finish()?;
-    let lens = MigrationLens::new(source, target, table_lenses);
+    let lens = MigrationLens::new(source, target, table_lenses).expect("valid migration lens");
     if canonical_lens_bytes(&lens) != bytes {
         return Err("noncanonical migration lens");
     }
@@ -4056,6 +4102,9 @@ struct ProtocolCodecCursor<'a> {
     offset: usize,
 }
 impl<'a> ProtocolCodecCursor<'a> {
+    const MAX_COUNT: u32 = 16_384;
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_DEPTH: usize = 64;
     fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
         let e = self
             .offset
@@ -4087,16 +4136,30 @@ impl<'a> ProtocolCodecCursor<'a> {
         Ok(uuid::Uuid::from_bytes(self.take(16)?.try_into().unwrap()))
     }
     fn count(&mut self) -> Result<u32, &'static str> {
-        self.u32()
+        let count = self.u32()?;
+        if count > Self::MAX_COUNT {
+            Err("protocol collection count exceeds limit")
+        } else {
+            Ok(count)
+        }
     }
     fn bytes(&mut self) -> Result<Vec<u8>, &'static str> {
         let n = self.u32()? as usize;
+        if n > Self::MAX_BYTES {
+            return Err("protocol byte length exceeds limit");
+        }
         Ok(self.take(n)?.to_vec())
     }
     fn string(&mut self) -> Result<String, &'static str> {
         String::from_utf8(self.bytes()?).map_err(|_| "invalid protocol utf8")
     }
     fn value(&mut self) -> Result<Value, &'static str> {
+        self.value_at(0)
+    }
+    fn value_at(&mut self, depth: usize) -> Result<Value, &'static str> {
+        if depth >= Self::MAX_DEPTH {
+            return Err("protocol value nesting exceeds limit");
+        }
         Ok(match self.u8()? {
             0 => Value::U8(self.u8()?),
             1 => Value::U16(u16::from_le_bytes(self.take(2)?.try_into().unwrap())),
@@ -4112,11 +4175,11 @@ impl<'a> ProtocolCodecCursor<'a> {
             7 => Value::Bytes(self.bytes()?),
             8 => Value::Uuid(self.uuid()?),
             9 => Value::EnumTag(self.u8()?),
-            10 => Value::Tuple(self.values()?),
-            11 => Value::Array(self.values()?),
+            10 => Value::Tuple(self.values_at(depth + 1)?),
+            11 => Value::Array(self.values_at(depth + 1)?),
             12 => match self.u8()? {
                 0 => Value::Nullable(None),
-                1 => Value::Nullable(Some(Box::new(self.value()?))),
+                1 => Value::Nullable(Some(Box::new(self.value_at(depth + 1)?))),
                 _ => return Err("invalid protocol nullable"),
             },
             13 => Value::I64(self.i64()?),
@@ -4125,10 +4188,10 @@ impl<'a> ProtocolCodecCursor<'a> {
             _ => return Err("invalid protocol value tag"),
         })
     }
-    fn values(&mut self) -> Result<Vec<Value>, &'static str> {
+    fn values_at(&mut self, depth: usize) -> Result<Vec<Value>, &'static str> {
         let mut v = Vec::new();
         for _ in 0..self.count()? {
-            v.push(self.value()?)
+            v.push(self.value_at(depth)?)
         }
         Ok(v)
     }
@@ -4558,7 +4621,8 @@ mod tests {
                 target_table: "target".into(),
                 ops: all,
             }],
-        );
+        )
+        .expect("valid migration lens");
         let exact = canonical_lens_bytes(&lens);
         assert_eq!(decode_canonical_lens_bytes(&exact).unwrap(), lens);
         for malformed in [
@@ -4900,7 +4964,8 @@ mod tests {
         assert_eq!(round_trip, manifest);
 
         let version = SchemaVersion::new(schema.clone());
-        let lens = MigrationLens::new(version.id, version.id, Vec::new());
+        let lens =
+            MigrationLens::new(version.id, version.id, Vec::new()).expect("valid migration lens");
         let publication = SchemaLineagePublication::new_genesis_fixture(
             version,
             lens,
@@ -4951,7 +5016,8 @@ mod tests {
                     to: "left_renamed".to_owned(),
                 }],
             }],
-        );
+        )
+        .expect("valid migration lens");
         let renamed = SchemaLineagePublication::author_from_prior(
             &renamed_source.schema,
             &manifest,
@@ -5032,7 +5098,8 @@ mod tests {
                     transform: "replace-enum-epoch".to_owned(),
                 }],
             }],
-        );
+        )
+        .expect("valid migration lens");
         let authored = SchemaLineagePublication::author_from_prior(
             &source.schema,
             &identities,
@@ -5145,7 +5212,8 @@ mod tests {
                     transform: "replace-enum-epoch".to_owned(),
                 }],
             }],
-        );
+        )
+        .expect("valid migration lens");
         let publication_2 = SchemaLineagePublication::author_from_prior_with_history(
             &v1.schema,
             &v1_identities,
@@ -5181,7 +5249,8 @@ mod tests {
                     default: Value::Array(Vec::new()),
                 }],
             }],
-        );
+        )
+        .expect("valid migration lens");
         let publication_3 = SchemaLineagePublication::author_from_prior_with_history(
             &v2.schema,
             &publication_2.physical_identities,
@@ -5380,6 +5449,7 @@ mod tests {
                 ],
             }],
         )
+        .expect("valid migration lens")
     }
 
     #[test]

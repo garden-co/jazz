@@ -1935,7 +1935,7 @@ fn direct_schema_view_lens(
         .map(|table| table.name.clone())
         .collect::<Vec<_>>();
     Ok((
-        MigrationLens::new(source_id, target_id, table_lenses),
+        MigrationLens::new(source_id, target_id, table_lenses).expect("valid migration lens"),
         new_tables,
         dropped_tables,
     ))

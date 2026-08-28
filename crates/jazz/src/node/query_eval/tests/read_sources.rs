@@ -98,7 +98,8 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
                             to: "people".to_owned(),
                         }],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
             )

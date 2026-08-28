@@ -104,7 +104,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
                 default: v(""),
             }],
         }],
-    );
+    ).expect("valid migration lens");
     let (_authority_dir, mut authority) = open_node_with_schema(node(0x35), base.clone());
     publish_schema_lineage(
         &mut authority,
@@ -280,7 +280,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -440,7 +440,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -459,7 +459,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -556,7 +556,7 @@ fn authored_columns_follow_a_renamed_column_through_wire_and_reopen() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -634,7 +634,7 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
                     default: v("default-body"),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1098,7 +1098,7 @@ fn duplicate_schema_destination_lineage(
                     default: Value::String("different-default".to_owned()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1255,7 +1255,7 @@ fn reopen_rejects_gapped_active_catalogue_sequences() {
                     default: Value::Bool(false),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1931,7 +1931,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     ).unwrap();
@@ -2132,7 +2132,7 @@ fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

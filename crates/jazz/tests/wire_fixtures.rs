@@ -205,7 +205,8 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
             ],
         }],
-    );
+    )
+    .expect("valid migration lens");
     // This is an isolated codec fixture rather than a live catalogue, but the
     // non-genesis payload still starts from an explicit authority manifest so
     // inherited identities cannot be minted by accident.
@@ -462,7 +463,8 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                             },
                         ],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
             },
         ),
         (

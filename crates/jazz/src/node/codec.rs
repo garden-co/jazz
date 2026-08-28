@@ -1307,7 +1307,8 @@ mod catalogue_payload_tests {
 
     fn staged_fixture() -> StagedSchemaLineage {
         let schema = SchemaVersion::new(JazzSchema::empty());
-        let lens = MigrationLens::new(schema.id, schema.id, Vec::new());
+        let lens =
+            MigrationLens::new(schema.id, schema.id, Vec::new()).expect("valid migration lens");
         let publication = SchemaLineagePublication::new_genesis_fixture(
             schema,
             lens,

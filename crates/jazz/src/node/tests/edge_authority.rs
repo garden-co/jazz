@@ -277,7 +277,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     ).unwrap();

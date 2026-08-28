@@ -1658,7 +1658,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
                     default: Value::Uuid(default_workspace),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1745,7 +1745,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
                     to: "space_id".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1836,7 +1836,7 @@ fn branch_column_evolution_rejects_non_monotone_changes() {
                     target_table: "todos".to_owned(),
                     ops: Vec::new(),
                 }],
-            ),
+            ).expect("valid migration lens"),
             Vec::<String>::new(),
             Vec::<String>::new(),
         )),
@@ -1871,7 +1871,7 @@ fn branch_column_evolution_accepts_monotone_addition_with_default() {
                 default: Value::Uuid(uuid::Uuid::nil()),
             }],
         }],
-    );
+    ).expect("valid migration lens");
 
     NodeState::<RocksDbStorage>::validate_migration_lens_between(&lens, &source, &target)
         .expect("a branch column can be added monotonically with an immutable default");

@@ -1091,7 +1091,8 @@ impl InMemoryServerShell {
                         ops: Vec::new(),
                     })
                     .collect(),
-            );
+            )
+            .expect("valid migration lens");
             self.publish_runtime_schema_with_lens(schema, lens, Vec::new(), Vec::new())?;
         }
 

@@ -849,7 +849,7 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
                     to: "tasks".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

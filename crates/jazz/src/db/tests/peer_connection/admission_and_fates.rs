@@ -746,7 +746,8 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     let publication = core
         .server
         .node()

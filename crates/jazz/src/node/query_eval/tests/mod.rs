@@ -463,7 +463,8 @@ fn evolved_todos_version() -> (
                             default: Value::String("base-default".to_owned()),
                         }],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
             )

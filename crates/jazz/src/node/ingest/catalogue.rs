@@ -1036,6 +1036,15 @@ where
         source: &SchemaVersion,
         target: &SchemaVersion,
     ) -> Result<(), Error> {
+        for pair in lens.table_lenses.windows(2) {
+            if (&pair[0].source_table, &pair[0].target_table)
+                >= (&pair[1].source_table, &pair[1].target_table)
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "table lenses must be canonically ordered and unique",
+                ));
+            }
+        }
         for table_lens in &lens.table_lenses {
             let source_table = source
                 .schema
