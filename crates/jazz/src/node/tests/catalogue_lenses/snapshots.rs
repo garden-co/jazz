@@ -1268,6 +1268,45 @@ fn reopen_rejects_staged_table_partition_mismatch() {
     );
 }
 
+/// Local integer aliases are intentionally node-owned, but the UUID manifest
+/// carried alongside them is authority-owned.  This planted reopen mutation
+/// replaces the descendant's manifest with a separately valid one: recovery
+/// must bind it back to the exact lineage publication rather than accepting
+/// two individually well-formed durable records.
+#[test]
+fn reopen_rejects_mapping_manifest_smuggled_under_active_lineage() {
+    let snapshot = catalogue_snapshot_fixture();
+    let dir = tempfile::tempdir().expect("create dynamic edge store");
+    let mut receiver = fresh_dynamic_edge_open(dir.path(), node(0x4e))
+        .expect("open uninitialized edge");
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    let active = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .expect("fixture activates one descendant")
+        .clone();
+    let mut smuggled = receiver.catalogue.physical_mappings[&active.publication.schema.id].clone();
+    smuggled.identities = PhysicalIdentityManifest::allocate(&active.publication.schema.schema);
+    write_schema_mapping_record(
+        &mut receiver,
+        active.alias,
+        active.publication.schema.id,
+        &smuggled,
+    );
+    drop(receiver);
+
+    let empty = empty_public_test_schema();
+    let cfs = empty.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        NodeState::new_catalogue_uninitialized(node(0x4e), storage).resolve(),
+        Err(Error::InvalidStoredValue("durable mapping identities disagree with authority publication"))
+    ));
+}
+
 /// A schema row is independently durable from its activation receipt. Reopen
 /// must recompute its content-derived ID before putting it in the resident
 /// catalogue; matching the row primary key alone is not sufficient.
@@ -1870,7 +1909,10 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
-    let publication = SchemaLineagePublication::new(
+    let genesis_physical_identities = PhysicalIdentityManifest::allocate(&base);
+    let publication = SchemaLineagePublication::author_from_prior(
+        &base,
+        &genesis_physical_identities,
         evolved.clone(),
         MigrationLens::new(
             base.version_id(),
@@ -1886,9 +1928,10 @@ fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    )
+    .expect("fixture authors descendant identities from the genesis authority manifest");
     crate::protocol::CatalogueSnapshot {
-        genesis_physical_identities: PhysicalIdentityManifest::allocate(&base),
+        genesis_physical_identities,
         schemas: vec![SchemaVersion::new(base), evolved.clone()],
         lineages: vec![(1, publication)],
         current_write_schema: CurrentWriteSchema {

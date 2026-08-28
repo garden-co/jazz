@@ -304,6 +304,16 @@ where
             planned.schema_version_aliases.insert(schema.id, alias);
         }
 
+        // A pre-bootstrap local node may already have durable rows under its
+        // opening schema.  Its numeric aliases remain local, but its
+        // provisional UUIDs are not an authority fact: install the exact
+        // snapshot genesis manifest before validating descendant publications.
+        // Otherwise a valid authority lineage would be compared to freshly
+        // minted local UUIDs and rejected during snapshot planning.
+        if let Some(mapping) = planned.physical_mappings.get_mut(genesis_id) {
+            mapping.identities = genesis_physical_identities.clone();
+        }
+
         for (catalogue_seq, publication) in lineages {
             Self::validate_schema_lineage_publication(&publication).map_err(|_| {
                 Error::InvalidCatalogueUpdate(

@@ -3653,8 +3653,13 @@ impl SchemaLineagePublication {
         Ok(publication)
     }
 
-    /// Construct an atomic schema-lineage publication payload.
-    pub fn new(
+    /// Construct the sole genesis-style publication fixture.  A real
+    /// non-genesis schema must be authored by [`Self::author_from_prior`], so
+    /// its identities inherit from the authority's exact source manifest.
+    ///
+    /// This constructor exists only for isolated protocol fixtures that have
+    /// no preceding catalogue; catalogue/runtime code must never use it.
+    pub fn new_genesis_fixture(
         schema: SchemaVersion,
         lens: MigrationLens,
         new_tables: impl IntoIterator<Item = impl Into<String>>,
@@ -3671,6 +3676,18 @@ impl SchemaLineagePublication {
         };
         publication.id = publication.content_id();
         publication
+    }
+
+    /// Legacy fixture constructor.  It cannot safely author a descendant,
+    /// because it has no authority source manifest.  Runtime callers must use
+    /// [`Self::author_from_prior`] (or `NodeState::author_schema_lineage_publication`).
+    pub fn new(
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::new_genesis_fixture(schema, lens, new_tables, dropped_tables)
     }
 
     /// Return the content-addressed id implied by this payload.

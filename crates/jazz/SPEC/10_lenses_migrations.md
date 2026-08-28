@@ -116,6 +116,14 @@ mutations travel as admin-gated
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 
+The authority allocates the genesis physical-identity manifest exactly once.
+Every non-genesis publication is authored from its source schema's durable
+manifest, preserving mapped UUIDs and minting only genuinely new identities.
+On reopen, a node validates each decoded local physical mapping against the
+exact genesis or lineage-publication manifest and replays every source-to-target
+identity evolution before admitting any catalogue state. Local numeric aliases
+are compression details and never authorize a replacement UUID manifest.
+
 Exactly one database-wide catalogue sequencer assigns a dense monotone
 `CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
 edges forward authenticated, prevalidated requests to that sequencer. Catalogue

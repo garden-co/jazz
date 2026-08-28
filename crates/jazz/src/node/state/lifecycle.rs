@@ -1921,6 +1921,15 @@ where
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);
         }
+        Self::validate_durable_physical_identity_bindings(
+            &catalogue_schemas,
+            &physical_mappings,
+            &staged_lineages,
+            &active_lineages_by_target,
+            &pending_lineages,
+            genesis_schema,
+            catalogue_bootstrap_state,
+        )?;
         let mut current_write_schema = CurrentWriteSchema {
             revision: 0,
             schema: current_schema_version_id,
@@ -1985,6 +1994,118 @@ where
         .map_err(|_| {
             Error::InvalidStoredValue("staged schema lineage table partition is invalid")
         })?;
+        Ok(())
+    }
+
+    /// Bind every recovered local alias mapping to the one authority manifest
+    /// that published its schema.  The integer aliases are deliberately local;
+    /// the UUID manifest is not.  Recovery must therefore re-check the binding
+    /// instead of merely checking that each independently decoded object looks
+    /// well formed.
+    fn validate_durable_physical_identity_bindings(
+        schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+        mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+        staged: &BTreeMap<u64, StagedSchemaLineage>,
+        active: &BTreeMap<SchemaVersionId, StagedSchemaLineage>,
+        pending: &BTreeMap<u64, PendingSchemaLineage>,
+        genesis: Option<SchemaVersionId>,
+        bootstrap_state: CatalogueBootstrapState,
+    ) -> Result<(), Error> {
+        if bootstrap_state == CatalogueBootstrapState::Uninitialized {
+            return Ok(());
+        }
+        if mappings.len() != schemas.len() {
+            return Err(Error::InvalidStoredValue(
+                "durable schema and physical mapping coverage differs",
+            ));
+        }
+        for (schema_id, schema) in schemas {
+            let mapping = mappings.get(schema_id).ok_or(Error::InvalidStoredValue(
+                "durable schema physical mapping is missing",
+            ))?;
+            mapping
+                .identities
+                .validate_for_schema(&schema.schema)
+                .map_err(|_| Error::InvalidStoredValue("durable physical identity manifest is invalid"))?;
+        }
+        let mut published = BTreeMap::<SchemaVersionId, &SchemaLineagePublication>::new();
+        for lineage in active.values().chain(staged.values()) {
+            if published
+                .insert(lineage.publication.schema.id, &lineage.publication)
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "durable schema has multiple identity publications",
+                ));
+            }
+        }
+        let roots = schemas
+            .keys()
+            .filter(|schema| !published.contains_key(schema))
+            .copied()
+            .collect::<Vec<_>>();
+        let [root] = roots.as_slice() else {
+            return Err(Error::InvalidStoredValue(
+                "durable catalogue must have exactly one genesis schema",
+            ));
+        };
+        if let Some(genesis) = genesis {
+            if genesis != *root {
+                return Err(Error::InvalidStoredValue(
+                    "durable genesis marker disagrees with lineage root",
+                ));
+            }
+        }
+        if published.contains_key(root) {
+            return Err(Error::InvalidStoredValue(
+                "durable genesis is incorrectly published as a lineage target",
+            ));
+        }
+        for (schema_id, mapping) in mappings {
+            if *schema_id == *root {
+                continue;
+            }
+            let publication = published.get(schema_id).ok_or(Error::InvalidStoredValue(
+                "durable non-genesis schema has no identity publication",
+            ))?;
+            if mapping.identities != publication.physical_identities {
+                return Err(Error::InvalidStoredValue(
+                    "durable mapping identities disagree with authority publication",
+                ));
+            }
+            let source = schemas.get(&publication.lens.source).ok_or(Error::InvalidStoredValue(
+                "durable identity publication source schema is missing",
+            ))?;
+            let source_mapping = mappings.get(&publication.lens.source).ok_or(
+                Error::InvalidStoredValue("durable identity publication source mapping is missing"),
+            )?;
+            source_mapping
+                .identities
+                .validate_evolution_to(
+                    &source.schema,
+                    &publication.physical_identities,
+                    &publication.schema.schema,
+                    &publication.lens,
+                )
+                .map_err(|_| Error::InvalidStoredValue("durable identity publication evolution is invalid"))?;
+        }
+        for lineage in pending.values() {
+            let source = schemas.get(&lineage.publication.lens.source).ok_or(Error::InvalidStoredValue(
+                "pending identity publication source schema is missing",
+            ))?;
+            let source_mapping = mappings.get(&lineage.publication.lens.source).ok_or(
+                Error::InvalidStoredValue("pending identity publication source mapping is missing"),
+            )?;
+            source_mapping
+                .identities
+                .validate_evolution_to(
+                    &source.schema,
+                    &lineage.publication.physical_identities,
+                    &lineage.publication.schema.schema,
+                    &lineage.publication.lens,
+                )
+                .map_err(|_| Error::InvalidStoredValue("pending identity publication evolution is invalid"))?;
+        }
         Ok(())
     }
 }
