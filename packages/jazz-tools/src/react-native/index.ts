@@ -29,3 +29,8 @@ export {
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 export { schema } from "../index.js";
+export {
+  ReactNativeRelayFrameAdapter,
+  type NativeRelayCapability,
+  type NativeRelayExecutor,
+} from "./native-relay-frame-adapter.js";
