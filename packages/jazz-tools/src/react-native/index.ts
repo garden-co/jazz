@@ -29,3 +29,11 @@ export {
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 export { schema } from "../index.js";
+export {
+  REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
+  REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
+  type NativeRelayCapability,
+  type NativeRelayExecutor,
+  type ReactNativeDbConfig,
+} from "./runtime-source.js";
+export { REACT_NATIVE_READ_ONLY_UNSUPPORTED_ERROR } from "./native-foreground-db.js";

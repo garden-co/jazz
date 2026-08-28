@@ -22,14 +22,14 @@ const nativeForegroundTest = vi.hoisted(() => ({
 vi.mock("react-native", () => ({
   TurboModuleRegistry: {
     get: () => ({
-      getAbiVersion: () => 5,
+      getAbiVersion: () => 7,
       execute: async () => {
         throw new Error("the read-only foreground path must not use TurboModule execute");
       },
       installForegroundRuntime: () => {
         nativeForegroundTest.install();
         (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1 = {
-          abiVersion: 5,
+          abiVersion: 7,
           openAttached: (capability: Uint8Array) => {
             nativeForegroundTest.openAttached(capability);
             return {

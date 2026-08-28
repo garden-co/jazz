@@ -2,12 +2,29 @@ import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
 import type { RuntimeClientContext, RuntimeTokenOptions } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
+import { JazzClient as JazzRuntimeClient } from "../runtime/client.js";
+import type { AppContext } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
+import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
+import {
+  getTrustedReservedSession,
+  setTrustedReservedSession,
+} from "../runtime/db-internal-session.js";
+import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
+import { authorBytesForSession } from "../runtime/author-id.js";
 import type { ReactNativeSqliteStorageDriver } from "./storage.js";
 import {
   REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
 } from "./storage.js";
+import {
+  NativeForegroundReadDb,
+  type NativeForegroundFactory,
+  type NativeForegroundModule,
+} from "./native-foreground-db.js";
+
+export type NativeRelayCapability = Uint8Array;
+export type NativeRelayExecutor = { execute(command: string): Promise<string> };
 
 export type ReactNativeDbConfig = DbConfig & {
   /**
@@ -21,7 +38,16 @@ export type ReactNativeDbConfig = DbConfig & {
    * native ordered-KV runtime exists.
    */
   sqliteStorage?: ReactNativeSqliteStorageDriver;
+  /** Installed-host authority; only the experimental JSI read facade consumes it. */
+  nativeRelay?: Readonly<{ executor: NativeRelayExecutor; capability: NativeRelayCapability }>;
+  /** Capability-gated local read/query/subscription facade over the native relay. */
+  experimentalNativeReadOnly?: true;
 };
+
+export const REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR =
+  "React Native persistent runtime requires the installed JazzRelay native artifact and its platform-provided opaque nativeRelay capability";
+export const REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR =
+  "React Native nativeRelay is only valid with persistent storage; remove nativeRelay when driver.type='memory'";
 
 function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
   return (config.driver?.type ?? "persistent") === "persistent";
@@ -29,12 +55,23 @@ function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
   private readonly fallback = new DefaultRuntimeSource();
+  private foregroundModule: NativeForegroundModule | null = null;
+  private foregroundFactory: NativeForegroundFactory | null = null;
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (config.sqliteStorage !== undefined) {
       throw new Error(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
     }
     if (shouldRequireSqliteDriver(config)) {
+      if (config.experimentalNativeReadOnly) {
+        if (!config.nativeRelay) throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
+        assertNativeRelay(config.nativeRelay);
+        resolveNativeReadSession(config);
+        const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+        this.foregroundFactory = foreground.installNativeForegroundRuntime();
+        this.foregroundModule = foreground;
+        return;
+      }
       // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
       // Rust ordered-KV runtime. Opening one here and then delegating to WASM
       // only preflights an unrelated database and falsely implies that Jazz
@@ -42,10 +79,41 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
       throw new Error(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
     }
 
+    if (config.nativeRelay) throw new Error(REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR);
     await this.fallback.load(config);
   }
 
   override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
+    if (context.config.experimentalNativeReadOnly) {
+      const factory = this.foregroundFactory;
+      const module = this.foregroundModule;
+      const relay = context.config.nativeRelay;
+      if (!factory || !module || !relay)
+        throw new Error("React Native native foreground runtime is not loaded");
+      const session = resolveNativeReadSession(context.config);
+      const runtime = NativeRuntimeAdapter.fromDb(
+        new NativeForegroundReadDb(factory.openAttached(relay.capability), module),
+        context.schema,
+        randomNativeNodeBytes(),
+        authorBytesForSession(session),
+        1,
+        false,
+      );
+      const appContext: AppContext = {
+        appId: context.config.appId,
+        schema: context.schema,
+        driver: context.config.driver,
+        serverUrl: context.config.serverUrl,
+        env: context.config.env,
+        jwtToken: context.config.jwtToken,
+        cookieSession: context.config.cookieSession,
+        tier: "local",
+      };
+      setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
+      return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {
+        onAuthFailure: context.onAuthFailure,
+      });
+    }
     return this.fallback.createClient(context);
   }
 
@@ -62,4 +130,33 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   override mintAnonymousToken(options: RuntimeTokenOptions): string {
     return this.fallback.mintAnonymousToken(options);
   }
+}
+
+function assertNativeRelay(relay: NonNullable<ReactNativeDbConfig["nativeRelay"]>): void {
+  if (
+    typeof relay.executor?.execute !== "function" ||
+    !(relay.capability instanceof Uint8Array) ||
+    relay.capability.byteLength !== 32
+  )
+    throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
+}
+
+function resolveNativeReadSession(config: ReactNativeDbConfig) {
+  const session = resolveClientInternalSessionSync({
+    ...config,
+    trustedReservedSession: getTrustedReservedSession(config),
+  });
+  if (!session)
+    throw new Error(
+      "React Native experimental native read-only runtime requires an already verified jwtToken or cookieSession; native token minting is not implemented",
+    );
+  return session;
+}
+
+function randomNativeNodeBytes(): Uint8Array {
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) return globalThis.crypto.getRandomValues(bytes);
+  for (let index = 0; index < bytes.length; index += 1)
+    bytes[index] = Math.floor(Math.random() * 256);
+  return bytes;
 }
