@@ -1477,16 +1477,30 @@ where
             .map(|view| view.key)
     }
 
-    /// Every relay Edge child consumes a relay-owned upstream authority
-    /// session. It must never seed membership from the relay's Local overlay:
-    /// a cached exact row can otherwise outlive the authority update that
-    /// revoked it.
+    fn is_policy_scoped_exact_id_query(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<bool, Error> {
+        let table = self.table_in_schema(&shape.query().table, shape.schema_version())?;
+        Ok(table.has_any_policy()
+            && root_literal_equalities(shape.query(), binding)?.contains_key("id"))
+    }
+
+    /// A relay authority-session owner always serves Edge children from its
+    /// dedicated upstream authority membership. Other relay configurations
+    /// preserve their existing narrow source selection: windows avoid a
+    /// double offset and policy-scoped exact-ID reads cannot resurrect a
+    /// cached row after revocation.
     pub(crate) fn relay_edge_query_requires_authority_source(
         &self,
-        _shape: &ValidatedQuery,
-        _binding: &Binding,
+        shape: &ValidatedQuery,
+        binding: &Binding,
     ) -> Result<bool, Error> {
-        Ok(self.is_relay_authority_session_owner())
+        if self.is_relay_authority_session_owner() || shape.query().offset != 0 {
+            return Ok(true);
+        }
+        self.is_policy_scoped_exact_id_query(shape, binding)
     }
 
     fn client_settled_binding_view_for_query(
@@ -2985,7 +2999,7 @@ where
         Error,
     > {
         let settled_binding_view =
-            Some(self.relay_authority_session_binding_view_key(shape, binding, read_view));
+            self.relay_edge_subscription_source_binding_view_key(shape, binding, read_view);
         self.open_seeded_maintained_subscription_view_in_authorization_mode(
             shape,
             binding,
@@ -3020,6 +3034,27 @@ where
             }
             .read_view_key(),
         )
+    }
+
+    /// Select the source receipt used while relaying an Edge view. The
+    /// browser-worker topology gives its upstream coverage a dedicated source
+    /// identity; older/general relay paths retain their existing Global view.
+    pub(crate) fn relay_edge_subscription_source_binding_view_key(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        read_view: &ReadViewSpec,
+    ) -> Option<BindingViewKey> {
+        if self.is_relay_authority_session_owner() {
+            Some(self.relay_authority_session_binding_view_key(shape, binding, read_view))
+        } else {
+            self.client_settled_binding_view_key_for_query(
+                shape,
+                binding,
+                DurabilityTier::Edge,
+                read_view,
+            )
+        }
     }
 
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an

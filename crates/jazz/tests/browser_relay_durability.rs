@@ -1599,11 +1599,11 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     }
 }
 
-/// A fresh (including reopened) browser main thread receives the worker's
-/// authority-owned reset as a complete relation snapshot in the same relay
-/// turn that applies it. This is intentionally an internal topology test:
-/// only the public `Db` facade can model the non-durable main/runtime worker/
-/// core boundary used by the browser bridge.
+/// A fresh browser main thread receives the worker's authority-owned reset as
+/// a complete relation snapshot in the same relay turn that applies it. This
+/// is intentionally an internal topology test: only the public `Db` facade
+/// can model the non-durable main/runtime worker/core boundary used by the
+/// browser bridge.
 #[test]
 fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let schema = included_relation_schema();
@@ -1702,6 +1702,136 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
                 if added.iter().any(|row| row.row.row_uuid() == message.row_uuid())
         )),
         "fresh included Edge subscription must publish the authority result, got {events:?}"
+    );
+}
+
+/// A reopened browser tab receives a new Edge receipt after the persistent
+/// worker has already applied the authority membership for an earlier tab.
+/// Alice closes the first main-thread runtime; the worker remains connected
+/// and retains its resident authority row; then Alice opens a fresh runtime.
+///
+/// ```text
+/// alice tab 1 ──Edge──► persistent worker ──Global──► core
+///      │                         │
+///      └──close──────────────────┤ retains applied authority row
+/// alice tab 2 ──Edge──► same worker ──receipt──► tab 2
+/// ```
+#[test]
+fn reopened_browser_tab_hydrates_from_worker_authority_state() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let worker = open_db(0x2b, alice, &schema);
+    let core = open_core(0x3b, &schema);
+    worker.set_relay_authority_session_owner();
+
+    let seeder = open_db(0x4b, alice, &schema);
+    let (seeder_transport, core_seed_transport) = duplex();
+    let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
+    let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let seeded = seeder
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("survives tab reopen".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("seed authority row");
+    for _ in 0..3 {
+        seeder.tick().expect("upload seeded row");
+        core.tick().expect("accept seeded row");
+        seeder.tick().expect("settle seeded row");
+    }
+
+    let first_tab = open_db(0x1b, alice, &schema);
+    first_tab.set_non_durable_client();
+    let (first_transport, first_worker_transport) = duplex();
+    let first_connection = block_on(first_tab.connect_upstream(first_transport));
+    let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let first_query = first_tab
+        .prepare_query(&first_tab.table("todos"))
+        .expect("prepare first-tab Edge query");
+    let mut first_subscription = block_on(first_tab.subscribe(
+        &first_query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe from first tab");
+    for _ in 0..6 {
+        first_tab.tick().expect("register first-tab coverage");
+        worker.tick().expect("forward first-tab coverage");
+        core.tick().expect("serve first-tab authority coverage");
+        worker.tick().expect("apply first-tab authority coverage");
+        first_tab.tick().expect("apply first-tab handoff");
+    }
+    assert!(
+        std::iter::from_fn(|| first_subscription.try_next_event()).any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, settled: true, .. }
+                if added.iter().any(|row| row.row.row_uuid() == seeded.row_uuid())
+        ))
+    );
+
+    // Closing the tab removes only its connection-scoped relay ownership. The
+    // worker has already applied the authority row and must remain usable by a
+    // subsequent tab without a process restart.
+    drop(first_subscription);
+    first_tab.tick().expect("finalize first-tab subscription");
+    worker.tick().expect("retire first-tab relay owner");
+    core.tick().expect("process first-tab relay retirement");
+    worker.tick().expect("apply first-tab relay retirement");
+    assert!(first_tab.detach_connection(&first_connection));
+    assert!(worker.detach_connection(&first_worker_connection));
+    let worker_query = worker
+        .prepare_query(&worker.table("todos"))
+        .expect("prepare worker resident query");
+    assert_eq!(
+        worker
+            .read(&worker_query)
+            .expect("read retained worker row")
+            .len(),
+        1,
+        "the persistent worker must retain the authority row after tab 1 closes",
+    );
+
+    let reopened_tab = open_db(0x1c, alice, &schema);
+    reopened_tab.set_non_durable_client();
+    let (reopened_transport, reopened_worker_transport) = duplex();
+    let _reopened_connection = block_on(reopened_tab.connect_upstream(reopened_transport));
+    let _reopened_worker_connection = worker.accept_subscriber(reopened_worker_transport, alice);
+    let reopened_query = reopened_tab
+        .prepare_query(&reopened_tab.table("todos"))
+        .expect("prepare reopened-tab Edge query");
+    let mut reopened_subscription = block_on(reopened_tab.subscribe(
+        &reopened_query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe from reopened tab");
+    for _ in 0..8 {
+        reopened_tab.tick().expect("register reopened-tab coverage");
+        worker.tick().expect("forward reopened-tab coverage");
+        core.tick().expect("serve reopened-tab authority coverage");
+        worker
+            .tick()
+            .expect("apply reopened-tab authority coverage");
+        reopened_tab.tick().expect("apply reopened-tab handoff");
+    }
+    assert!(
+        std::iter::from_fn(|| reopened_subscription.try_next_event()).any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, settled: true, .. }
+                if added.iter().any(|row| row.row.row_uuid() == seeded.row_uuid())
+        )),
+        "the reopened tab must receive a settled authority handoff"
     );
 }
 

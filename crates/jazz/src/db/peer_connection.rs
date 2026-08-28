@@ -3097,16 +3097,16 @@ where
                                 read_view: coverage.opts.read_view_key(),
                             };
                             let local_subscriber = *local_receiver;
-                            let upstream_opts = if local_subscriber
-                                && self.node.borrow().is_relay_authority_session_owner()
-                            {
+                            let upstream_opts = if local_subscriber {
                                 let mut opts = upstream_register_shape_options(
                                     opts.tier,
                                     opts.read_view.clone(),
                                     DurabilityTier::Global,
                                     opts.propagate_upstream,
                                 );
-                                opts.binding_source = BindingSource::RelayAuthoritySession;
+                                if self.node.borrow().is_relay_authority_session_owner() {
+                                    opts.binding_source = BindingSource::RelayAuthoritySession;
+                                }
                                 opts
                             } else {
                                 opts.clone()
@@ -4033,6 +4033,7 @@ where
         .map(|update| update.parts.settled_through)
         .max();
     let node_ref = node.borrow();
+    let relay_authority_session_owner = node_ref.is_relay_authority_session_owner();
     let confirmed_binding_views = confirmed_subscriptions
         .iter()
         .filter_map(|(subscription, settled_through)| {
@@ -4070,15 +4071,15 @@ where
     let mut node_ref = node.lock().await;
     node_ref.apply_view_updates_in_batch(updates).await?;
     drop(node_ref);
-    // An authority view is also input to every local subscriber that is
-    // currently served by this node.  Advance the shared generation only
-    // after the whole validated batch has committed, then let Node's normal
-    // post-receive pass rehydrate each subscriber.  In particular, a tab
-    // attached after its worker already has an authority view must not wait
-    // for unrelated upstream traffic before receiving that membership.
-    let next = subscriber_dirty_epoch.get().wrapping_add(1);
-    subscriber_dirty_epoch.set(next);
-    schedule_tick_in(scheduler, TickUrgency::Immediate);
+    if relay_authority_session_owner {
+        // A relay authority view is input to every locally served browser
+        // Edge child. Advance the shared generation only after the validated
+        // batch commits, so a later tab is rehydrated from the worker's
+        // resident authority membership without unrelated upstream traffic.
+        let next = subscriber_dirty_epoch.get().wrapping_add(1);
+        subscriber_dirty_epoch.set(next);
+        schedule_tick_in(scheduler, TickUrgency::Immediate);
+    }
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
     {
@@ -4098,10 +4099,12 @@ where
         let mut refreshes = coverage_refresh_generations.borrow_mut();
         for coverage in std::mem::take(clears) {
             awaiting.remove(&coverage);
-            // Coalescing is valid only while this authority reply is still
-            // outstanding. Once applied, the next usage-site attachment must
-            // issue a new Subscribe and observe its own later receipt.
-            refreshes.remove(&coverage);
+            if relay_authority_session_owner {
+                // Coalescing is valid only while this relay authority reply
+                // remains outstanding. A later tab must request a receipt of
+                // its own rather than inheriting an obsolete refresh marker.
+                refreshes.remove(&coverage);
+            }
         }
     }
     Ok(())

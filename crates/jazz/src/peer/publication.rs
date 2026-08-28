@@ -925,7 +925,8 @@ impl PeerState {
                 .await,
         };
         let source_binding_view = relay_edge_requires_authority_source
-            .then(|| node.relay_authority_session_binding_view_key(shape, binding, read_view));
+            .then(|| node.relay_edge_subscription_source_binding_view_key(shape, binding, read_view))
+            .flatten();
         let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
             match opened {
             Ok(opened) => opened,
