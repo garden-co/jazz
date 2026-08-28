@@ -38,6 +38,15 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.doesNotMatch(fixture, /jazzDeviceBuildFingerprint/);
 });
 
+test("iOS fixture imports the public JazzRn pod header, not its private relay framework", () => {
+  const podspec = fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/JazzRn.podspec"), "utf8");
+  const fixture = read("native/ios/JazzDeviceFixture.mm");
+  assert.match(podspec, /s\.name\s+=\s+"JazzRn"/);
+  assert.match(podspec, /s\.source_files\s+=\s+"ios\/\*\*\/\*\.\{h,m,mm,swift\}"/);
+  assert.match(fixture, /#import <JazzRn\/JazzRelay\.h>/);
+  assert.doesNotMatch(fixture, /JazzNativeRelay\/JazzRelay\.h/);
+});
+
 test("Android bootstrap rejects corrupt pinned archives before extraction", () => {
   const bootstrap = read("scripts/bootstrap-android.sh");
   assert.match(bootstrap, /verify-pinned-archive\.sh/);
