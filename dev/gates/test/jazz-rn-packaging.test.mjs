@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { parse } from "yaml";
 
 const require = createRequire(import.meta.url);
+const ts = require("typescript");
 const packageJson = JSON.parse(
   await readFile(
     new URL("../../../crates/jazz-rn/package.json", import.meta.url),
@@ -69,22 +70,78 @@ function assertOnlyAllowedNames(surface, actual, allowed) {
   );
 }
 
-function assertNoTsReexports(surface, source) {
-  const commentFree = stripComments(source);
-  assert.doesNotMatch(
-    commentFree,
-    /\bexport\s*\*/,
-    `${surface} must not star-re-export ABI`,
+function exportedStatements(surface, source) {
+  const file = ts.createSourceFile(
+    `${surface}.ts`,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
   );
-  assert.doesNotMatch(
-    commentFree,
-    /\bexport\s*\{[^}]*\bas\b[^}]*\}/s,
-    `${surface} must not alias-re-export ABI`,
+  assert.deepEqual(
+    file.parseDiagnostics,
+    [],
+    `${surface} must be valid TypeScript`,
   );
-  assert.doesNotMatch(
-    commentFree,
-    /\bexport\s*\{\s*default\b[^}]*\}/s,
-    `${surface} must not default-re-export ABI`,
+  return file.statements.filter(
+    (statement) =>
+      ts.isExportAssignment(statement) ||
+      ts.isExportDeclaration(statement) ||
+      ts.isNamespaceExportDeclaration(statement) ||
+      (ts.canHaveModifiers(statement) &&
+        ts
+          .getModifiers(statement)
+          ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)),
+  );
+}
+
+function exportedDeclarationName(statement) {
+  if (
+    ts.isInterfaceDeclaration(statement) ||
+    ts.isTypeAliasDeclaration(statement) ||
+    ts.isFunctionDeclaration(statement) ||
+    ts.isClassDeclaration(statement) ||
+    ts.isEnumDeclaration(statement) ||
+    ts.isModuleDeclaration(statement)
+  ) {
+    return statement.name?.text;
+  }
+  if (
+    ts.isVariableStatement(statement) &&
+    statement.declarationList.declarations.length === 1
+  ) {
+    const name = statement.declarationList.declarations[0].name;
+    return ts.isIdentifier(name) ? name.text : undefined;
+  }
+  return undefined;
+}
+
+function assertNamedRelayReexport(surface, statement, names, typeOnly) {
+  assert.ok(
+    ts.isExportDeclaration(statement),
+    `${surface} may only re-export its fixed relay names`,
+  );
+  assert.equal(
+    statement.isTypeOnly,
+    typeOnly,
+    `${surface} has the wrong type-only export`,
+  );
+  assert.equal(
+    statement.moduleSpecifier?.text,
+    "./relay",
+    `${surface} must re-export from ./relay`,
+  );
+  assert.ok(
+    statement.exportClause && ts.isNamedExports(statement.exportClause),
+    `${surface} must not star-re-export the relay ABI`,
+  );
+  assert.deepEqual(
+    statement.exportClause.elements.map((item) => item.name.text),
+    names,
+  );
+  assert.ok(
+    statement.exportClause.elements.every((item) => item.propertyName === undefined),
+    `${surface} must not alias-re-export the relay ABI`,
   );
 }
 
@@ -106,11 +163,78 @@ function braceBody(source, opening) {
 
 function assertExactTsRelaySurface(nativeSpec, relay, index) {
   const commentFreeSpec = stripComments(nativeSpec);
-  const commentFreeRelay = stripComments(relay);
-  const commentFreeIndex = stripComments(index);
-  assertNoTsReexports("NativeJazzRelay TypeScript spec", nativeSpec);
-  assertNoTsReexports("relay TypeScript module", relay);
-  assertNoTsReexports("relay package entry point", index);
+  const specExports = exportedStatements("NativeJazzRelay TypeScript spec", nativeSpec);
+  const relayExports = exportedStatements("relay TypeScript module", relay);
+  const indexExports = exportedStatements("relay package entry point", index);
+
+  assert.equal(
+    specExports.length,
+    2,
+    "NativeJazzRelay must expose exactly its Spec and registry lookup",
+  );
+  assert.ok(
+    ts.isInterfaceDeclaration(specExports[0]),
+    "NativeJazzRelay must only export Spec as an interface",
+  );
+  assert.equal(specExports[0].name.text, "Spec");
+  assert.ok(
+    ts.isExportAssignment(specExports[1]),
+    "NativeJazzRelay must default-export its registry lookup",
+  );
+  assert.notEqual(specExports[1].isExportEquals, true);
+
+  assert.equal(
+    relayExports.length,
+    3,
+    "relay must expose exactly its fixed ABI declarations",
+  );
+  assert.ok(
+    ts.isInterfaceDeclaration(relayExports[0]),
+    "relay must export NativeRelayAbiRange as an interface",
+  );
+  assert.equal(relayExports[0].name.text, "NativeRelayAbiRange");
+  assert.ok(
+    ts.isVariableStatement(relayExports[1]),
+    "relay must export NATIVE_RELAY_ABI as a variable",
+  );
+  assert.notEqual(
+    relayExports[1].declarationList.flags & ts.NodeFlags.Const,
+    0,
+    "relay must export NATIVE_RELAY_ABI as a const",
+  );
+  assert.equal(relayExports[1].declarationList.declarations.length, 1);
+  assert.equal(
+    relayExports[1].declarationList.declarations[0].name.getText(),
+    "NATIVE_RELAY_ABI",
+  );
+  assert.ok(
+    ts.isFunctionDeclaration(relayExports[2]),
+    "relay must export executeNativeRelayCommand as a function",
+  );
+  assert.equal(relayExports[2].name?.text, "executeNativeRelayCommand");
+  assertExactNames(
+    "relay TypeScript module",
+    new Set(relayExports.map(exportedDeclarationName).filter(Boolean)),
+    relayJsExports,
+  );
+
+  assert.equal(
+    indexExports.length,
+    2,
+    "relay package entry point must contain only its two fixed re-exports",
+  );
+  assertNamedRelayReexport(
+    "relay package entry point",
+    indexExports[0],
+    ["NATIVE_RELAY_ABI", "executeNativeRelayCommand"],
+    false,
+  );
+  assertNamedRelayReexport(
+    "relay package entry point",
+    indexExports[1],
+    ["NativeRelayAbiRange"],
+    true,
+  );
 
   const spec = braceBody(
     commentFreeSpec,
@@ -128,25 +252,6 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     "NativeJazzRelay may only default-export its registry lookup",
   );
 
-  const relayExports = new Set(
-    [
-      ...commentFreeRelay.matchAll(
-        /(?:^|\n)\s*export\s+(?:declare\s+)?(?:interface|type|const|async\s+function|function)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g,
-      ),
-    ].map((match) => match[1]),
-  );
-  assertExactNames("relay TypeScript module", relayExports, relayJsExports);
-  const entryExports = new Set(
-    [
-      ...commentFreeIndex.matchAll(
-        /(?:^|\n)\s*export\s+(?:type\s+)?\{([^}]*)\}/g,
-      ),
-    ]
-      .flatMap((match) => match[1].split(","))
-      .map((name) => name.trim())
-      .filter(Boolean),
-  );
-  assertExactNames("relay package entry point", entryExports, relayJsExports);
 }
 
 function assertOpaqueAndroidRelaySurface(androidModule) {
@@ -229,28 +334,47 @@ function macroExportName(declaration, macro) {
   return /^([A-Za-z_$][A-Za-z0-9_$]*)\s*:/.exec(body)?.[1] ?? body;
 }
 
+function objcImplementations(source) {
+  const implementations = [];
+  const pattern =
+    /^\s*@implementation\s+([A-Za-z_$][A-Za-z0-9_$]*)(?:\s*\([^)]*\))?/gm;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    const end = /^\s*@end\b/m.exec(source.slice(pattern.lastIndex));
+    assert.ok(end, `unterminated Objective-C implementation for ${match[1]}`);
+    implementations.push({
+      className: match[1],
+      source: source.slice(
+        match.index,
+        pattern.lastIndex + end.index + end[0].length,
+      ),
+    });
+    pattern.lastIndex += end.index + end[0].length;
+  }
+  return implementations;
+}
+
 function assertOpaqueIosRelaySurface(iosRelay) {
   const commentFreeRelay = stripComments(iosRelay);
-  const implementationStart = commentFreeRelay.indexOf(
-    "@implementation JazzRelay",
+  const implementations = objcImplementations(commentFreeRelay);
+  const relayImplementations = implementations.filter(
+    (implementation) => implementation.className === "JazzRelay",
   );
-  assert.notEqual(
-    implementationStart,
-    -1,
+  assert.ok(
+    relayImplementations.length > 0,
     "could not find JazzRelay Objective-C implementation",
   );
-  const trustedAdmissionStart = commentFreeRelay.indexOf(
-    "@implementation JazzRelayTrustedAdmission",
+  assert.ok(
+    implementations.some(
+      (implementation) => implementation.className === "JazzRelayTrustedAdmission",
+    ),
+    "could not find the specifically named trusted Objective-C admission class",
   );
-  assert.notEqual(
-    trustedAdmissionStart,
-    -1,
-    "could not separate trusted Objective-C admission from exported relay module",
-  );
-  const relayModule = commentFreeRelay.slice(
-    implementationStart,
-    trustedAdmissionStart,
-  );
+  // Categories are separate @implementation JazzRelay (...) blocks. Check all
+  // of them: only the named private admission class is excluded from this
+  // receipt, so a later category cannot hide an RCT export after the primary
+  // implementation's @end.
+  const relayModule = relayImplementations.map((item) => item.source).join("\n");
   const exportedMethods = objcMethodNames(relayModule);
   // Old-architecture macros are JavaScript exports even when no Objective-C
   // selector appears in this source. Their mapped JavaScript names are still
@@ -588,7 +712,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
         `${relay}\nexport function configure() {}`,
         relayIndex,
       ),
-    /configure/,
+    undefined,
     "an innocuous TypeScript helper must not enlarge the relay ABI",
   );
   assert.throws(
@@ -598,7 +722,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
         relay,
         `${relayIndex}\nexport { executeNativeRelayCommand as configure } from './relay';`,
       ),
-    /alias-re-export/,
+    undefined,
     "an alias re-export must not smuggle a new public relay name into the package",
   );
   assert.throws(
@@ -608,7 +732,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
         relay,
         `${relayIndex}\nexport * from './relay';`,
       ),
-    /star-re-export/,
+    undefined,
     "a star re-export must not automatically publish future relay helpers",
   );
   assert.throws(
@@ -618,9 +742,62 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
         `${relay}\nexport { default } from './NativeJazzRelay';`,
         relayIndex,
       ),
-    /default-re-export/,
+    undefined,
     "a default re-export must not publish the raw TurboModule lookup",
   );
+  for (const fixture of [
+    {
+      name: "a relay default export",
+      relay: `${relay}\nexport default requireNativeRelay;`,
+    },
+    {
+      name: "a relay default declaration",
+      relay: `${relay}\nexport default class RelayEscapeHatch {}`,
+    },
+    {
+      name: "a relay class export",
+      relay: `${relay}\nexport class RelayEscapeHatch {}`,
+    },
+    {
+      name: "a relay enum export",
+      relay: `${relay}\nexport enum RelayEscapeHatch { Open }`,
+    },
+    {
+      name: "a relay namespace export",
+      relay: `${relay}\nexport namespace RelayEscapeHatch {}`,
+    },
+    {
+      name: "a relay export list",
+      relay: `${relay}\nexport { requireNativeRelay };`,
+    },
+    {
+      name: "a relay type-only export",
+      relay: `${relay}\nexport type RelayEscapeHatch = string;`,
+    },
+    {
+      name: "an index default export",
+      index: `${relayIndex}\nexport default executeNativeRelayCommand;`,
+    },
+    {
+      name: "an index export from an unapproved source",
+      index: `${relayIndex}\nexport { executeNativeRelayCommand } from './untrusted';`,
+    },
+    {
+      name: "an index whitespace/comment alias",
+      index: `${relayIndex}\nexport /* no aliases */ { executeNativeRelayCommand /* nope */ as configure } from './relay';`,
+    },
+  ]) {
+    assert.throws(
+      () =>
+        assertExactTsRelaySurface(
+          nativeSpec,
+          fixture.relay ?? relay,
+          fixture.index ?? relayIndex,
+        ),
+      undefined,
+      `${fixture.name} must not enlarge the fixed relay ABI`,
+    );
+  }
   assert.doesNotThrow(
     () =>
       assertExactTsRelaySurface(
@@ -692,6 +869,21 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
       ),
     /configure/,
     "an arbitrary Objective-C method must not grow the sealed relay module",
+  );
+  assert.throws(
+    () =>
+      assertOpaqueIosRelaySurface(
+        `${iosRelay}\n@implementation JazzRelay (LaterEscapeHatch)\nRCT_EXPORT_METHOD(configure:(NSString *)scope)\n@end`,
+      ),
+    /configure/,
+    "a later JazzRelay category must not hide an RCT export after the primary implementation",
+  );
+  assert.doesNotThrow(
+    () =>
+      assertOpaqueIosRelaySurface(
+        `${iosRelay}\n// RCT_EXPORT_METHOD(configure:(NSString *)scope)`,
+      ),
+    "comments must not become iOS relay exports",
   );
   assert.match(androidBridge, /object JazzRelayTrustedAdmission/);
   assert.match(androidBridge, /TrustedRelayScopeConfig/);
