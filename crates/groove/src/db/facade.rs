@@ -188,10 +188,14 @@ where
     Ok(Some(completed))
 }
 
-async fn completed_large_value_upload<S>(
+/// Resolve a completed upload only after its bidirectional journal and the
+/// durable staging receipt agree. This is intentionally separate from the
+/// caller's requested descriptor: raw chunk staging does not have a descriptor
+/// to compare, but it must still not report a corrupt incomplete promotion as
+/// an idempotent completed upload.
+async fn completed_large_value_upload_receipt<S>(
     storage: &S,
     upload_id: crate::large_values::StagedLargeValueId,
-    value_ref: &crate::large_values::LargeValueRef,
 ) -> Result<Option<crate::large_values::StagedLargeValue>, Error>
 where
     S: OrderedKvStorage + ?Sized,
@@ -199,14 +203,9 @@ where
     let Some(completed) = completed_large_value_upload_journal(storage, upload_id).await? else {
         return Ok(None);
     };
-    if completed.descriptor.as_ref() != Some(value_ref) {
-        return Err(Error::InvalidLargeValueMetadata(
-            "completed upload is bound to a different descriptor".to_owned(),
-        ));
-    }
     let receipt_id = completed
         .receipt_id
-        .expect("validated completed receipt id");
+        .expect("completed journal requires a receipt id");
     let encoded = storage
         .get(
             LARGE_VALUE_METADATA_CF.to_owned(),
@@ -221,11 +220,30 @@ where
     let staged_key = staged_large_value_key(receipt_id);
     let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
     if staged.id != receipt_id
-        || staged.value_ref != *value_ref
+        || completed.descriptor.as_ref() != Some(&staged.value_ref)
         || staged.accounting != completed.accounting
     {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload receipt does not match its binding".to_owned(),
+        ));
+    }
+    Ok(Some(staged))
+}
+
+async fn completed_large_value_upload<S>(
+    storage: &S,
+    upload_id: crate::large_values::StagedLargeValueId,
+    value_ref: &crate::large_values::LargeValueRef,
+) -> Result<Option<crate::large_values::StagedLargeValue>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let Some(staged) = completed_large_value_upload_receipt(storage, upload_id).await? else {
+        return Ok(None);
+    };
+    if staged.value_ref != *value_ref {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload is bound to a different descriptor".to_owned(),
         ));
     }
     Ok(Some(staged))
@@ -578,7 +596,7 @@ impl Database {
         pending_limit: Option<usize>,
     ) -> Result<bool, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
-        if completed_large_value_upload_journal(&self.storage, upload_id)
+        if completed_large_value_upload_receipt(&self.storage, upload_id)
             .await?
             .is_some()
         {

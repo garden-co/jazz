@@ -968,3 +968,80 @@ async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
         "rejected reverse copy must remain untouched"
     );
 }
+
+// A bidirectional completion journal is not itself a completed upload: its
+// durable staged receipt is the third member of that atomic promotion. This is
+// necessarily an internal corruption receipt because public APIs never expose
+// lifecycle keys, and it proves raw staging cannot silently treat an incomplete
+// promotion as a successful idempotent retry.
+#[futures_test::test]
+async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutates() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let database = Database::new(schema, storage.clone()).await.unwrap();
+    let descriptor = crate::large_values::prepare(crate::large_values::LargeValueKind::Bytes, b"x")
+        .unwrap()
+        .value_ref;
+    let upload_id = crate::large_values::StagedLargeValueId([0x89; 16]);
+    let receipt_id = crate::large_values::StagedLargeValueId([0x8a; 16]);
+    let completed =
+        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
+            id: upload_id,
+            descriptor: Some(descriptor),
+            receipt_id: Some(receipt_id),
+            accounting: crate::large_values::StagedLargeValueAccounting::default(),
+            created_at_ms: 0,
+            chunks: Vec::new(),
+        })
+        .unwrap();
+    let upload_key = completed_large_value_upload_key(upload_id);
+    let receipt_key = completed_large_value_receipt_key(receipt_id);
+    database
+        .storage
+        .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: upload_key.clone(),
+                value: completed.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: receipt_key.clone(),
+                value: completed.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        database
+            .stage_large_value_chunk_batch(
+                upload_id,
+                crate::large_values::LargeValueKind::Bytes,
+                Vec::new(),
+            )
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("completed upload points to a missing staged receipt")
+    ));
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key)
+            .await
+            .unwrap(),
+        Some(completed.clone()),
+        "failed staging must not alter the forward completion journal"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key)
+            .await
+            .unwrap(),
+        Some(completed),
+        "failed staging must not alter the reverse completion journal"
+    );
+}
