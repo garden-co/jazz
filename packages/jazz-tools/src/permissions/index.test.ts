@@ -491,6 +491,20 @@ describe("permissions DSL", () => {
     expect(compiled.todos!.update?.with_check).toEqual(compiled.todos!.update?.using);
   });
 
+  it("accepts a symmetric update rule containing a BigInt literal", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowUpdate.where({ ownerId: 1n } as unknown as TodoWhere),
+    ]);
+
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Cmp",
+      column: "ownerId",
+      op: "Eq",
+      value: { type: "Literal", value: 1n },
+    });
+    expect(compiled.todos!.update?.with_check).toEqual(compiled.todos!.update?.using);
+  });
+
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowRead.where({ $createdBy: session.user }),
