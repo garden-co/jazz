@@ -152,6 +152,46 @@ fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_sour
 }
 
 #[test]
+fn relay_authority_source_selection_requires_read_policy_for_exact_id() {
+    fn selected(schema: JazzSchema) -> bool {
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0x35; 16]), schema.clone());
+        node.set_relay_authority_session_owner();
+        let shape = Query::from("docs")
+            .filter(eq(col("id"), lit(Value::Uuid(row(0x36).0))))
+            .validate_runtime(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        node.relay_edge_query_requires_authority_source(&shape, &binding)
+            .unwrap()
+    }
+
+    let table = || PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text);
+    let no_policy = public_query_eval_schema(PublicSchemaBuilder::new().table(table()));
+    let read_policy =
+        public_query_eval_schema(PublicSchemaBuilder::new().table(
+            table().policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ));
+    let write_only_policy =
+        public_query_eval_schema(PublicSchemaBuilder::new().table(
+            table().policies(PublicTablePolicies::new().with_insert(PublicPolicyExpr::True)),
+        ));
+
+    assert!(
+        !selected(no_policy),
+        "public point reads stay on the ordinary relay path"
+    );
+    assert!(
+        selected(read_policy),
+        "read-policy revocation requires authority membership"
+    );
+    assert!(
+        !selected(write_only_policy),
+        "write-only policy cannot revoke read membership and must not select a second source",
+    );
+}
+
+#[test]
 fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
     let schema = owner_policy_schema();
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());

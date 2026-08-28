@@ -120,8 +120,9 @@ it prevents a worker-owned authority receipt from being confused with ordinary
 Global coverage for the same shape and bindings. It is selected only when a
 downstream Edge handoff must reuse authority membership rather than re-evaluate
 the worker cache: a nonzero window (whose offset must not be applied twice) or
-a policy-scoped exact-ID read (whose cached row must not survive revocation).
-Other Edge reads keep the ordinary relay path. In particular, adding a worker
+a read-policy-scoped exact-ID read (whose cached row must not survive read
+membership revocation). A write-only policy does not scope read membership and
+therefore does not select this source. Other Edge reads keep the ordinary relay path. In particular, adding a worker
 authority source MUST NOT create a second result projection or cause the same
 transaction to be delivered through incompatible view bundles.
 

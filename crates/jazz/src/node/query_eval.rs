@@ -1483,7 +1483,7 @@ where
         binding: &Binding,
     ) -> Result<bool, Error> {
         let table = self.table_in_schema(&shape.query().table, shape.schema_version())?;
-        Ok(table.has_any_policy()
+        Ok(table.read_policy.is_some()
             && root_literal_equalities(shape.query(), binding)?.contains_key("id"))
     }
 

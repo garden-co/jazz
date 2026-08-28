@@ -19,7 +19,7 @@ use jazz::protocol::{
 };
 use jazz::query::{BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
@@ -103,6 +103,18 @@ fn schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+            .build(),
+    )
+}
+
+fn write_only_policy_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::True)),
+            )
             .build(),
     )
 }
@@ -1832,6 +1844,93 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
                 if added.iter().any(|row| row.row.row_uuid() == seeded.row_uuid())
         )),
         "the reopened tab must receive a settled authority handoff"
+    );
+}
+
+/// A write policy changes admission only; it cannot revoke read membership.
+/// A browser-authored exact-row transaction therefore uses the worker's one
+/// ordinary Edge projection. Treating the write-only table as read-scoped
+/// would select a second relay-authority projection and deliver the same
+/// transaction through incompatible bundles (`ConflictingCommitUnit`).
+#[test]
+fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection() {
+    let schema = write_only_policy_schema();
+    let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let worker = open_db(0xc3, alice, &schema);
+    let core = open_core(0xc4, &schema);
+    worker.set_relay_authority_session_owner();
+
+    let main_thread = open_db(0xc5, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    let row_id = jazz::ids::RowUuid::from_bytes([0xc6; 16]);
+    let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
+    let todos = main_thread
+        .prepare_query(&exact_query)
+        .expect("prepare exact Edge query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe exact Edge query");
+
+    for _ in 0..4 {
+        main_thread.tick().expect("register exact Edge coverage");
+        worker.tick().expect("relay exact Edge coverage");
+        core.tick().expect("serve initial exact coverage");
+        worker.tick().expect("apply initial exact coverage");
+        main_thread.tick().expect("settle initial exact coverage");
+    }
+    while subscription.try_next_event().is_some() {}
+
+    let authored = main_thread
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("one ordinary projection".to_owned()),
+            )]),
+            jazz::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .expect("author browser row");
+    for _ in 0..8 {
+        main_thread.tick().expect("upload browser-authored row");
+        worker
+            .tick()
+            .expect("relay authored row without conflicting commit units");
+        core.tick().expect("admit authored row");
+        worker
+            .tick()
+            .expect("apply authored settlement without conflicting commit units");
+        main_thread.tick().expect("apply authored row settlement");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. }
+                if added.iter().any(|row| row.row.row_uuid() == authored.row_uuid())
+        )),
+        "the public Edge read must receive the authored row once: {events:?}",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. })),
+        "the authored row must settle through the ordinary projection: {events:?}",
     );
 }
 
