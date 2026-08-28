@@ -12,13 +12,25 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
   try {
     const adb = join(fixture, "adb");
     const emulator = join(fixture, "emulator");
+    const sessionLauncher = join(fixture, "session-launcher");
+    const timeout = join(fixture, "timeout");
     const log = join(fixture, "emulator.log");
     const config = join(fixture, "config.ini");
     writeFileSync(adb, `#!/usr/bin/env bash\nset -euo pipefail\n${adbBody}\n`);
     writeFileSync(emulator, `#!/usr/bin/env bash\nset -euo pipefail\n${emulatorBody}\n`);
+    // macOS has neither GNU `setsid` nor GNU `timeout`. These deliberately
+    // small test doubles exercise the receipt's bounded state machine without
+    // claiming to prove Linux process-group cleanup (covered below on Linux).
+    writeFileSync(sessionLauncher, "#!/usr/bin/env bash\nexec \"$@\"\n");
+    writeFileSync(
+      timeout,
+      "#!/usr/bin/env bash\nduration=${2%s}\nshift 2\nexec perl -e 'alarm shift; exec @ARGV' \"$duration\" \"$@\"\n",
+    );
     writeFileSync(config, "avd.id=acceptance\n");
     chmodSync(adb, 0o755);
     chmodSync(emulator, 0o755);
+    chmodSync(sessionLauncher, 0o755);
+    chmodSync(timeout, 0o755);
     const result = spawnSync("bash", [script, "test-avd", log, config], {
       encoding: "utf8",
       env: {
@@ -27,6 +39,13 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
         JAZZ_DEVICE_EMULATOR: emulator,
         JAZZ_ANDROID_BOOT_TIMEOUT_SECONDS: "1",
         JAZZ_ANDROID_BOOT_POLL_SECONDS: "0.05",
+        ...(process.platform === "linux"
+          ? {}
+          : {
+              JAZZ_ANDROID_SESSION_LAUNCHER: sessionLauncher,
+              JAZZ_ANDROID_SESSION_PROCESS_GROUP: "0",
+              JAZZ_ANDROID_TIMEOUT_COMMAND: timeout,
+            }),
         ...options.env,
       },
       timeout: 5_000,
@@ -86,12 +105,28 @@ test("Android boot receipt accepts the device-to-boot-complete transition", () =
   try {
     assert.doesNotThrow(() => process.kill(emulatorPid, 0));
   } finally {
-    process.kill(-emulatorPid, "SIGKILL");
+    process.kill(process.platform === "linux" ? -emulatorPid : emulatorPid, "SIGKILL");
     rmSync(emulatorFile, { force: true });
   }
 });
 
-test("Android boot receipt cleans up the complete emulator process group on failure", () => {
+test("Android boot receipt supports the macOS test launcher without relaxing the Linux default", () => {
+  withFixture(
+    "portable-launcher",
+    'case "$1" in get-state) echo device ;; shell) echo 1 ;; *) exit 2 ;; esac',
+    'echo "started"; exec sleep 1',
+    (result) => assert.equal(result.status, 0, result.stderr),
+    {
+      env: {
+        JAZZ_ANDROID_SESSION_LAUNCHER: "/bin/sh",
+        JAZZ_ANDROID_SESSION_PROCESS_GROUP: "0",
+        JAZZ_ANDROID_TIMEOUT_COMMAND: "/usr/bin/timeout",
+      },
+    },
+  );
+});
+
+test("Android boot receipt cleans up the complete emulator process group on failure", { skip: process.platform !== "linux" }, () => {
   const childFile = join(tmpdir(), `jazz-rn-boot-child-${process.pid}-${Date.now()}`);
   try {
     withFixture(
@@ -108,7 +143,7 @@ test("Android boot receipt cleans up the complete emulator process group on fail
   }
 });
 
-test("Android boot receipt removes its emulator process group when cancelled", async () => {
+test("Android boot receipt removes its emulator process group when cancelled", { skip: process.platform !== "linux" }, async () => {
   const fixture = mkdtempSync(join(tmpdir(), "jazz-rn-boot-cancel-"));
   const adb = join(fixture, "adb");
   const emulator = join(fixture, "emulator");
@@ -148,4 +183,10 @@ test("workflow delegates Android boot to the bounded receipt script", () => {
   assert.ok(workflow.endsWith("rn-device-acceptance.yml"));
   assert.match(text, /boot-android-emulator\.sh/);
   assert.doesNotMatch(text, /adb wait-for-device/);
+  assert.match(text, /JAZZ_ANDROID_SESSION_LAUNCHER=setsid/);
+  assert.match(text, /JAZZ_ANDROID_SESSION_PROCESS_GROUP=1/);
+
+  const receipt = readFileSync(script, "utf8");
+  assert.match(receipt, /session_launcher=\$\{JAZZ_ANDROID_SESSION_LAUNCHER:-setsid\}/);
+  assert.match(receipt, /session_process_group=\$\{JAZZ_ANDROID_SESSION_PROCESS_GROUP:-1\}/);
 });
