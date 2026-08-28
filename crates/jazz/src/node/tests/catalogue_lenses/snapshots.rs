@@ -1000,13 +1000,14 @@ fn catalogue_kernel_kind_fixture_is_exact_and_closed() {
         (CatalogueRecordKind::SchemaLineageActive, 5),
         (CatalogueRecordKind::WritePointerPending, 6),
         (CatalogueRecordKind::BootstrapReady, 7),
+        (CatalogueRecordKind::CurrentIndexLayout, 8),
     ];
 
     for (kind, bytes) in fixture {
         assert_eq!(kind.key(), bytes, "epoch-pinned kind fixture changed");
         assert_eq!(CatalogueRecordKind::from_key(bytes).unwrap(), kind);
     }
-    assert!(CatalogueRecordKind::from_key(8).is_err());
+    assert!(CatalogueRecordKind::from_key(9).is_err());
     assert!(CatalogueRecordKind::from_key(u64::MAX).is_err());
 }
 

@@ -813,6 +813,28 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = MemoryStorage::new(&refs).unwrap();
     let mut memory = NodeState::new_history_complete(node(0x70), schema.clone(), storage).unwrap();
+    // A fresh node must install the settled layout directly.  Installing V1
+    // first and then registering V2 doubles schema-index construction for a
+    // wide catalogue (and made large-schema NAPI opens time out), while there
+    // is no predecessor data to migrate.
+    for (table, indexed_column) in [("users", "name"), ("todos", "title")] {
+        let mapping =
+            memory.catalogue.physical_mappings[&schema.version_id()].tables[table].clone();
+        let legacy_index =
+            PhysicalCurrentIndexLayout::LegacyV1.name(mapping.columns[indexed_column]);
+        let v2_index = physical_current_index_name(mapping.columns[indexed_column]);
+        for storage_table in [
+            physical_ahead_current_table_name(mapping.table_id),
+            physical_global_current_table_name(mapping.table_id),
+        ] {
+            let indices = &memory.database.table_schema(&storage_table).unwrap().indices;
+            assert!(indices.iter().any(|index| index.name == v2_index));
+            assert!(
+                !indices.iter().any(|index| index.name == legacy_index),
+                "fresh opens must not construct obsolete V1 current indexes"
+            );
+        }
+    }
     memory
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)

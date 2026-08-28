@@ -1938,6 +1938,8 @@ struct CatalogueOpenState {
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
+    has_catalogue_residue: bool,
+    branch_prefixed_current_indexes: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
