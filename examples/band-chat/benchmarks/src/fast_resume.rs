@@ -32,7 +32,6 @@ pub struct FastResumeReceipt {
     pub result_member_adds: usize,
     pub result_member_removes: usize,
     pub version_carriers: usize,
-    pub version_bundles: usize,
 }
 
 impl FastResumeReceipt {
@@ -41,7 +40,6 @@ impl FastResumeReceipt {
             && self.result_member_adds == 0
             && self.result_member_removes == 0
             && self.version_carriers == 0
-            && self.version_bundles == 0
     }
 }
 
@@ -163,7 +161,6 @@ impl FastResumeFixture {
             result_member_adds: payload.result_member_adds.len(),
             result_member_removes: payload.result_member_removes.len(),
             version_carriers: payload.version_carriers.len(),
-            version_bundles: payload.version_bundles.len(),
         }
     }
 }

@@ -38,6 +38,7 @@ use jazz_sim::fixture::{
 use jazz_sim::public_schema_fixture::{
     all_operation_policies, compile_public_schema, seeded_recursive_access_policy,
 };
+use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PeerProfile, ThreadedDriver, Topology,
     bench_profile, emit_json_line, metadata_fields, profiling,
@@ -2879,13 +2880,12 @@ fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles,
+            version_carriers,
             result_member_adds,
             result_member_removes,
             ..
         }) => {
-            let bundles = version_bundles
-                .iter()
+            let bundles = version_bundle_refs(version_carriers)
                 .map(|bundle| {
                     64 + bundle
                         .versions
@@ -2903,10 +2903,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles, ..
-        }) => version_bundles
-            .iter()
-            .flat_map(|bundle| bundle.versions.iter())
+            version_carriers, ..
+        }) => version_bundle_refs(version_carriers)
+            .flat_map(|bundle| bundle.versions)
             .map(|version| version.record().raw().len() as u64)
             .sum(),
         _ => 0,

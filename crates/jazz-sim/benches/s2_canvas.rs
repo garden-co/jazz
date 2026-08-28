@@ -28,7 +28,7 @@ use jazz_sim::fixture::{
     settle_outcome,
 };
 use jazz_sim::public_schema_fixture::{all_operation_policies, compile_public_schema};
-use jazz_sim::view_accounting::{bytes_floor, view_update_bytes};
+use jazz_sim::view_accounting::{bytes_floor, version_bundle_refs, view_update_bytes};
 use jazz_sim::{
     DeterministicDriver, DriverContext, Metrics, NodeRole, PeerProfile, SimulatorTransportCodec,
     ThreadedDriver, Topology, bench_profile, emit_json_line, loopback_transport_message, mem,
@@ -1676,9 +1676,8 @@ fn observed_at_read_tier(update: &SyncMessage, tier: DurabilityTier) -> bool {
     }
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles, ..
-        }) => version_bundles
-            .iter()
+            version_carriers, ..
+        }) => version_bundle_refs(version_carriers)
             .any(|bundle| bundle.durability >= tier && matches!(bundle.fate, Fate::Accepted)),
         SyncMessage::FateUpdate { durability, .. } => durability.is_some_and(|seen| seen >= tier),
         _ => false,
