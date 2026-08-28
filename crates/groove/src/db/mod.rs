@@ -36,7 +36,7 @@ use crate::schema::{
 };
 use crate::storage::{
     BoxedStorage, LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
-    ReopenableStorage, StagedWriteOverlay, StagedWriteState, StorageLayout,
+    ReopenableStorage, StagedWriteOverlay, StagedWriteState, StorageLayout, WriteManyOutcome,
 };
 use thiserror::Error;
 
@@ -1291,6 +1291,10 @@ impl AppliedBatch {
         );
         let mut attempt = PersistenceAttempt {
             lifecycle: Rc::clone(&self.lifecycle),
+            order: Rc::clone(&self.order),
+            publication: self.publication,
+            abandoned_application: Rc::clone(&self.abandoned_application),
+            write_started: false,
             completed: false,
         };
         let turn = std::future::poll_fn(|cx| {
@@ -1316,9 +1320,24 @@ impl AppliedBatch {
                 .collect::<Vec<_>>(),
         );
         let storage_start = Instant::now();
-        let result = match turn {
-            Ok(()) => self.storage.write_many(operations).await,
-            Err(error) => Err(error),
+        let outcome = match turn {
+            Ok(()) => {
+                attempt.write_started = true;
+                self.storage.write_many_outcome(operations).await
+            }
+            Err(error) => WriteManyOutcome::Uncommitted(error),
+        };
+        let result = match outcome {
+            WriteManyOutcome::Committed => Ok(()),
+            WriteManyOutcome::Uncommitted(error) => Err(error),
+            WriteManyOutcome::PossiblyCommitted(error) => {
+                // Runtime state already reflects this publication. Without a
+                // definite non-commit receipt it cannot be rolled back or
+                // retried safely; every database entry point must fail closed
+                // even before the host settles the returned receipt.
+                self.abandoned_application.set(true);
+                Err(error)
+            }
         };
         let storage_write_time = storage_start.elapsed();
         if result.is_ok()
@@ -1375,13 +1394,33 @@ impl AppliedBatch {
 
 struct PersistenceAttempt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    order: Rc<RefCell<PersistenceOrder>>,
+    publication: PublicationId,
+    abandoned_application: Rc<Cell<bool>>,
+    write_started: bool,
     completed: bool,
 }
 
 impl Drop for PersistenceAttempt {
     fn drop(&mut self) {
         if !self.completed && self.lifecycle.get() == AppliedBatchLifecycle::Persisting {
-            self.lifecycle.set(AppliedBatchLifecycle::Applied);
+            if self.write_started {
+                self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
+                self.abandoned_application.set(true);
+                let waiters = {
+                    let mut order = self.order.borrow_mut();
+                    order.failure = Some(format!(
+                        "publication {:?} persistence was cancelled after its atomic write started",
+                        self.publication
+                    ));
+                    std::mem::take(&mut order.waiters)
+                };
+                for (_, waiter) in waiters {
+                    waiter.wake();
+                }
+            } else {
+                self.lifecycle.set(AppliedBatchLifecycle::Applied);
+            }
         }
     }
 }

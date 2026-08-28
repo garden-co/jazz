@@ -16,6 +16,7 @@ Invariant digest:
 - `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
 - `INV-STORAGE-30`: Application table and direct-record-store names MUST have one case-sensitive, collision-free namespace that excludes Groove's engine-owned names; every physical column-family ingress MUST reject embedded NUL and names beyond the portable UTF-8 byte bound before durable mutation.
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
+- `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -158,6 +159,48 @@ have left the batch unapplied from a failure that may have followed a durable
 commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
+
+**Commit receipts and cancellation.** A portable atomic-batch submission has
+three acknowledgement classes: `Committed`, `Uncommitted(error)`, and
+`PossiblyCommitted(error)` (`INV-STORAGE-32`). `Uncommitted` is permitted only
+when the adapter proves the error happened before its atomic commit boundary
+(for example, complete local validation before beginning a native write).
+An adapter that receives a native failure without that proof must report
+`PossiblyCommitted`, even if the backend normally makes the failure unlikely.
+Dropping/cancelling a submission future after it has begun produces no receipt;
+callers must treat that case as possibly committed. Dropping it before the
+first poll begins no attempt and is uncommitted. This is an acknowledgement
+classification, not a request to make asynchronous storage operations
+uncancellable.
+
+Groove's resident-publication lifecycle applies that distinction directly. A
+cancelled persistence future may return its publication to `Applied` only while
+it is still waiting for its ordered turn and has not started the storage
+submission. Once submission starts, cancellation permanently marks the
+database unusable and wakes every later publication waiting for its ordered
+turn so each observes the terminal order failure rather than hanging. An
+explicit `PossiblyCommitted` result does the same before
+the host settles its receipt, so holding or dropping that receipt cannot expose
+a retry window. A proven `Uncommitted` result is the only result for which an
+implementation may retry or roll back; conservatively poisoning instead
+remains valid when the higher layer has no complete rollback operation.
+
+This poison is instance-local, not a durable marker. Discarding the poisoned
+`Database` and reopening the backend creates a fresh instance that may make
+new operations against the durable state it finds. Reopen does not classify the
+abandoned submission retroactively and MUST NOT replay it as a retry; it only
+restores the state for which storage has a definite durable receipt.
+
+**Worked cancellation/reopen receipt.** Suppose durable state contains row A.
+The live database makes row B resident, begins B's atomic submission, and its
+host drops that persistence future. The live instance is poisoned: it may not
+read, write, retry B, or report B as locally durable. After discarding that
+instance, reopening the same backend observes A and whatever byte state the
+backend definitively contains; it does not synthesize another attempt for B.
+The reopened instance may write a new row C normally. In the controlled
+pre-write cancellation receipt, reopening therefore observes A, not B, and
+then persists C; a backend that had actually committed B is still safe because
+the former instance never retries or rolls back B.
 
 `put_if_absent` and `compare_and_delete` are atomic at the persistence scope
 (`INV-STORAGE-28`). A backend either serializes them across every concurrently

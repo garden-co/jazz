@@ -2,10 +2,12 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use futures::executor::block_on;
-use futures::task::noop_waker;
+use futures::task::{ArcWake, noop_waker, waker};
 use groove::db::{
     Database, Error as DatabaseError, GraphBuilder, NotificationTiming, PrimaryKeyValue,
 };
@@ -1114,7 +1116,7 @@ fn cancelled_one_shot_query_discards_ephemeral_graph_and_hydration_state() {
 }
 
 #[test]
-fn cancelled_persistence_does_not_undo_an_applied_batch() {
+fn cancelled_started_persistence_poisoned_database_cannot_retry_or_roll_back() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
     let subscription =
@@ -1166,17 +1168,119 @@ fn cancelled_persistence_does_not_undo_an_applied_batch() {
     drop(persistence);
 
     assert!(subscription.try_recv().is_err());
-    assert_eq!(
-        block_on(database.query_graph(GraphBuilder::table("albums")))
-            .unwrap()
-            .deltas
-            .len(),
-        1
+    control.resume();
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        block_on(database.query_graph(GraphBuilder::table("albums"))),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    drop(applied);
+}
+
+#[test]
+fn cancelled_started_persistence_wakes_queued_publication_with_order_failure() {
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    let first = block_on(database.apply_batch(first)).unwrap();
+
+    let mut second = database.open_batch();
+    second.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Blue Train".into())],
+    );
+    let second = block_on(database.apply_batch(second)).unwrap();
+
+    control.pause_on(TestStorageOperation::WriteMany);
+    let mut first_persistence = Box::pin(first.persist());
+    let first_waker = noop_waker();
+    let mut first_context = Context::from_waker(&first_waker);
+    assert!(matches!(
+        Pin::new(&mut first_persistence).poll(&mut first_context),
+        Poll::Pending
+    ));
+    assert!(
+        control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany),
+        "publication A must reach the storage submission before cancellation"
     );
 
-    control.resume();
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let second_waker = waker(Arc::clone(&wakes));
+    let mut second_context = Context::from_waker(&second_waker);
+    let mut second_persistence = Box::pin(second.persist());
+    assert!(matches!(
+        Pin::new(&mut second_persistence).poll(&mut second_context),
+        Poll::Pending
+    ));
+    assert_eq!(wakes.0.load(Ordering::Acquire), 0);
+
+    drop(first_persistence);
+
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        1,
+        "cancelling A must wake B's registered publication-order waiter"
+    );
+    let Poll::Ready(second_result) = Pin::new(&mut second_persistence).poll(&mut second_context)
+    else {
+        panic!("woken publication B remained pending behind cancelled A");
+    };
+    drop(second_persistence);
+    assert!(matches!(
+        database.finish_persistence(second_result),
+        Err(DatabaseError::Storage(_))
+    ));
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    control.resume_operation(TestStorageOperation::WriteMany);
+    drop(first);
+}
+
+#[test]
+fn possibly_committed_receipt_poisoned_database_before_settlement() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    let applied = block_on(database.apply_batch(batch)).unwrap();
+
+    // YieldingStorage's injected error has no backend proof that the native
+    // atomic boundary was not crossed, so the portable default classifies it
+    // as PossiblyCommitted.
+    control.fail_next(TestStorageOperation::WriteMany);
     let persisted = block_on(applied.persist());
-    database.finish_persistence(persisted).unwrap();
+
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        database.finish_persistence(persisted),
+        Err(DatabaseError::Storage(_))
+    ));
 }
 
 #[test]
@@ -1333,13 +1437,8 @@ fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended()
     );
     assert_eq!(database.durable_publication_frontier(), None);
 
-    drop(persistence);
-    let rows = block_on(database.query_graph(GraphBuilder::table("albums"))).unwrap();
-    assert_eq!(rows.deltas.len(), 1);
-    assert_eq!(database.durable_publication_frontier(), None);
-
     control.resume_operation(TestStorageOperation::WriteMany);
-    let persistence = block_on(published.persist());
+    let persistence = block_on(persistence);
     assert_eq!(
         database.finish_persistence(persistence).unwrap(),
         PublicationId(1)

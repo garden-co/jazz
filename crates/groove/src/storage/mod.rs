@@ -174,6 +174,44 @@ impl ScanRequest {
 pub type StorageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub type StorageScan<'a> = Box<dyn StorageCursor + 'a>;
 
+/// The settled acknowledgement of one atomic [`OrderedKvStorage::write_many`]
+/// attempt.
+///
+/// A caller that drops the write future after it has started has no receipt at
+/// all and must conservatively act as though the batch may have committed.
+/// Likewise, adapters must use [`WriteManyOutcome::PossiblyCommitted`] whenever
+/// their native API cannot prove that a failed acknowledgement happened before
+/// its atomic commit boundary.  Only [`WriteManyOutcome::Uncommitted`] permits
+/// a caller to discard in-memory state or retry the identical batch.
+#[derive(Debug)]
+pub enum WriteManyOutcome {
+    /// The atomic batch crossed the backend's commit boundary.
+    Committed,
+    /// The adapter proved that no operation in the batch reached its commit
+    /// boundary, such as validation failing before a native write begins.
+    Uncommitted(Error),
+    /// The native operation returned an error without proving that the batch
+    /// was not committed. This is deliberately fail-closed.
+    PossiblyCommitted(Error),
+}
+
+impl WriteManyOutcome {
+    pub fn is_committed(&self) -> bool {
+        matches!(self, Self::Committed)
+    }
+
+    pub fn error(&self) -> Option<&Error> {
+        match self {
+            Self::Committed => None,
+            Self::Uncommitted(error) | Self::PossiblyCommitted(error) => Some(error),
+        }
+    }
+
+    pub fn may_have_committed(&self) -> bool {
+        !matches!(self, Self::Uncommitted(_))
+    }
+}
+
 /// Executor-local ownership boundary used by interruptible engine work.
 ///
 /// `OrderedKvStorage` deliberately permits futures and cursors that borrow an
@@ -383,6 +421,24 @@ pub trait OrderedKvStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>>;
 
+    /// Submit one atomic batch with an acknowledgement class.
+    ///
+    /// This is the portable commit-result boundary. The legacy [`Self::write_many`]
+    /// convenience method remains for callers that do not advance in-memory
+    /// state before persistence. Its default adapter is conservative: a plain
+    /// error has no proof that the native commit did not happen.
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
+        })
+    }
+
     /// Return known column-family names when the backend can enumerate them.
     ///
     /// This is intentionally optional so the ordered-KV contract stays small.
@@ -492,6 +548,13 @@ where
         self.as_ref().write_many(operations)
     }
 
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        self.as_ref().write_many_outcome(operations)
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.as_ref().column_family_names()
     }
@@ -545,6 +608,13 @@ where
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         S::write_many(*self, operations)
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        S::write_many_outcome(*self, operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -828,6 +898,25 @@ impl LayoutStorage {
         let strip_len = 4 + logical_prefix.len();
         (mapping.physical_cf.to_owned(), physical_prefix, strip_len)
     }
+
+    fn physical_operations(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> Vec<OwnedWriteOperation> {
+        operations
+            .into_iter()
+            .map(|operation| match operation {
+                OwnedWriteOperation::Set { cf, key, value } => {
+                    let (cf, key) = self.physical_key(&cf, &key);
+                    OwnedWriteOperation::Set { cf, key, value }
+                }
+                OwnedWriteOperation::Delete { cf, key } => {
+                    let (cf, key) = self.physical_key(&cf, &key);
+                    OwnedWriteOperation::Delete { cf, key }
+                }
+            })
+            .collect()
+    }
 }
 
 impl OrderedKvStorage for LayoutStorage {
@@ -967,27 +1056,15 @@ impl OrderedKvStorage for LayoutStorage {
         &self,
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
-        let translated = operations
-            .into_iter()
-            .map(|operation| match operation {
-                OwnedWriteOperation::Set { cf, key, value } => {
-                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-                    OwnedWriteOperation::Set {
-                        cf: physical_cf,
-                        key: physical_key,
-                        value,
-                    }
-                }
-                OwnedWriteOperation::Delete { cf, key } => {
-                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-                    OwnedWriteOperation::Delete {
-                        cf: physical_cf,
-                        key: physical_key,
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        self.inner.write_many(translated)
+        self.inner.write_many(self.physical_operations(operations))
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        self.inner
+            .write_many_outcome(self.physical_operations(operations))
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -1125,6 +1202,13 @@ impl OrderedKvStorage for BoxedStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.write_many(operations)
+    }
+
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        self.inner.write_many_outcome(operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -2643,6 +2727,58 @@ mod tests {
         assert!(matches!(
             storage.scan(ScanRequest::prefix("missing".into(), b"a".to_vec())).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
+        ));
+    }
+
+    // This is deliberately an internal contract test: only the ordered-KV
+    // seam knows whether a backend acknowledgement proves that an atomic
+    // batch was not committed. Higher-level APIs must receive that proof, not
+    // infer it from an arbitrary backend error string.
+    #[futures_test::test]
+    async fn write_many_outcome_default_is_conservative_after_an_error() {
+        let (storage, control) = TestStorage::controlled(&["records"]);
+        control.fail_next(TestStorageOperation::WriteMany);
+
+        let outcome = storage
+            .write_many_outcome(vec![OwnedWriteOperation::set("records", b"key", b"value")])
+            .await;
+
+        assert!(matches!(&outcome, WriteManyOutcome::PossiblyCommitted(_)));
+        assert!(outcome.may_have_committed());
+        assert!(!outcome.is_committed());
+    }
+
+    #[futures_test::test]
+    async fn memory_write_many_outcome_proves_prevalidation_errors_uncommitted() {
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
+
+        let outcome = storage
+            .write_many_outcome(vec![OwnedWriteOperation::set("missing", b"key", b"value")])
+            .await;
+
+        assert!(matches!(
+            &outcome,
+            WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
+        ));
+        assert!(!outcome.may_have_committed());
+    }
+
+    #[futures_test::test]
+    async fn layout_storage_preserves_backend_commit_classification() {
+        let storage = LayoutStorage::new(
+            MemoryStorage::new(&["records"]).expect("valid memory storage families"),
+            StorageLayout::Identity,
+        )
+        .await
+        .unwrap();
+
+        let outcome = storage
+            .write_many_outcome(vec![OwnedWriteOperation::set("missing", b"key", b"value")])
+            .await;
+
+        assert!(matches!(
+            outcome,
+            WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
     }
 
