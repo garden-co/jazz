@@ -3963,7 +3963,7 @@ impl SchemaVersion {
 }
 
 /// Published bidirectional migration lens.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MigrationLens {
     /// Content-addressed lens id.
     pub(crate) id: MigrationLensId,
@@ -3975,12 +3975,13 @@ pub struct MigrationLens {
     pub(crate) table_lenses: Vec<TableLens>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
-struct MigrationLensWire {
-    id: MigrationLensId,
-    source: SchemaVersionId,
-    target: SchemaVersionId,
-    table_lenses: Vec<TableLens>,
+impl serde::Serialize for MigrationLens {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&canonical_lens_bytes(self))
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for MigrationLens {
@@ -3988,15 +3989,8 @@ impl<'de> serde::Deserialize<'de> for MigrationLens {
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = MigrationLensWire::deserialize(deserializer)?;
-        let lens = Self::new(wire.source, wire.target, wire.table_lenses)
-            .map_err(serde::de::Error::custom)?;
-        if lens.id != wire.id {
-            return Err(serde::de::Error::custom(
-                "migration lens content ID mismatch",
-            ));
-        }
-        Ok(lens)
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        decode_canonical_lens_bytes(&bytes).map_err(serde::de::Error::custom)
     }
 }
 
@@ -4765,37 +4759,10 @@ mod tests {
             }],
         )
         .unwrap();
-        let wire = |id, tables| MigrationLensWire {
-            id,
-            source: schema_id(1),
-            target: schema_id(2),
-            table_lenses: tables,
-        };
-        let duplicate = wire(
-            valid.id,
-            vec![
-                TableLens {
-                    source_table: "a".into(),
-                    target_table: "b".into(),
-                    ops: Vec::new(),
-                },
-                TableLens {
-                    source_table: "a".into(),
-                    target_table: "c".into(),
-                    ops: Vec::new(),
-                },
-            ],
-        );
+        let mut malformed = canonical_lens_bytes(&valid);
+        malformed.push(0);
         assert!(
-            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&duplicate).unwrap())
-                .is_err()
-        );
-        let wrong_id = wire(
-            MigrationLensId(uuid::Uuid::from_bytes([0x55; 16])),
-            valid.table_lenses.clone(),
-        );
-        assert!(
-            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&wrong_id).unwrap())
+            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&malformed).unwrap())
                 .is_err()
         );
         // Planted sensitivity: if Deserialize stopped routing through `new`,
@@ -4824,22 +4791,20 @@ mod tests {
             Value::Enum(enum_value),
             Value::Large(large),
         ] {
-            let wire = MigrationLensWire {
-                id: MigrationLensId(uuid::Uuid::nil()),
-                source: schema_id(1),
-                target: schema_id(2),
-                table_lenses: vec![TableLens {
-                    source_table: "a".into(),
-                    target_table: "b".into(),
-                    ops: vec![LensOp::AddColumn {
-                        column: "x".into(),
-                        default: value,
-                    }],
-                }],
-            };
             assert!(
-                postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&wire).unwrap())
-                    .is_err()
+                MigrationLens::new(
+                    schema_id(1),
+                    schema_id(2),
+                    vec![TableLens {
+                        source_table: "a".into(),
+                        target_table: "b".into(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "x".into(),
+                            default: value
+                        }]
+                    }]
+                )
+                .is_err()
             );
         }
     }
