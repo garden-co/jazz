@@ -129,13 +129,17 @@ ordinary ordered-KV data plane. Before creating a table, column family, page,
 or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
-IDs, and sorted decode-relevant adapter parameters. The epoch-1 payload registry
-is exactly `groove.ordered-kv.v1`; omission, addition, or substitution of a
-codec ID is invalid even when the rest of the manifest is canonical. The
-manifest envelope is the root boundary rather than an entry in its own
-registry. Adding an authoritative opaque byte payload requires a stable ID, a
-corpus entry, and a new epoch rather than an adapter-local postcard/`Bytes`
-exception. Missing, truncated,
+IDs, and sorted decode-relevant adapter parameters. Groove contributes exactly
+`groove.ordered-kv.v1`; the caller composes that with its own closed persistent
+codec profile before opening the adapter. The adapter treats higher-layer IDs
+as opaque and never learns their semantics. A Jazz root, for example, supplies
+the complete profile in `jazz::storage_codec_profile`, while a Groove-only root
+uses only the Groove ID. Omission, addition, duplication, or substitution of a
+codec ID is invalid for the selected profile even when the rest of the manifest
+is canonical. The manifest envelope is the root boundary rather than an entry
+in its own registry. Adding an authoritative opaque byte payload requires a
+stable ID, a corpus entry, and a new epoch rather than an adapter-local
+postcard/`Bytes` exception. Missing, truncated,
 noncanonical, corrupt, unknown, or inconsistent manifests fail closed before
 any mutation (`INV-STORAGE-31`).
 
@@ -158,8 +162,8 @@ conformance. Backend files are not interchange formats.
 **Implementation-status note.** RocksDB and SQLite persist and validate this
 shared `JSM1` manifest. IndexedDB persists the equivalent structured-clone
 epoch-one manifest at its fixed `storage-manifest`/`epoch` location before the
-caller receives a page-store handle. It includes the epoch, adapter/page
-versions, sole `groove.ordered-kv.v1` codec ID, fixed 16 KiB page size, and
+caller receives a page-store handle. It includes the caller-selected closed
+codec profile, epoch, adapter/page versions, fixed 16 KiB page size, and
 `xxh3-64-le` page checksum identity. The browser physical-open receipt installs
 the committed page-v2 fixture by raw IndexedDB transaction, opens it read-only,
 writes current data, reopens it, and proves corrupt/unknown manifests fail

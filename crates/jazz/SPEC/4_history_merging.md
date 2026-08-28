@@ -158,6 +158,25 @@ storage root must first pass the top-level epoch-manifest admission gate before
 any row is decoded: an unsupported former-alpha opaque payload must not be
 guessed as the new untagged array (`INV-HIST-19`; Groove storage §2).
 
+### Durable codec profile
+
+Every persistent Jazz root supplies one closed epoch-one codec profile when it
+opens its ordered-KV adapter. It contains Groove's generic ordered-KV codec and
+the Jazz-owned byte families for branch keys; catalogue schemas, mappings,
+lineages, bootstrap receipts, lenses, activations, and write pointers; and
+persisted result-member, result-row-source, and program-fact keys. The profile
+is sorted, pinned by the adapter manifest,
+and checked before any ordinary record is decoded or mutated. Groove carries
+these identifiers as opaque metadata: it does not import or interpret Jazz
+schemas. A missing, duplicate, substituted, or future ID therefore fails open
+admission rather than leaving a `Bytes` field to a codec-specific fallback.
+
+This inventory names encoding families, not user tables or individual values.
+Ordinary scalar/record representation remains Groove's one typed record codec;
+a distinct durable root composes this base with its own root-local codec family
+before opening. Adding a new Jazz-owned durable byte family requires a new
+storage epoch, golden fixtures, and an explicit decoder/migration decision.
+
 ### 4.4 Deletion as a separate layer
 
 Deletion is modeled separately from content so that hiding and restoring a row do

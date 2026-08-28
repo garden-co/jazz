@@ -32,7 +32,7 @@ use thiserror::Error;
 pub use idb::IdbStorage;
 pub use manifest::{
     AdapterFormat, ManifestOpenReceipt, MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1,
-    StorageEpochManifest, StorageMigration,
+    StorageCodecProfile, StorageEpochManifest, StorageMigration,
 };
 pub use memory::MemoryStorage;
 #[cfg(any(test, feature = "test"))]
@@ -1232,6 +1232,7 @@ pub trait StorageFactory: std::fmt::Debug + Send + Sync {
         &self,
         path: std::path::PathBuf,
         column_families: Vec<String>,
+        codec_profile: StorageCodecProfile,
     ) -> StorageFuture<'_, Result<BoxedStorage, Error>>;
 }
 
