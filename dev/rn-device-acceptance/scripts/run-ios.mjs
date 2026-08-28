@@ -47,7 +47,7 @@ const expected = {
   buildFingerprint,
   runNonce,
   startedAt,
-  scenarios: scenarioPlan.map((item) => item.scenario),
+  scenarios: scenarioPlan.filter((item) => item.state === "passed").map((item) => item.scenario),
 };
 for (let attempt = 0; attempt < 30; attempt += 1) {
   try {

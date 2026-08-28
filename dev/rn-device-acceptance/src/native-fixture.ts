@@ -1,11 +1,12 @@
 import { NativeModules } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
+import type { Platform } from "./protocol";
 
 type NativeRelayCapability = Uint8Array;
 type NativeRelayExecutor = { execute(commandBase64: string): Promise<string> };
 
 export type DeviceReceiptContext = {
-  platform: "android";
+  platform: Platform;
   deviceIdentifier: string;
   buildFingerprint: string;
   runNonce: string;
@@ -47,7 +48,7 @@ export async function admittedNativeRelay(): Promise<{
 export async function deviceReceiptContext(): Promise<DeviceReceiptContext> {
   const context = await fixtureModule().receiptContext();
   if (
-    context.platform !== "android" ||
+    !(["android", "ios"] as const).includes(context.platform) ||
     !context.deviceIdentifier ||
     !/^[0-9a-f]{64}$/.test(context.buildFingerprint) ||
     !context.runNonce

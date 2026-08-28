@@ -10,10 +10,6 @@
 @implementation JazzDeviceFixture
 RCT_EXPORT_MODULE();
 
-RCT_REMAP_METHOD(linkedAbi, linkedAbiWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
-  resolve([[[JazzRelay alloc] init] getAbiVersion]);
-}
-
 RCT_REMAP_METHOD(admittedCapability, admittedCapabilityWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSError *error = nil;
   if (self.capability == nil) {
@@ -41,7 +37,7 @@ RCT_REMAP_METHOD(logout, logoutWithResolver:(RCTPromiseResolveBlock)resolve reje
   self.capability = nil; resolve(nil);
 }
 
-RCT_REMAP_METHOD(acceptanceRunMetadata, acceptanceRunMetadataWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+RCT_REMAP_METHOD(receiptContext, receiptContextWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
   NSString *(^valueFor)(NSString *) = ^NSString *(NSString *key) {
     NSUInteger index = [arguments indexOfObject:key];
@@ -54,6 +50,6 @@ RCT_REMAP_METHOD(acceptanceRunMetadata, acceptanceRunMetadataWithResolver:(RCTPr
     reject(@"E_JAZZ_DEVICE_METADATA", @"Missing simulator acceptance launch metadata", nil);
     return;
   }
-  resolve(@{ @"runNonce": nonce, @"buildFingerprint": fingerprint, @"deviceIdentifier": device });
+  resolve(@{ @"platform": @"ios", @"runNonce": nonce, @"buildFingerprint": fingerprint, @"deviceIdentifier": device });
 }
 @end
