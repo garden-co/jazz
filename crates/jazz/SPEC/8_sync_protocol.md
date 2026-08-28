@@ -98,6 +98,9 @@ trailing byte; concatenation belongs only to the documented WebSocket
 `Vec<Vec<u8>>` batch carrier. In particular, a binding MUST NOT hand a byte
 suffix from one frame to the semantic decoder, and a semantic decoder MUST NOT
 silently leave a suffix for its caller (`INV-WIRE-1`).
+The TypeScript WebSocket carrier MUST consume the entire outer batch and the
+entire known `Hello`, `Message`, or `Error` frame whenever it parses or
+classifies that frame; reading only the enum tag is not frame acceptance.
 
 Postcard enum ordinals are wire data. The v14 baseline freezes these permanent
 discriminants (decimal):
@@ -141,7 +144,9 @@ limits and expiry/deduplication rules are normative in
 The v14 frozen corpus is `crates/jazz/fixtures/wire_message_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
-reads the transport envelope through its production postcard reader. Its
+reads every transport envelope through its production postcard reader, rejects
+a suffix on every corpus frame, and round-trips each through the exact batch
+carrier. Its
 binding companion, `binding_codec_golden.json`, covers NAPI/WASM's shared
 Rust-produced relation-snapshot and subscription-delta byte ABI, consumed by
 the production TypeScript decoder. These corpora are compatibility evidence,
