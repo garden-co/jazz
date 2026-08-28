@@ -162,8 +162,12 @@ describe("binding codec golden contract", () => {
     expect(() => new PostcardWriter().i64(-(Number.MAX_SAFE_INTEGER + 1))).toThrow(
       "i64 must be a safe integer when passed as a number",
     );
-    expect(() => new PostcardWriter().i64(minI64 - 1n)).toThrow("i64 out of range");
-    expect(() => new PostcardWriter().i64(maxI64 + 1n)).toThrow("i64 out of range");
+    expect(() => new PostcardWriter().i64(minI64 - 1n)).toThrow(
+      "i64 must be a signed 64-bit integer",
+    );
+    expect(() => new PostcardWriter().i64(maxI64 + 1n)).toThrow(
+      "i64 must be a signed 64-bit integer",
+    );
 
     const u32Writer = new PostcardWriter();
     u32Writer.u32Le(0xffff_ffff);

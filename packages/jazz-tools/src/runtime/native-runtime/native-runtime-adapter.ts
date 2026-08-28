@@ -57,6 +57,7 @@ import {
   type QueryPredicateOp,
   type ValueType,
 } from "./native-codec.js";
+import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import {
@@ -4852,7 +4853,7 @@ function coerceLiteralForColumnType(
     return { type: "Double", value: value.value };
   }
   if (columnType?.type === "BigInt" && value.type === "Integer") {
-    return { type: "BigInt", value: BigInt(value.value) };
+    return { type: "BigInt", value: exactSignedI64(value.value, "BigInt value") };
   }
   if (columnType?.type === "Timestamp" && value.type === "Integer") {
     return { type: "Timestamp", value: value.value };
