@@ -76,10 +76,36 @@ rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
 `write_pointer_pending = 6`, and `bootstrap_ready = 7`. Discovery and reopen
 reject every other numeric kind rather than guessing how to decode it.
 
-This freezes only that numeric discriminator and primary-key layout. It does
-not freeze the catalogue payload codecs, schema-descriptor identity model,
-physical identity allocation, or catalogue lifecycle guarantees. Those remain
-part of the catalogue storage settlement tracked by
+The kernel payloads that establish recovery state have their own explicit,
+versioned binary layouts; they are not authoritative JSON. In this epoch,
+`schema` is `[v1, schema_uuid, public_schema_json_len:u32-le,
+public_schema_json]`, `bootstrap_ready` is `[v1, genesis_uuid,
+pointer_revision:u64-le, pointer_schema_uuid, active_catalogue_seq:u64-le]`,
+and the pending write-pointer and active-lineage receipts are likewise fixed
+`v1` UUID/integer tuples. A decoder accepts exactly one known version and
+must consume the entire payload before it returns a value to catalogue
+recovery; it does not fall back to the former JSON bytes. The public-schema
+body is decoded and re-encoded with the canonical public-schema serializer,
+and those bytes must match exactly, so insignificant whitespace, field
+reordering, or alternate JSON spellings are corruption rather than aliases.
+Each pending write-pointer row id is UUIDv5 under its schema UUID over the
+little-endian revision bytes; recovery verifies that join and rejects two rows
+claiming the same revision before building resident pointer state.
+
+For example, a bootstrap receipt whose genesis UUID begins `00112233…`, whose
+pointer revision is `0x0102030405060708`, and whose active sequence is
+`0x1112131415161718` begins with `01 00 11 22 33 … 08 07 06 05 04 03 02 01`.
+Appending even one byte, adding whitespace to the embedded public-schema JSON,
+using an arbitrary pending-pointer row id, duplicating a pending revision,
+truncating a payload, or changing `01` to an unknown version rejects reopen
+before resident catalogue state is replaced.
+
+This freezes the numeric discriminator and primary-key layout plus only the
+schema envelope, bootstrap receipt, pending write-pointer, and active-lineage
+receipt representations described above. It does not freeze the remaining
+catalogue payload codecs, schema-descriptor identity model, physical identity
+allocation, or complete catalogue lifecycle guarantees. Those remain part of
+the catalogue storage settlement tracked by
 [#2037](https://github.com/garden-co/jazz/issues/2037) and
 [#1779](https://github.com/garden-co/jazz/issues/1779).
 

@@ -606,6 +606,126 @@ let persisted = crate::db::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
+/// This is intentionally an internal storage-boundary test: only a direct
+/// durable-row mutation can prove malformed kernel bytes fail before open
+/// returns a resident `NodeState`.
+#[test]
+fn catalogue_kernel_payload_corruption_rejects_reopen_before_resident_mutation() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa5), base.clone());
+    let durable_schema = SchemaVersion::new(base.clone());
+    let mut payload = codec::encode_catalogue_schema(&durable_schema).unwrap();
+    payload.push(0);
+    write_catalogue_record(
+        &mut node_state,
+        b"schema",
+        durable_schema.id.0,
+        payload,
+    );
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa5), base, storage)),
+        Err(Error::InvalidStoredValue("invalid catalogue schema payload"))
+    ));
+}
+
+/// The public-schema JSON body is a canonical byte string within the typed
+/// schema envelope. A semantically equivalent spelling must not become a
+/// second durable representation of the same schema.
+#[test]
+fn noncanonical_catalogue_public_schema_rejects_reopen_before_resident_mutation() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa6), base.clone());
+    let durable_schema = SchemaVersion::new(base.clone());
+    let mut payload = codec::encode_catalogue_schema(&durable_schema).unwrap();
+    let length = u32::from_le_bytes(payload[17..21].try_into().unwrap());
+    payload[17..21].copy_from_slice(&(length + 1).to_le_bytes());
+    payload.insert(21, b' ');
+    write_catalogue_record(
+        &mut node_state,
+        b"schema",
+        durable_schema.id.0,
+        payload,
+    );
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa6), base, storage)),
+        Err(Error::InvalidStoredValue(
+            "non-canonical catalogue schema public schema"
+        ))
+    ));
+}
+
+#[test]
+fn pending_catalogue_write_pointer_reopen_requires_deterministic_row_id() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa7), base.clone());
+    let pointer = CurrentWriteSchema {
+        revision: 9,
+        schema: base.version_id(),
+    };
+    write_catalogue_record(
+        &mut node_state,
+        b"write_pointer_pending",
+        uuid::Uuid::from_u128(0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa),
+        codec::encode_catalogue_write_pointer(pointer),
+    );
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa7), base, storage)),
+        Err(Error::InvalidStoredValue(
+            "pending catalogue write-pointer id mismatch"
+        ))
+    ));
+}
+
+#[test]
+fn pending_catalogue_write_pointer_reopen_rejects_duplicate_revision() {
+    let base = schema();
+    let (dir, mut node_state) = open_node_with_schema(node(0xa8), base.clone());
+    let first = CurrentWriteSchema {
+        revision: 9,
+        schema: base.version_id(),
+    };
+    let second = CurrentWriteSchema {
+        revision: 9,
+        schema: SchemaVersionId(uuid::Uuid::from_u128(
+            0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,
+        )),
+    };
+    for pointer in [first, second] {
+        write_catalogue_record(
+            &mut node_state,
+            b"write_pointer_pending",
+            codec::catalogue_write_pointer_id(pointer),
+            codec::encode_catalogue_write_pointer(pointer),
+        );
+    }
+    drop(node_state);
+
+    let cfs = base.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(0xa8), base, storage)),
+        Err(Error::InvalidStoredValue(
+            "duplicate pending catalogue write-pointer revision"
+        ))
+    ));
+}
+
 fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id: uuid::Uuid) {
     let mut batch = node.database.open_batch();
     batch.delete(
@@ -756,11 +876,10 @@ fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &St
         node,
         b"schema_lineage_active",
         staged.publication.id.0,
-        serde_json::to_vec(&SchemaLineageActivation {
+        codec::encode_catalogue_lineage_activation(SchemaLineageActivation {
             id: staged.publication.id,
             catalogue_seq: staged.catalogue_seq,
-        })
-        .unwrap(),
+        }),
     );
 }
 
@@ -1156,7 +1275,7 @@ fn reopen_rejects_standalone_schema_content_identity_mismatch() {
         &mut receiver,
         b"schema",
         tampered.id.0,
-        serde_json::to_vec(&tampered).unwrap(),
+        codec::encode_catalogue_schema(&tampered).unwrap(),
     );
     drop(receiver);
 
@@ -1164,7 +1283,7 @@ fn reopen_rejects_standalone_schema_content_identity_mismatch() {
         &dir,
         node(0x4c),
         base,
-        "catalogue schema id does not match schema payload",
+        "catalogue schema content id mismatch",
     );
 }
 
@@ -1455,12 +1574,11 @@ fn dynamic_edge_reopen_rejects_truncated_or_mismatched_bootstrap_marker() {
         &mut edge,
         b"bootstrap_ready",
         schema().version_id().0,
-        serde_json::to_vec(&CatalogueBootstrapReady {
+        codec::encode_catalogue_bootstrap_ready(&CatalogueBootstrapReady {
             genesis: schema().version_id(),
             current_write_schema: snapshot.current_write_schema,
             active_catalogue_seq: 0,
-        })
-        .unwrap(),
+        }),
     );
     drop(edge);
 
@@ -1506,7 +1624,7 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
         &mut edge,
         b"schema",
         smuggled.id.0,
-        serde_json::to_vec(&smuggled).unwrap(),
+        codec::encode_catalogue_schema(&smuggled).unwrap(),
     );
     write_schema_mapping_record(&mut edge, SchemaVersionAlias(99), smuggled.id, &mapping);
     drop(edge);

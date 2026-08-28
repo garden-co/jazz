@@ -97,7 +97,7 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::Schema => {
-                    let schema: SchemaVersion = serde_json::from_slice(
+                    let schema = codec::decode_catalogue_schema(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if schema.id
@@ -108,7 +108,7 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::SchemaLineageActive => {
-                    let active: SchemaLineageActivation = serde_json::from_slice(
+                    let active = codec::decode_catalogue_lineage_activation(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -139,7 +139,7 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::BootstrapReady => {
-                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                    let ready = codec::decode_catalogue_bootstrap_ready(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -477,7 +477,7 @@ where
                     vec![
                         Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
                         Value::Uuid(ready.genesis.0),
-                        Value::Bytes(serde_json::to_vec(&ready)?),
+                        Value::Bytes(codec::encode_catalogue_bootstrap_ready(&ready)),
                     ],
                 );
             }
@@ -1541,7 +1541,7 @@ where
                 record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
             )? {
                 codec::CatalogueRecordKind::Schema => {
-                    let schema_version: SchemaVersion = serde_json::from_slice(
+                    let schema_version = codec::decode_catalogue_schema(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if schema_version.id
@@ -1599,7 +1599,7 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::SchemaLineageActive => {
-                    let active: SchemaLineageActivation = serde_json::from_slice(
+                    let active = codec::decode_catalogue_lineage_activation(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -1612,10 +1612,24 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::WritePointerPending => {
-                    let pointer: CurrentWriteSchema = serde_json::from_slice(
+                    let pointer = codec::decode_catalogue_write_pointer(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
-                    pending_write_pointers.insert(pointer.revision, pointer);
+                    if record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        != codec::catalogue_write_pointer_id(pointer)
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "pending catalogue write-pointer id mismatch",
+                        ));
+                    }
+                    if pending_write_pointers
+                        .insert(pointer.revision, pointer)
+                        .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate pending catalogue write-pointer revision",
+                        ));
+                    }
                 }
                 codec::CatalogueRecordKind::Genesis => {
                     let schema =
@@ -1627,7 +1641,7 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::BootstrapReady => {
-                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                    let ready = codec::decode_catalogue_bootstrap_ready(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -1871,7 +1885,7 @@ where
                         vec![
                             Value::U64(codec::CatalogueRecordKind::Schema.key()),
                             Value::Uuid(current_schema_version_id.0),
-                            Value::Bytes(serde_json::to_vec(&SchemaVersion::new(schema.clone()))?),
+                            Value::Bytes(codec::encode_catalogue_schema(&SchemaVersion::new(schema.clone()))?),
                         ],
                     );
                 }

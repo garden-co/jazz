@@ -9,7 +9,7 @@ where
             vec![
                 Value::U64(codec::CatalogueRecordKind::Schema.key()),
                 Value::Uuid(schema.id.0),
-                Value::Bytes(serde_json::to_vec(schema)?),
+                Value::Bytes(codec::encode_catalogue_schema(schema)?),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
@@ -724,7 +724,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::Schema.key()),
                 Value::Uuid(schema.id.0),
-                Value::Bytes(serde_json::to_vec(schema)?),
+                Value::Bytes(codec::encode_catalogue_schema(schema)?),
             ],
         );
         batch.update(
@@ -750,7 +750,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::SchemaLineageActive.key()),
                 Value::Uuid(active.id.0),
-                Value::Bytes(serde_json::to_vec(&active)?),
+                Value::Bytes(codec::encode_catalogue_lineage_activation(active)),
             ],
         );
         Ok(())
@@ -822,14 +822,14 @@ self.database.finish_persistence(persisted)?;
         &mut self,
         pointer: CurrentWriteSchema,
     ) -> Result<(), Error> {
-        let id = uuid::Uuid::new_v5(&pointer.schema.0, &pointer.revision.to_le_bytes());
+        let id = codec::catalogue_write_pointer_id(pointer);
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
             vec![
                 Value::U64(codec::CatalogueRecordKind::WritePointerPending.key()),
                 Value::Uuid(id),
-                Value::Bytes(serde_json::to_vec(&pointer)?),
+                Value::Bytes(codec::encode_catalogue_write_pointer(pointer)),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
