@@ -49,9 +49,16 @@ test("Android bootstrap rejects corrupt pinned archives before extraction", () =
 });
 
 test("checksum pin rejects a planted corrupt cache archive", () => {
-  const archive = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jazz-corrupt-cache-")), "jdk.tgz");
+  const archive = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "jazz-corrupt-cache-")),
+    "jdk.tgz",
+  );
   fs.writeFileSync(archive, "corrupt");
   assert.throws(() =>
-    execFileSync("bash", [path.join(root, "scripts/verify-pinned-archive.sh"), archive, "0".repeat(64)]),
+    execFileSync("bash", [
+      path.join(root, "scripts/verify-pinned-archive.sh"),
+      archive,
+      "0".repeat(64),
+    ]),
   );
 });
