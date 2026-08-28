@@ -41,6 +41,144 @@ mod schema;
 mod subscriptions;
 mod support;
 
+// These are intentionally internal codec assertions: durable key bytes are the
+// storage boundary below Groove's public row API, so a public API round-trip
+// could not distinguish a coordinated encoder/decoder regression from a stable
+// persisted format. The fixtures below keep hard-coded epoch-1 bytes on both
+// sides of that boundary.
+#[test]
+fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
+    use super::encoding::{
+        decode_index_key_part, decode_primary_key_part, encode_index_prefix_part,
+        encode_primary_key_part,
+    };
+
+    let uuid = uuid::Uuid::from_bytes([0x10; 16]);
+    let primary_values = [
+        Value::U8(0xaa),
+        Value::U16(0x1234),
+        Value::U32(0x1234_5678),
+        Value::U64(0x0102_0304_0506_0708),
+        Value::I64(-2),
+        Value::I32(-3),
+        Value::Bool(true),
+        Value::String("a\0b".to_owned()),
+        Value::Bytes(vec![0, 0xff]),
+        Value::Uuid(uuid),
+        Value::Tuple(vec![Value::U16(2), Value::Bool(false)]),
+    ];
+    let frozen_primary = [
+        0x00, 0xaa, // U8
+        0x01, 0x12, 0x34, // U16
+        0x02, 0x12, 0x34, 0x56, 0x78, // U32
+        0x03, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // U64
+        0x0d, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, // I64 sign-flipped
+        0x0e, 0x7f, 0xff, 0xff, 0xfd, // I32 sign-flipped
+        0x05, 0x01, // Bool
+        0x06, b'a', 0x00, 0xff, b'b', 0x00, 0x00, // String
+        0x07, 0x00, 0xff, 0xff, 0x00, 0x00, // Bytes
+        0x0a, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+        0x10, 0x10, 0x0b, 0x01, 0x00, 0x02, 0x05, 0x00, // fixed Tuple(U16, Bool)
+    ];
+
+    let mut encoded = Vec::new();
+    for value in &primary_values {
+        encode_primary_key_part(&mut encoded, value).unwrap();
+    }
+    assert_eq!(encoded, frozen_primary);
+
+    let mut remaining = frozen_primary.as_slice();
+    for (value, value_type) in primary_values.iter().zip([
+        ValueType::U8,
+        ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::I64,
+        ValueType::I32,
+        ValueType::Bool,
+        ValueType::String,
+        ValueType::Bytes,
+        ValueType::Uuid,
+        ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
+    ]) {
+        let decoded = decode_primary_key_part(&mut remaining, &value_type).unwrap();
+        assert_eq!(decoded, *value);
+    }
+    assert!(remaining.is_empty());
+
+    let nullable_string = ColumnType::Nullable(Box::new(ColumnType::String));
+    let frozen_index_part = [0x09, 0x06, b'a', 0x00, 0xff, b'b', 0x00, 0x00];
+    let mut encoded_index = Vec::new();
+    encode_index_prefix_part(
+        &mut encoded_index,
+        &Value::Nullable(Some(Box::new(Value::String("a\0b".to_owned())))),
+        &nullable_string,
+    )
+    .unwrap();
+    assert_eq!(encoded_index, frozen_index_part);
+    let mut remaining = frozen_index_part.as_slice();
+    assert_eq!(
+        decode_index_key_part(&mut remaining, &nullable_string, "fixture").unwrap(),
+        Value::Nullable(Some(Box::new(Value::String("a\0b".to_owned()))))
+    );
+    assert!(remaining.is_empty());
+
+    let mut malformed_escape = &[0x06, b'a', 0x00, 0x01][..];
+    assert!(decode_primary_key_part(&mut malformed_escape, &ValueType::String).is_err());
+    let mut trailing = &[0x05, 0x01, 0xff][..];
+    assert_eq!(
+        decode_primary_key_part(&mut trailing, &ValueType::Bool).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        !trailing.is_empty(),
+        "callers must reject a decoded key with trailing bytes"
+    );
+
+    let mut positive_quiet_nan = &[0x04, 0xff, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..];
+    assert!(decode_index_key_part(&mut positive_quiet_nan, &ColumnType::F64, "fixture").is_err());
+    let mut positive_infinity = &[0x04, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..];
+    assert_eq!(
+        decode_index_key_part(&mut positive_infinity, &ColumnType::F64, "fixture").unwrap(),
+        Value::F64(f64::INFINITY)
+    );
+    assert!(positive_infinity.is_empty());
+
+    // The ordered F64 transform is a separate persisted format from record
+    // values. These literal receipts pin its boundary order, including signed
+    // zero and infinities; NaNs are deliberately outside the format.
+    let f64_receipts: &[(f64, [u8; 9])] = &[
+        (
+            f64::NEG_INFINITY,
+            [0x04, 0x00, 0x0f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (-0.0, [0x04, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        (0.0, [0x04, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        (
+            f64::INFINITY,
+            [0x04, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ),
+    ];
+    let mut previous = None;
+    for (value, receipt) in f64_receipts {
+        let mut actual = Vec::new();
+        encode_index_prefix_part(&mut actual, &Value::F64(*value), &ColumnType::F64).unwrap();
+        assert_eq!(actual, receipt);
+        let mut remaining = receipt.as_slice();
+        let decoded =
+            decode_index_key_part(&mut remaining, &ColumnType::F64, "f64 receipt").unwrap();
+        assert_eq!(decoded, Value::F64(*value));
+        assert!(remaining.is_empty());
+        if let Some(previous) = previous {
+            assert!(
+                previous < *receipt,
+                "frozen receipt order must be lexicographic"
+            );
+        }
+        previous = Some(*receipt);
+    }
+}
+
 #[test]
 fn large_value_metadata_keys_use_the_canonical_node_ref_record() {
     let node_ref = crate::large_values::NodeRef {
