@@ -1177,6 +1177,60 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
 }
 
 #[test]
+fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
+    // Internal recovery-boundary coverage: force a valid persisted fact followed
+    // by a malformed durable key and verify recovery leaves the prior resident
+    // closure untouched rather than publishing a partially decoded prefix.
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let fact = crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
+        crate::protocol::PathCorrelationCoverageEntry {
+            path: "valid".to_owned(),
+            source_table: "todos".to_owned().into(),
+            source_row: row(43),
+            correlation_key: vec![1],
+            complete: true,
+        },
+    );
+    reader
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: vec![fact],
+            program_fact_removes: Vec::new(),
+        }))
+        .unwrap();
+    let expected_facts = reader.query.settled_program_facts.clone();
+    let expected_cursors = reader.query.settled_through_by_binding_view.clone();
+    let corrupt_store = reader
+        .database
+        .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
+        .unwrap();
+    futures::executor::block_on(corrupt_store.set(
+            &[
+                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
+                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
+                Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
+                Value::Bytes(vec![0]),
+            ],
+            &[Value::U64(1)],
+        ))
+    .unwrap();
+    assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());
+    assert_eq!(reader.query.settled_program_facts, expected_facts);
+    assert_eq!(reader.query.settled_through_by_binding_view, expected_cursors);
+}
+
+#[test]
 fn known_state_declaration_never_skips_unfated_edge_members() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_edge_dir, mut edge) = open_node_with_uuid(node(7));
