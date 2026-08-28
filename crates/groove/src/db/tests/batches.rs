@@ -4298,6 +4298,80 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
     );
 }
 
+#[futures_test::test]
+async fn direct_record_store_tuple_keys_set_prefix_order_and_reopen_symmetrically() {
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "tuple_keys",
+        RecordDescriptor::new([
+            ("namespace", ValueType::String),
+            (
+                "coordinate",
+                ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
+            ),
+        ]),
+        RecordDescriptor::new([("bytes", ValueType::Bytes)]),
+    ));
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let database = Database::new(schema.clone(), storage).await.unwrap();
+    let keys = [
+        Value::Tuple(vec![Value::U16(2), Value::Bool(false)]),
+        Value::Tuple(vec![Value::U16(1), Value::Bool(true)]),
+        Value::Tuple(vec![Value::U16(1), Value::Bool(false)]),
+    ];
+    {
+        let store = database.direct_record_store("tuple_keys").unwrap();
+        for (key, payload) in keys
+            .iter()
+            .zip([b"two".as_slice(), b"one-true", b"one-false"])
+        {
+            store
+                .set(
+                    &[Value::String("scope".to_owned()), key.clone()],
+                    &[Value::Bytes(payload.to_vec())],
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .prefix_entries(&[Value::String("scope".to_owned())])
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.key[1].clone())
+                .collect::<Vec<_>>(),
+            [keys[2].clone(), keys[1].clone(), keys[0].clone()]
+        );
+    }
+
+    let storage = database.into_storage();
+    let reopened = Database::new(schema, storage).await.unwrap();
+    let reopened_store = reopened.direct_record_store("tuple_keys").unwrap();
+    let entries = reopened_store
+        .prefix_entries(&[Value::String("scope".to_owned())])
+        .await
+        .unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.key[1].clone())
+            .collect::<Vec<_>>(),
+        [keys[2].clone(), keys[1].clone(), keys[0].clone()]
+    );
+    assert_eq!(
+        entries
+            .into_iter()
+            .map(|entry| entry.value.get("bytes").unwrap())
+            .collect::<Vec<_>>(),
+        [
+            Value::Bytes(b"one-false".to_vec()),
+            Value::Bytes(b"one-true".to_vec()),
+            Value::Bytes(b"two".to_vec()),
+        ]
+    );
+}
+
 async fn assert_direct_record_store_round_trips_array_of_record_values() {
     let child = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(

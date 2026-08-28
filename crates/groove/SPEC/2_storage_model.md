@@ -556,7 +556,8 @@ The epoch-1 tags are frozen: `U8=00`, `U16=01`, `U32=02`, `U64=03`,
 `I64=0d`, `I32=0e`, `Bool=05`, `String=06`, `Bytes=07`, `Uuid=0a`, and
 fixed-width `Tuple=0b`. Signed integer payloads flip their sign bit before
 big-endian emission. A direct record-store key may use only the supported
-declared key types and fixed tuples thereof. Every key decoder is type-directed
+declared key types and fixed tuples thereof; a tuple payload recursively uses
+the same tagged encoding for each member in declaration order. Every key decoder is type-directed
 and MUST consume the entire key: unknown/wrong tags, truncated payloads,
 `Bool` payloads other than `00|01`, malformed NUL escapes, invalid UTF-8
 strings, and trailing bytes are rejected. These primary-key bytes are also the
@@ -571,7 +572,8 @@ embedded NUL and `00 00` terminator. Arrays, records, payload enums, and large
 values are not index key parts. Non-unique keys append exactly `ff` followed by
 the complete typed primary-key bytes; unique keys append nothing. Index decoders
 MUST reject malformed or trailing logical-key bytes rather than accepting a
-prefix as a key.
+prefix as a key. Positive and negative infinity are valid ordered `F64` values;
+every NaN bit pattern is invalid on both encode and decode (`INV-STORAGE-12`).
 
 ### 2.9 Canonical row storage
 

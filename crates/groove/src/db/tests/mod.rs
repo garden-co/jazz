@@ -59,10 +59,12 @@ fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
         Value::Bool(true),
         Value::String("a\0b".to_owned()),
         Value::Uuid(uuid),
+        Value::Tuple(vec![Value::U16(2), Value::Bool(false)]),
     ];
     let frozen_primary = [
         0x01, 0x12, 0x34, 0x05, 0x01, 0x06, b'a', 0x00, 0xff, b'b', 0x00, 0x00, 0x0a, 0x10, 0x10,
-        0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+        0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0b,
+        0x01, 0x00, 0x02, 0x05, 0x00,
     ];
 
     let mut encoded = Vec::new();
@@ -77,6 +79,7 @@ fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
         ValueType::Bool,
         ValueType::String,
         ValueType::Uuid,
+        ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
     ] {
         let decoded = decode_primary_key_part(&mut remaining, &value_type).unwrap();
         assert_eq!(
@@ -86,6 +89,7 @@ fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
                 ValueType::Bool => 1,
                 ValueType::String => 2,
                 ValueType::Uuid => 3,
+                ValueType::Tuple(_) => 4,
                 _ => unreachable!("fixture declares only primary-key types"),
             }]
         );
@@ -120,6 +124,15 @@ fn epoch_1_primary_and_index_key_fixtures_are_exact_and_fail_closed() {
         !trailing.is_empty(),
         "callers must reject a decoded key with trailing bytes"
     );
+
+    let mut positive_quiet_nan = &[0x04, 0xff, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..];
+    assert!(decode_index_key_part(&mut positive_quiet_nan, &ColumnType::F64, "fixture").is_err());
+    let mut positive_infinity = &[0x04, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..];
+    assert_eq!(
+        decode_index_key_part(&mut positive_infinity, &ColumnType::F64, "fixture").unwrap(),
+        Value::F64(f64::INFINITY)
+    );
+    assert!(positive_infinity.is_empty());
 }
 
 #[test]
