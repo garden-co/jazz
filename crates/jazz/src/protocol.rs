@@ -3989,8 +3989,36 @@ impl<'de> serde::Deserialize<'de> for MigrationLens {
     where
         D: serde::Deserializer<'de>,
     {
-        let bytes = Vec::<u8>::deserialize(deserializer)?;
-        decode_canonical_lens_bytes(&bytes).map_err(serde::de::Error::custom)
+        struct LensBytes;
+        impl<'de> serde::de::Visitor<'de> for LensBytes {
+            type Value = MigrationLens;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a bounded canonical migration-lens byte blob")
+            }
+            fn visit_borrowed_bytes<E>(self, bytes: &'de [u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
+                    return Err(E::custom(
+                        "migration lens blob exceeds aggregate byte budget",
+                    ));
+                }
+                decode_canonical_lens_bytes(bytes).map_err(E::custom)
+            }
+            fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
+                    return Err(E::custom(
+                        "migration lens blob exceeds aggregate byte budget",
+                    ));
+                }
+                decode_canonical_lens_bytes(bytes).map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_bytes(LensBytes)
     }
 }
 
