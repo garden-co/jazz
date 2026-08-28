@@ -116,7 +116,13 @@ ordinary ordered-KV data plane. Before creating a table, column family, page,
 or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
-IDs, and sorted decode-relevant adapter parameters. Missing, truncated,
+IDs, and sorted decode-relevant adapter parameters. The epoch-1 payload registry
+is exactly `groove.ordered-kv.v1`; omission, addition, or substitution of a
+codec ID is invalid even when the rest of the manifest is canonical. The
+manifest envelope is the root boundary rather than an entry in its own
+registry. Adding an authoritative opaque byte payload requires a stable ID, a
+corpus entry, and a new epoch rather than an adapter-local postcard/`Bytes`
+exception. Missing, truncated,
 noncanonical, corrupt, unknown, or inconsistent manifests fail closed before
 any mutation (`INV-STORAGE-31`).
 
@@ -135,6 +141,12 @@ column family, SQLite metadata table, or IndexedDB root metadata), but it MUST
 return a successful open receipt only after validating this common contract.
 Memory storage has no durable manifest and is used solely for semantic
 conformance. Backend files are not interchange formats.
+
+**Implementation-status note.** RocksDB and SQLite persist and validate this
+shared `JSM1` manifest. IndexedDB currently validates its adapter-private
+`jazz-idb-tree` page metadata but does not yet persist the shared epoch
+manifest; therefore it is not covered by the epoch-1 physical-open receipt.
+That remaining acceptance item stays explicitly tracked by #2160.
 
 The only ordering property groove requires from the backing store is
 lexicographic byte order. A range `ScanRequest` returns keys in that order and
