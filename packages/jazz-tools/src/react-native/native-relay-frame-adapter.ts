@@ -93,7 +93,10 @@ export class ReactNativeRelayFrameAdapter {
   private closed = false;
   private scheduled = false;
   private running: Promise<void> = Promise.resolve();
+  private startPromise: Promise<void> | null = null;
+  private shutdownPromise: Promise<void> | null = null;
   private readonly pendingFrames: Uint8Array[] = [];
+  private readonly receivedFrames: Uint8Array[] = [];
   private readonly removeWorkListener: () => void;
 
   constructor(
@@ -107,6 +110,12 @@ export class ReactNativeRelayFrameAdapter {
   }
 
   async start(): Promise<void> {
+    if (this.closed) throw new Error("Jazz native relay adapter is closed");
+    this.startPromise ??= this.startImpl();
+    return await this.startPromise;
+  }
+
+  private async startImpl(): Promise<void> {
     const opened = await this.execute({
       type: "open",
       capability: this.capability,
@@ -114,15 +123,26 @@ export class ReactNativeRelayFrameAdapter {
     if (opened.type !== "opened")
       throw new Error("Jazz native relay did not open an admitted scope");
     this.relay = opened.relay;
+    if (this.closed) {
+      await this.closeOpenedHandles();
+      return;
+    }
     const attached = await this.execute({
       type: "attach",
       relay: opened.relay,
     }).catch(async (error) => {
-      await this.execute({ type: "close-relay", relay: opened.relay }).catch(() => undefined);
+      await this.closeOpenedHandles();
       throw error;
     });
-    if (attached.type !== "attached") throw new Error("Jazz native relay did not attach a UI peer");
+    if (attached.type !== "attached") {
+      await this.closeOpenedHandles();
+      throw new Error("Jazz native relay did not attach a UI peer");
+    }
     this.client = attached.client;
+    if (this.closed) {
+      await this.closeOpenedHandles();
+      return;
+    }
     this.transport.setOutboundScheduler?.(() => this.schedule());
     this.schedule();
   }
@@ -158,23 +178,23 @@ export class ReactNativeRelayFrameAdapter {
   }
 
   async shutdown(): Promise<void> {
-    if (this.closed) return;
+    this.shutdownPromise ??= this.shutdownImpl();
+    await this.shutdownPromise;
+  }
+
+  private async shutdownImpl(): Promise<void> {
     this.closed = true;
     this.removeWorkListener();
     this.transport.clearOutboundScheduler?.();
+    await this.startPromise?.catch(() => undefined);
     await this.running;
-    const client = this.client;
-    this.client = null;
-    const relay = this.relay;
-    this.relay = null;
-    if (client !== null)
-      await this.execute({ type: "close-client", client }).catch(() => undefined);
-    if (relay !== null) await this.execute({ type: "close-relay", relay }).catch(() => undefined);
+    await this.closeOpenedHandles();
     await this.runtime.retirePeerTransport(this.transport);
   }
 
   private async progress(): Promise<void> {
     if (this.closed || this.client === null || this.relay === null) return;
+    if (this.deliverReceivedFrames()) this.runtime.notifyPeerTransportActivity?.();
     const outbound = this.transport.recvWireFrames().map(normalizeFrame);
     if (outbound.length > 0) this.pendingFrames.push(...outbound);
     while (this.pendingFrames.length > 0) {
@@ -193,9 +213,8 @@ export class ReactNativeRelayFrameAdapter {
     });
     if (response.type !== "frames") throw new Error("Jazz native relay did not return peer frames");
     if (response.frames.length > 0) {
-      if (this.transport.sendWireFrames) this.transport.sendWireFrames(response.frames);
-      else for (const frame of response.frames) this.transport.sendWireFrame(frame);
-      this.runtime.notifyPeerTransportActivity?.();
+      this.receivedFrames.push(...response.frames);
+      if (this.deliverReceivedFrames()) this.runtime.notifyPeerTransportActivity?.();
     }
     await this.runtime.progressPeerTransport();
   }
@@ -210,6 +229,32 @@ export class ReactNativeRelayFrameAdapter {
     return decodeNativeRelayResponse(
       await this.executor.execute(encodeNativeRelayCommand(command)),
     );
+  }
+
+  /** Deliver one at a time so a failed local delivery retains FIFO frames. */
+  private deliverReceivedFrames(): boolean {
+    let delivered = false;
+    while (this.receivedFrames.length > 0) {
+      const frame = this.receivedFrames[0]!;
+      this.transport.sendWireFrame(frame);
+      this.receivedFrames.shift();
+      delivered = true;
+    }
+    return delivered;
+  }
+
+  /** Atomically claim handles before issuing close commands, exactly once. */
+  private async closeOpenedHandles(): Promise<void> {
+    const client = this.client;
+    const relay = this.relay;
+    this.client = null;
+    this.relay = null;
+    if (client !== null) {
+      await this.execute({ type: "close-client", client }).catch(() => undefined);
+    }
+    if (relay !== null) {
+      await this.execute({ type: "close-relay", relay }).catch(() => undefined);
+    }
   }
 }
 

@@ -143,4 +143,144 @@ describe("ReactNativeRelayFrameAdapter", () => {
     expect(sent).toHaveLength(2);
     await adapter.shutdown();
   });
+
+  it("closes a relay opened while shutdown races startup", async () => {
+    let releaseOpen!: () => void;
+    const openReady = new Promise<void>((resolve) => {
+      releaseOpen = resolve;
+    });
+    const runtime = {
+      onPeerTransportWork: () => () => undefined,
+      progressPeerTransport: async () => undefined,
+      retirePeerTransport: vi.fn(async () => undefined),
+    };
+    const transport = {
+      close: () => true,
+      recvWireFrames: () => [],
+      sendWireFrame: vi.fn(),
+      tick: () => 0,
+    };
+    const tags: number[] = [];
+    const executor = {
+      execute: vi.fn(async (request: string) => {
+        const tag = atob(request).charCodeAt(0);
+        tags.push(tag);
+        if (tag === 1) {
+          await openReady;
+          return base64([1, 9]);
+        }
+        if (tag === 4) return base64([3, 1]);
+        throw new Error(`unexpected command ${tag}`);
+      }),
+    };
+    const adapter = new ReactNativeRelayFrameAdapter(
+      runtime,
+      transport,
+      executor,
+      capability,
+      vi.fn(),
+    );
+
+    const start = adapter.start();
+    const shutdown = adapter.shutdown();
+    releaseOpen();
+    await expect(start).resolves.toBeUndefined();
+    await shutdown;
+    expect(tags).toEqual([1, 4]);
+    expect(runtime.retirePeerTransport).toHaveBeenCalledOnce();
+  });
+
+  it("closes an opened relay when attach has a wrong but valid response", async () => {
+    const runtime = {
+      onPeerTransportWork: () => () => undefined,
+      progressPeerTransport: async () => undefined,
+      retirePeerTransport: async () => undefined,
+    };
+    const transport = {
+      close: () => true,
+      recvWireFrames: () => [],
+      sendWireFrame: vi.fn(),
+      tick: () => 0,
+    };
+    const tags: number[] = [];
+    const executor = {
+      execute: vi.fn(async (request: string) => {
+        const tag = atob(request).charCodeAt(0);
+        tags.push(tag);
+        return tag === 1 ? base64([1, 9]) : tag === 2 ? base64([4]) : base64([3, 1]);
+      }),
+    };
+    const adapter = new ReactNativeRelayFrameAdapter(
+      runtime,
+      transport,
+      executor,
+      capability,
+      vi.fn(),
+    );
+
+    await expect(adapter.start()).rejects.toThrow(/did not attach/);
+    await adapter.shutdown();
+    expect(tags).toEqual([1, 2, 4]);
+  });
+
+  it("redelivers native-drained frames in FIFO order after local delivery failure", async () => {
+    let listener: (() => void) | undefined;
+    let receiveCount = 0;
+    let allowDelivery = false;
+    const delivered: Uint8Array[] = [];
+    const runtime = {
+      onPeerTransportWork: (next: () => void) => {
+        listener = next;
+        return () => {
+          listener = undefined;
+        };
+      },
+      notifyPeerTransportActivity: vi.fn(),
+      progressPeerTransport: async () => undefined,
+      retirePeerTransport: async () => undefined,
+    };
+    const transport = {
+      close: () => true,
+      recvWireFrames: () => [],
+      sendWireFrame: (frame: Uint8Array) => {
+        if (!allowDelivery) {
+          throw new Error("local transport backpressured");
+        }
+        delivered.push(frame);
+      },
+      tick: () => 0,
+    };
+    const onError = vi.fn();
+    const executor = {
+      execute: vi.fn(async (request: string) => {
+        const tag = atob(request).charCodeAt(0);
+        if (tag === 1) return base64([1, 9]);
+        if (tag === 2) return base64([2, 7]);
+        if (tag === 7) return base64(receiveCount++ === 0 ? [5, 2, 1, 0xbb, 1, 0xcc] : [5, 0]);
+        if (tag === 3 || tag === 4) return base64([3, 1]);
+        return base64([4]);
+      }),
+    };
+    const adapter = new ReactNativeRelayFrameAdapter(
+      runtime,
+      transport,
+      executor,
+      capability,
+      onError,
+    );
+
+    await adapter.start();
+    await adapter.flush();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringMatching(/local transport/),
+      }),
+    );
+    expect(delivered).toEqual([]);
+    allowDelivery = true;
+    listener?.();
+    await adapter.flush();
+    expect(delivered).toEqual([Uint8Array.of(0xbb), Uint8Array.of(0xcc)]);
+    await adapter.shutdown();
+  });
 });
