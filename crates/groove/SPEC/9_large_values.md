@@ -180,6 +180,65 @@ second hash in each child descriptor. Consequently, identical UTF-8 or JSON-comp
 not share logical identities across bytes, text, and JSON values. Candidate
 format-1 nodes fail closed; there is no compatibility decoder.
 
+### V2 codec dispatch and permanent layout
+
+`LargeValueRef.format_version` selects the immutable-node codec before any
+descriptor-guided traversal, upload-frontier walk, finalization, edit-tail
+replay, materialization, or upload export interprets a node. The selected codec
+MUST reject a node whose embedded format differs. A decoder MUST NOT try the
+current codec after an unknown, malformed, or mismatched format fails.
+
+V2 is the only supported case in the format dispatch table. Its stored-scalar
+arm remains the schema-known `Primitive = 2 | Chunked = 3` enum: schema lowers
+the bytes/string/JSON kind, so neither arm adds a client-controlled kind tag.
+V2's permanent numeric identities are:
+
+```text
+ChunkNode = enum { Leaf = 0, Branch = 1 }
+Leaf        = { 1: format:u8, 2: kind:u8, 3: bytes:bytes }
+Branch      = { 1: format:u8, 2: kind:u8, 3: children:[BranchChild] }
+BranchChild = {
+  1: object_hash:bytes32, 2: locator:bytes32, 3: byte_length:u64,
+  4: utf16_length:u64?, 5: logical_hash:bytes32
+}
+```
+
+These records use ordinary normative Groove enum/record/scalar encoding. V2
+has no serde/postcard envelope or private node tag. Exact v2 fixtures cover a
+leaf node and object hash, an indirect descriptor with a bounded edit tail, and
+the schema-known stored-scalar wrapper. Each fixture decodes to the stated
+semantic value and byte-identically re-encodes; trailing, alternate, unknown,
+or descriptor/node-version-mismatched bytes fail before child discovery,
+locator disclosure, upload accounting, or metadata mutation. A future format
+MUST add one explicit dispatch case and its own reviewed fixtures; it cannot
+reinterpret v2 bytes or use a fallback decoder.
+
+The following v2 fixtures are authoritative hex, where `object` is
+`object_hash(encoded_node)` and `logical` is the locator-independent node
+logical hash. They are repeated verbatim by
+`large_values::tests::v2_codec_golden_bytes_decode_semantically_and_reject_alternates`.
+
+| semantic value     | canonical node bytes         | object                                                             | logical / metrics                                                                         |
+| ------------------ | ---------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| bytes `v2-fixture` | `00020076322d66697874757265` | `a8f6ec8e407e168b63923c3b2fa558d390672a0db53338497fd4257245918978` | `7ddfe3b3961b5d41459b122dd696fa07867c754d797939efd7b7e09c81a3bfbb`; bytes `10`            |
+| string `v2-🙂`     | `00020176322df09f9982`       | `678e46c71b86713680adea8f58bda0ead55aa464331f72dae2bc89c9de37382c` | `7c1bf3f4b3db7ef7f523bcfd24dd10dc421d41c248f1811ca1d35367f5a5d247`; bytes `7`, UTF-16 `5` |
+| JSON `{"n":-0}`    | `0002027b226e223a2d307d`     | `b73917ac4decd2f0698b805c22cdb5f10ba1a16447f10221c15ca2d34d4c051e` | `b4f699c671ee5f343a5b14ebd2a1b0811118f056e5fee14e458ecea7bb345baf`; bytes/UTF-16 `8`      |
+
+For the bytes leaf above, locator `44` repeated 32 times, logical hash
+`7ddf…bfbb`, and the no-op bounded tail `Replace { offset:9, delete:1,
+insert:"e", utf16:* = 0 }`, the descriptor fixture is:
+
+```text
+00020a000000000000000000000000000000003a0000007e0000007ddfe3b3961b5d41459b122dd696fa07867c754d797939efd7b7e09c81a3bfbb24000000a8f6ec8e407e168b63923c3b2fa558d390672a0db53338497fd42572459189784444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065
+```
+
+The same value wrapped in the bytes schema's ordinary `Chunked = 3` scalar arm
+is exactly the preceding bytes with its leading `00` enum tag replaced by `03`.
+
+`INV-LARGE-11`: descriptor-led format dispatch and canonical v2 fixture
+validation MUST fail closed before a malformed physical representation can
+change lifecycle state or disclose an authenticated child capability.
+
 Nodes use Groove's ordinary canonical enum/record codec rather than a private
 serialization envelope. A leaf is `{ format, kind, bytes }`; a branch is
 `{ format, kind, children }`, where each child is the ordinary record
