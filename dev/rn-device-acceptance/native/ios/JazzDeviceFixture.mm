@@ -18,16 +18,16 @@ RCT_REMAP_METHOD(admittedCapability, admittedCapabilityWithResolver:(RCTPromiseR
   NSError *error = nil;
   if (self.capability == nil) {
     NSDictionary *scope = @{ @"app_namespace": @"jazz-device-acceptance",
-                              @"storage_namespace": @"ios-simulator-acceptance",
+                              @"storage_namespace": @"acceptance-fixture",
                               @"auth_scope": @"fixture-user-a" };
     NSDictionary *fixture = @{ @"scope": scope,
       @"sqlite_path": [NSTemporaryDirectory() stringByAppendingPathComponent:@"jazz-device.sqlite"],
       // Fixed non-secret fixture material. The capability minted from it is
       // opaque; no scope, identity, or claims cross this native boundary.
-      @"schema_json": @"{}",
-      @"identity": @{ @"node": @"11111111-1111-1111-1111-111111111111",
-                       @"author": @"[\"https://jazz.test\",\"ios-simulator\"]" },
-      @"claims": @{ @"role": @"member" } };
+      @"schema_json": @"{\"tables\":{}}",
+      @"identity": @{ @"node": @"11111111-1111-4111-8111-111111111111",
+                       @"author": @"[\"https://jazz.device.test\",\"fixture-user-a\"]" },
+      @"claims": @{} };
     NSData *json = [NSJSONSerialization dataWithJSONObject:fixture options:0 error:&error];
     if (json != nil) self.capability = [JazzRelayTrustedAdmission admitScopeJSON:json error:&error];
   }
