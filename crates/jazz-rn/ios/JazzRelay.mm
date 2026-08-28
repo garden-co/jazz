@@ -37,8 +37,6 @@ static NSError *RelayLifecycleError(NSString *message) {
 }
 #endif
 
-RCT_EXPORT_MODULE(JazzRelay)
-
 - (instancetype)init {
   self = [super init];
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE

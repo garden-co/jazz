@@ -46,15 +46,6 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
-// C and Objective-C translate physical source lines before recognizing either
-// comments or macro invocations. Clang accepts a backslash followed by an LF,
-// CRLF, or implementation-permitted horizontal whitespace and a newline as a
-// line continuation. Normalize that spelling first so this lexical receipt
-// observes the same JavaScript-visible exports as the compiler.
-function normalizeObjcLineContinuations(source) {
-  return source.replace(/\\[ \t\v\f]*\r?\n/g, "");
-}
-
 function assertExactNames(surface, actual, allowed) {
   const unexpected = [...actual].filter((name) => !allowed.has(name));
   const missing = [...allowed].filter((name) => !actual.has(name));
@@ -350,43 +341,6 @@ function assertOpaqueAndroidRelaySurface(androidModule) {
   );
 }
 
-function legacyExportMacros(source) {
-  const declarations = [];
-  const pattern = /\b(RCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*)\s*\(/g;
-  let match;
-  while ((match = pattern.exec(source)) !== null) {
-    const macro = match[1];
-    if (macro === "RCT_EXPORT_MODULE") continue;
-    const opening = source.indexOf("(", match.index + macro.length);
-    let depth = 0;
-    let quote = null;
-    let escaped = false;
-    let closed = false;
-    for (let index = opening; index < source.length; index += 1) {
-      const character = source[index];
-      if (quote !== null) {
-        if (escaped) escaped = false;
-        else if (character === "\\") escaped = true;
-        else if (character === quote) quote = null;
-        continue;
-      }
-      if (character === '"' || character === "'") quote = character;
-      else if (character === "(") depth += 1;
-      else if (character === ")") {
-        depth -= 1;
-        if (depth === 0) {
-          declarations.push({ macro, declaration: source.slice(match.index, index + 1) });
-          pattern.lastIndex = index + 1;
-          closed = true;
-          break;
-        }
-      }
-    }
-    if (!closed) assert.fail(`unterminated ${macro} declaration`);
-  }
-  return declarations;
-}
-
 function objcMethodNames(source) {
   return new Set(
     [
@@ -418,7 +372,15 @@ function objcImplementations(source) {
 }
 
 function assertOpaqueIosRelaySurface(iosRelay) {
-  const commentFreeRelay = stripComments(normalizeObjcLineContinuations(iosRelay));
+  // The generated New-Architecture spec is the sole iOS JavaScript ABI. A raw
+  // source ban is intentional: comments, strings, categories, and line
+  // continuations must not create a parser-dependent escape hatch.
+  assert.doesNotMatch(
+    iosRelay,
+    /\bRCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*\b/,
+    "iOS JazzRelay must contain no legacy RCT export/remap macro token",
+  );
+  const commentFreeRelay = stripComments(iosRelay);
   const implementations = objcImplementations(commentFreeRelay);
   const relayImplementations = implementations.filter(
     (implementation) => implementation.className === "JazzRelay",
@@ -434,26 +396,13 @@ function assertOpaqueIosRelaySurface(iosRelay) {
     "could not find the specifically named trusted Objective-C admission class",
   );
   // Categories are separate @implementation JazzRelay (...) blocks. Check all
-  // of them: only the named private admission class is excluded from this
-  // receipt, so a later category cannot hide an RCT export after the primary
-  // implementation's @end.
+  // of them so no selector grows the generated ABI.
   const relayModule = relayImplementations.map((item) => item.source).join("\n");
   const exportedMethods = objcMethodNames(relayModule);
-  // Old-architecture macros are JavaScript exports even when no Objective-C
-  // selector appears in this source. Their mapped JavaScript names are still
-  // constrained by the generated ABI.
   assertExactNames(
     "iOS JazzRelay implementation",
     exportedMethods,
     iosRelaySelectors,
-  );
-  // The generated New-Architecture spec is the sole iOS JavaScript ABI. An
-  // RCT export/remap macro would create a parallel old-architecture entry
-  // point, so reject every family (including future spelling variants).
-  assert.deepEqual(
-    legacyExportMacros(relayModule),
-    [],
-    "iOS JazzRelay must not add legacy RCT export/remap JavaScript entry points",
   );
 }
 
@@ -638,7 +587,7 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
   assert.doesNotMatch(androidPackage, /JazzRnModule/);
-  assert.match(iosRelay, /RCT_EXPORT_MODULE\(JazzRelay\)/);
+  assert.doesNotMatch(iosRelay, /\bRCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*\b/);
   assert.match(iosRelay, /JAZZ_RELAY_ARTIFACT_AVAILABLE/);
   assert.match(iosRelay, /jazz_native_relay_host_execute/);
   assert.match(iosRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
@@ -908,66 +857,30 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     /configure/,
     "an unqualified handwritten @ReactMethod must receive the same fixed ABI receipt",
   );
-  assert.throws(
-    () =>
-      assertOpaqueIosRelaySurface(
-        iosRelay.replace(
-          "- (void)invalidate",
-          "RCT_EXPORT_METHOD \n(\n  configure:(NSString *)scope\n)\n\n- (void)invalidate",
-        ),
-      ),
-    /configure/,
-    "a multiline RCT_EXPORT_METHOD must not introduce an arbitrary iOS JS export",
-  );
-  assert.throws(
-    () =>
-      assertOpaqueIosRelaySurface(
-        iosRelay.replace(
-          "- (void)invalidate",
-          "RCT_REMAP_METHOD \n( begin, begin:(NSString *)scope )\n\n- (void)invalidate",
-        ),
-      ),
-    /begin/,
-    "a multiline RCT_REMAP_METHOD must not introduce an arbitrary iOS JS export",
-  );
   for (const fixture of [
     {
-      name: "an LF-spliced RCT_EXPORT_METHOD",
+      name: "a URL string prefix",
+      source: 'NSString *url = @"https://example.invalid/RCT_EXPORT_METHOD";',
+    },
+    {
+      name: "a comment",
+      source: "// RCT_REMAP_METHOD(begin, begin:(NSString *)scope)",
+    },
+    {
+      name: "a line continuation",
       source: "RCT_EXPORT_\\\nMETHOD(configure:(NSString *)scope)",
     },
     {
-      name: "a CRLF-and-whitespace-spliced RCT_REMAP_METHOD",
-      source: "RCT_REMAP_\\ \t\r\nMETHOD(begin, begin:(NSString *)scope)",
-    },
-    {
-      name: "an LF-spliced synchronous RCT export",
+      name: "a category",
       source:
-        "RCT_EXPORT_SYNCHRONOUS_TYPED_\\\nMETHOD(NSString *, configure)",
+        "@implementation JazzRelay (LegacyEscapeHatch)\nRCT_EXPORT_METHOD(configure:(NSString *)scope)\n@end",
     },
   ]) {
     assert.throws(
       () =>
-        assertOpaqueIosRelaySurface(
-          iosRelay.replace("- (void)invalidate", `${fixture.source}\n\n- (void)invalidate`),
-        ),
-      /RCT_|configure|begin/,
-      `${fixture.name} must not bypass the sealed iOS relay receipt`,
-    );
-  }
-  for (const fixture of [
-    "RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(configure)",
-    "RCT_EXPORT_SYNCHRONOUS_TYPED_METHOD(NSString *, configure)",
-    "RCT_REMAP_BLOCKING_SYNCHRONOUS_METHOD(configure, configure)",
-    "RCT_REMAP_SYNCHRONOUS_TYPED_METHOD(NSString *, configure, configure)",
-    "RCT_EXPORT_FUTURE_METHOD(configure)",
-  ]) {
-    assert.throws(
-      () =>
-        assertOpaqueIosRelaySurface(
-          iosRelay.replace("- (void)invalidate", `${fixture}\n\n- (void)invalidate`),
-        ),
-      /RCT_/,
-      `${fixture} must not add a legacy iOS relay export`,
+        assertOpaqueIosRelaySurface(`${iosRelay}\n${fixture.source}`),
+      /legacy RCT/,
+      `${fixture.name} must fail the raw iOS legacy macro ban`,
     );
   }
   assert.throws(
@@ -980,28 +893,6 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
       ),
     /configure/,
     "an arbitrary Objective-C method must not grow the sealed relay module",
-  );
-  assert.throws(
-    () =>
-      assertOpaqueIosRelaySurface(
-        `${iosRelay}\n@implementation JazzRelay (LaterEscapeHatch)\nRCT_EXPORT_METHOD(configure:(NSString *)scope)\n@end`,
-      ),
-    /configure/,
-    "a later JazzRelay category must not hide an RCT export after the primary implementation",
-  );
-  assert.doesNotThrow(
-    () =>
-      assertOpaqueIosRelaySurface(
-        `${iosRelay}\n// RCT_EXPORT_METHOD(configure:(NSString *)scope)`,
-      ),
-    "comments must not become iOS relay exports",
-  );
-  assert.doesNotThrow(
-    () =>
-      assertOpaqueIosRelaySurface(
-        `${iosRelay}\n// Still a comment after C line splicing \\ \t\r\nRCT_EXPORT_METHOD(configure:(NSString *)scope)`,
-      ),
-    "a continued Objective-C line comment must not become a relay export",
   );
   assert.match(androidBridge, /object JazzRelayTrustedAdmission/);
   assert.match(androidBridge, /TrustedRelayScopeConfig/);
