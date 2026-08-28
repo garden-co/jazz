@@ -72,7 +72,8 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     upstream_transport
         .send(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
