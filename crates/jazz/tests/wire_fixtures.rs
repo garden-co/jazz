@@ -673,6 +673,29 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
         let decoded = decode_sync_message(&envelope.payload)
             .unwrap_or_else(|error| panic!("fixture {name} fails to decode: {error}"));
         assert_eq!(decoded, expected);
+        assert_eq!(
+            encode_frame(&WireFrame::Message(envelope.clone())).expect("fixture frame reencodes"),
+            frame_bytes,
+            "{name}: semantic frame re-encodes to its frozen exact bytes"
+        );
+        assert_eq!(
+            encode_sync_message(&decoded).expect("fixture payload reencodes"),
+            envelope.payload,
+            "{name}: semantic payload re-encodes to its frozen exact bytes"
+        );
+
+        let mut trailing_frame = frame_bytes;
+        trailing_frame.push(0);
+        assert!(
+            jazz::wire::decode_frame(&trailing_frame).is_err(),
+            "{name}: a canonical frame must reject a suffix"
+        );
+        let mut trailing_payload = envelope.payload;
+        trailing_payload.push(0);
+        assert!(
+            decode_sync_message(&trailing_payload).is_err(),
+            "{name}: a canonical payload must reject a suffix"
+        );
     }
 }
 

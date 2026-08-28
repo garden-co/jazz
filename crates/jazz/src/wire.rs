@@ -6,7 +6,7 @@
 //! server shells can adopt the envelope before the full [`crate::protocol::SyncMessage`]
 //! encoder is frozen.
 
-use postcard::{from_bytes, to_allocvec};
+use postcard::{take_from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -338,16 +338,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     if validate_wire_frame_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
-    let frame: WireFrame = from_bytes(bytes)?;
-    // `postcard` is a compact transport, not a permissive interchange
-    // language.  A payload with another spelling for the same semantic frame
-    // would undermine byte-addressed receipts and golden fixtures.  Decode
-    // first so ordinary malformed/trailing inputs retain postcard's error,
-    // then require the one encoder spelling for every accepted frame.
-    if to_allocvec(&frame)? != bytes {
-        return Err(postcard::Error::DeserializeBadOption);
-    }
-    Ok(frame)
+    decode_postcard_exact(bytes)
 }
 
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
@@ -384,7 +375,7 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     if validate_logical_message_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
-    let message: SyncMessage = from_bytes(bytes)?;
+    let message: SyncMessage = decode_postcard_exact(bytes)?;
     message
         .validate_version_carriers()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
@@ -395,6 +386,24 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
         return Err(postcard::Error::DeserializeBadOption);
     }
     Ok(message)
+}
+
+/// Decode one postcard value only when it consumes the complete input.
+///
+/// Postcard's `from_bytes` intentionally leaves an unread suffix invisible to
+/// callers. A Jazz wire frame and its semantic payload are each exactly one
+/// value, so accepting such a suffix would give one physical frame two
+/// interpretations at adjacent protocol seams.
+fn decode_postcard_exact<'a, T>(bytes: &'a [u8]) -> Result<T, postcard::Error>
+where
+    T: Deserialize<'a>,
+{
+    let (value, remainder) = take_from_bytes(bytes)?;
+    if remainder.is_empty() {
+        Ok(value)
+    } else {
+        Err(postcard::Error::DeserializeBadEncoding)
+    }
 }
 
 /// Decode a semantic message only when its required capabilities were
@@ -862,6 +871,44 @@ mod tests {
         let decoded = decode_frame(&encoded).unwrap();
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn canonical_wire_decoders_reject_trailing_bytes() {
+        let frame = WireFrame::Error(WireError::new(
+            WireErrorCode::Backpressure,
+            WireRetry::Later,
+            "receiver overloaded",
+        ));
+        let mut frame_bytes = encode_frame(&frame).expect("frame encodes");
+        frame_bytes.push(0);
+        assert!(
+            postcard::from_bytes::<WireFrame>(&frame_bytes).is_ok(),
+            "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
+        );
+        assert_eq!(
+            decode_frame(&frame_bytes),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "a physical frame is exactly one postcard value"
+        );
+
+        let message = SyncMessage::FateUpdate {
+            tx_id: TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16])),
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        };
+        let mut payload = encode_sync_message(&message).expect("message encodes");
+        payload.push(0);
+        assert!(
+            postcard::from_bytes::<SyncMessage>(&payload).is_ok(),
+            "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
+        );
+        assert_eq!(
+            decode_sync_message(&payload),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "a logical payload is exactly one postcard value"
+        );
     }
 
     #[test]
@@ -1370,6 +1417,19 @@ mod tests {
         assert_eq!(
             decoder.decode_message(&message, FEATURE_NONE).unwrap(),
             message
+        );
+    }
+
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn zstd_stream_decoder_rejects_corrupt_compressed_payload() {
+        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+
+        assert!(
+            decoder
+                .decode_message(b"not a zstd frame", FEATURE_PAYLOAD_ZSTD)
+                .is_err(),
+            "a negotiated compression bit must not turn corrupt bytes into a semantic payload"
         );
     }
 

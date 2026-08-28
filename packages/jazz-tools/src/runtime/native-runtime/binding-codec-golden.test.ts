@@ -89,6 +89,25 @@ describe("binding codec golden contract", () => {
       { type: "ServerFailure", code: "TableNotFound" },
     ]);
   });
+
+  it("rejects trailing bytes after a complete binding payload", () => {
+    const fixture = bindingCodecGoldenFixture();
+    const relation = relationCase(fixture, "empty_root_count_zero");
+    const relationWithSuffix = Uint8Array.from([...hexToBytes(relation.payload_hex), 0]);
+    expect(() =>
+      readNativeRelationSubscriptionSnapshot(new PostcardReader(relationWithSuffix)),
+    ).toThrow("relation snapshot has trailing postcard bytes");
+
+    const delta = fixture.subscription_deltas.find(
+      (candidate) => candidate.name === "added_updated_removed_with_v1_and_v2_occurrence_keys",
+    )!;
+    const deltaWithSuffix = Uint8Array.from([...hexToBytes(delta.payload_hex), 0]);
+    expect(() => readNativeSubscriptionDelta(new PostcardReader(deltaWithSuffix))).toThrow(
+      "subscription delta has trailing postcard bytes",
+    );
+
+    expect(() => new PostcardReader(Uint8Array.from([1, 0xff])).string()).toThrow();
+  });
 });
 
 function bindingCodecGoldenFixture(): BindingCodecGoldenFixture {

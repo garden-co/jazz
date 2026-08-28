@@ -90,6 +90,64 @@ only supported message layout. `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
 derived on decode), replacing postcard's former field-by-field representation.
 
+### 8.1.1 Frozen v14 byte contract
+
+`WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
+value**. A conformant decoder MUST reject a valid prefix followed by any
+trailing byte; concatenation belongs only to the documented WebSocket
+`Vec<Vec<u8>>` batch carrier. In particular, a binding MUST NOT hand a byte
+suffix from one frame to the semantic decoder, and a semantic decoder MUST NOT
+silently leave a suffix for its caller (`INV-WIRE-1`).
+
+Postcard enum ordinals are wire data. The v14 baseline freezes these permanent
+discriminants (decimal):
+
+| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `WirePeerRole`  | `Client=0`, `Core=1`, `Edge=2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `SetCurrentWriteSchema=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29` |
+
+Future variants MUST append after these values; existing variants, fields, and
+their field order MUST NOT be reordered, inserted before, reused, or decoded
+through a migration path. A new optional semantic variant additionally needs a
+new negotiated feature bit. v14 intentionally provides neither old-version
+decoding nor migration.
+
+Feature bits are also permanent: `SyncMessagePayload=1<<0`,
+`SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
+`PayloadZstd=1<<4`, `MessageFragmentation=1<<5`,
+`AuthorizationScopeReceipts=1<<6`, `AuthorizationScopeViews=1<<7`, and
+`AuxiliaryChunks=1<<8`. `Hello` negotiates only the intersection. A message
+envelope or fragment MUST NOT declare a bit outside that intersection. Exactly
+one compression bit may be active on an envelope; when both codecs are
+negotiated, an outbound v14 sender selects LZ4 and emits only its bit. A
+receiver rejects an envelope declaring both codecs, a codec change within one
+connection, corrupt compressed bytes, or a decompressed payload exceeding the
+logical-message budget. Compression is applied before fragmentation and removed
+only after complete fragment reassembly; it never changes semantic bytes.
+
+`WireMessageFragment` is the complete physical-fragment layout in field order:
+`protocol_version`, `features`, `session`, `message_id`, `message_digest`,
+`total_len`, `offset`, `payload`. Its digest covers the entire compressed
+payload; reassembly admits only negotiated, session-authenticated, in-range,
+non-overlapping extents with exact contiguous coverage and matching metadata,
+then verifies that digest before decompression or semantic decode. The resource
+limits and expiry/deduplication rules are normative in
+`SPEC/13_transport_message_fragmentation.md`.
+
+The v14 frozen corpus is `crates/jazz/fixtures/wire_message_frames.json`:
+Rust independently decodes every hard-coded frame, re-encodes the semantic
+value to the exact same payload and frame bytes, and TypeScript independently
+reads the transport envelope through its production postcard reader. Its
+binding companion, `binding_codec_golden.json`, covers NAPI/WASM's shared
+Rust-produced relation-snapshot and subscription-delta byte ABI, consumed by
+the production TypeScript decoder. These corpora are compatibility evidence,
+not a permissive migration input. Adding a new case requires a SPEC decision,
+an invariant citation, and a review of every language consumer.
+
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at
 the edge of the core, so handshake, socket state, malformed-byte errors, and
