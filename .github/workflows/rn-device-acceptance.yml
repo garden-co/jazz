@@ -1,26 +1,28 @@
-name: React Native device acceptance (WIP)
+name: React Native device scaffold verification
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, labeled, unlabeled]
+    types: [opened, reopened, synchronize]
     paths:
       - "dev/rn-device-acceptance/**"
       - "crates/jazz-rn/**"
       - "crates/jazz-native-relay/**"
       - "packages/jazz-tools/src/react-native/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
       - ".github/workflows/rn-device-acceptance.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: rn-device-acceptance-${{ github.event.pull_request.number }}
+  group: rn-device-scaffold-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  android:
-    # Expensive emulator work is maintainer-opt-in and never trusts fork code.
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'react-native') && github.event.pull_request.head.repo.full_name == github.repository }}
+  android-source-scaffold:
+    name: Android source scaffold verification (not device acceptance)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -32,11 +34,13 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter rn-device-acceptance verify
-      # TODO(#1974): stage matching relay libraries, register the fixture,
-      # assemble/install a development build, then invoke device:android.
+      # TODO(#1974): a separate `react-native`-label-gated device workflow
+      # will stage relay libraries, use Gradle/Cargo caches, assemble/install,
+      # launch, and run the receipt driver. Do not call that job acceptance
+      # until all of those steps exist.
 
-  ios:
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'react-native') && github.event.pull_request.head.repo.full_name == github.repository }}
+  ios-source-scaffold:
+    name: iOS source scaffold verification (not device acceptance)
     runs-on: blacksmith-6vcpu-macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -48,5 +52,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter rn-device-acceptance verify
-      # TODO(#1974): stage XCFramework, register fixture, build/install app,
-      # then invoke device:ios. This job is source/prebuild scaffolding only.
+      # TODO(#1974): a separate `react-native`-label-gated device workflow
+      # will stage the XCFramework, use CocoaPods/Cargo caches, build/install,
+      # launch, and run the receipt driver. This source job is not acceptance.

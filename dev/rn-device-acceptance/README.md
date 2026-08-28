@@ -8,7 +8,7 @@ The app has one durable native relay and a scenario plan requiring two UI runtim
 
 `native/android/JazzDeviceFixtureModule.kt` and `native/ios/JazzDeviceFixture.mm` admit a scope entirely in trusted platform code. The relay's opaque 32-byte capability is the only value permitted into JavaScript. The templates use build-time test-only fixture placeholders; they must never be populated by Metro variables, intents, a remote config service, or an OTA update. `src/native-fixture.ts` is the narrow JS consumer.
 
-The Expo config plugin copies those templates during prebuild. Native host registration and CI fixture material are deliberately tracked as TODO because their generated-host shapes and the verified fixture schema/identity must be validated with a real staged relay artifact. The injected code is therefore not an asserted build receipt.
+The Expo config plugin copies and registers the Android template during prebuild; its public placeholder `BuildConfig` values make that host compile-shaped without embedding credentials. A real device job must replace only its non-secret test fixture material after staging a matching relay artifact. iOS registration and both platform build receipts remain TODO; this source scaffold is not device acceptance.
 
 ## Current acceptance plan
 
