@@ -4500,6 +4500,87 @@ mod tests {
         SchemaVersionId::from_bytes([byte; 16])
     }
 
+    #[test]
+    fn protocol_lens_storage_codec_covers_every_declared_operation_and_value_arm() {
+        let values = vec![
+            Value::U8(1),
+            Value::U16(2),
+            Value::U32(3),
+            Value::U64(4),
+            Value::I32(-5),
+            Value::I64(-6),
+            Value::F64(7.5),
+            Value::Bool(true),
+            Value::String("s".into()),
+            Value::Bytes(vec![8]),
+            Value::Uuid(uuid::Uuid::from_bytes([9; 16])),
+            Value::EnumTag(10),
+            Value::Tuple(vec![Value::U8(11)]),
+            Value::Array(vec![Value::U8(12)]),
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::U8(13)))),
+        ];
+        let ops = vec![
+            LensOp::RenameTable {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            LensOp::RenameColumn {
+                from: "c".into(),
+                to: "d".into(),
+            },
+            LensOp::CopyColumn {
+                from: "e".into(),
+                to: "f".into(),
+            },
+            LensOp::TransformColumn {
+                column: "g".into(),
+                transform: "h".into(),
+            },
+            LensOp::RejectSourceDelta { reason: "i".into() },
+        ];
+        let mut all = ops;
+        for (index, value) in values.into_iter().enumerate() {
+            all.push(LensOp::AddColumn {
+                column: format!("add{index}"),
+                default: value.clone(),
+            });
+            all.push(LensOp::DropColumn {
+                column: format!("drop{index}"),
+                backwards_default: value,
+            });
+        }
+        let lens = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![TableLens {
+                source_table: "source".into(),
+                target_table: "target".into(),
+                ops: all,
+            }],
+        );
+        let exact = canonical_lens_bytes(&lens);
+        assert_eq!(decode_canonical_lens_bytes(&exact).unwrap(), lens);
+        for malformed in [
+            vec![],
+            exact[..exact.len() - 1].to_vec(),
+            [exact.clone(), vec![0]].concat(),
+            {
+                let mut changed = exact.clone();
+                changed[0] ^= 1;
+                changed
+            },
+        ] {
+            assert!(decode_canonical_lens_bytes(&malformed).is_err());
+        }
+        // Planted sensitivity: accepting an alternate bool tag would make a
+        // malformed durable default indistinguishable from a valid one.
+        let bool_offset = exact.iter().position(|byte| *byte == 5).unwrap();
+        let mut planted = exact.clone();
+        planted[bool_offset + 1] = 2;
+        assert!(decode_canonical_lens_bytes(&planted).is_err());
+    }
+
     // This is intentionally an internal byte-level test: the durable physical
     // identity is not observable through the public row API, and a behavioral
     // round trip alone would not freeze the assigned version, tags, or widths.
