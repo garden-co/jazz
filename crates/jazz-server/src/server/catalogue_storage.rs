@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
 use crate::server::catalogue_entry::CatalogueEntry;
-use jazz::groove::storage::{BoxedStorage, OrderedKvStorage, StorageFactory};
+use jazz::groove::storage::{BoxedStorage, OrderedKvStorage, StorageCodecProfile, StorageFactory};
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::tools::ObjectId;
 
@@ -91,9 +91,7 @@ impl CatalogueKvStorage {
         factory: Arc<dyn StorageFactory>,
         path: PathBuf,
     ) -> CatalogueStorageResult<Self> {
-        let codec_profile = epoch_1_storage_codec_profile()
-            .and_then(|profile| profile.with_additional_codecs(["jazz.server-catalogue-entry.v1"]))
-            .map_err(storage_error)?;
+        let codec_profile = catalogue_storage_codec_profile()?;
         let (commands, receiver) = mpsc::channel();
         let (opened_tx, opened_rx) = mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -259,25 +257,48 @@ fn storage_error(error: jazz::groove::storage::Error) -> CatalogueStorageError {
     CatalogueStorageError::IoError(error.to_string())
 }
 
+/// Closed manifest profile for the server's independent catalogue root.
+///
+/// The catalogue has the same Jazz-owned durable families as an app runtime,
+/// plus its own opaque entry payload codec. Keeping this constructor shared by
+/// production and physical-layout fixtures prevents a stale Groove-only
+/// manifest from masquerading as an accepted Jazz store.
+pub(crate) fn catalogue_storage_codec_profile() -> CatalogueStorageResult<StorageCodecProfile> {
+    epoch_1_storage_codec_profile()
+        .and_then(|profile| profile.with_additional_codecs(["jazz.server-catalogue-entry.v1"]))
+        .map_err(storage_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use jazz::groove::storage::OrderedKvStorage;
 
     #[test]
-    fn adapter_catalogue_reads_the_pre_extraction_default_cf_layout() {
+    fn adapter_catalogue_reads_the_settled_default_cf_layout() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("catalogue.rocksdb");
         let object_id = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x4a; 16]));
         let entry = CatalogueEntry {
             object_id,
             metadata: std::collections::HashMap::from([("type".to_owned(), "table".to_owned())]),
-            content: b"legacy-catalogue-row".to_vec(),
+            content: b"catalogue-row".to_vec(),
         };
 
         {
-            let legacy = jazz_storage_rocksdb::RocksDbStorage::open(&path, &["default"]).unwrap();
-            jazz::db::block_on(legacy.set(
+            // This lower-level fixture intentionally writes a physically
+            // pre-existing catalogue row. It must use the same settled
+            // manifest as the production opener; Jazz no longer admits a
+            // Groove-only root as a compatibility layout.
+            let storage =
+                jazz_storage_rocksdb::RocksDbStorage::open_with_durability_and_codec_profile(
+                    &path,
+                    &["default"],
+                    jazz_storage_rocksdb::Durability::WalNoSync,
+                    &catalogue_storage_codec_profile().unwrap(),
+                )
+                .unwrap();
+            jazz::db::block_on(storage.set(
                 "default".to_owned(),
                 CatalogueKvStorage::entry_key(object_id),
                 entry.encode_storage_row().unwrap(),

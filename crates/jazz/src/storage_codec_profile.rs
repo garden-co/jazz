@@ -28,17 +28,14 @@ pub const JAZZ_EPOCH_1_STORAGE_CODECS: &[&str] = &[
 
 /// The closed base profile required by every persistent Jazz node.
 ///
-/// The generic `groove.ordered-kv.v1` family remains first because codec IDs
-/// are sorted by the profile constructor. An incompatible addition changes the
+/// Groove's mandatory epoch-one families remain first because codec IDs are
+/// sorted by the profile constructor. An incompatible addition changes the
 /// top-level manifest and therefore requires a new storage epoch. A separate
 /// durable root (such as the server's catalogue-entry store) composes this
 /// profile with its own root-local codec family before opening its adapter.
 pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
-    StorageCodecProfile::new(
-        ["groove.ordered-kv.v1"]
-            .into_iter()
-            .chain(JAZZ_EPOCH_1_STORAGE_CODECS.iter().copied()),
-    )
+    StorageCodecProfile::groove_epoch_1()
+        .with_additional_codecs(JAZZ_EPOCH_1_STORAGE_CODECS.iter().copied())
 }
 
 #[cfg(test)]
@@ -51,6 +48,8 @@ mod tests {
         assert_eq!(
             profile.codec_ids().collect::<Vec<_>>(),
             vec![
+                "groove.large-value.v1",
+                "groove.ordered-chunk-storage.v1",
                 "groove.ordered-kv.v1",
                 "jazz.branch-key.v1",
                 "jazz.catalogue.activation.v1",
@@ -78,7 +77,7 @@ mod tests {
             &epoch_1_storage_codec_profile().expect("valid fixed profile"),
         )
         .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0c\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x19jazz.result-member-key.v1\x19jazz.result-row-source.v1\x25jazz.subscription-program-fact-key.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x01\0\x01\x06memory\x0e\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x19jazz.result-member-key.v1\x19jazz.result-row-source.v1\x25jazz.subscription-program-fact-key.v1\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(manifest.encode().expect("canonical manifest"), expected);
         assert_eq!(
             crate::groove::storage::StorageEpochManifest::decode(expected)
