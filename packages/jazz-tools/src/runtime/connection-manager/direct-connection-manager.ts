@@ -64,7 +64,12 @@ export class DirectConnectionManager extends ConnectionManager {
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
     if (this.connectionError) throw this.connectionError;
-    await this.connectionReady;
+    // Awaiting `null` still yields a microtask. Preserve the direct manager's
+    // established synchronous-ready path when a source has no platform peer:
+    // remote reads and subscription handoffs choose their tier before an
+    // explicit disconnect/reconnect can interleave.
+    const connectionReady = this.connectionReady;
+    if (connectionReady) await connectionReady;
     if (this.connectionError) throw this.connectionError;
     if (tier === "local") return;
     for (;;) {
