@@ -238,6 +238,78 @@ is exactly the preceding bytes with its leading `00` enum tag replaced by `03`.
 validation MUST fail closed before a malformed physical representation can
 change lifecycle state or disclose an authenticated child capability.
 
+V1 dispatch is joint: the outer descriptor's `format_version` is selected
+before its root record, every nested edit record, or the `Chunked = 3`
+stored-scalar payload is interpreted. The schema-known scalar kind still
+supplies bytes/string/JSON context; it is not a version selector and never
+supplies a client-controlled kind tag. A future version therefore needs one
+reviewed descriptor/edit/scalar decoder as well as its node decoder. It MUST
+NOT reuse V1's edit-coordinate validation simply because the outer enum tag is
+unchanged.
+
+The raw dispatch preflight reads only the canonical outer enum tag and the
+first fixed `format_version:u8` payload byte. It does not bind a descriptor or
+node record, calculate variable-field spans, decode a root `NodeRef`, decode
+branch children, or decode an edit before selecting the codec. The same node
+selector is used by descriptor-free metadata observation and descriptor-led
+upload admission. Therefore an unknown/future version with a truncated or
+deliberately non-V1 nested layout fails as `UnsupportedFormat`, rather than as
+a V1 malformed record. Once V1 is selected, the full current
+descriptor/edit/scalar or node payload is decoded and exactly
+re-encoded; V1 malformed or trailing bytes still fail closed.
+
+Staged-root receipts and pending-upload journals store the canonical complete
+`LargeValueRef` encoding as an opaque `bytes` metadata field (nullable bytes
+for an unbound pending descriptor), not as a nested generic descriptor value.
+On every recovery/read path Groove runs that byte field through the same raw
+preflight and codec decoder before it interprets root or edit fields. The
+`future_descriptor_metadata_fails_before_v1_binding_without_mutation` reopen
+receipt installs a future outer tag/version plus invalid nested bytes in both
+journals, requires `UnsupportedFormat`, and proves the durable records remain
+byte-identical after rejection. No metadata reader may create a V1 decoding
+bypass by embedding a descriptor inside another record.
+
+V1's content-defined profile is permanent format data:
+
+```text
+leaf minimum / target / maximum = 16,384 / 65,536 / 262,144 bytes
+leaf short / long masks         = 0x0001ffff / 0x00007fff
+branch minimum / target / max   = 4 / 16 / 64 children
+branch short / long masks       = 0x0000001f / 0x00000007
+gear(byte) = SplitMix64(byte + 0x9e3779b97f4a7c15), with multipliers
+             0xbf58476d1ce4e5b9 and 0x94d049bb133111eb
+```
+
+The leaf and branch rolling accumulators shift left by one and add that gear
+value per input byte or recovered grouping-hash byte. Before target they cut
+on the short mask; at/after target they cut on the long mask; the stated hard
+maximum always cuts. These values include the gear construction, not merely
+the visible size constants. They cannot be tuned, seeded from a runtime RNG,
+or changed for one backend without a new immutable format version.
+`v1_content_defined_profile_manifest_is_permanent` freezes gear vectors,
+short- and long-mask leaf ranges over a deterministic multi-megabyte input,
+the no-match hard maximum, UTF-8 boundary repair, and every object/logical hash
+of a multi-branch grouping manifest. This is a planted sensitivity receipt:
+changing either mask or any gear parameter changes at least one frozen range
+or branch object/logical hash.
+
+V1 JSON is literal validated UTF-8 source, never a normalized serialization.
+Its canonical receipt uses the exact source
+`{"literal":"\\uD83D\\uDE42","dup":1,"dup":2,"n":-0,"scientific":1e+00,"text":"\\u00e9"}`;
+the leaf bytes, object hash, and logical hash are respectively
+`0002027b226c69746572616c223a225c75443833445c7544453432222c22647570223a312c22647570223a322c226e223a2d302c22736369656e7469666963223a31652b30302c2274657874223a225c7530306539227d`,
+`c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b0`, and
+`b538953f883dc4ca231dc62746a6b3e8413b772e2baf267f16be791bd58fcb3f`.
+The source preserves duplicate spelling and number spelling physically; a
+parsed object read has ordinary last-duplicate-key behavior, retains negative
+zero, and decodes the Unicode escapes. The exact descriptor and scalar
+fixtures for a whole-document replacement containing literal `🙂` and `é` are
+authoritatively exercised by
+`v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical`.
+They prove exact re-encoding, trailing-byte rejection, malformed UTF-8/JSON
+rejection, whole-value-only JSON edits, UTF-8-to-UTF-16 metric agreement, and
+tail consolidation back to an empty-tail immutable root.
+
 Nodes use Groove's ordinary canonical enum/record codec rather than a private
 serialization envelope. A leaf is `{ format, kind, bytes }`; a branch is
 `{ format, kind, children }`, where each child is the ordinary record
