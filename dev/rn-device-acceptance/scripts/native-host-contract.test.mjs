@@ -35,6 +35,8 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /jazzDeviceRunNonce/);
   assert.match(fixture, /applicationInfo\.sourceDir/);
   assert.match(fixture, /MessageDigest\.getInstance\("SHA-256"\)/);
+  assert.match(fixture, /@ReactMethod fun recordReceipt/);
+  assert.match(fixture, /jazz-device-receipt\.ndjson/);
   assert.doesNotMatch(fixture, /jazzDeviceBuildFingerprint/);
 });
 
@@ -48,6 +50,11 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
   assert.match(podspec, /s\.source_files\s+=\s+"ios\/\*\*\/\*\.\{h,m,mm,swift\}"/);
   assert.match(fixture, /#import <JazzRn\/JazzRelay\.h>/);
   assert.doesNotMatch(fixture, /JazzNativeRelay\/JazzRelay\.h/);
+  assert.equal(
+    fixture,
+    read("ios/JazzDeviceFixture.mm"),
+    "the checked-in iOS host fixture must match the prebuild template",
+  );
 });
 
 test("Expo config plugin describes the real iOS receipt boundary without claiming TODO scenarios", () => {
@@ -131,6 +138,10 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   ]) {
     assert.match(fixture, new RegExp(key));
   }
+  assert.match(fixture, /RCT_REMAP_METHOD\(recordReceipt/);
+  assert.match(fixture, /JAZZ_DEVICE_RESULT/);
+  assert.match(fixture, /NSDataWritingAtomic/);
+  assert.doesNotMatch(fixture, /recordReceipt[\s\S]*JazzRelayTrustedAdmission/);
 });
 
 test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt timeout", () => {
@@ -144,10 +155,20 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   for (const detail of [
     "parseLaunchProcessId",
     "get_app_container",
+    "jazz-device-receipt.ndjson",
+    "receiptFile",
+    "rmSync\\(receiptFilePath\\(\\)",
     "launchctl",
     "recent app logs \\(capped\\)",
     'process == "JazzRNdeviceacceptance"',
   ]) {
     assert.match(driver, new RegExp(detail));
   }
+  const app = read("App.tsx");
+  assert.match(app, /await proveAdmittedRelay/);
+  assert.match(app, /await recordDeviceReceipt\(result\)/);
+  assert.ok(
+    app.indexOf("await proveAdmittedRelay") < app.indexOf("await recordDeviceReceipt(result)"),
+    "the native receipt sink must run only after the JS relay proof",
+  );
 });

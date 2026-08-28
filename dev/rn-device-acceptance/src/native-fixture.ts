@@ -13,6 +13,7 @@ type FixtureModule = {
   admittedCapability(): Promise<string>;
   logout(): Promise<void>;
   receiptContext(): Promise<DeviceReceiptContext>;
+  recordReceipt(receipt: string): Promise<void>;
 };
 
 /**
@@ -63,4 +64,14 @@ export async function deviceReceiptContext(): Promise<DeviceReceiptContext> {
     throw new Error("JazzDeviceFixture returned an invalid trusted receipt context");
   }
   return context;
+}
+
+/**
+ * Release iOS builds do not provide a reliable unified-log sink for React
+ * Native's `console.log`. The test-only native fixture persists the exact
+ * protocol line only after JavaScript has completed its proof; the host reads
+ * that app-sandbox file and still validates it independently.
+ */
+export async function recordDeviceReceipt(receipt: string): Promise<void> {
+  await fixtureModule().recordReceipt(receipt);
 }

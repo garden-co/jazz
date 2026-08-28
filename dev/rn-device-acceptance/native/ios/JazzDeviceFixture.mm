@@ -10,6 +10,12 @@
 @implementation JazzDeviceFixture
 RCT_EXPORT_MODULE();
 
+static NSURL *JazzDeviceReceiptURL(void) {
+  NSURL *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
+                                                         inDomains:NSUserDomainMask].firstObject;
+  return [caches URLByAppendingPathComponent:@"jazz-device-receipt.ndjson"];
+}
+
 RCT_REMAP_METHOD(admittedCapability, admittedCapabilityWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   NSError *error = nil;
   if (self.capability == nil) {
@@ -51,5 +57,22 @@ RCT_REMAP_METHOD(receiptContext, receiptContextWithResolver:(RCTPromiseResolveBl
     return;
   }
   resolve(@{ @"platform": @"ios", @"runNonce": nonce, @"buildFingerprint": fingerprint, @"deviceIdentifier": device });
+}
+
+// This is intentionally a sink, not a native receipt generator: JavaScript
+// supplies the complete protocol line after its relay proof, and the host
+// validates it after reading the app-sandbox file.
+RCT_REMAP_METHOD(recordReceipt, recordReceipt:(NSString *)receipt resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if (![receipt hasPrefix:@"JAZZ_DEVICE_RESULT "] || receipt.length > 16384) {
+    reject(@"E_JAZZ_DEVICE_RECEIPT", @"Invalid device receipt", nil);
+    return;
+  }
+  NSError *error = nil;
+  NSData *data = [[receipt stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+  if (![data writeToURL:JazzDeviceReceiptURL() options:NSDataWritingAtomic error:&error]) {
+    reject(@"E_JAZZ_DEVICE_RECEIPT", error.localizedDescription, error);
+    return;
+  }
+  resolve(nil);
 }
 @end

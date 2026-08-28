@@ -74,4 +74,17 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     }
     return digest.digest().joinToString("") { "%02x".format(it) }
   }
+
+  /** See the matching iOS fixture: JavaScript supplies the verified protocol
+   * line after its relay proof; this method only persists that line. */
+  @ReactMethod fun recordReceipt(receipt: String, promise: Promise) {
+    try {
+      require(receipt.startsWith("JAZZ_DEVICE_RESULT ") && receipt.length <= 16_384) {
+        "invalid device receipt"
+      }
+      reactApplicationContext.cacheDir.resolve("jazz-device-receipt.ndjson")
+        .writeText("$receipt\n")
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT", error) }
+  }
 }
