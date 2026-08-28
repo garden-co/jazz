@@ -1112,7 +1112,11 @@ fn validate_value_inner(
         ValueType::U64 | ValueType::I64 => read_exact::<8>(bytes).map(|_| ()),
         ValueType::F64 => {
             let value = f64::from_le_bytes(read_exact::<8>(bytes)?);
-            if require_constructible && value.is_nan() {
+            // NaN has no representation in any persisted record state. This
+            // structural check intentionally does not depend on the stronger
+            // constructibility mode: `OwnedRecord::validate` is a durable
+            // admission boundary for externally supplied raw VariantRecords.
+            if value.is_nan() {
                 Err(Error::InvalidF64NaN)
             } else {
                 Ok(())

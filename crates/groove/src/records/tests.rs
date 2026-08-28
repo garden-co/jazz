@@ -1221,6 +1221,10 @@ fn epoch_1_scalar_record_fixture_is_exact_and_rejects_nan_and_noncanonical_null(
     // F64 starts after 1 + 2 + 4 + 8 + 4 + 8 bytes.
     nan[27..35].copy_from_slice(&f64::NAN.to_le_bytes());
     assert!(descriptor.bind(&nan).to_values().is_err());
+    assert!(matches!(
+        descriptor.bind(&nan).validate(),
+        Err(Error::InvalidF64NaN)
+    ));
 }
 
 #[test]

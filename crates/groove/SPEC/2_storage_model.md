@@ -538,8 +538,9 @@ non-monotonic offset; a trailing byte in a fixed-only record; an invalid scalar;
 or a non-canonical nested record is invalid, not an alternate representation.
 
 `F64` record values use their IEEE-754 bits little-endian; positive and negative
-infinity are valid, while every NaN bit pattern is invalid on both encode and decode.
-Ordered-index `F64` uses the separately specified order transform in §2.8.
+infinity are valid, while every NaN bit pattern is invalid on encode, decode, and
+structural validation before a caller-supplied raw `VariantRecord` can enter durable
+storage. Ordered-index `F64` uses the separately specified order transform in §2.8.
 
 **Nullable values** (`INV-STORAGE-10`): a fixed-width null is flag `0` plus a
 zero-filled reserved width; a variable-width null is the flag byte alone.

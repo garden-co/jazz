@@ -1,5 +1,5 @@
 use groove::db::{Database, Error, GraphBuilder, IvmRuntimeError, ProjectField};
-use groove::records::{RecordDescriptor, Value, ValueType, VariantRecord};
+use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType, VariantRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
     TableVariant,
@@ -26,6 +26,45 @@ async fn open_database() -> Result<Database, Error> {
     let storage =
         MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     Database::new(schema, storage).await
+}
+
+#[futures_test::test]
+async fn raw_variant_record_with_nan_is_rejected_before_durable_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let table = TableSchema::new(
+        "metrics",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::F64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_variant(1, ["id", "value"]);
+    let schema = DatabaseSchema::new([table]);
+    let storage = MemoryStorage::new(&schema.column_families())?;
+    let mut database = Database::new(schema.clone(), storage).await?;
+    let descriptor = schema
+        .table("metrics")
+        .unwrap()
+        .record_schema_for_variant(1)
+        .unwrap();
+    let mut raw = 7_u64.to_le_bytes().to_vec();
+    raw.extend(f64::NAN.to_le_bytes());
+    let malicious = VariantRecord::new(1, OwnedRecord::new(raw, descriptor));
+
+    let mut batch = database.open_batch();
+    batch.insert("metrics", malicious);
+    assert!(matches!(
+        database.apply_batch(batch).await,
+        Err(Error::RecordEncoding(groove::records::Error::InvalidF64NaN))
+    ));
+    assert!(
+        database
+            .primary_key_get_raw("metrics", &[Value::U64(7)])
+            .await?
+            .is_none()
+    );
+    Ok(())
 }
 
 fn row(version: u32, values: &[Value]) -> VariantRecord {
