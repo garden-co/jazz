@@ -46,6 +46,21 @@ test("Android bootstrap rejects corrupt pinned archives before extraction", () =
   assert.match(bootstrap, /commandlinetools-linux-13114758_latest\.zip/);
   assert.match(bootstrap, /android-ndk-r27b-linux\.zip/);
   assert.match(bootstrap, /33e16af1a6bbabe12cad54b2117085c07eab7e4fa67cdd831805f0e94fd826c1/);
+  assert.match(bootstrap, /\.jazz-pinned-sha256/);
+  assert.match(bootstrap, /java" -version/);
+  assert.match(bootstrap, /sdkmanager" --version/);
+  assert.match(bootstrap, /cargo-ndk" --version/);
+  assert.match(bootstrap, /reset_cache_path/);
+});
+
+test("dispatch workflow fails clearly without KVM and bounds emulator boot", () => {
+  const workflow = fs.readFileSync(
+    path.join(root, "../../.github/workflows/rn-device-acceptance.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /\[\[ -r \/dev\/kvm && -w \/dev\/kvm \]\]/);
+  assert.match(workflow, /did not boot within 180s/);
+  assert.match(workflow, /tail -200 "\$cache\/emulator\.log"/);
 });
 
 test("checksum pin rejects a planted corrupt cache archive", () => {

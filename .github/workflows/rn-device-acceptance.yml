@@ -93,10 +93,19 @@ jobs:
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk" ANDROID_HOME="$cache/sdk"
           export PATH="$cache/cargo/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
           export ANDROID_AVD_HOME="$cache/avd"
+          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance requires readable/writable /dev/kvm; choose a KVM-enabled runner" >&2; exit 1; }
           yes no | avdmanager create avd --force --name jazz-device-acceptance-api35 --package 'system-images;android-35;google_apis;x86_64'
           emulator -avd jazz-device-acceptance-api35 -no-window -no-audio -gpu swiftshader_indirect -no-boot-anim -no-metrics >"$cache/emulator.log" 2>&1 &
           adb wait-for-device
-          until [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == 1 ]]; do sleep 2; done
+          deadline=$((SECONDS + 180))
+          until [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == 1 ]]; do
+            if (( SECONDS >= deadline )); then
+              echo "Android emulator did not boot within 180s; recent emulator log:" >&2
+              tail -200 "$cache/emulator.log" >&2 || true
+              exit 1
+            fi
+            sleep 2
+          done
           (cd dev/rn-device-acceptance/android && NODE_ENV=production ./gradlew :app:assembleRelease --console=plain)
           export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
           export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
