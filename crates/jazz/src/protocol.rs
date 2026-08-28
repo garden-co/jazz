@@ -3963,7 +3963,7 @@ impl SchemaVersion {
 }
 
 /// Published bidirectional migration lens.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct MigrationLens {
     /// Content-addressed lens id.
     pub(crate) id: MigrationLensId,
@@ -3973,6 +3973,31 @@ pub struct MigrationLens {
     pub(crate) target: SchemaVersionId,
     /// Per-table lens definitions.
     pub(crate) table_lenses: Vec<TableLens>,
+}
+
+#[derive(serde::Deserialize)]
+struct MigrationLensWire {
+    id: MigrationLensId,
+    source: SchemaVersionId,
+    target: SchemaVersionId,
+    table_lenses: Vec<TableLens>,
+}
+
+impl<'de> serde::Deserialize<'de> for MigrationLens {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MigrationLensWire::deserialize(deserializer)?;
+        let lens = Self::new(wire.source, wire.target, wire.table_lenses)
+            .map_err(serde::de::Error::custom)?;
+        if lens.id != wire.id {
+            return Err(serde::de::Error::custom(
+                "migration lens content ID mismatch",
+            ));
+        }
+        Ok(lens)
+    }
 }
 
 impl MigrationLens {
