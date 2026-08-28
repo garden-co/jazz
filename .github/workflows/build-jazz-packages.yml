@@ -235,8 +235,10 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          rust-cache-key: release-jazz-rn-android-${{ env.JAZZ_RN_CARGO_NDK_VERSION }}-ndk-27.1.12297006-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/jazz/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
+          rust-cache-bin: "true"
           sccache: "true"
-          sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          sccache-key: release-jazz-rn-android-${{ env.JAZZ_RN_CARGO_NDK_VERSION }}-ndk-27.1.12297006-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/jazz/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
@@ -274,8 +276,9 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          rust-cache-key: release-jazz-rn-ios-macos-15-xcode-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/jazz/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
           sccache: "true"
-          sccache-key: release-jazz-rn-ios-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          sccache-key: release-jazz-rn-ios-macos-15-xcode-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/groove/**', 'crates/jazz/**', 'crates/jazz-native-relay/**', 'crates/jazz-storage-sqlite/**', 'crates/jazz-rn/scripts/build-relay-artifacts.sh') }}
 
       - name: Build and verify iOS relay XCFramework
         run: |

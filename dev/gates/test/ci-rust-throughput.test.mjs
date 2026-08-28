@@ -1138,13 +1138,35 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
 
 test("React Native artifact builds are explicit same-repository label opt-ins", () => {
   const document = parse(rnNativeArtifactsWorkflow);
+  const nativeArtifactPushPaths = [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/groove/**",
+    "crates/idb-tree/**",
+    "crates/jazz/**",
+    "crates/jazz-compression/**",
+    "crates/jazz-native-relay/**",
+    "crates/jazz-storage-sqlite/**",
+    "crates/jazz-rn/**",
+  ];
+  const assertNativeArtifactPushPaths = (candidate) => {
+    assert.deepEqual(candidate.on.push, {
+      branches: ["main"],
+      paths: nativeArtifactPushPaths,
+    });
+  };
   assert.deepEqual(document.on.pull_request, {
     types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"],
   });
-  assert.deepEqual(document.on.push, {
-    branches: ["main"],
-    paths: ["crates/jazz-native-relay/**", "crates/jazz-storage-sqlite/**", "crates/jazz-rn/**"],
-  });
+  assertNativeArtifactPushPaths(document);
+  for (const omittedPath of nativeArtifactPushPaths) {
+    const mutated = parse(rnNativeArtifactsWorkflow.replace(`      - "${omittedPath}"\n`, ""));
+    assert.throws(
+      () => assertNativeArtifactPushPaths(mutated),
+      /Expected values to be strictly deep-equal/,
+      `the artifact workflow contract must reject an omitted ${omittedPath} trigger`,
+    );
+  }
   assert.equal(document.on.workflow_dispatch, undefined);
   assert.equal(document.on.schedule, undefined);
   assert.deepEqual(document.permissions, { contents: "read" });
