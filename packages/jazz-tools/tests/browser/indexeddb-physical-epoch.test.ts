@@ -48,11 +48,12 @@ describe("IndexedDB physical epoch", () => {
     store.close();
   });
 
-  it("rejects corrupt and unknown epoch manifests before a page mutation", async () => {
+  it("rejects corrupt, unknown, and extra epoch-manifest fields before a page mutation", async () => {
     for (const manifest of [
       undefined,
       { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 },
       { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds: ["unknown.codec"] },
+      { ...INDEXEDDB_STORAGE_MANIFEST, futureDecodeParameter: "unknown" },
     ]) {
       const name = databaseName();
       const page = new Uint8Array([0x99]);
