@@ -1219,9 +1219,17 @@ fn branch_prefixed_current_index_backfills_legacy_rocks_layout_on_reopen() {
     // observable distinction between the two bootstrap paths.
     drop(reopened);
     let mut reopened_again = reopen_history_complete_node_at(&directory, node(0x73), schema.clone());
-    for (table_id, v2_index) in [
-        (users_mapping.table_id, users_v2_index),
-        (todos_mapping.table_id, todos_v2_index),
+    for (table_id, v2_index, legacy_v1_index) in [
+        (
+            users_mapping.table_id,
+            users_v2_index,
+            PhysicalCurrentIndexLayout::LegacyV1.name(users_mapping.columns["name"]),
+        ),
+        (
+            todos_mapping.table_id,
+            todos_v2_index,
+            PhysicalCurrentIndexLayout::LegacyV1.name(todos_mapping.columns["title"]),
+        ),
     ] {
         for storage_table in [
             physical_ahead_current_table_name(table_id),
@@ -1230,9 +1238,7 @@ fn branch_prefixed_current_index_backfills_legacy_rocks_layout_on_reopen() {
             let indices = &reopened_again.database.table_schema(&storage_table).unwrap().indices;
             assert!(indices.iter().any(|index| index.name == v2_index));
             assert!(
-                indices
-                    .iter()
-                    .all(|index| !index.name.starts_with("current_v1_")),
+                indices.iter().all(|index| index.name != legacy_v1_index),
                 "settled V2 marker must bypass the predecessor V1 bootstrap layout"
             );
         }
