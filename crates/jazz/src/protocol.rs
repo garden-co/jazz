@@ -4680,6 +4680,54 @@ mod tests {
         assert!(decode_canonical_lens_bytes(&planted).is_err());
     }
 
+    #[test]
+    fn migration_lens_constructor_and_decoder_enforce_bijective_bounded_shape() {
+        let table = |source: &str, target: &str| TableLens {
+            source_table: source.into(),
+            target_table: target.into(),
+            ops: Vec::new(),
+        };
+        assert!(
+            MigrationLens::new(
+                schema_id(1),
+                schema_id(2),
+                vec![table("a", "b"), table("a", "c")]
+            )
+            .is_err()
+        );
+        assert!(
+            MigrationLens::new(
+                schema_id(1),
+                schema_id(2),
+                vec![table("a", "b"), table("c", "b")]
+            )
+            .is_err()
+        );
+
+        let lens = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![table("a", "b"), table("c", "d")],
+        )
+        .unwrap();
+        let exact = canonical_lens_bytes(&lens);
+        // The final target byte is `d`; changing it to `b` plants a repeated
+        // target in otherwise fully well-formed bytes. Decode must return an
+        // error through the fallible constructor, never panic or normalize it.
+        let mut duplicate_target = exact.clone();
+        *duplicate_target.last_mut().unwrap() = b'b';
+        assert!(decode_canonical_lens_bytes(&duplicate_target).is_err());
+
+        // Header count is after marker (4+24), source UUID, and target UUID.
+        let count_offset = 4 + "jazz-migration-lens-v1".len() + 16 + 16;
+        let mut item_bomb = exact.clone();
+        item_bomb[count_offset..count_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_canonical_lens_bytes(&item_bomb).is_err());
+        let mut byte_bomb = exact.clone();
+        byte_bomb[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_canonical_lens_bytes(&byte_bomb).is_err());
+    }
+
     // This is intentionally an internal byte-level test: the durable physical
     // identity is not observable through the public row API, and a behavioral
     // round trip alone would not freeze the assigned version, tags, or widths.
