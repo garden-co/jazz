@@ -1139,6 +1139,66 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(todosAfterRevert.length).toBe(0);
   });
 
+  /**
+   * 1. Two in-memory `Db`s attach to the same persistent browser worker.
+   * 2. One DB inserts a row.
+   * 3. The other DB receives the optimistic row through its subscription.
+   * 4. The server rejects the transaction.
+   * 5. The persistent worker rolls back.
+   * 6. The writer DB rolls back.
+   * 7. The other in-memory DB rolls back as well.
+   */
+  it("rejected write from one live peer reverts every attached peer", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-cross-peer-rejection",
+      readOnlyPermissions,
+    );
+    const secret = generateAuthSecret();
+    const dbName = uniqueDbName("sync-cross-peer-rejection");
+    const config = {
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+      schema: app,
+    };
+    // Both `Db`s attach to the same persistent worker
+    const appPeer = track(await createDb(config));
+    const writerPeer = track(await createDb(config));
+
+    await Promise.all([
+      appPeer.all(allTodos, { tier: "edge" }),
+      writerPeer.all(allTodos, { tier: "edge" }),
+    ]);
+    // Disconnect from server so both in-memory `Db`s receive the optimistic insert
+    // before the server rejection
+    await appPeer.disconnect();
+
+    const rejected = writerPeer.insert(todos, {
+      title: "Rejected from the other peer",
+      done: false,
+    });
+    await rejected.wait({ tier: "local" });
+    await waitForCondition(
+      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 1,
+      5000,
+      "non-originating app peer should observe the optimistic insert",
+    );
+
+    await appPeer.reconnect();
+    await expect(rejected.wait({ tier: "edge" })).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "permission_denied",
+    });
+    expect(await writerPeer.all(allTodos, { tier: "local" })).toEqual([]);
+    expect(await appPeer.all(allTodos, { tier: "edge" })).toEqual([]);
+    await waitForCondition(
+      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 0,
+      5000,
+      "non-originating app peer should receive the rejection rollback",
+    );
+  });
+
   it("server permissions check rejects client optimistic insert - onMutationError notification", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-wait-edge",

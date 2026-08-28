@@ -867,7 +867,14 @@ where
                         &update,
                     )
                 });
-                send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
+                send_subscriber_with_sync_context(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    &self.local_fate_routes,
+                    &self.downstream_fates,
+                    update,
+                )?;
                 if let Some((subscription, receipt)) = receipt {
                     queue_direct_control(
                         &mut self.pending_control_responses,
@@ -884,7 +891,14 @@ where
                 let mut node = self.node.lock().await;
                 peer.current_rows_update(&mut node, table).await?
             };
-            send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
+            send_subscriber_with_sync_context(
+                &self.node,
+                peer,
+                self.transport.as_mut(),
+                &self.local_fate_routes,
+                &self.downstream_fates,
+                update,
+            )?;
         }
 
         self.observed_session_claim_revision.set(current_revision);
@@ -1070,7 +1084,14 @@ where
                         &update,
                     )
                 });
-                send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
+                send_subscriber_with_sync_context(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    &self.local_fate_routes,
+                    &self.downstream_fates,
+                    update,
+                )?;
                 if let Some((subscription, receipt)) = receipt {
                     queue_direct_control(
                         &mut self.pending_control_responses,
@@ -3278,10 +3299,12 @@ where
                                             &update,
                                         )
                                     });
-                                send_with_sync_context(
+                                send_subscriber_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
+                                    &self.local_fate_routes,
+                                    &self.downstream_fates,
                                     update,
                                 )?;
                                 if let Some((subscription, receipt)) = receipt {
@@ -3725,10 +3748,12 @@ where
                                     &update,
                                 )
                             });
-                            send_with_sync_context(
+                            send_subscriber_with_sync_context(
                                 &self.node,
                                 peer,
                                 self.transport.as_mut(),
+                                &self.local_fate_routes,
+                                &self.downstream_fates,
                                 update,
                             )?;
                             if let Some((subscription, receipt)) = receipt {
@@ -3821,10 +3846,12 @@ where
                                     "subscriber send group delta {}",
                                     summarize_sync_message(&update)
                                 ));
-                                send_with_sync_context(
+                                send_subscriber_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
+                                    &self.local_fate_routes,
+                                    &self.downstream_fates,
                                     update,
                                 )?;
                                 if let Some((subscription, receipt)) = receipt {
@@ -3847,10 +3874,12 @@ where
                             peer.current_rows_update(&mut node, table).await?
                         };
                         if !view_update_is_empty(&update) {
-                            send_with_sync_context(
+                            send_subscriber_with_sync_context(
                                 &self.node,
                                 peer,
                                 self.transport.as_mut(),
+                                &self.local_fate_routes,
+                                &self.downstream_fates,
                                 update,
                             )?;
                             sent_view_update = true;
@@ -4825,6 +4854,38 @@ where
         summarize_sync_message(&message)
     ));
     send_sync_message_chunked(transport, message)
+}
+
+fn send_subscriber_with_sync_context<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    local_fate_routes: &LocalFateRoutes,
+    downstream_fates: &PendingDownstreamFates,
+    message: SyncMessage,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let mut pending_tx_ids = BTreeSet::new();
+    if let SyncMessage::ViewUpdate(payload) = &message {
+        for carrier in &payload.version_carriers {
+            for bundle in carrier
+                .bundle_refs()
+                .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?
+            {
+                if matches!(bundle.fate, Fate::Pending) {
+                    pending_tx_ids.insert(bundle.tx.tx_id);
+                }
+            }
+        }
+    }
+
+    send_with_sync_context(node, peer, transport, message)?;
+    for tx_id in pending_tx_ids {
+        register_local_fate_observer(local_fate_routes, tx_id, downstream_fates);
+    }
+    Ok(())
 }
 
 /// Deliver terminal/local fate updates in FIFO order without letting a bounded
