@@ -64,4 +64,20 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
       })
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
   }
+
+  /**
+   * iOS Release does not make JavaScript console output a dependable host
+   * receipt transport. Keep both fixtures structurally identical so the JS
+   * acceptance proof has one post-proof sink on every device platform.
+   */
+  @ReactMethod fun recordReceipt(receipt: String, promise: Promise) {
+    try {
+      require(receipt.startsWith("JAZZ_DEVICE_RESULT ") && receipt.length <= 16_384) {
+        "invalid device receipt"
+      }
+      reactApplicationContext.cacheDir.resolve("jazz-device-receipt.ndjson")
+        .writeText("$receipt\n")
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT", error) }
+  }
 }

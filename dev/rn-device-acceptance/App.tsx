@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-native";
 import { encodeResult } from "./src/protocol";
 import { scenarioPlan } from "./src/scenarios";
-import { admittedNativeRelay, deviceReceiptContext } from "./src/native-fixture";
+import {
+  admittedNativeRelay,
+  deviceReceiptContext,
+  recordDeviceReceipt,
+} from "./src/native-fixture";
 import { proveAdmittedRelay } from "./src/relay-admission";
 
 async function observeLinkedAbiAdmission() {
@@ -18,12 +22,15 @@ export default function App() {
     void (async () => {
       const receipt = await observeLinkedAbiAdmission();
       const linked = scenarioPlan.find((scenario) => scenario.scenario === "linked-abi-admission")!;
-      console.log(
-        encodeResult({
-          ...linked,
-          receipt: { ...receipt, sequence: 1, observedAt: new Date().toISOString() },
-        }),
-      );
+      const result = encodeResult({
+        ...linked,
+        receipt: { ...receipt, sequence: 1, observedAt: new Date().toISOString() },
+      });
+      // The host validates this independently. Persisting it is necessary on
+      // iOS release builds, where console output is not a dependable receipt
+      // transport; it must happen after the JS-side relay proof.
+      await recordDeviceReceipt(result);
+      console.log(result);
       return receipt;
     })()
       .then((receipt) => {

@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { assertDeviceReceipt } from "./device-driver.mjs";
 import {
   boundedDiagnostic,
@@ -30,6 +31,13 @@ const startedAt = Date.now();
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
 simctl(["bootstatus", udid, "-b"]);
 simctl(["install", udid, app]);
+const appDataContainer = () =>
+  simctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"]).trim();
+const receiptFilePath = () =>
+  join(appDataContainer(), "Library", "Caches", "jazz-device-receipt.ndjson");
+// Reinstalling preserves the simulator data container. A former launch's valid
+// receipt must not become a confusing stale candidate for this fresh nonce.
+rmSync(receiptFilePath(), { force: true });
 const launchResult = simctl([
   "launch",
   udid,
@@ -42,19 +50,10 @@ const launchResult = simctl([
   udid,
 ]);
 const launchPid = parseLaunchProcessId(launchResult);
-const receiptOutput = () =>
-  simctl([
-    "spawn",
-    udid,
-    "log",
-    "show",
-    "--last",
-    "2m",
-    "--style",
-    "compact",
-    "--predicate",
-    "eventMessage CONTAINS 'JAZZ_DEVICE_RESULT'",
-  ]);
+const receiptFile = () => {
+  const file = receiptFilePath();
+  return existsSync(file) ? readFileSync(file, "utf8") : "";
+};
 const expected = {
   platform: "ios",
   deviceIdentifier: udid,
@@ -67,6 +66,7 @@ const diagnostics = () =>
   [
     `simctl launch PID: ${launchPid}`,
     `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
+    `app receipt file:\n${boundedDiagnostic(receiptFile())}`,
     `launchd app state:\n${trySimctl(["spawn", udid, "launchctl", "print", "gui/501"])}`,
     `recent app logs (capped):\n${relevantAppLogs(
       trySimctl([
@@ -86,7 +86,7 @@ const diagnostics = () =>
   ].join("\n\n");
 for (let attempt = 0; attempt < 30; attempt += 1) {
   try {
-    assertDeviceReceipt(receiptOutput(), expected);
+    assertDeviceReceipt(receiptFile(), expected);
     break;
   } catch (error) {
     if (attempt === 29) {
