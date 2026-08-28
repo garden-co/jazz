@@ -1,5 +1,6 @@
 import { createDb, schema as s } from "jazz-tools/react-native";
 import { admittedNativeRelay } from "./native-fixture";
+import { metroWasmSource } from "./runtime-wasm";
 
 const acceptanceApp = s.defineApp({
   notes: s.table({ title: s.string() }),
@@ -14,9 +15,18 @@ const observationTimeoutMs = 30_000;
  */
 export async function observeLocalWriteSubscription(): Promise<void> {
   const relay = await admittedNativeRelay();
+  const wasmSource = await metroWasmSource();
   const [clientA, clientB] = await Promise.all([
-    createDb({ appId: "jazz-device-acceptance", nativeRelay: relay }),
-    createDb({ appId: "jazz-device-acceptance", nativeRelay: relay }),
+    createDb({
+      appId: "jazz-device-acceptance",
+      nativeRelay: relay,
+      runtimeSources: { wasmSource },
+    }),
+    createDb({
+      appId: "jazz-device-acceptance",
+      nativeRelay: relay,
+      runtimeSources: { wasmSource },
+    }),
   ]);
   const marker = `device-write-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let unsubscribe: (() => void) | undefined;

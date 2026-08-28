@@ -45,6 +45,7 @@ if ! has_marker "$jdk" "166774efcf0f722f2ee18eba0039de2d685b350ee14d7b69e6f83437
   tar -xzf "$downloads/OpenJDK17U-jdk_x64_linux_hotspot_17.0.16_8.tar.gz" -C "$jdk" --strip-components=1
   mark_verified "$jdk" "166774efcf0f722f2ee18eba0039de2d685b350ee14d7b69e6f83437dafd2af1"
 fi
+export JAVA_HOME="$jdk" ANDROID_SDK_ROOT="$sdk"
 fetch \
   "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip" \
   "$downloads/commandlinetools-linux-13114758_latest.zip" \
@@ -59,9 +60,15 @@ if ! has_marker "$tools" "7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdc
   mark_verified "$tools" "7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee"
 fi
 
-export JAVA_HOME="$jdk" ANDROID_SDK_ROOT="$sdk"
 manager="$sdk/cmdline-tools/latest/bin/sdkmanager"
+set +o pipefail
 yes | "$manager" --licenses >/dev/null
+license_status=${PIPESTATUS[1]}
+set -o pipefail
+if (( license_status != 0 )); then
+  echo "Android SDK license acceptance failed" >&2
+  exit "$license_status"
+fi
 "$manager" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
 # sdkmanager's package metadata is not an archive pin we control, so retain and
