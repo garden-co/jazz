@@ -28,10 +28,15 @@ const acceptanceBundleId = "dev.jazz.rndeviceacceptance";
 
 /** `simctl launch` returns `<bundle id>: <positive pid>` on success. */
 export const parseLaunchProcessId = (value) => {
+  const output = value.endsWith("\r\n")
+    ? value.slice(0, -2)
+    : value.endsWith("\n")
+      ? value.slice(0, -1)
+      : value;
   const prefix = `${acceptanceBundleId}: `;
-  if (!value.startsWith(prefix))
+  if (!output.startsWith(prefix))
     throw new Error("simctl launch returned an unexpected bundle/process id");
-  const pid = value.slice(prefix.length);
+  const pid = output.slice(prefix.length);
   if (!/^[1-9]\d*$/.test(pid))
     throw new Error("simctl launch returned an unexpected bundle/process id");
   const processId = Number(pid);
