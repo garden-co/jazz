@@ -304,6 +304,20 @@ canonical logical export/import transfers global identities and authoritative
 history, then rebuilds derived state on the receiving backend. It cannot bypass
 epoch validation or make an unknown physical manifest decodable.
 
+`MemoryStorage::export_snapshot` is a narrower restart/test harness boundary:
+it captures the complete ordered-KV map rather than a logical interchange and
+therefore has no compatibility decoder for alpha bytes. Its sole V1 spelling is
+`"GMS1" | version:u16be | family_count:u32be | family*`; a family is
+`name_len:u16be | UTF-8 name | entry_count:u32be | entry*`, and an entry is
+`key_len:u32be | key | value_len:u32be | value`. Family names and entries use
+their unsigned B-tree order. The decoder consumes exactly one snapshot, rejects
+invalid UTF-8, truncation, trailing bytes, duplicate or alternate ordering, and
+re-encodes the semantic map byte-identically before replacing resident state.
+Physical-name validation still occurs before replacement. This explicit codec
+is not serde, postcard, or a durable-adapter manifest; a future incompatible
+snapshot requires a new magic/version and an explicit epoch decision
+(`INV-STORAGE-34`).
+
 An ordered cursor is **not** a snapshot-isolation primitive. A backend may
 observe committed changes between batches; in particular, `MemoryStorage`
 reacquires its map for every lazy cursor batch to keep memory proportional to
