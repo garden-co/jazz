@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import { WriteHandle, WriteResult, JazzClient, type BatchId, type InsertResult } from "./client.js";
+import { WriteHandle, WriteResult, JazzClient, type TxId, type InsertResult } from "./client.js";
 import type { Session } from "./context.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 
@@ -40,11 +40,11 @@ function makeHandleClient(): JazzClient {
 
 function makeWriteResult(row: InsertResult): WriteResult<InsertResult> {
   if (row.kind !== "committed") throw new Error("expected committed fixture");
-  return new WriteResult(row, row.batchId, makeHandleClient());
+  return new WriteResult(row, row.txId, makeHandleClient());
 }
 
 function makeWriteHandle(transactionId: string): WriteHandle {
-  return new WriteHandle(transactionId as BatchId, makeHandleClient());
+  return new WriteHandle(transactionId as TxId, makeHandleClient());
 }
 
 describe("Db runtime schema order", () => {
@@ -193,7 +193,7 @@ describe("Db runtime schema order", () => {
           { type: "Boolean", value: false },
         ],
         kind: "committed",
-        batchId: "transaction-schema-order-runtime" as BatchId,
+        txId: "transaction-schema-order-runtime" as TxId,
       }),
     );
     const client = {
@@ -361,7 +361,7 @@ describe("Db runtime schema order", () => {
           { type: "Boolean", value: false },
         ],
         kind: "committed",
-        batchId: "transaction-schema-order-generated" as BatchId,
+        txId: "transaction-schema-order-generated" as TxId,
       }),
     );
     const client = {
@@ -418,7 +418,7 @@ describe("Db runtime schema order", () => {
           { type: "Boolean", value: false },
         ],
         kind: "committed",
-        batchId: "transaction-1" as BatchId,
+        txId: "transaction-1" as TxId,
       }),
     );
     const client = {
@@ -487,7 +487,7 @@ describe("Db runtime schema order", () => {
     >;
 
     expect(db.upsert(table, externalId, { title: "Buy milk", done: false })).toMatchObject({
-      batchId: Promise.resolve("transaction-upsert" as BatchId),
+      txId: Promise.resolve("transaction-upsert" as TxId),
     });
 
     expect(upsert).toHaveBeenCalledWith(
@@ -523,7 +523,7 @@ describe("Db runtime schema order", () => {
           { type: "Boolean", value: false },
         ],
         kind: "committed",
-        batchId: "transaction-1" as BatchId,
+        txId: "transaction-1" as TxId,
       }),
     );
     const update = vi.fn<(...args: [string, InsertValues, { updatedAt: number }]) => WriteHandle>(
@@ -603,7 +603,7 @@ describe("Db runtime schema order", () => {
           { type: "Boolean", value: false },
         ],
         kind: "committed",
-        batchId: "transaction-insert" as BatchId,
+        txId: "transaction-insert" as TxId,
       }),
     );
     const update = vi.fn<() => WriteHandle>(() => makeWriteHandle("transaction-update"));

@@ -17,7 +17,12 @@ import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
-import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "./client.js";
+import {
+  createOpenTransactionId,
+  type TxId,
+  type OpenTransactionId,
+  type WriteReceipt,
+} from "./client.js";
 
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -37,19 +42,19 @@ async function runNapiFixture(name: string, args: string[] = []) {
   });
 }
 
-function beginTestBatch(runtime: NativeRuntimeAdapter): OpenBatchId {
-  const id = createOpenBatchId();
+function beginTestBatch(runtime: NativeRuntimeAdapter): OpenTransactionId {
+  const id = createOpenTransactionId();
   runtime.beginTransaction("mergeable", id);
   return id;
 }
 
-async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+async function committedTxId(receipt: WriteReceipt): Promise<TxId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
-  return await receipt.batchId;
+  return await receipt.txId;
 }
 
-function expectStaged(receipt: WriteReceipt, openBatchId: OpenBatchId): void {
-  expect(receipt).toMatchObject({ kind: "staged", openBatchId });
+function expectStaged(receipt: WriteReceipt, openTransactionId: OpenTransactionId): void {
+  expect(receipt).toMatchObject({ kind: "staged", openTransactionId });
 }
 
 const TEST_SCHEMA: WasmSchema = {
@@ -373,7 +378,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       title: { type: "Text", value: "created by canonical author" },
       done: { type: "Boolean", value: false },
     });
-    await runtime.waitForTransaction(await committedBatchId(inserted), "local");
+    await runtime.waitForTransaction(await committedTxId(inserted), "local");
 
     await expect(
       runtime.query(
@@ -533,7 +538,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       aliceSession,
     );
-    const transactionId = await committedBatchId(inserted);
+    const transactionId = await committedTxId(inserted);
 
     const args = await waitFor(
       async () => callbackArgs,
@@ -700,8 +705,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const first = insert("first");
     const second = insert("second");
-    const openBatchId = beginTestBatch(runtime);
-    const writeContext = JSON.stringify({ batch_id: openBatchId });
+    const openTransactionId = beginTestBatch(runtime);
+    const writeContext = JSON.stringify({ transaction_id: openTransactionId });
     const third = insert("third", writeContext);
     const fourth = insert("fourth", writeContext);
 
@@ -716,7 +721,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const ids = [first.id, second.id, third.id, fourth.id];
     expect(ids).toEqual([...ids].sort());
 
-    await runtime.commitTransaction(openBatchId);
+    await runtime.commitTransaction(openTransactionId);
     const rows = (await runtime.query(JSON.stringify({ table: "todos" }))) as Array<{
       id: string;
     }>;
@@ -1179,7 +1184,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
 
     const tx = beginTestBatch(runtime);
-    const writeContext = JSON.stringify({ batch_id: tx });
+    const writeContext = JSON.stringify({ transaction_id: tx });
     const first = runtime.insert(
       "todos",
       {
@@ -1203,8 +1208,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     expectStaged(second, tx);
     expect(updates).toHaveLength(1);
 
-    const batchId = await runtime.commitTransaction(tx);
-    await runtime.waitForTransaction(batchId, "local");
+    const txId = await runtime.commitTransaction(tx);
+    await runtime.waitForTransaction(txId, "local");
 
     expect(updates).toHaveLength(2);
     expect(updates[1]?.reset).not.toBe(true);
@@ -1236,7 +1241,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       aliceSession,
     );
-    await runtime.waitForTransaction(await committedBatchId(aliceTodo), "local");
+    await runtime.waitForTransaction(await committedTxId(aliceTodo), "local");
 
     const aliceRows = await runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -1265,7 +1270,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       aliceSession,
     );
-    await runtime.waitForTransaction(await committedBatchId(foreignOwnerTodo), "local");
+    await runtime.waitForTransaction(await committedTxId(foreignOwnerTodo), "local");
 
     const aliceRowsAfterForeignOwnerInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -1288,7 +1293,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       },
       bobSession,
     );
-    await runtime.waitForTransaction(await committedBatchId(bobTodo), "local");
+    await runtime.waitForTransaction(await committedTxId(bobTodo), "local");
 
     const aliceRowsAfterBobInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
@@ -1360,8 +1365,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(aliceTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
     ]);
 
     await expect(runtime.query(query, aliceSession, "local")).resolves.toEqual(
@@ -1441,8 +1446,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(aliceTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
     ]);
 
     await expect(
@@ -1457,8 +1462,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceDeletesBob = runtime.delete("todos", bobTodo.id, aliceSession);
     const bobDeletesAlice = runtime.delete("todos", aliceTodo.id, bobSession);
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceDeletesBob), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobDeletesAlice), "local"),
+      runtime.waitForTransaction(await committedTxId(aliceDeletesBob), "local"),
+      runtime.waitForTransaction(await committedTxId(bobDeletesAlice), "local"),
     ]);
 
     await expect(
@@ -1519,14 +1524,14 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     await Promise.all([
-      runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
-      runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(aliceTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
     ]);
     await expect(
       runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
     ).resolves.toHaveLength(2);
 
-    const aliceDenied = runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge");
+    const aliceDenied = runtime.waitForTransaction(await committedTxId(aliceTodo), "edge");
     await expect(aliceDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
@@ -1538,7 +1543,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       value: expect.stringContaining("AuthorizationDenied"),
     });
     await expect(aliceDenied).rejects.toThrow("AuthorizationDenied");
-    const bobDenied = runtime.waitForTransaction(await committedBatchId(bobTodo), "edge");
+    const bobDenied = runtime.waitForTransaction(await committedTxId(bobTodo), "edge");
     await expect(bobDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
@@ -1604,18 +1609,18 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
 
       await Promise.all([
-        runtime.waitForTransaction(await committedBatchId(aliceTodo), "local"),
-        runtime.waitForTransaction(await committedBatchId(bobTodo), "local"),
+        runtime.waitForTransaction(await committedTxId(aliceTodo), "local"),
+        runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
       ]);
       await expect(
         runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
       ).resolves.toHaveLength(2);
 
       await expect(
-        runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
+        runtime.waitForTransaction(await committedTxId(aliceTodo), "edge"),
       ).rejects.toThrow("AuthorizationDenied");
       await expect(
-        runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
+        runtime.waitForTransaction(await committedTxId(bobTodo), "edge"),
       ).rejects.toThrow("AuthorizationDenied");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -1652,7 +1657,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       "todos",
       inserted.id,
       { done: { type: "Boolean", value: true } },
-      JSON.stringify({ batch_id: tx }),
+      JSON.stringify({ transaction_id: tx }),
     );
     runtime.upsert(
       "todos",
@@ -1661,7 +1666,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         title: { type: "Text", value: "direct napi tx upserted row" },
         done: { type: "Boolean", value: true },
       },
-      JSON.stringify({ batch_id: tx }),
+      JSON.stringify({ transaction_id: tx }),
     );
     runtime.insert(
       "todos",
@@ -1669,7 +1674,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         title: { type: "Text", value: "direct napi tx row" },
         done: { type: "Boolean", value: false },
       },
-      JSON.stringify({ batch_id: tx }),
+      JSON.stringify({ transaction_id: tx }),
       "22222222-2222-4222-8222-222222222222",
     );
     const committed = await runtime.commitTransaction(tx);
@@ -1753,7 +1758,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       done: { type: "Boolean", value: false },
     });
     await waitForPromise(
-      writer.waitForTransaction(await committedBatchId(inserted), "edge"),
+      writer.waitForTransaction(await committedTxId(inserted), "edge"),
       "writer insert did not settle at edge",
     );
 
@@ -1814,7 +1819,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
-        writer.waitForTransaction(await committedBatchId(inserted), "edge"),
+        writer.waitForTransaction(await committedTxId(inserted), "edge"),
         "writer insert did not settle at persistent edge",
       );
       await writer.close();
@@ -1894,7 +1899,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     });
 
     await waitForPromise(
-      writer.waitForTransaction(await committedBatchId(inserted), "edge"),
+      writer.waitForTransaction(await committedTxId(inserted), "edge"),
       "writer public chat insert did not settle at edge",
     );
 
@@ -1931,7 +1936,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       text: { type: "Text", value: "hello through public chat policy" },
     });
     await waitForPromise(
-      writer.waitForTransaction(await committedBatchId(message), "edge"),
+      writer.waitForTransaction(await committedTxId(message), "edge"),
       "writer public-chat message insert did not settle at edge",
     );
 
@@ -1986,7 +1991,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         title: { type: "Text", value: "direct napi persistent row" },
         done: { type: "Boolean", value: false },
       });
-      await firstRuntime.waitForTransaction(await committedBatchId(inserted), "local");
+      await firstRuntime.waitForTransaction(await committedTxId(inserted), "local");
       await firstRuntime.close();
       firstRuntime = null;
 

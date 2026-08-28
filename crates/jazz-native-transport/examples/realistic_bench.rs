@@ -397,7 +397,7 @@ async fn seed_dataset(
 
     for i in 0..profile.users {
         report_loop_progress("seed users", i, profile.users);
-        let (id, _row_values, _batch_id) = client.insert(
+        let (id, _row_values, _transaction_id) = client.insert(
             "users",
             row([
                 ("display_name", Value::Text(format!("User {}", i))),
@@ -409,7 +409,7 @@ async fn seed_dataset(
 
     for i in 0..profile.organizations {
         report_loop_progress("seed organizations", i, profile.organizations);
-        let (id, _row_values, _batch_id) = client.insert(
+        let (id, _row_values, _transaction_id) = client.insert(
             "organizations",
             row([
                 ("name", Value::Text(format!("Org {}", i))),
@@ -439,7 +439,7 @@ async fn seed_dataset(
     for i in 0..profile.projects {
         report_loop_progress("seed projects", i, profile.projects);
         let org = organizations[i % organizations.len()];
-        let (id, _row_values, _batch_id) = client.insert(
+        let (id, _row_values, _transaction_id) = client.insert(
             "projects",
             row([
                 ("organization_id", Value::Uuid(org)),
@@ -456,7 +456,7 @@ async fn seed_dataset(
         report_loop_progress("seed tasks", i, profile.tasks);
         let project_idx = i % projects.len();
         let assignee_idx = i % users.len();
-        let (id, _row_values, _batch_id) = client.insert(
+        let (id, _row_values, _transaction_id) = client.insert(
             "tasks",
             row([
                 ("project_id", Value::Uuid(projects[project_idx])),

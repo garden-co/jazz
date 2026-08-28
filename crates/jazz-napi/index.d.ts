@@ -64,24 +64,24 @@ export declare class NapiDb {
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
   /**
-   * Attach a schema view to an owner-wide mergeable batch without opening,
-   * committing, or abandoning that batch.
+   * Attach a schema view to an owner-wide mergeable transaction without opening,
+   * committing, or abandoning that transaction.
    */
-  attachMergeableTx(openBatchId: string): Tx
-  /** Attach a schema view to an existing owner-wide exclusive batch. */
-  attachExclusiveTx(openBatchId: string): Tx
+  attachMergeableTx(openTransactionId: string): Tx
+  /** Attach a schema view to an existing owner-wide exclusive transaction. */
+  attachExclusiveTx(openTransactionId: string): Tx
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
-  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
+  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null): void
   /**
    * Begin the only supported attributed transaction shape. Keeping this a
    * distinct native ABI makes an older binding fail closed rather than
    * silently treating provenance as ordinary SYSTEM authorship.
    */
-  beginTransactionAttributed(openBatchId: string, attribution: Uint8Array): void
+  beginTransactionAttributed(openTransactionId: string, attribution: Uint8Array): void
   /** Commit an owner-wide transaction by id and optional kind. */
-  commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
+  commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
-  rollbackTransaction(openBatchId: string): void
+  rollbackTransaction(openTransactionId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
@@ -117,8 +117,8 @@ export declare class NapiDb {
   setRelayAuthoritySessionOwner(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
-  mergeableTx(openBatchId: string): Tx
-  mergeableTxForIdentity(openBatchId: string, author: Uint8Array): Tx
+  mergeableTx(openTransactionId: string): Tx
+  mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
 }
 
@@ -214,7 +214,7 @@ export declare class Tx {
 }
 
 export declare class Write {
-  get batchId(): string
+  get txId(): string
   get payload(): Uint8Array
   get rowId(): Uint8Array
   writeState(): any

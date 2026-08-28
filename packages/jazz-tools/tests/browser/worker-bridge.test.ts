@@ -1128,10 +1128,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken, syncServer);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      transactionId: batchId,
+      transactionId: txId,
       code: "permission_denied",
     });
 
@@ -1152,7 +1152,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     db.onMutationError(mutationErrorSpy);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
       5000,
@@ -1162,12 +1162,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        transactionId: batchId,
+        transactionId: txId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          transactionId: batchId,
+          transactionId: txId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1194,7 +1194,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      transactionId: insertResult.transactionId,
+      transactionId: insertResult.txId,
       code: "permission_denied",
     });
     expect(mutationErrorSpy).not.toHaveBeenCalled();
@@ -1230,7 +1230,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       title: "Rejected across restart",
       done: false,
     });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
 
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
@@ -1241,12 +1241,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        transactionId: batchId,
+        transactionId: txId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          transactionId: batchId,
+          transactionId: txId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1401,7 +1401,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const insertResult = db.insert(todos, { title: "Rejected", done: false });
       await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: insertResult.transactionId,
+        transactionId: insertResult.txId,
         code: "permission_denied",
       });
 
@@ -1427,7 +1427,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const updateResult = db.update(todos, todo.id, { title: "Updated task" });
       await expect(updateResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: updateResult.transactionId,
+        transactionId: updateResult.txId,
         code: "permission_denied",
       });
 
@@ -1453,7 +1453,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const deleteResult = db.delete(todos, todo.id);
       await expect(deleteResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: deleteResult.transactionId,
+        transactionId: deleteResult.txId,
         code: "permission_denied",
       });
 

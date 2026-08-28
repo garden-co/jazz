@@ -234,7 +234,7 @@ async fn create_todo(
     let description = request.description.clone().unwrap_or_default();
     let values = todo_values(request.title.clone(), description.clone());
     match state.client.insert("todos", values).await {
-        Ok((row_id, row_values, _batch_id)) => {
+        Ok((row_id, row_values, _transaction_id)) => {
             let todo = row_to_todo(row_id, &row_values);
             broadcast_todos(&state).await;
             (StatusCode::CREATED, Json(todo)).into_response()
@@ -265,7 +265,7 @@ async fn update_todo(
     }
 
     match state.client.update(object_id, updates).await {
-        Ok(_batch_id) => {
+        Ok(_transaction_id) => {
             broadcast_todos(&state).await;
             let query = Query::from("todos");
             match state.client.query(query, None).await {
@@ -304,7 +304,7 @@ async fn delete_todo(
 ) -> impl IntoResponse {
     let object_id = ObjectId::from_uuid(id);
     match state.client.delete(object_id).await {
-        Ok(_batch_id) => {
+        Ok(_transaction_id) => {
             broadcast_todos(&state).await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -480,7 +480,7 @@ async fn test_local_persistence() {
 
         // Create a todo
         let values = todo_values("Persist me", "");
-        let (row_id, _row_values, _batch_id) = client.insert("todos", values).unwrap();
+        let (row_id, _row_values, _transaction_id) = client.insert("todos", values).unwrap();
 
         // Verify it exists
         let query = Query::from("todos");
@@ -807,7 +807,7 @@ async fn test_server_resync() {
 
         // Create a todo
         let values = todo_values("Synced todo", "");
-        let (_row_id, _row_values, _batch_id) = client.insert("todos", values).unwrap();
+        let (_row_id, _row_values, _transaction_id) = client.insert("todos", values).unwrap();
 
         // Verify it exists locally
         let query = Query::from("todos");

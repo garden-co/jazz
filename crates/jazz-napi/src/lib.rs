@@ -89,7 +89,7 @@ use jazz::query::{
 };
 use jazz::schema::JazzSchema;
 use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
-use jazz::tools::OpenTransactionId as CoreOpenBatchId;
+use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
 use jazz::tools::identity;
 use jazz::tools::{AppId, TransactionId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
@@ -307,7 +307,7 @@ pub struct QueryAttachment {
 pub struct Write {
     payload: Vec<u8>,
     row_id: CoreRowUuid,
-    batch_id: TransactionId,
+    tx_id: TransactionId,
     inner: Option<NapiWrite>,
 }
 
@@ -751,9 +751,9 @@ pub struct Tx {
     // the host-visible close boundary.
     db: Option<NapiDbInnerStorage>,
     kind: NapiTxKind,
-    open_tx: Option<CoreOpenBatchId>,
+    open_tx: Option<CoreOpenTransactionId>,
     owns_lifetime: bool,
-    /// A backend-attributed batch is deliberately root-only until branch
+    /// A backend-attributed transaction is deliberately root-only until branch
     /// attribution has a separately designed representation.
     attributed: bool,
 }
@@ -841,9 +841,9 @@ impl Write {
 
 #[napi]
 impl Write {
-    #[napi(getter, js_name = "batchId")]
-    pub fn batch_id(&self) -> String {
-        self.batch_id.to_string()
+    #[napi(getter, js_name = "txId")]
+    pub fn tx_id(&self) -> String {
+        self.tx_id.to_string()
     }
 
     #[napi(getter)]
@@ -1259,7 +1259,7 @@ impl Tx {
     pub fn commit(&mut self) -> napi::Result<Write> {
         if !self.owns_lifetime {
             return Err(napi::Error::from_reason(
-                "attached transaction views cannot commit the owner-wide batch",
+                "attached transaction views cannot commit the owner-wide transaction",
             ));
         }
         let open_tx = self.open_tx()?;
@@ -1279,7 +1279,7 @@ impl Tx {
     pub fn rollback(&mut self) -> napi::Result<()> {
         if !self.owns_lifetime {
             return Err(napi::Error::from_reason(
-                "attached transaction views cannot roll back the owner-wide batch",
+                "attached transaction views cannot roll back the owner-wide transaction",
             ));
         }
         let open_tx = self.open_tx()?;
@@ -1317,12 +1317,12 @@ impl Tx {
         Ok(())
     }
 
-    fn open_tx(&self) -> napi::Result<CoreOpenBatchId> {
+    fn open_tx(&self) -> napi::Result<CoreOpenTransactionId> {
         self.open_tx
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
     }
 
-    fn abandon(&self, open_tx: CoreOpenBatchId) -> napi::Result<()> {
+    fn abandon(&self, open_tx: CoreOpenTransactionId) -> napi::Result<()> {
         let db = self
             .db
             .as_ref()
@@ -1345,7 +1345,7 @@ impl Drop for Tx {
 
 fn abandon_transaction_handle(
     db: &NapiDbInnerStorage,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<()> {
     match db {
         NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
@@ -1363,7 +1363,7 @@ pub struct NapiDb {
     trusted_backend: bool,
     /// Owner-wide marker carried into short-lived attached Tx handles so they
     /// can reject branch operations before staging any mutation.
-    attributed_mergeable_batches: Rc<RefCell<HashSet<CoreOpenBatchId>>>,
+    attributed_mergeable_batches: Rc<RefCell<HashSet<CoreOpenTransactionId>>>,
 }
 
 /// Native bounded-memory sink used by the TypeScript async streaming-mutation
@@ -2135,12 +2135,12 @@ impl NapiDb {
         })
     }
 
-    /// Attach a schema view to an owner-wide mergeable batch without opening,
-    /// committing, or abandoning that batch.
+    /// Attach a schema view to an owner-wide mergeable transaction without opening,
+    /// committing, or abandoning that transaction.
     #[napi(js_name = "attachMergeableTx")]
-    pub fn attach_mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn attach_mergeable_tx(&self, open_transaction_id: String) -> napi::Result<Tx> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
@@ -2152,20 +2152,20 @@ impl NapiDb {
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
             }),
             kind: NapiTxKind::Mergeable,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: false,
             attributed: self
                 .attributed_mergeable_batches
                 .borrow()
-                .contains(&open_batch_id),
+                .contains(&open_transaction_id),
         })
     }
 
-    /// Attach a schema view to an existing owner-wide exclusive batch.
+    /// Attach a schema view to an existing owner-wide exclusive transaction.
     #[napi(js_name = "attachExclusiveTx")]
-    pub fn attach_exclusive_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn attach_exclusive_tx(&self, open_transaction_id: String) -> napi::Result<Tx> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
@@ -2177,7 +2177,7 @@ impl NapiDb {
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
             }),
             kind: NapiTxKind::Exclusive,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: false,
             attributed: false,
         })
@@ -2187,22 +2187,22 @@ impl NapiDb {
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: String,
         author: Option<Uint8Array>,
     ) -> napi::Result<()> {
-        self.begin_transaction_inner(open_batch_id, kind, author, None)
+        self.begin_transaction_inner(open_transaction_id, kind, author, None)
     }
 
     fn begin_transaction_inner(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: String,
         author: Option<Uint8Array>,
         attribution: Option<Uint8Array>,
     ) -> napi::Result<()> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let author = author
             .as_deref()
@@ -2240,24 +2240,24 @@ impl NapiDb {
                     if kind == "mergeable" {
                         match attribution {
                             Some(attribution) => {
-                                $db.begin_mergeable_attributed(open_batch_id, attribution)
+                                $db.begin_mergeable_attributed(open_transaction_id, attribution)
                                     .await
                             }
                             None => match author {
                                 Some(author) => {
-                                    $db.begin_mergeable_for_identity(open_batch_id, author)
+                                    $db.begin_mergeable_for_identity(open_transaction_id, author)
                                         .await
                                 }
-                                None => $db.begin_mergeable(open_batch_id).await,
+                                None => $db.begin_mergeable(open_transaction_id).await,
                             },
                         }
                     } else {
                         match author {
                             Some(author) => {
-                                $db.begin_exclusive_for_identity(open_batch_id, author)
+                                $db.begin_exclusive_for_identity(open_transaction_id, author)
                                     .await
                             }
-                            None => $db.begin_exclusive(open_batch_id).await,
+                            None => $db.begin_exclusive(open_transaction_id).await,
                         }
                     }
                 })
@@ -2271,7 +2271,7 @@ impl NapiDb {
         if attribution.is_some() {
             self.attributed_mergeable_batches
                 .borrow_mut()
-                .insert(open_batch_id);
+                .insert(open_transaction_id);
         }
         Ok(())
     }
@@ -2282,11 +2282,11 @@ impl NapiDb {
     #[napi(js_name = "beginTransactionAttributed")]
     pub fn begin_transaction_attributed(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         attribution: Uint8Array,
     ) -> napi::Result<()> {
         self.begin_transaction_inner(
-            open_batch_id,
+            open_transaction_id,
             "mergeable".to_owned(),
             None,
             Some(attribution),
@@ -2297,11 +2297,11 @@ impl NapiDb {
     #[napi(js_name = "commitTransaction")]
     pub fn commit_transaction(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: Option<String>,
     ) -> napi::Result<Write> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
@@ -2309,16 +2309,16 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let result = match (db, kind.as_deref().unwrap_or("mergeable")) {
             (NapiDbInnerStorage::Memory(db), "mergeable") => {
-                core_commit_tx_memory(db, open_batch_id)
+                core_commit_tx_memory(db, open_transaction_id)
             }
             (NapiDbInnerStorage::Persistent(db), "mergeable") => {
-                core_commit_tx_persistent(db, open_batch_id)
+                core_commit_tx_persistent(db, open_transaction_id)
             }
             (NapiDbInnerStorage::Memory(db), "exclusive") => {
-                core_commit_exclusive_tx_memory(db, open_batch_id)
+                core_commit_exclusive_tx_memory(db, open_transaction_id)
             }
             (NapiDbInnerStorage::Persistent(db), "exclusive") => {
-                core_commit_exclusive_tx_persistent(db, open_batch_id)
+                core_commit_exclusive_tx_persistent(db, open_transaction_id)
             }
             (_, kind) => Err(napi::Error::from_reason(unknown_transaction_kind_message(
                 kind,
@@ -2327,30 +2327,32 @@ impl NapiDb {
         if result.is_ok() {
             self.attributed_mergeable_batches
                 .borrow_mut()
-                .remove(&open_batch_id);
+                .remove(&open_transaction_id);
         }
         result
     }
 
     /// Roll back an owner-wide open transaction by id.
     #[napi(js_name = "rollbackTransaction")]
-    pub fn rollback_transaction(&self, open_batch_id: String) -> napi::Result<()> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn rollback_transaction(&self, open_transaction_id: String) -> napi::Result<()> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let result = match db {
-            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_batch_id),
-            NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_batch_id),
+            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_transaction_id),
+            NapiDbInnerStorage::Persistent(db) => {
+                db.abandon_transaction_handle(open_transaction_id)
+            }
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()));
         if result.is_ok() {
             self.attributed_mergeable_batches
                 .borrow_mut()
-                .remove(&open_batch_id);
+                .remove(&open_transaction_id);
         }
         result
     }
@@ -3485,9 +3487,9 @@ impl NapiDb {
     }
 
     #[napi(js_name = "mergeableTx")]
-    pub fn mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn mergeable_tx(&self, open_transaction_id: String) -> napi::Result<Tx> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
@@ -3498,9 +3500,9 @@ impl NapiDb {
                 db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable(open_batch_id))
+                    core_block_on(db.begin_mergeable(open_transaction_id))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
@@ -3509,9 +3511,9 @@ impl NapiDb {
                 db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable(open_batch_id))
+                    core_block_on(db.begin_mergeable(open_transaction_id))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
@@ -3522,11 +3524,11 @@ impl NapiDb {
     #[napi(js_name = "mergeableTxForIdentity")]
     pub fn mergeable_tx_for_identity(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         author: Uint8Array,
     ) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
@@ -3538,9 +3540,9 @@ impl NapiDb {
                 db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
+                    core_block_on(db.begin_mergeable_for_identity(open_transaction_id, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
@@ -3549,9 +3551,9 @@ impl NapiDb {
                 db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
+                    core_block_on(db.begin_mergeable_for_identity(open_transaction_id, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
@@ -3803,7 +3805,7 @@ fn core_write_memory(
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
 }
@@ -3821,7 +3823,7 @@ fn core_write_persistent(
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
@@ -3920,7 +3922,7 @@ fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })
 }
@@ -4020,7 +4022,7 @@ fn finish_immediate_promise(
     let _ = unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
 }
 
-fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<TxId>
+fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenTransactionId) -> napi::Result<TxId>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -4030,7 +4032,7 @@ where
 
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
@@ -4044,7 +4046,7 @@ fn core_commit_tx_memory(
 
 fn core_commit_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
@@ -4058,7 +4060,7 @@ fn core_commit_tx_persistent(
 
 fn core_commit_exclusive_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -4073,7 +4075,7 @@ fn core_commit_exclusive_tx_memory(
 
 fn core_commit_exclusive_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -5301,7 +5303,7 @@ mod tests {
         AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
     };
     use jazz::protocol::{ReadViewSpec as CoreReadViewSpec, SubscribeRejectReason};
-    use jazz::tools::OpenTransactionId as CoreOpenBatchId;
+    use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
     use jazz::tools::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
     };
@@ -5764,7 +5766,7 @@ mod tests {
         };
         assert!(err.reason.contains("explicit backend runtime"));
 
-        let attributed_batch = CoreOpenBatchId::new().to_string();
+        let attributed_batch = CoreOpenTransactionId::new().to_string();
         backend
             .begin_transaction_attributed(
                 attributed_batch.clone(),
@@ -5794,7 +5796,7 @@ mod tests {
 
         let err = ordinary
             .begin_transaction_attributed(
-                CoreOpenBatchId::new().to_string(),
+                CoreOpenTransactionId::new().to_string(),
                 Uint8Array::from(alice_bytes.clone()),
             )
             .expect_err("ordinary transactions cannot claim backend attribution");
@@ -6323,7 +6325,7 @@ mod tests {
             .unwrap(),
         );
         let view = Rc::new(core_block_on(owner.register_schema_view(schema.clone())).unwrap());
-        let batch = CoreOpenBatchId::new();
+        let batch = CoreOpenTransactionId::new();
         core_block_on(owner.begin_mergeable(batch)).unwrap();
         let view_refs_before_attachment = Rc::strong_count(&view);
         let mut releasable_view = Tx {
@@ -6370,7 +6372,7 @@ mod tests {
         .unwrap();
         core_block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
-        let exclusive = CoreOpenBatchId::new();
+        let exclusive = CoreOpenTransactionId::new();
         core_block_on(owner.begin_exclusive(exclusive)).unwrap();
         drop(Tx {
             db: Some(NapiDbInnerStorage::Memory(Rc::clone(&view))),
@@ -6393,7 +6395,7 @@ mod tests {
         .unwrap();
         core_block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
 
-        // The public NAPI batch surface binds Alice at begin. A later request
+        // The public NAPI transaction surface binds Alice at begin. A later request
         // cannot switch the transaction-local authorization subject to Bob.
         let binding = NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
@@ -6404,7 +6406,7 @@ mod tests {
             attributed_mergeable_batches: Rc::default(),
         };
         let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
-        let bound = CoreOpenBatchId::new();
+        let bound = CoreOpenTransactionId::new();
         binding
             .begin_transaction(
                 bound.to_string(),

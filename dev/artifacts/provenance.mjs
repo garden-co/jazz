@@ -76,6 +76,14 @@ const isStagedNapiBinding = (repoPath) =>
     repoPath,
   );
 
+// napi-rs writes the matching target manifest beside its loadable binding.
+// It is ignored, sealed after the producer build, and cannot be a producer
+// input without making the native fingerprint depend on lane-local output.
+const isNapiGeneratedTargetManifest = (repoPath) =>
+  /^crates\/jazz-napi\/jazz-napi\.(?:linux-x64-gnu|win32-x64-msvc|darwin-x64|darwin-arm64)\.manifest\.json$/.test(
+    repoPath,
+  );
+
 const isNapiGeneratedOutput = (repoPath) =>
   repoPath === "crates/jazz-napi/index.js" ||
   repoPath === "crates/jazz-napi/index.d.ts" ||
@@ -110,7 +118,8 @@ function files(root, paths) {
         isNapiGeneratedOutput(repoPath) ||
         repoPath.endsWith("native-artifact-fingerprint-napi.ts") ||
         repoPath.endsWith("native-artifact-fingerprint-wasm.ts") ||
-        isStagedNapiBinding(repoPath)
+        isStagedNapiBinding(repoPath) ||
+        isNapiGeneratedTargetManifest(repoPath)
       )
         return;
       found.push(repoPath);

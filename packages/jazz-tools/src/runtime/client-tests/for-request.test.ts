@@ -144,7 +144,7 @@ describe("JazzClient runtime helpers", () => {
       '{"table":"todos"}',
       {
         localUpdates: "deferred",
-        openBatchId: transactionId,
+        openTransactionId: transactionId,
       },
       undefined,
     );
@@ -153,7 +153,7 @@ describe("JazzClient runtime helpers", () => {
     expect(queryCalls[0]![3]).toBe(
       JSON.stringify({
         local_updates: "deferred",
-        transaction_batch_id: writeContext.batch_id,
+        transaction_id: writeContext.transaction_id,
       }),
     );
   });

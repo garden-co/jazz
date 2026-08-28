@@ -1,9 +1,9 @@
 import {
   JazzClient,
-  type BatchId,
+  type TxId,
   type InsertResult,
   type MutationResult,
-  type OpenBatchId,
+  type OpenTransactionId,
   type Runtime,
 } from "../client.js";
 import type { AppContext } from "../context.js";
@@ -37,26 +37,27 @@ export async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-export const testBatchId = (value: string): BatchId => value as BatchId;
-export const testOpenBatchId = (value: string): OpenBatchId => value as OpenBatchId;
+export const testTxId = (value: string): TxId => value as TxId;
+export const testOpenTransactionId = (value: string): OpenTransactionId =>
+  value as OpenTransactionId;
 
 const committed = (value: string): MutationResult => ({
   kind: "committed",
-  batchId: testBatchId(value),
+  txId: testTxId(value),
 });
 
 export function mockRow(id = "todo-1"): InsertResult {
   return { id, values: [], ...committed(`transaction-${id}`) };
 }
 
-export function mockMutation(batchId = "00000000000070008000000000000001"): MutationResult {
-  return committed(batchId);
+export function mockMutation(txId = "00000000000070008000000000000001"): MutationResult {
+  return committed(txId);
 }
 
 export const runtimeTransactionRecordStubs = {
-  beginTransaction: (_kind: "mergeable" | "exclusive", id: OpenBatchId) => id,
+  beginTransaction: (_kind: "mergeable" | "exclusive", id: OpenTransactionId) => id,
   upsert: () => mockMutation("upsert-transaction-id"),
-  commitTransaction: () => testBatchId("committed-batch"),
+  commitTransaction: () => testTxId("committed-batch"),
   waitForTransaction: async () => {},
   rollbackTransaction: async () => false,
   connect: () => {},

@@ -1,12 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
-import {
-  JazzClient,
-  WriteResult,
-  type BatchId,
-  type InsertResult,
-  type Runtime,
-} from "./client.js";
+import { JazzClient, WriteResult, type TxId, type InsertResult, type Runtime } from "./client.js";
 import { createDbWithRuntimeSource, Db, type DbConfig } from "./db.js";
 import { formatAuthSecret } from "./auth-secret-codec.js";
 import {
@@ -338,10 +332,10 @@ describe("runtime/Db native runtime path upstream wiring", () => {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
       kind: "committed",
-      batchId: "transaction-1" as BatchId,
+      txId: "transaction-1" as TxId,
     };
     const client = {
-      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.batchId, client)),
+      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.txId, client)),
       shutdown: vi.fn(async () => undefined),
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),

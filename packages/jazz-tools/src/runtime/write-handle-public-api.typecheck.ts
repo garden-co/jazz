@@ -6,6 +6,10 @@ import type {
   WriteHandle,
   WriteResult,
 } from "../index.js";
+// @ts-expect-error `BatchId` was removed from the runtime transaction API.
+import type { BatchId } from "./client.js";
+// @ts-expect-error `OpenBatchId` was removed from the runtime transaction API.
+import type { OpenBatchId } from "./client.js";
 
 type Todo = { id: string; title: string; done: boolean };
 type TodoInit = { title: string; done: boolean };
@@ -48,7 +52,11 @@ async function assertWriteHandleContract() {
   // @ts-expect-error A streaming insert must put its source in the derived streamed column.
   db.insertStreaming(todos, { title: "todo", done: false });
 
-  const batchId: Promise<string> = inserted.batchId;
+  const txId: Promise<string> = inserted.txId;
+  // @ts-expect-error `txId` is the single public committed-write identity.
+  inserted.batchId;
+  // @ts-expect-error `transactionId` was an obsolete compatibility alias.
+  inserted.transactionId;
 
   inserted.wait({ tier: "local" });
   // @ts-expect-error Mergeable mutations require a durability tier when waiting.
@@ -78,7 +86,7 @@ async function assertWriteHandleContract() {
   void streamed;
   void streamedUpdate;
   void streamedUpsert;
-  void batchId;
+  void txId;
   void mergeableCommit;
   void exclusiveCommit;
 }
