@@ -39,6 +39,19 @@ skip the picker with `--starter <name>`:
 Each starter ships a working todo-list UI with permissions, schema, and
 zero-config local sync.
 
+## React Native / Expo
+
+`create-jazz` intentionally does not offer a React Native or Expo starter yet.
+The installable `jazz-rn` native-relay package now has proven Expo development
+build and bare React Native autolinking paths, but Jazz's high-level foreground
+React Native client is still under restoration. A generated todo app would
+therefore imply a supported application API that does not exist yet.
+
+The canonical configuration receipt is
+[`examples/todo-client-localfirst-expo`](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo).
+It demonstrates the required direct `jazz-rn` dependency, Expo plugin, and New
+Architecture setting without claiming Expo Go or persistent-client support.
+
 ## Requirements
 
 - Node.js 22.12+
