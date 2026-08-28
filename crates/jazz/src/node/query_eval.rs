@@ -1487,17 +1487,19 @@ where
             && root_literal_equalities(shape.query(), binding)?.contains_key("id"))
     }
 
-    /// A relay authority-session owner always serves Edge children from its
-    /// dedicated upstream authority membership. Other relay configurations
-    /// preserve their existing narrow source selection: windows avoid a
-    /// double offset and policy-scoped exact-ID reads cannot resurrect a
-    /// cached row after revocation.
+    /// Relay forwarding consumes a selected upstream authority receipt only
+    /// where local re-evaluation would change its meaning: windows would
+    /// otherwise apply their offset twice, and policy-scoped exact-ID reads
+    /// could resurrect a cached row after revocation. A browser worker's
+    /// dedicated authority-session identity keeps that selected receipt
+    /// separate from ordinary Global coverage; it does not turn every Edge
+    /// child into a second projection path.
     pub(crate) fn relay_edge_query_requires_authority_source(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<bool, Error> {
-        if self.is_relay_authority_session_owner() || shape.query().offset != 0 {
+        if shape.query().offset != 0 {
             return Ok(true);
         }
         self.is_policy_scoped_exact_id_query(shape, binding)

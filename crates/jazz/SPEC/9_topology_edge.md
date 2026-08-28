@@ -36,6 +36,7 @@ Invariant digest:
 - `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("user")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
 - `INV-EDGE-18`: An edge MUST share a settled permission-scope subscription among all dependent acceptance gates it can satisfy.
 - `INV-EDGE-19`: A dynamically catalogued serving authority MUST NOT accept an uploaded commit unit until an authority has published a permissions head selecting its write schema and table policies. If no head is published, it MUST reject the unit with `permissions_head_missing`, rather than silently accepting it.
+- `INV-EDGE-20`: A worker's relay-authority source identity MUST be used only for selected authority-membership handoffs; it MUST NOT create a second projection of ordinary Edge reads or deliver one transaction through conflicting view bundles.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
@@ -111,6 +112,18 @@ returns `Pending`/`Local`; that durability acknowledgement does not assign fate.
 The relay forwards later Edge/Global durability and authority fates back over the
 same client-worker link. A worker without an upstream can therefore satisfy
 `Local` waits while Edge/Global waits remain unavailable.
+
+The worker may give an upstream authority receipt an internal
+`RelayAuthoritySession` source identity. That source is a topology-local
+discriminator, never an application option, persisted field, or policy input:
+it prevents a worker-owned authority receipt from being confused with ordinary
+Global coverage for the same shape and bindings. It is selected only when a
+downstream Edge handoff must reuse authority membership rather than re-evaluate
+the worker cache: a nonzero window (whose offset must not be applied twice) or
+a policy-scoped exact-ID read (whose cached row must not survive revocation).
+Other Edge reads keep the ordinary relay path. In particular, adding a worker
+authority source MUST NOT create a second result projection or cause the same
+transaction to be delivered through incompatible view bundles.
 
 ### 9.3 Relays
 
