@@ -65,7 +65,8 @@ module.exports = function withJazzDeviceFixture(config) {
       injectAndroidBuildConfig(root);
     },
   );
-  // iOS registration remains TODO until the staged pod/XCFramework compile job
-  // verifies its generated-host shape; this workflow is source-only.
+  // The label-gated iOS simulator workflow registers this fixture after
+  // prebuild, stages the pod/XCFramework, and requires its linked
+  // ABI/admission receipt. Multi-peer acceptance remains TODO (#2291).
   return copyTemplate(config, "ios", "ios/JazzDeviceFixture.mm", "JazzDeviceFixture.mm");
 };
