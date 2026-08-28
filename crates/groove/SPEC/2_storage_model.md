@@ -401,12 +401,12 @@ receipt against the production page store; it does not substitute
 
 IndexedDB is one durable adapter, not a second logical Groove layout. Its
 database name; `pages`, `metadata`, and `storage-manifest` object-store names;
- and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
- caller receives a handle, `storage-manifest`/`epoch` must be the exact
- structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
- `1`, the mandatory Groove base plus the complete caller-composed Jazz codec
- profile, page size `16384`, page checksum `xxh3-64-le`, page magic
- `IDBTREE\\0`, and page format `1`. Missing,
+and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
+caller receives a handle, `storage-manifest`/`epoch` must be the exact
+structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
+`1`, the mandatory Groove base plus the complete caller-composed Jazz codec
+profile, page size `16384`, page checksum `xxh3-64-le`, page magic
+`IDBTREE\\0`, and page format `1`. Missing,
 unknown, extra, or inconsistent fields fail closed before a mutation. Epoch-one
 starts at the settlement baseline: a browser schema-generation-2 database receives the new store
 but no manifest and is unsupported rather than adopted. `current` is a
