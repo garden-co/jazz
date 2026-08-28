@@ -855,7 +855,7 @@ mod tests {
             .expect("open raw catalogue storage");
         jazz::db::block_on(storage.set(
             "default".to_owned(),
-            format!("cat:{}", entry.object_id.uuid().simple()).into_bytes(),
+            crate::server::catalogue_storage::CatalogueKvStorage::entry_key(entry.object_id),
             entry.encode_storage_row().expect("encode catalogue entry"),
         ))
         .expect("write raw catalogue entry");
@@ -1629,7 +1629,7 @@ mod tests {
         );
         assert!(
             error.contains(
-                "failed to read durable catalogue: Storage error: IO error: catalogue key uuid"
+                "failed to read durable catalogue: Storage error: IO error: catalogue key uses an unsupported namespace"
             ),
             "startup error retains the catalogue-read context and storage corruption: {error}"
         );
@@ -1711,7 +1711,7 @@ mod tests {
                 .expect("failed startup releases the catalogue RocksDB lock");
             jazz::db::block_on(storage.delete(
                 "default".to_owned(),
-                format!("cat:{}", object_id.uuid().simple()).into_bytes(),
+                crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
             ))
             .expect("remove corrupt catalogue entry");
             drop(storage);
@@ -1834,7 +1834,7 @@ mod tests {
                 .expect("failed startup releases the catalogue RocksDB lock");
             jazz::db::block_on(storage.delete(
                 "default".to_owned(),
-                format!("cat:{}", object_id.uuid().simple()).into_bytes(),
+                crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
             ))
             .expect("remove corrupt catalogue entry");
             drop(storage);

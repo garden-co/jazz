@@ -81,10 +81,13 @@ enum CatalogueStorageCommand {
 }
 
 impl CatalogueKvStorage {
-    // Keep the original catalogue RocksDB layout: entries lived in the default
-    // column family under `cat:` keys before storage became adapter-driven.
+    // `cat:` is the reserved server-catalogue namespace. Every epoch-1 entry
+    // uses the versioned raw-UUID subnamespace below; scans deliberately cover
+    // the whole parent namespace so an old or alternate spelling fails closed
+    // instead of becoming invisible restart state.
     pub(crate) const COLUMN_FAMILY: &'static str = "default";
-    const ENTRY_PREFIX: &'static [u8] = b"cat:";
+    const SCAN_PREFIX: &'static [u8] = b"cat:";
+    const ENTRY_PREFIX: &'static [u8] = b"cat:v1:";
 
     pub(crate) fn open(
         factory: Arc<dyn StorageFactory>,
@@ -134,11 +137,21 @@ impl CatalogueKvStorage {
         })?
     }
 
-    fn entry_key(object_id: ObjectId) -> Vec<u8> {
-        let mut key = Vec::with_capacity(Self::ENTRY_PREFIX.len() + 32);
+    pub(crate) fn entry_key(object_id: ObjectId) -> Vec<u8> {
+        let mut key = Vec::with_capacity(Self::ENTRY_PREFIX.len() + 16);
         key.extend_from_slice(Self::ENTRY_PREFIX);
-        key.extend_from_slice(object_id.uuid().simple().to_string().as_bytes());
+        key.extend_from_slice(object_id.uuid().as_bytes());
         key
+    }
+
+    fn decode_entry_key(key: &[u8]) -> CatalogueStorageResult<ObjectId> {
+        let raw = key.strip_prefix(Self::ENTRY_PREFIX).ok_or_else(|| {
+            CatalogueStorageError::IoError("catalogue key uses an unsupported namespace".to_owned())
+        })?;
+        let uuid: [u8; 16] = raw.try_into().map_err(|_| {
+            CatalogueStorageError::IoError("catalogue key is not one raw UUID".to_owned())
+        })?;
+        Ok(ObjectId::from_uuid(uuid::Uuid::from_bytes(uuid)))
     }
 }
 
@@ -223,24 +236,14 @@ fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<Catalog
 fn scan_entries(storage: &BoxedStorage) -> CatalogueStorageResult<Vec<CatalogueEntry>> {
     let rows = jazz::db::block_on(storage.prefix(
         CatalogueKvStorage::COLUMN_FAMILY.to_owned(),
-        CatalogueKvStorage::ENTRY_PREFIX.to_vec(),
+        CatalogueKvStorage::SCAN_PREFIX.to_vec(),
     ))
     .map_err(storage_error)?;
     let mut entries = rows
         .into_iter()
         .map(|(key, value)| {
-            let hex_id = key
-                .strip_prefix(CatalogueKvStorage::ENTRY_PREFIX)
-                .ok_or_else(|| {
-                    CatalogueStorageError::IoError("invalid catalogue key".to_owned())
-                })?;
-            let uuid = uuid::Uuid::parse_str(std::str::from_utf8(hex_id).map_err(|error| {
-                CatalogueStorageError::IoError(format!("catalogue key utf8: {error}"))
-            })?)
-            .map_err(|error| {
-                CatalogueStorageError::IoError(format!("catalogue key uuid: {error}"))
-            })?;
-            CatalogueEntry::decode_storage_row(ObjectId::from_uuid(uuid), &value).map_err(|error| {
+            let object_id = CatalogueKvStorage::decode_entry_key(&key)?;
+            CatalogueEntry::decode_storage_row(object_id, &value).map_err(|error| {
                 CatalogueStorageError::IoError(format!("decode catalogue entry: {error}"))
             })
         })
@@ -259,7 +262,26 @@ mod tests {
     use jazz::groove::storage::OrderedKvStorage;
 
     #[test]
-    fn adapter_catalogue_reads_the_pre_extraction_default_cf_layout() {
+    fn catalogue_key_v1_is_exact_and_rejects_alternate_spellings() {
+        let object_id = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x4a; 16]));
+        let golden = b"cat:v1:\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a";
+        assert_eq!(CatalogueKvStorage::entry_key(object_id), golden);
+        assert_eq!(
+            CatalogueKvStorage::decode_entry_key(golden).unwrap(),
+            object_id
+        );
+        for malformed in [
+            b"cat:4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a".as_slice(),
+            b"cat:v1:\x4a".as_slice(),
+            b"cat:v1:\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x4a\x00"
+                .as_slice(),
+        ] {
+            assert!(CatalogueKvStorage::decode_entry_key(malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn adapter_catalogue_reopens_only_the_v1_default_cf_layout() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("catalogue.rocksdb");
         let object_id = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x4a; 16]));
@@ -279,11 +301,53 @@ mod tests {
             .unwrap();
         }
 
+        let catalogue = CatalogueKvStorage::open(
+            Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+            path.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            catalogue.scan_catalogue_entries().unwrap(),
+            vec![entry.clone()]
+        );
+        catalogue.close().unwrap();
+        let reopened =
+            CatalogueKvStorage::open(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory), path)
+                .unwrap();
+        assert_eq!(reopened.scan_catalogue_entries().unwrap(), vec![entry]);
+        reopened.close().unwrap();
+    }
+
+    #[test]
+    fn scan_rejects_one_malformed_entry_before_returning_partial_catalogue() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalogue.rocksdb");
+        let valid_id = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x4a; 16]));
+        let malformed_id = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x4b; 16]));
+        let valid = CatalogueEntry {
+            object_id: valid_id,
+            metadata: std::collections::HashMap::from([("type".to_owned(), "table".to_owned())]),
+            content: b"catalogue-row".to_vec(),
+        };
+        {
+            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&path, &["default"]).unwrap();
+            jazz::db::block_on(storage.set(
+                "default".to_owned(),
+                CatalogueKvStorage::entry_key(valid_id),
+                valid.encode_storage_row().unwrap(),
+            ))
+            .unwrap();
+            jazz::db::block_on(storage.set(
+                "default".to_owned(),
+                CatalogueKvStorage::entry_key(malformed_id),
+                b"JCAT\x01".to_vec(),
+            ))
+            .unwrap();
+        }
         let catalogue =
             CatalogueKvStorage::open(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory), path)
                 .unwrap();
-        assert_eq!(catalogue.scan_catalogue_entries().unwrap(), vec![entry]);
-        catalogue.close().unwrap();
+        assert!(catalogue.scan_catalogue_entries().is_err());
         catalogue.close().unwrap();
     }
 }

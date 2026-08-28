@@ -110,6 +110,31 @@ the catalogue storage settlement tracked by
 [#2037](https://github.com/garden-co/jazz/issues/2037) and
 [#1779](https://github.com/garden-co/jazz/issues/1779).
 
+#### Server `cat:` recovery entries
+
+The server-local catalogue is also restart authority. Its only epoch-1 key is
+`"cat:v1:" | object_id:uuid[16]` in the default ordered-KV family. The raw UUID
+bytes are the identity and ordering coordinate; dashed, simple-hex, textual,
+short, extended, or a prior `cat:` spelling is not an alias. Recovery scans the
+whole reserved `cat:` namespace so that an old or alternate key fails closed
+rather than becoming invisible state.
+
+The matching value is exactly `"JCAT" | v1:u8 | object_id:uuid[16] |
+metadata_count:u16be | (key_len:u16be | UTF-8 key | value_len:u16be | UTF-8
+value)* | content_len:u32be | content`. Metadata keys are strictly increasing
+unsigned UTF-8 byte order; a key is bound to the repeated value object ID.
+Unknown versions, malformed UTF-8, duplicate/alternate map spelling,
+truncation, a trailing byte, a key/value ID mismatch, or an unsupported key
+namespace rejects the entire recovery scan before a resident catalogue index is
+constructed. The previous `HashMap` JSON/admin-row representation has no
+compatibility decoder in epoch 1 (`INV-LENS-25`).
+
+For example, object ID `4a…4a` has key
+`63 61 74 3a 76 31 3a 4a 4a … 4a` (`cat:v1:` plus sixteen raw `4a` bytes).
+Swapping the `app_id` and `type` metadata entries or copying that valid `JCAT`
+value under a different key fails before a valid earlier row can become
+resident.
+
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue
 mutations travel as admin-gated
