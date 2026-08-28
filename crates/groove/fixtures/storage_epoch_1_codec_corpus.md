@@ -24,10 +24,11 @@ It runs in the canonical Rust workspace partition. For focused local work use:
 `cargo test -p groove storage::manifest::tests::epoch_1_codec_corpus_`.
 
 Physical RocksDB, SQLite, and IndexedDB files are backend implementation
-formats, not this corpus and not file-level interchange. RocksDB and SQLite
-persist the shared manifest today. IndexedDB only has its adapter-private page
-metadata, so its missing shared physical epoch manifest and historical-store
-fixture capture remain explicitly non-covered acceptance work under #2160.
+formats, not this corpus and not file-level interchange. Committed epoch-1
+physical fixtures for RocksDB and SQLite persist and validate the shared
+manifest today. IndexedDB only has its adapter-private page metadata, so its
+missing shared physical epoch manifest and historical-store fixture capture
+remain explicitly non-covered acceptance work under #2160.
 
 ## Backend-neutral ordered-KV pack
 

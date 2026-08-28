@@ -950,10 +950,15 @@ impl OrderedKvStorage for RocksDbStorage {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use flate2::read::GzDecoder;
     use groove::storage::{Error, OrderedKvStorage, ReopenableStorage};
+    use sha2::{Digest, Sha256};
     use std::future::Future;
+    use std::io::Cursor;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
+    use tar::Archive;
 
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
@@ -962,7 +967,173 @@ mod tests {
         RocksDbClassProfile, RocksDbStorage, any_available, inspect_existing_column_families,
         rocksdb_class_profile, rocksdb_manifest, sum_available,
     };
-    use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+    use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options};
+
+    const EPOCH_1_ROCKSDB_FIXTURE_BASE64: &str =
+        include_str!("../fixtures/epoch-1-historical.tar.gz.base64");
+    const EPOCH_1_ROCKSDB_FIXTURE_SHA256: &str =
+        "468ba3377ed1b219d332c56af40f8e5d5d0cabc7ca085e3ae88c66434e7efa49";
+    const EPOCH_1_ORDERED_KV_PACK: &str =
+        include_str!("../../groove/fixtures/epoch-1-ordered-kv.pack");
+    const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
+        "5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7";
+
+    fn historical_epoch_1_rocksdb_archive() -> Vec<u8> {
+        let archive = STANDARD
+            .decode(EPOCH_1_ROCKSDB_FIXTURE_BASE64.lines().collect::<String>())
+            .expect("committed RocksDB fixture is base64");
+        assert!(historical_epoch_1_rocksdb_checksum_matches(&archive));
+        archive
+    }
+
+    fn historical_epoch_1_rocksdb_checksum_matches(archive: &[u8]) -> bool {
+        format!("{:x}", Sha256::digest(archive)) == EPOCH_1_ROCKSDB_FIXTURE_SHA256
+    }
+
+    fn unpack_historical_epoch_1_rocksdb(root: &std::path::Path) -> std::path::PathBuf {
+        let archive = historical_epoch_1_rocksdb_archive();
+        Archive::new(GzDecoder::new(Cursor::new(archive)))
+            .unpack(root)
+            .expect("committed RocksDB fixture is a safe archive");
+        root.join("rocksdb-epoch-1")
+    }
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0, "fixture hex is byte aligned");
+        (0..value.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
+        assert_eq!(
+            format!("{:x}", Sha256::digest(EPOCH_1_ORDERED_KV_PACK)),
+            EPOCH_1_ORDERED_KV_PACK_SHA256,
+            "the authoritative logical pack must match its checked-in checksum"
+        );
+        EPOCH_1_ORDERED_KV_PACK
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let mut fields = line.split('\t');
+                let family = fields.next().unwrap().to_owned();
+                let key = decode_hex(fields.next().unwrap());
+                let value = decode_hex(fields.next().unwrap());
+                assert!(
+                    fields.next().is_none(),
+                    "fixture pack has exactly three fields"
+                );
+                (family, key, value)
+            })
+            .collect()
+    }
+
+    fn settled_epoch_1_rocksdb_manifest_bytes() -> Vec<u8> {
+        // This is intentionally spelled as fixed wire bytes instead of
+        // calling the current manifest encoder: the fixture proves a release
+        // baseline, not that the current implementation agrees with itself.
+        let mut bytes = b"JSM1\0\x01\0\x03\x07rocksdb\x01\x14groove.ordered-kv.v1\x04".to_vec();
+        for (key, value) in [
+            ("internal-cf", b"__groove_storage_internal_v3".as_slice()),
+            ("key-order", b"unsigned-lexicographic".as_slice()),
+            ("rocksdb-comparator", b"rocksdb.bytewise.v1".as_slice()),
+            ("value-format", b"raw-v3".as_slice()),
+        ] {
+            bytes.push(key.len() as u8);
+            bytes.extend_from_slice(key.as_bytes());
+            bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            bytes.extend_from_slice(value);
+        }
+        bytes
+    }
+
+    #[test]
+    fn historical_epoch_1_rocksdb_fixture_is_checksum_guarded_before_extraction() {
+        let mut corrupted = historical_epoch_1_rocksdb_archive();
+        corrupted[0] ^= 1;
+        assert!(
+            !historical_epoch_1_rocksdb_checksum_matches(&corrupted),
+            "planted physical-fixture corruption must be rejected by the checksum gate"
+        );
+    }
+
+    #[test]
+    fn historical_epoch_1_rocksdb_fixture_read_only_snapshot_mixed_write_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let historical_path = unpack_historical_epoch_1_rocksdb(directory.path());
+
+        // The first open cannot create a file or column family. It reads the
+        // released physical store before the current adapter sees it.
+        let read_only = DB::open_cf_for_read_only(
+            &Options::default(),
+            &historical_path,
+            ["indices", "records", ROCKSDB_INTERNAL_CF],
+            false,
+        )
+        .unwrap();
+        let internal = read_only.cf_handle(ROCKSDB_INTERNAL_CF).unwrap();
+        assert_eq!(
+            read_only
+                .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)
+                .unwrap(),
+            Some(ROCKSDB_VALUE_FORMAT_V3.to_vec())
+        );
+        assert_eq!(
+            read_only
+                .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
+                .unwrap(),
+            Some(settled_epoch_1_rocksdb_manifest_bytes())
+        );
+        let mut snapshot = Vec::new();
+        for family in ["indices", "records"] {
+            let handle = read_only.cf_handle(family).unwrap();
+            snapshot.extend(
+                read_only
+                    .iterator_cf(handle, IteratorMode::Start)
+                    .map(|entry| {
+                        let (key, value) = entry.unwrap();
+                        (family.to_owned(), key.to_vec(), value.to_vec())
+                    }),
+            );
+        }
+        assert_eq!(snapshot, epoch_1_ordered_kv_pack());
+        drop(read_only);
+
+        let current = RocksDbStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        ready(current.write_many(vec![
+            groove::storage::OwnedWriteOperation::Set {
+                cf: "records".into(),
+                key: b"user:3".to_vec(),
+                value: b"Lin".to_vec(),
+            },
+            groove::storage::OwnedWriteOperation::Delete {
+                cf: "indices".into(),
+                key: b"name:Ada".to_vec(),
+            },
+            groove::storage::OwnedWriteOperation::Set {
+                cf: "indices".into(),
+                key: b"name:Lin".to_vec(),
+                value: b"3".to_vec(),
+            },
+        ]))
+        .unwrap();
+        drop(current);
+
+        let reopened = RocksDbStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        assert_eq!(
+            ready(reopened.get("records".into(), b"user:3".to_vec())).unwrap(),
+            Some(b"Lin".to_vec())
+        );
+        assert_eq!(
+            ready(reopened.get("indices".into(), b"name:Ada".to_vec())).unwrap(),
+            None
+        );
+        assert_eq!(
+            ready(reopened.get("indices".into(), b"name:Lin".to_vec())).unwrap(),
+            Some(b"3".to_vec())
+        );
+    }
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
