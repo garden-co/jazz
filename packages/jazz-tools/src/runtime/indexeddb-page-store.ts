@@ -30,6 +30,8 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  * opened with the exact epoch-one inventory.
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
+  "groove.large-value.v1",
+  "groove.ordered-chunk-storage.v1",
   "groove.ordered-kv.v1",
   "jazz.branch-key.v1",
   "jazz.catalogue.activation.v1",

@@ -982,8 +982,9 @@ mod tests {
     fn caller_selected_codec_profile_is_pinned_and_required_on_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile.sqlite");
-        let profile =
-            StorageCodecProfile::new(["groove.ordered-kv.v1", "jazz.example-opaque.v1"]).unwrap();
+        let profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["jazz.example-opaque.v1"])
+            .unwrap();
         drop(
             SqliteStorage::open_with_durability_and_codec_profile(
                 &path,

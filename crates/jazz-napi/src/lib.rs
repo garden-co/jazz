@@ -88,6 +88,7 @@ use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
 use jazz::schema::JazzSchema;
+use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::tools::OpenTransactionId as CoreOpenBatchId;
 use jazz::tools::identity;
 use jazz::tools::{AppId, TransactionId};
@@ -101,7 +102,9 @@ use jazz_server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
-use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
+use jazz_storage_rocksdb::{
+    Durability as CoreRocksDbDurability, RocksDbStorage as CoreRocksDbStorage,
+};
 
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
@@ -2044,10 +2047,7 @@ impl NapiDb {
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = CoreRocksDbStorage::open(data_path, &refs)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
@@ -2069,10 +2069,7 @@ impl NapiDb {
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_backend_identity(&config)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = CoreRocksDbStorage::open(data_path, &refs)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, true)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
@@ -2100,10 +2097,7 @@ impl NapiDb {
             claimed_author,
         };
         let identity = core_open_identity(&config, Some(&proof))?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = CoreRocksDbStorage::open(data_path, &refs)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
@@ -3622,6 +3616,29 @@ fn decode_public_schema(schema: &[u8]) -> napi::Result<JazzSchema> {
         .map_err(napi::Error::from_reason)
 }
 
+/// Open the one durable store owned by a public NAPI runtime.
+///
+/// This is deliberately the Jazz profile rather than the adapter's generic
+/// Groove-only convenience open: the runtime can persist every Jazz codec
+/// family in `epoch_1_storage_codec_profile`, so its root must declare all of
+/// them before any bytes are admitted.
+fn open_persistent_core_storage(
+    data_path: String,
+    schema: &JazzSchema,
+) -> napi::Result<CoreRocksDbStorage> {
+    let refs = schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let codec_profile = epoch_1_storage_codec_profile()
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    CoreRocksDbStorage::open_with_durability_and_codec_profile(
+        data_path,
+        &refs,
+        CoreRocksDbDurability::WalNoSync,
+        &codec_profile,
+    )
+    .map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
 fn open_core_db<S>(
     schema: JazzSchema,
     storage: S,
@@ -4937,6 +4954,113 @@ mod tests {
         core_update_options, core_upsert_options, encode_core_subscription_delta,
         requeue_retryable_subscription_batch, unknown_transaction_kind_message,
     };
+
+    fn encode_persistent_open_config(author: CoreAuthorSubject) -> Vec<u8> {
+        #[derive(serde::Serialize)]
+        struct EncodedIdentity {
+            node: CoreNodeUuid,
+            author: CoreAuthorSubject,
+        }
+        #[derive(serde::Serialize)]
+        struct EncodedConfig {
+            identity: EncodedIdentity,
+            row_id_seed: Option<u64>,
+            history_complete: bool,
+            initial_sync_flush_every: Option<u32>,
+            backend_credential: Option<String>,
+        }
+        postcard::to_allocvec(&EncodedConfig {
+            identity: EncodedIdentity {
+                node: CoreNodeUuid::from_bytes([0x71; 16]),
+                author,
+            },
+            row_id_seed: None,
+            history_complete: false,
+            initial_sync_flush_every: None,
+            backend_credential: None,
+        })
+        .expect("valid NAPI open fixture")
+    }
+
+    /// Plant the adapter's generic profile first. Each public persistent NAPI
+    /// opener must reject it rather than silently treating a Jazz root as a
+    /// Groove-only one. This is intentionally an internal manifest-admission
+    /// receipt: a user-visible API cannot create the invalid physical root.
+    fn plant_groove_only_persistent_root(path: &std::path::Path, schema_bytes: &[u8]) {
+        let schema = crate::decode_public_schema(schema_bytes).expect("valid public schema");
+        let column_families = schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        drop(
+            jazz_storage_rocksdb::RocksDbStorage::open(path, &refs)
+                .expect("plant generic Groove manifest"),
+        );
+    }
+
+    #[test]
+    fn every_public_persistent_open_rejects_a_planted_groove_only_manifest() {
+        let schema = br#"{"tables":{}}"#;
+        let external_author =
+            CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let config = encode_persistent_open_config(external_author);
+
+        let ordinary_dir = tempfile::tempdir().unwrap();
+        let ordinary_path = ordinary_dir.path().join("ordinary.rocksdb");
+        plant_groove_only_persistent_root(&ordinary_path, schema);
+        assert!(
+            NapiDb::open_persistent(
+                ordinary_path.to_string_lossy().into_owned(),
+                Uint8Array::from(schema.to_vec()),
+                Uint8Array::from(config.clone()),
+            )
+            .is_err(),
+            "openPersistent must reject a manifest that omits Jazz codecs"
+        );
+
+        let backend_dir = tempfile::tempdir().unwrap();
+        let backend_path = backend_dir.path().join("backend.rocksdb");
+        plant_groove_only_persistent_root(&backend_path, schema);
+        assert!(
+            NapiDb::open_persistent_as_backend(
+                backend_path.to_string_lossy().into_owned(),
+                Uint8Array::from(schema.to_vec()),
+                Uint8Array::from(config.clone()),
+            )
+            .is_err(),
+            "openPersistentAsBackend must reject a manifest that omits Jazz codecs"
+        );
+
+        let proof_dir = tempfile::tempdir().unwrap();
+        let proof_path = proof_dir.path().join("proof.rocksdb");
+        plant_groove_only_persistent_root(&proof_path, schema);
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[0x72; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "codec-profile-test",
+            60,
+        )
+        .unwrap();
+        let verified =
+            jazz::tools::identity::verify_jazz_self_signed_proof(&token, "codec-profile-test")
+                .unwrap();
+        let claimed_author =
+            serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, verified.user_id))
+                .unwrap();
+        assert!(
+            NapiDb::open_persistent_with_self_signed_proof(
+                proof_path.to_string_lossy().into_owned(),
+                Uint8Array::from(schema.to_vec()),
+                Uint8Array::from(config),
+                token,
+                "codec-profile-test".to_owned(),
+                claimed_author,
+            )
+            .is_err(),
+            "openPersistentWithSelfSignedProof must reject a manifest that omits Jazz codecs"
+        );
+    }
 
     #[test]
     fn pending_native_read_retains_a_suspended_future_until_the_next_js_turn() {

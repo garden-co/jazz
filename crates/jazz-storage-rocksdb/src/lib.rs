@@ -1368,8 +1368,9 @@ mod tests {
     #[test]
     fn caller_selected_codec_profile_is_pinned_and_required_on_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let profile =
-            StorageCodecProfile::new(["groove.ordered-kv.v1", "jazz.example-opaque.v1"]).unwrap();
+        let profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["jazz.example-opaque.v1"])
+            .unwrap();
         drop(
             RocksDbStorage::open_with_durability_and_codec_profile(
                 dir.path(),

@@ -829,6 +829,7 @@ mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
     use crate::server::catalogue_entry::CatalogueEntry;
+    use crate::server::catalogue_storage::catalogue_storage_codec_profile;
     use jazz::groove::storage::OrderedKvStorage;
     use jazz::tools::AppId;
     use jazz::tools::metadata::{MetadataKey, ObjectType};
@@ -851,14 +852,25 @@ mod tests {
     }
 
     fn write_raw_catalogue_entry(catalogue_path: &std::path::Path, entry: &CatalogueEntry) {
-        let storage = jazz_storage_rocksdb::RocksDbStorage::open(catalogue_path, &["default"])
-            .expect("open raw catalogue storage");
+        let storage = open_raw_catalogue_storage(catalogue_path);
         jazz::db::block_on(storage.set(
             "default".to_owned(),
             crate::server::catalogue_storage::CatalogueKvStorage::entry_key(entry.object_id),
             entry.encode_storage_row().expect("encode catalogue entry"),
         ))
         .expect("write raw catalogue entry");
+    }
+
+    fn open_raw_catalogue_storage(
+        catalogue_path: &std::path::Path,
+    ) -> jazz_storage_rocksdb::RocksDbStorage {
+        jazz_storage_rocksdb::RocksDbStorage::open_with_durability_and_codec_profile(
+            catalogue_path,
+            &["default"],
+            jazz_storage_rocksdb::Durability::WalNoSync,
+            &catalogue_storage_codec_profile().expect("settled catalogue profile"),
+        )
+        .expect("open raw catalogue storage")
     }
 
     struct NoopWireTransport;
@@ -1606,8 +1618,7 @@ mod tests {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
         {
-            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-                .expect("open raw catalogue storage");
+            let storage = open_raw_catalogue_storage(&catalogue_path);
             jazz::db::block_on(storage.set(
                 "default".to_owned(),
                 b"cat:not-a-uuid".to_vec(),
@@ -1635,8 +1646,7 @@ mod tests {
             "startup error retains the catalogue-read context and storage corruption: {error}"
         );
 
-        let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-            .expect("failed startup releases the catalogue RocksDB lock");
+        let storage = open_raw_catalogue_storage(&catalogue_path);
         jazz::db::block_on(storage.delete("default".to_owned(), b"cat:not-a-uuid".to_vec()))
             .expect("remove corrupt catalogue entry");
         drop(storage);
@@ -1708,8 +1718,7 @@ mod tests {
                 "startup error identifies the corrupt durable object: {error}"
             );
 
-            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-                .expect("failed startup releases the catalogue RocksDB lock");
+            let storage = open_raw_catalogue_storage(&catalogue_path);
             jazz::db::block_on(storage.delete(
                 "default".to_owned(),
                 crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
@@ -1905,8 +1914,7 @@ mod tests {
                 "startup error identifies the corrupt durable object: {error}"
             );
 
-            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-                .expect("failed startup releases the catalogue RocksDB lock");
+            let storage = open_raw_catalogue_storage(&catalogue_path);
             jazz::db::block_on(storage.delete(
                 "default".to_owned(),
                 crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),

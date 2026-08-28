@@ -130,17 +130,22 @@ ordinary ordered-KV data plane. Before creating a table, column family, page,
 or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
-IDs, and sorted decode-relevant adapter parameters. Groove contributes exactly
-`groove.ordered-kv.v1`; the caller composes that with its own closed persistent
-codec profile before opening the adapter. The adapter treats higher-layer IDs
-as opaque and never learns their semantics. A Jazz root, for example, supplies
-the complete profile in `jazz::storage_codec_profile`, while a Groove-only root
-uses only the Groove ID. Omission, addition, duplication, or substitution of a
-codec ID is invalid for the selected profile even when the rest of the manifest
-is canonical. The manifest envelope is the root boundary rather than an entry
-in its own registry. Adding an authoritative opaque byte payload requires a
-stable ID, a corpus entry, and a new epoch rather than an adapter-local
-postcard/`Bytes` exception. Missing, truncated,
+IDs, and sorted decode-relevant adapter parameters. Groove contributes the
+mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v1`, and
+`groove.ordered-chunk-storage.v1`; every profile and decoded manifest MUST
+contain all three before an adapter may mutate. `groove.large-value.v1` covers
+the inseparable V1 descriptor/`NodeRef` records and authenticated immutable-node
+envelopes; `groove.ordered-chunk-storage.v1` covers that adapter's independent
+install-receipt wrapper. The caller composes this closed base with its own
+persistent codec profile before opening the adapter. The adapter treats
+higher-layer IDs as opaque and never learns their semantics. A Jazz root, for
+example, supplies the complete profile in `jazz::storage_codec_profile`, while
+a Groove-only root uses exactly the mandatory Groove base. Omission, addition,
+duplication, or substitution of a codec ID is invalid for the selected profile
+even when the rest of the manifest is canonical. The manifest envelope is the
+root boundary rather than an entry in its own registry. Adding an authoritative
+opaque byte payload requires a stable ID, a corpus entry, and a new epoch rather
+than an adapter-local postcard/`Bytes` exception. Missing, truncated,
 noncanonical, corrupt, unknown, or inconsistent manifests fail closed before
 any mutation (`INV-STORAGE-31`).
 
@@ -396,11 +401,12 @@ receipt against the production page store; it does not substitute
 
 IndexedDB is one durable adapter, not a second logical Groove layout. Its
 database name; `pages`, `metadata`, and `storage-manifest` object-store names;
-and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
-caller receives a handle, `storage-manifest`/`epoch` must be the exact
-structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
-`1`, required codec IDs `[groove.ordered-kv.v1]`, page size `16384`, page
-checksum `xxh3-64-le`, page magic `IDBTREE\\0`, and page format `1`. Missing,
+ and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
+ caller receives a handle, `storage-manifest`/`epoch` must be the exact
+ structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
+ `1`, the mandatory Groove base plus the complete caller-composed Jazz codec
+ profile, page size `16384`, page checksum `xxh3-64-le`, page magic
+ `IDBTREE\\0`, and page format `1`. Missing,
 unknown, extra, or inconsistent fields fail closed before a mutation. Epoch-one
 starts at the settlement baseline: a browser schema-generation-2 database receives the new store
 but no manifest and is unsupported rather than adopted. `current` is a
