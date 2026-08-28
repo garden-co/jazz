@@ -12,7 +12,7 @@ The Expo config plugin copies and registers the Android template during prebuild
 
 ## Current acceptance plan
 
-- `linked-abi-trusted-admission`: automatic iOS receipt that verifies the embedded ABI and receives a 32-byte capability from the trusted native admission boundary.
+- `linked-abi-admission`: automatic iOS and Android receipt that verifies the embedded ABI and receives a 32-byte capability from the trusted native admission boundary.
 - `local-write-subscription`: UI-A write observed by UI-B through one relay.
 - `reconnect` and `reopen`: connection recovery and durable process/app relaunch.
 - `scope-isolation` and `logout-auth-switch`: separate scope visibility and revocation before replacement.

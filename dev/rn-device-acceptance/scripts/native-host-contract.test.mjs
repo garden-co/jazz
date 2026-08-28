@@ -73,6 +73,7 @@ test("dispatch workflow fails clearly without KVM and bounds emulator boot", () 
   assert.match(workflow, /\[\[ -r \/dev\/kvm && -w \/dev\/kvm \]\]/);
   assert.match(workflow, /did not boot within 180s/);
   assert.match(workflow, /tail -200 "\$cache\/emulator\.log"/);
+  assert.match(workflow, /android-device-acceptance:[\s\S]*timeout-minutes: 45/);
 });
 
 test("checksum pin rejects a planted corrupt cache archive", () => {
