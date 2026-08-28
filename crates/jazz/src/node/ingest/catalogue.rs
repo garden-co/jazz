@@ -603,6 +603,7 @@ where
             } else {
                 let fresh = allocate_provisional_physical_mapping(
                     &publication.schema.schema,
+                    publication.physical_identities.clone(),
                     &mut self.catalogue.next_physical_table_id,
                     &mut self.catalogue.next_physical_column_id,
                 )?;

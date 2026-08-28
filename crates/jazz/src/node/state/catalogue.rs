@@ -2,42 +2,6 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Every durable or durably reserved authority manifest known to this
-    /// node.  Historical mappings are retained by catalogue recovery, while
-    /// staged and pending envelopes reserve their UUIDs before activation.
-    pub(super) fn physical_identity_history(&self) -> Vec<PhysicalIdentityManifest> {
-        self.physical_identity_history_except(None)
-    }
-
-    /// As [`Self::physical_identity_history`] but omits the publication being
-    /// validated. A parked bundle reserves its UUIDs against *other* bundles;
-    /// treating its own new identities as already retired would incorrectly
-    /// reject every pending activation.
-    pub(super) fn physical_identity_history_except(
-        &self,
-        omit: Option<crate::ids::SchemaLineagePublicationId>,
-    ) -> Vec<PhysicalIdentityManifest> {
-        self.catalogue
-            .physical_mappings
-            .values()
-            .map(|mapping| mapping.identities.clone())
-            .chain(
-                self.catalogue
-                    .staged_lineages
-                    .values()
-                    .filter(|staged| Some(staged.publication.id) != omit)
-                    .map(|staged| staged.publication.physical_identities.clone()),
-            )
-            .chain(
-                self.catalogue
-                    .pending_lineages
-                    .values()
-                    .filter(|pending| Some(pending.publication.id) != omit)
-                    .map(|pending| pending.publication.physical_identities.clone()),
-            )
-            .collect()
-    }
-
     /// Reservation history for admitting `candidate_schema`. Descendant parked
     /// envelopes are excluded: they are allowed to inherit identities minted
     /// by this candidate, even when they arrived out of order. Unrelated
@@ -126,7 +90,7 @@ where
                 "schema lineage source identities are missing",
             ))?
             .identities;
-        let history = self.physical_identity_history();
+        let history = self.physical_identity_history_for_candidate(schema.id, None);
         SchemaLineagePublication::author_from_prior_with_history(
             &source.schema,
             identities,

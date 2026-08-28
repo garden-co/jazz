@@ -582,7 +582,6 @@ impl SyncMessage {
             }
             _ => self.carried_view_update().map_or(Ok(()), |view| {
                 validate_version_carrier_runs(&view.version_carriers)?;
-                validate_version_bundles(&view.version_bundles)?;
                 for carrier in &view.version_carriers {
                     for bundle in carrier.bundle_refs()? {
                         validate_version_records(bundle.versions)?;

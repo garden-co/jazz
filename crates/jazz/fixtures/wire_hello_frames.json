@@ -1,105 +1,105 @@
 {
-  "fixture_set": "jazz-wire-hello-frames-v14",
+  "fixture_set": "jazz-wire-hello-frames-v15",
   "codec": "postcard WireFrame::Hello(WireHello)",
   "fixtures": [
     {
       "name": "client_without_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 0,
       "role": 0,
       "authority_node_hex": null,
       "authority_epoch": null,
-      "frame_hex": "000e0e000000",
-      "frame_base64": "AA4OAAAA"
+      "frame_hex": "000f0f000000",
+      "frame_base64": "AA8PAAAA"
     },
     {
       "name": "client_with_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 1,
       "role": 0,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": 300,
-      "frame_hex": "000e0e010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-      "frame_base64": "AA4OAQABEF5eXl5eXl5eXl5eXl5eXl6sAg=="
+      "frame_hex": "000f0f010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+      "frame_base64": "AA8PAQABEF5eXl5eXl5eXl5eXl5eXl6sAg=="
     },
     {
       "name": "core_without_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 4,
       "role": 1,
       "authority_node_hex": null,
       "authority_epoch": null,
-      "frame_hex": "000e0e040100",
-      "frame_base64": "AA4OBAEA"
+      "frame_hex": "000f0f040100",
+      "frame_base64": "AA8PBAEA"
     },
     {
       "name": "core_with_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 501,
       "role": 1,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": 300,
-      "frame_hex": "000e0ef5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-      "frame_base64": "AA4O9QMBARBeXl5eXl5eXl5eXl5eXl5erAI="
+      "frame_hex": "000f0ff5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+      "frame_base64": "AA8P9QMBARBeXl5eXl5eXl5eXl5eXl5erAI="
     },
     {
       "name": "core_with_max_u64_authority_epoch",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 0,
       "role": 1,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": "18446744073709551615",
-      "frame_hex": "000e0e000101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5effffffffffffffffff01",
-      "frame_base64": "AA4OAAEBEF5eXl5eXl5eXl5eXl5eXl7///////////8B"
+      "frame_hex": "000f0f000101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5effffffffffffffffff01",
+      "frame_base64": "AA8PAAEBEF5eXl5eXl5eXl5eXl5eXl7///////////8B"
     },
     {
       "name": "edge_without_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 32,
       "role": 2,
       "authority_node_hex": null,
       "authority_epoch": null,
-      "frame_hex": "000e0e200200",
-      "frame_base64": "AA4OIAIA"
+      "frame_hex": "000f0f200200",
+      "frame_base64": "AA8PIAIA"
     },
     {
       "name": "edge_with_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 64,
       "role": 2,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": 300,
-      "frame_hex": "000e0e400201105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-      "frame_base64": "AA4OQAIBEF5eXl5eXl5eXl5eXl5eXl6sAg=="
+      "frame_hex": "000f0f400201105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+      "frame_base64": "AA8PQAIBEF5eXl5eXl5eXl5eXl5eXl6sAg=="
     },
     {
       "name": "relay_without_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 128,
       "role": 3,
       "authority_node_hex": null,
       "authority_epoch": null,
-      "frame_hex": "000e0e80010300",
-      "frame_base64": "AA4OgAEDAA=="
+      "frame_hex": "000f0f80010300",
+      "frame_base64": "AA8PgAEDAA=="
     },
     {
       "name": "relay_with_authority",
-      "min_protocol_version": 14,
-      "max_protocol_version": 14,
+      "min_protocol_version": 15,
+      "max_protocol_version": 15,
       "features": 264,
       "role": 3,
       "authority_node_hex": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
       "authority_epoch": 300,
-      "frame_hex": "000e0e88020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
-      "frame_base64": "AA4OiAIDARBeXl5eXl5eXl5eXl5eXl5erAI="
+      "frame_hex": "000f0f88020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+      "frame_base64": "AA8PiAIDARBeXl5eXl5eXl5eXl5eXl5erAI="
     }
   ]
 }

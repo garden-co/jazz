@@ -750,7 +750,7 @@ fn hello_fixture_manifest() -> HelloManifest {
         .collect();
 
     HelloManifest {
-        fixture_set: "jazz-wire-hello-frames-v14",
+        fixture_set: "jazz-wire-hello-frames-v15",
         codec: "postcard WireFrame::Hello(WireHello)",
         fixtures,
     }

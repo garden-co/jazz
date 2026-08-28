@@ -96,7 +96,102 @@ payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
 data. Wire v13's otherwise-current storage layout still carries packed-HLC
 provenance, so v14 rejected it and every earlier version rather than decoding or
-migrating them. Wire v15 retains that storage/provenance representation.
+migrating them. Wire v15 retains that storage/provenance representation. The
+v15 golden fixture set is the only supported message layout. `MigrationLens`
+payloads in that fixture set are
+their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
+derived on decode), replacing postcard's former field-by-field representation.
+
+### 8.1.1 Frozen v15 byte contract
+
+`WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
+value**. A conformant decoder MUST reject a valid prefix followed by any
+trailing byte; concatenation belongs only to the documented WebSocket
+`Vec<Vec<u8>>` batch carrier. In particular, a binding MUST NOT hand a byte
+suffix from one frame to the semantic decoder, and a semantic decoder MUST NOT
+silently leave a suffix for its caller (`INV-WIRE-1`).
+Every postcard `u64`, including an enum discriminant or length prefix, MUST use
+its shortest base-128 spelling. A redundant continuation byte, more than ten
+bytes, or a tenth-byte payload above `1` is malformed rather than a compatible
+alternate encoding. TypeScript decoders that expose a `u64` as a JavaScript
+`number` MUST reject values above `Number.MAX_SAFE_INTEGER`; only fields kept
+as `bigint` may retain the full `u64` domain.
+Writers encode a ZigZag `i64` only from a safe JavaScript `number` or a
+`bigint` in `[-2^63, 2^63-1]`; they MUST reject an unsafe number or either
+out-of-range signed endpoint before emitting bytes.
+The TypeScript WebSocket carrier MUST consume the entire outer batch and the
+entire known `Hello`, `Message`, or `Error` frame whenever it parses or
+classifies that frame; reading only the enum tag is not frame acceptance.
+Within `WireHello.authority`, `WireAuthorityEndpoint.node` is the postcard
+sequence representation of `NodeUuid`: a canonical length prefix of `16`
+followed by exactly sixteen UUID bytes, then the postcard `u64` authority
+epoch. It is not a bare fixed-width UUID. A carrier MUST consume this complete
+optional endpoint before applying the exact-frame EOF check. Omitting the
+sequence length, accepting a valid Hello plus a suffix, or treating a genuine
+endpoint byte as a suffix is malformed framing, not version compatibility. A
+length other than exactly `16` MUST be rejected even when the declared byte
+sequence and the remaining Hello fields are otherwise well formed.
+
+Postcard enum ordinals are wire data. The v15 baseline freezes these permanent
+discriminants (decimal):
+
+| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `WirePeerRole`  | `Client=0`, `Core=1`, `Edge=2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `SetCurrentWriteSchema=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29` |
+
+Future variants MUST append after these values; existing variants, fields, and
+their field order MUST NOT be reordered, inserted before, reused, or decoded
+through a migration path. A new optional semantic variant additionally needs a
+new negotiated feature bit. v15 intentionally provides neither old-version
+decoding nor migration.
+
+Feature bits are also permanent: `SyncMessagePayload=1<<0`,
+`SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
+`PayloadZstd=1<<4`, `MessageFragmentation=1<<5`,
+`AuthorizationScopeReceipts=1<<6`, `AuthorizationScopeViews=1<<7`, and
+`AuxiliaryChunks=1<<8`. `Hello` negotiates only the intersection. A message
+envelope or fragment MUST NOT declare a bit outside that intersection. Feature
+masks are postcard `u64` values and MUST be decoded and compared across all 64
+bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.
+Any unsupported low or high bit, including `1<<32`, rejects the Hello before
+its accepted mask is converted to a narrower runtime type. The feature mask
+and authority epoch remain `bigint` through wire decoding, so canonical values
+through `2^64-1` are representable without a JavaScript number conversion. Exactly
+one compression bit may be active on an envelope; when both codecs are
+negotiated, an outbound v15 sender selects LZ4 and emits only its bit. A
+receiver rejects an envelope declaring both codecs, a codec change within one
+connection, corrupt compressed bytes, or a decompressed payload exceeding the
+logical-message budget. Compression is applied before fragmentation and removed
+only after complete fragment reassembly; it never changes semantic bytes.
+
+`WireMessageFragment` is the complete physical-fragment layout in field order:
+`protocol_version`, `features`, `session`, `message_id`, `message_digest`,
+`total_len`, `offset`, `payload`. Its digest covers the entire compressed
+payload; reassembly admits only negotiated, session-authenticated, in-range,
+non-overlapping extents with exact contiguous coverage and matching metadata,
+then verifies that digest before decompression or semantic decode. The resource
+limits and expiry/deduplication rules are normative in
+`SPEC/13_transport_message_fragmentation.md`.
+
+The v15 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
+`crates/jazz/fixtures/wire_hello_frames.json`:
+Rust independently decodes every hard-coded frame, re-encodes the semantic
+value to the exact same payload and frame bytes, and TypeScript independently
+reads every transport envelope through its production postcard reader, rejects
+a suffix on every corpus frame, and round-trips each through the exact batch
+carrier. The Hello corpus crosses every frozen peer role with both absent and
+present authority endpoints and one- and multi-byte feature masks; supported
+Core cases additionally pass through the production TypeScript WebSocket
+negotiation path. Its
+binding companion, `binding_codec_golden.json`, covers NAPI/WASM's shared
+Rust-produced relation-snapshot and subscription-delta byte ABI, consumed by
+the production TypeScript decoder. These corpora are compatibility evidence,
+not a permissive migration input. Adding a new case requires a SPEC decision,
+an invariant citation, and a review of every language consumer.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at
