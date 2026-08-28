@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ReadOpts};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
@@ -70,7 +70,7 @@ fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
 }
 
 #[test]
-fn deferred_persistence_keeps_resident_write_sync_and_local_durability_pending() {
+fn cancelled_started_deferred_persistence_poison_requires_reopen() {
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -145,10 +145,20 @@ fn deferred_persistence_keeps_resident_write_sync_and_local_durability_pending()
             .contains(&TestStorageOperation::WriteMany)
     );
 
-    // Host teardown may cancel an in-flight tick. The publication must remain
-    // queued so the next host tick can finish the already-visible write.
+    // This poll has started the atomic write. Host teardown therefore cannot
+    // safely retry the resident publication: it may already be durable.
     drop(tick);
-    control.resume_operation(TestStorageOperation::WriteMany);
-    block_on(db.tick()).expect("persistence settles through a later host tick");
-    block_on(write.wait(DurabilityTier::Local)).expect("write reaches local durability");
+    let error = match block_on(db.insert(
+        "todos",
+        row! { title: "must require reopen" },
+        Default::default(),
+    )) {
+        Ok(_) => panic!("a started persistence cancellation poisons the live database"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Storage);
+    assert!(
+        error.message.contains("poisoned"),
+        "the public error must identify the fail-closed local database state: {error}"
+    );
 }
