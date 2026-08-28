@@ -224,7 +224,10 @@ the receipt; ordinary orphan reclamation may then collect nodes whose last
 retainer disappeared. Completion bindings are not independently TTL-expired.
 Every completed binding, reverse binding, receipt key, and receipt value MUST
 agree on the exact upload and receipt identities as well as descriptor and
-accounting; recovery fails closed on any disagreement.
+accounting; specifically the fixed-width suffix of each `completed-upload/` or
+`completed-receipt/` Groove key is authoritative and must equal the respective
+embedded upload or receipt ID. Recovery, staging preflight, retry lookup, and
+acceptance/eviction cleanup fail closed before mutation on any disagreement.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
 version nor root reachability.
@@ -302,7 +305,7 @@ eviction mutates anything. Receipt IDs are not row IDs or authority: a matching
 receipt is consumed only by the same atomic owner-row batch containing its exact
 descriptor. The initial descriptor upload key is a Groove-only BLAKE3
 derive-key identity over canonical descriptor bytes using the frozen context
-`"groove pending descriptor upload v2"`; it supports replay/resume of that
+`"groove pending descriptor upload v1"`; it supports replay/resume of that
 descriptor only. The creation timestamp is never a synchronous admission
 deadline: while the journal exists, an otherwise authorized operation may
 continue or accept it; maintenance is the sole expiry authority. The named

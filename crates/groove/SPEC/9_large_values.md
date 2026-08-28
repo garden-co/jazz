@@ -711,10 +711,17 @@ whose key alone carries the identity.
 ID is duplicated in the canonical value and MUST match byte-for-byte before
 scan/recovery, acceptance, finalization, resume, or eviction. A valid value
 copied under a different or malformed key is corruption, not an alias or replay.
+The promotion journals apply the same rule in both directions:
+`completed-upload/<upload-id>` MUST contain that exact embedded upload ID, and
+`completed-receipt/<receipt-id>` MUST contain that exact embedded receipt ID.
+Every staging preflight, forward retry lookup, and reverse
+acceptance/eviction cleanup validates its selected key suffix before any
+metadata or refcount mutation; copying either canonical record under another
+key cannot create an alias.
 The descriptor field is canonical opaque `LargeValueRef` bytes at this metadata
 boundary, so its V1 dispatcher runs before nested descriptor fields are bound.
 Descriptor-keyed uploads derive their initial pending key with
-`BLAKE3 derive_key("groove pending descriptor upload v2",
+`BLAKE3 derive_key("groove pending descriptor upload v1",
 canonical_large_value_ref_bytes)[0..16]`; retry-receipt IDs and locators remain
 independent random capabilities. `created_at_ms` is GC/accounting observation,
 not an admission deadline: only host-serialized eviction makes a handle stale.

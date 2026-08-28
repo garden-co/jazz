@@ -1233,7 +1233,7 @@ async fn completed_upload_retry_rejects_substituted_receipt_id_after_reopen() {
             .finalize_large_value_upload(upload_id, prepared.value_ref)
             .await,
         Err(Error::InvalidLargeValueMetadata(message))
-            if message.contains("receipt does not match")
+            if message.contains("key and receipt id differ")
     ));
 }
 

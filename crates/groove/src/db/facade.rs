@@ -149,6 +149,45 @@ where
     Ok((staged, operations))
 }
 
+/// Read one completed upload's bidirectional journals, binding both embedded
+/// identities to their selected keys before any caller treats completion as a
+/// reason to skip staging or mutate lifecycle state.
+async fn completed_large_value_upload_journal<S>(
+    storage: &S,
+    upload_id: crate::large_values::StagedLargeValueId,
+) -> Result<Option<crate::large_values::PendingLargeValueUpload>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let upload_key = completed_large_value_upload_key(upload_id);
+    let Some(encoded) = storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
+        .await?
+    else {
+        return Ok(None);
+    };
+    let completed = decode_completed_large_value_upload_at_key(&upload_key, &encoded)?;
+    let receipt_id = completed.receipt_id.ok_or_else(|| {
+        Error::InvalidLargeValueMetadata("completed upload has no receipt id".to_owned())
+    })?;
+    let receipt_key = completed_large_value_receipt_key(receipt_id);
+    let reverse = storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key.clone())
+        .await?
+        .ok_or_else(|| {
+            Error::InvalidLargeValueMetadata(
+                "completed upload has no receipt reverse binding".to_owned(),
+            )
+        })?;
+    let reverse_completed = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
+    if reverse != encoded || reverse_completed != completed {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload bindings disagree".to_owned(),
+        ));
+    }
+    Ok(Some(completed))
+}
+
 async fn completed_large_value_upload<S>(
     storage: &S,
     upload_id: crate::large_values::StagedLargeValueId,
@@ -157,40 +196,17 @@ async fn completed_large_value_upload<S>(
 where
     S: OrderedKvStorage + ?Sized,
 {
-    let Some(encoded) = storage
-        .get(
-            LARGE_VALUE_METADATA_CF.to_owned(),
-            completed_large_value_upload_key(upload_id),
-        )
-        .await?
-    else {
+    let Some(completed) = completed_large_value_upload_journal(storage, upload_id).await? else {
         return Ok(None);
     };
-    let completed = decode_pending_large_value_upload(&encoded)?;
-    if completed.id != upload_id || completed.descriptor.as_ref() != Some(value_ref) {
+    if completed.descriptor.as_ref() != Some(value_ref) {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload is bound to a different descriptor".to_owned(),
         ));
     }
-    let receipt_id = completed.receipt_id.ok_or_else(|| {
-        Error::InvalidLargeValueMetadata("completed upload has no receipt id".to_owned())
-    })?;
-    let reverse = storage
-        .get(
-            LARGE_VALUE_METADATA_CF.to_owned(),
-            completed_large_value_receipt_key(receipt_id),
-        )
-        .await?
-        .ok_or_else(|| {
-            Error::InvalidLargeValueMetadata(
-                "completed upload has no receipt reverse binding".to_owned(),
-            )
-        })?;
-    if reverse != encoded {
-        return Err(Error::InvalidLargeValueMetadata(
-            "completed upload bindings disagree".to_owned(),
-        ));
-    }
+    let receipt_id = completed
+        .receipt_id
+        .expect("validated completed receipt id");
     let encoded = storage
         .get(
             LARGE_VALUE_METADATA_CF.to_owned(),
@@ -229,12 +245,7 @@ where
     else {
         return Ok(Vec::new());
     };
-    let completed = decode_pending_large_value_upload(&encoded)?;
-    if completed.receipt_id != Some(receipt_id) {
-        return Err(Error::InvalidLargeValueMetadata(
-            "completed receipt reverse binding is inconsistent".to_owned(),
-        ));
-    }
+    let completed = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
     let upload_key = completed_large_value_upload_key(completed.id);
     let forward = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
@@ -242,7 +253,8 @@ where
         .ok_or_else(|| {
             Error::InvalidLargeValueMetadata("completed receipt has no upload binding".to_owned())
         })?;
-    if forward != encoded {
+    let forward_completed = decode_completed_large_value_upload_at_key(&upload_key, &forward)?;
+    if forward != encoded || forward_completed != completed {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -566,12 +578,7 @@ impl Database {
         pending_limit: Option<usize>,
     ) -> Result<bool, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
-        if self
-            .storage
-            .get(
-                LARGE_VALUE_METADATA_CF.to_owned(),
-                completed_large_value_upload_key(upload_id),
-            )
+        if completed_large_value_upload_journal(&self.storage, upload_id)
             .await?
             .is_some()
         {
@@ -717,7 +724,7 @@ impl Database {
         let encoded = crate::large_values::encode_large_value_ref(value_ref).map_err(|error| {
             Error::InvalidLargeValueMetadata(format!("cannot encode upload descriptor: {error}"))
         })?;
-        let digest = blake3::derive_key("groove pending descriptor upload v2", &encoded);
+        let digest = blake3::derive_key("groove pending descriptor upload v1", &encoded);
         let mut id = [0_u8; 16];
         id.copy_from_slice(&digest[..16]);
         Ok(crate::large_values::StagedLargeValueId(id))

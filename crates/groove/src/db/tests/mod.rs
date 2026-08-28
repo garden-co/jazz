@@ -536,16 +536,14 @@ fn large_value_metadata_records_are_canonical_groove_records() {
     );
     assert_eq!(
         to_hex(Database::descriptor_upload_id(&value_ref).unwrap().0),
-        "56b8e4a2c8d0c22a9ca73b21d372744f"
+        "aec69de205adc49847c9d755eee7c9c3"
     );
 }
 
-// This internal reopen receipt protects the metadata envelope boundary. The
-// descriptor bytes are intentionally a future selector followed by a payload
-// that cannot possibly bind as V1; reads must return the selector failure and
-// leave both persisted journals untouched for a future implementation.
+// This internal reopen receipt proves the discarded pre-freeze V2 selector is
+// rejected, with no compatibility decoding or lifecycle mutation.
 #[futures_test::test]
-async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
+async fn historical_v2_descriptor_metadata_is_rejected_without_mutation() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",
         [ColumnSchema::new("id", ColumnType::U64)],
@@ -630,7 +628,7 @@ async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 2")
         ),
-        "staged journal must dispatch before V1 binding"
+        "staged journal must reject discarded V2"
     );
     assert!(
         matches!(
@@ -638,7 +636,7 @@ async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 2")
         ),
-        "pending journal must dispatch before V1 binding"
+        "pending journal must reject discarded V2"
     );
     assert_eq!(
         storage
@@ -660,10 +658,10 @@ async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
 
 // This internal reopen receipt protects the metadata envelope boundary. The
 // descriptor bytes are intentionally a future selector followed by a payload
-// that cannot possibly bind as V2; reads must return the selector failure and
+// that cannot possibly bind as V1; reads must return the selector failure and
 // leave both persisted journals untouched for a future implementation.
 #[futures_test::test]
-async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
+async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",
         [ColumnSchema::new("id", ColumnType::U64)],
@@ -673,7 +671,9 @@ async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
     let database = Database::new(schema.clone(), storage.clone())
         .await
         .unwrap();
-    let future_descriptor = vec![0, crate::large_values::FORMAT_VERSION + 1, 0xff];
+    // V2 is the discarded pre-freeze encoding. This receipt must instead use
+    // an actual future selector, so it proves the future-version boundary.
+    let future_descriptor = vec![0, crate::large_values::FORMAT_VERSION + 2, 0xff];
     let staged_id = crate::large_values::StagedLargeValueId([0x91; 16]);
     let pending_id = crate::large_values::StagedLargeValueId([0x92; 16]);
     let staged = encode_large_value_metadata_record(
@@ -748,7 +748,7 @@ async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 3")
         ),
-        "staged journal must dispatch before V2 binding"
+        "staged journal must dispatch before V1 binding"
     );
     assert!(
         matches!(
@@ -756,7 +756,7 @@ async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 3")
         ),
-        "pending journal must dispatch before V2 binding"
+        "pending journal must dispatch before V1 binding"
     );
     assert_eq!(
         storage
@@ -882,5 +882,89 @@ async fn receipt_and_upload_key_identity_corruption_survives_reopen_without_muta
             .unwrap(),
         Some(pending),
         "rejected pending corruption must remain intact for inspection"
+    );
+}
+
+// The completed journals are an authority boundary too: neither direction may
+// be copied to another fixed-width lifecycle key. Exercise the forward
+// staging preflight and the reverse cleanup primitive that acceptance and TTL
+// eviction share, and prove both reject before a write.
+#[futures_test::test]
+async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let database = Database::new(schema, storage.clone()).await.unwrap();
+    let descriptor = crate::large_values::prepare(crate::large_values::LargeValueKind::Bytes, b"x")
+        .unwrap()
+        .value_ref;
+    let source_upload = crate::large_values::StagedLargeValueId([0x85; 16]);
+    let copied_upload_key_id = crate::large_values::StagedLargeValueId([0x86; 16]);
+    let source_receipt = crate::large_values::StagedLargeValueId([0x87; 16]);
+    let copied_receipt_key_id = crate::large_values::StagedLargeValueId([0x88; 16]);
+    let completed =
+        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
+            id: source_upload,
+            descriptor: Some(descriptor),
+            receipt_id: Some(source_receipt),
+            accounting: crate::large_values::StagedLargeValueAccounting::default(),
+            created_at_ms: 0,
+            chunks: Vec::new(),
+        })
+        .unwrap();
+    let copied_upload_key = completed_large_value_upload_key(copied_upload_key_id);
+    let copied_receipt_key = completed_large_value_receipt_key(copied_receipt_key_id);
+    database
+        .storage
+        .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: copied_upload_key.clone(),
+                value: completed.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: copied_receipt_key.clone(),
+                value: completed.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        database
+            .stage_large_value_chunk_batch(
+                copied_upload_key_id,
+                crate::large_values::LargeValueKind::Bytes,
+                Vec::new(),
+            )
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("completed upload key and journal id differ")
+    ));
+    assert!(matches!(
+        super::facade::completed_large_value_cleanup_operations(&storage, copied_receipt_key_id)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("completed receipt key and receipt id differ")
+    ));
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), copied_upload_key)
+            .await
+            .unwrap(),
+        Some(completed.clone()),
+        "rejected forward copy must remain untouched"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), copied_receipt_key)
+            .await
+            .unwrap(),
+        Some(completed),
+        "rejected reverse copy must remain untouched"
     );
 }

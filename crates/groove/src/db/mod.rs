@@ -934,6 +934,40 @@ fn decode_pending_large_value_upload_at_key(
     Ok(upload)
 }
 
+/// Decode the forward completed-upload journal only when its embedded upload
+/// identity is the canonical fixed-width suffix of its metadata key.
+fn decode_completed_large_value_upload_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+    let key_id =
+        staged_large_value_id_from_metadata_key(key, b"completed-upload/", "completed upload")?;
+    let completed = decode_pending_large_value_upload(encoded)?;
+    if completed.id != key_id {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload key and journal id differ".to_owned(),
+        ));
+    }
+    Ok(completed)
+}
+
+/// Decode the reverse completed-receipt journal only when its embedded receipt
+/// identity is the canonical fixed-width suffix of its metadata key.
+fn decode_completed_large_value_receipt_at_key(
+    key: &[u8],
+    encoded: &[u8],
+) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
+    let key_id =
+        staged_large_value_id_from_metadata_key(key, b"completed-receipt/", "completed receipt")?;
+    let completed = decode_pending_large_value_upload(encoded)?;
+    if completed.receipt_id != Some(key_id) {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed receipt key and receipt id differ".to_owned(),
+        ));
+    }
+    Ok(completed)
+}
+
 /// Apply physical-node ownership transitions against one read-your-own-write
 /// overlay. Each active parent contributes one reference to each distinct
 /// child node, regardless of how many logical occurrences of that child the
