@@ -203,7 +203,10 @@ where
             )
         })?;
     let staged = decode_staged_large_value(&encoded)?;
-    if staged.value_ref != *value_ref || staged.accounting != completed.accounting {
+    if staged.id != receipt_id
+        || staged.value_ref != *value_ref
+        || staged.accounting != completed.accounting
+    {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload receipt does not match its binding".to_owned(),
         ));

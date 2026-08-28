@@ -1036,6 +1036,65 @@ async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt(
     );
 }
 
+// This internal durability test plants a staged value whose embedded receipt
+// id disagrees with the metadata key selected by the completed-upload binding.
+// Public APIs cannot construct this persisted corruption directly.
+#[futures_test::test]
+async fn completed_upload_retry_rejects_substituted_receipt_id_after_reopen() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let upload_id = crate::large_values::StagedLargeValueId([0xc6; 16]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0xc5; crate::large_values::INLINE_VALUE_MAX_BYTES * 2],
+    )
+    .unwrap();
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    database
+        .stage_large_value_chunk_batch(upload_id, prepared.value_ref.kind, prepared.staged_chunks)
+        .await
+        .unwrap();
+    let receipt = database
+        .finalize_large_value_upload(upload_id, prepared.value_ref.clone())
+        .await
+        .unwrap();
+    let receipt_key = staged_large_value_key(receipt.id);
+    let mut substituted = receipt;
+    substituted.id = crate::large_values::StagedLargeValueId([0xc7; 16]);
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: receipt_key,
+            value: encode_staged_large_value(&substituted).unwrap(),
+        }])
+        .await
+        .unwrap();
+    drop(database);
+
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks);
+    assert!(matches!(
+        reopened
+            .finalize_large_value_upload(upload_id, prepared.value_ref)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("receipt does not match")
+    ));
+}
+
 #[futures_test::test]
 async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail() {
     let schema = DatabaseSchema::new([TableSchema::new(

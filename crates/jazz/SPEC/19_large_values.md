@@ -171,6 +171,9 @@ into a new claim. Receipt consumption by an accepted row or explicit TTL
 eviction atomically removes both directions of that idempotency binding with
 the receipt; ordinary orphan reclamation may then collect nodes whose last
 retainer disappeared. Completion bindings are not independently TTL-expired.
+Every completed binding, reverse binding, receipt key, and receipt value MUST
+agree on the exact upload and receipt identities as well as descriptor and
+accounting; recovery fails closed on any disagreement.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
 version nor root reachability.
