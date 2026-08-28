@@ -564,7 +564,7 @@ it("keeps an attached view alive through a failed commit, then releases it once 
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "rollback after failed commit" } },
-    JSON.stringify({ batch_id: openBatchId }),
+    JSON.stringify({ transaction_id: openBatchId }),
   );
 
   expect(() => runtime.commitTransaction(openBatchId)).toThrow("injected commit failure");
@@ -597,7 +597,7 @@ it("closing a schema view releases only its attached transaction handle", () => 
   view.insert(
     "todos",
     { title: { type: "Text", value: "view closes before parent batch" } },
-    JSON.stringify({ batch_id: openBatchId }),
+    JSON.stringify({ transaction_id: openBatchId }),
   );
 
   void view.close();
