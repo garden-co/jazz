@@ -5736,8 +5736,8 @@ mod tests {
                         145537, 34950, 152569, 41743, 42982, 69329, 56603, 124288, 73969, 85750,
                         84406, 23086, 111851, 83424
                     ],
-                    "8e0e4ba73b814dec723f825eb147de2710e41a8b7ebbae3be638d12d2ecab055".to_owned(),
-                    "7b4803eacbf8b1b3141f8de6c51505401523d4b9cc8ec2b89d1c41cf55ea1049".to_owned()
+                    "b720e518e7680a0d403e8dc78217d3414e15d39740279b0f42b99e0933685a04".to_owned(),
+                    "c8b977ca28bab218dd195785eec03dc78706b126edae83a480772b517381a575".to_owned()
                 ),
                 (
                     vec![
@@ -5745,18 +5745,18 @@ mod tests {
                         84454, 160417, 126463, 84455, 79700, 38374, 46026, 71601, 69902, 35485,
                         44337, 19041, 139318, 50419
                     ],
-                    "9a9d69b5577928dee1c315fa67f65dd9e106c246c97ec8e02940062401bc4c6c".to_owned(),
-                    "6185a6d7577f8de1be4a5131b9405f616f20ffc09115e677babdfe5b4738d826".to_owned()
+                    "0144a46b81a69c8e865d22c6a7d91da207e23c3689b3cf8ee78b7dc7443322dc".to_owned(),
+                    "d274d2f7b43d8e4a774c8b52929567e6fd059a5fb035a76ba7d694c561536d1a".to_owned()
                 ),
                 (
                     vec![73665, 79319],
-                    "df7b53c850c1574950adb5cf0e7ed6b852c4d165cba55feebe949668b2cf8cf4".to_owned(),
-                    "d7e0e23658973115f1b0742d182e2315f2e867b0130c883e465594d82189c659".to_owned()
+                    "1e435f295806a39b9247255a85bfc64745f3cf2ca2033c0c1b720f249ba4ce3d".to_owned(),
+                    "64119616bbd532be38b6ae4e33fb1b9260cd022f322cc9225b3efe4607e27365".to_owned()
                 ),
                 (
                     vec![1130487, 1927793, 152984],
-                    "da561219c038a1ba3728d5cd66bf21ee4bd20920e83774089a7907b9cb7f3d9f".to_owned(),
-                    "9e6e0ae09aa0afc9367f30980cad725e49c30081b0ff1689e3548fd6214fcb12".to_owned()
+                    "9d0c1498928003bbeaa8cb526252c3080cd819b83b99a0e01ad3cd79f63a2319".to_owned(),
+                    "2d9f7ec079e2ac62ff79eafb27784ad9dbe6651e91df5795fe3fe54807247e2e".to_owned()
                 ),
             ],
             "multi-branch grouping and every locator-bearing object receipt are frozen"

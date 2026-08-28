@@ -628,7 +628,7 @@ async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
         matches!(
             staged_result,
             Err(Error::InvalidLargeValueMetadata(message))
-                if message.contains("unsupported large-value format version 3")
+                if message.contains("unsupported large-value format version 2")
         ),
         "staged journal must dispatch before V1 binding"
     );
@@ -636,7 +636,7 @@ async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
         matches!(
             reopened.pending_large_value_uploads().await,
             Err(Error::InvalidLargeValueMetadata(message))
-                if message.contains("unsupported large-value format version 3")
+                if message.contains("unsupported large-value format version 2")
         ),
         "pending journal must dispatch before V1 binding"
     );
