@@ -6,7 +6,18 @@ import {
   markTrustedReservedSession,
   internalSessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
-import { selfSignedClientProofFromConfig } from "./default-runtime-source.js";
+import {
+  selfSignedClientProofFromConfig,
+  trustAttachedBrowserWorkerSession,
+} from "./default-runtime-source.js";
+import { getTrustedReservedSession } from "./db-internal-session.js";
+import type { DbConfig } from "./db.js";
+
+function unsignedJwt(payload: Record<string, unknown>): string {
+  const encode = (value: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "EdDSA", typ: "JWT" })}.${encode(payload)}.test-signature`;
+}
 
 describe("selfSignedClientProofFromConfig", () => {
   it("binds local-first and anonymous runtime opens to their signed author", () => {
@@ -55,5 +66,59 @@ describe("selfSignedClientProofFromConfig", () => {
         },
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("trustAttachedBrowserWorkerSession", () => {
+  const session = {
+    issuer: LOCAL_FIRST_JWT_ISSUER,
+    user_id: "alice",
+    claims: { role: "writer" },
+    authMode: "local-first" as const,
+  };
+
+  function attachedConfig(
+    overrides: { runtimeSources?: DbConfig["runtimeSources"] } = {},
+  ): DbConfig {
+    return {
+      appId: "proof-app",
+      jwtToken: unsignedJwt({
+        iss: LOCAL_FIRST_JWT_ISSUER,
+        sub: "alice",
+        claims: { role: "writer" },
+      }),
+      runtimeSources: {
+        browserWorkerPort: {} as MessagePort,
+        browserWorkerSession: session,
+      },
+      ...overrides,
+    };
+  }
+
+  it("carries a matching reserved session across an attached worker boundary", () => {
+    const config = attachedConfig();
+    trustAttachedBrowserWorkerSession(config);
+
+    expect(getTrustedReservedSession(config)).toEqual(session);
+  });
+
+  it("rejects a host session that does not match the attached identity token", () => {
+    const config = attachedConfig({
+      runtimeSources: {
+        browserWorkerPort: {} as MessagePort,
+        browserWorkerSession: { ...session, user_id: "mallory" },
+      },
+    });
+
+    expect(() => trustAttachedBrowserWorkerSession(config)).toThrow(
+      "Attached browser worker session does not match its identity token",
+    );
+  });
+
+  it("does not trust forwarded session data without an attached worker port", () => {
+    const config = attachedConfig({ runtimeSources: { browserWorkerSession: session } });
+    trustAttachedBrowserWorkerSession(config);
+
+    expect(getTrustedReservedSession(config)).toBeUndefined();
   });
 });

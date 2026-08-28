@@ -146,7 +146,7 @@ export function InspectorApp() {
             ...hostConfig,
             appId: context.appId,
             driver: { type: "persistent", dbName: context.dbName },
-            runtimeSources: { browserWorkerPort },
+            runtimeSources: { ...hostConfig.runtimeSources, browserWorkerPort },
           },
           schema: context.schema,
         });

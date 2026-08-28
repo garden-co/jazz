@@ -38,7 +38,10 @@ import {
   type StreamingValueSource,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
-import { DefaultRuntimeSource } from "./default-runtime-source.js";
+import {
+  DefaultRuntimeSource,
+  trustAttachedBrowserWorkerSession,
+} from "./default-runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -1707,8 +1710,11 @@ export class Db {
   getConfig(): DbConfig {
     // Return a copy without internal live transport handles. MessagePorts are
     // neither configuration nor cloneable unless transferred.
-    const { browserWorkerPort: _browserWorkerPort, ...runtimeSources } =
-      this.config.runtimeSources ?? {};
+    const {
+      browserWorkerPort: _browserWorkerPort,
+      browserWorkerSession: _browserWorkerSession,
+      ...runtimeSources
+    } = this.config.runtimeSources ?? {};
     return structuredClone({
       ...this.config,
       runtimeSources: Object.keys(runtimeSources).length > 0 ? runtimeSources : undefined,
@@ -2784,6 +2790,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     resolvedConfig = { ...configWithoutAuth, jwtToken };
     setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
+
+  trustAttachedBrowserWorkerSession(resolvedConfig);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
   const db =

@@ -8,13 +8,17 @@ import {
   type JazzInspectorHost,
 } from "./inspector-host-types.js";
 import { openAggregatedBrowserInspectorControlPort } from "./browser-control-registry.js";
+import { getDbInternalSession } from "../../runtime/db-internal-session.js";
 
 /**
  * Build the ready-to-use browser config in the host bundle, where the host's
  * resolved storage coordinates and worker URL are known. The overlay passes it
  * to its provider verbatim instead of duplicating those resolution rules.
  */
-function buildOverlayDbConfig(config: DbConfig): DbConfig {
+function buildOverlayDbConfig(
+  config: DbConfig,
+  session: ReturnType<typeof getDbInternalSession>,
+): DbConfig {
   const identityCredential = config.jwtToken
     ? { jwtToken: config.jwtToken }
     : config.secret
@@ -32,6 +36,7 @@ function buildOverlayDbConfig(config: DbConfig): DbConfig {
     // `persistent` selects the SharedWorker connection so this client joins
     // the host's IndexedDB-backed runtime. Its main-thread Db remains in-memory.
     driver: { type: "persistent", dbName: resolveDefaultPersistentDbName(config) },
+    ...(session ? { runtimeSources: { browserWorkerSession: structuredClone(session) } } : {}),
   };
 }
 
@@ -50,7 +55,7 @@ export function installInspectorHost(
 
   const handle: JazzInspectorHost = {
     getConnectionConfig() {
-      return buildOverlayDbConfig(db.getConfig());
+      return buildOverlayDbConfig(db.getConfig(), getDbInternalSession(db));
     },
     openControlPort() {
       return openAggregatedBrowserInspectorControlPort(() => db.openInspectorControlPort());

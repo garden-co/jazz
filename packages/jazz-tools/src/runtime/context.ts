@@ -44,6 +44,14 @@ export interface RuntimeSourcesConfig {
 
   /** @internal Pre-attached worker peer used by the same-origin inspector. */
   browserWorkerPort?: MessagePort;
+
+  /**
+   * @internal Verified identity forwarded by the same-origin inspector host.
+   *
+   * This is only admitted together with `browserWorkerPort`; the native runtime
+   * still verifies reserved-issuer JWT proofs before opening the local peer.
+   */
+  browserWorkerSession?: Session;
 }
 
 /**
