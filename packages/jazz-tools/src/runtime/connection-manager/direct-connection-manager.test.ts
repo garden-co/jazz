@@ -1,11 +1,35 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DirectConnectionManager } from "./direct-connection-manager.js";
 import type { DbForConnection } from "./types.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { Session } from "../context.js";
+import type { DirectRuntimeConnection } from "../runtime-source.js";
 
 const host = { config: { serverUrl: "ws://example.invalid" } } as DbForConnection;
 const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function managerWithDirectConnection(connection: DirectRuntimeConnection): {
+  manager: DirectConnectionManager;
+  reportFailure(error: unknown): void;
+} {
+  let reportFailure: (error: unknown) => void = () => undefined;
+  const manager = new DirectConnectionManager({
+    config: { appId: "direct-connection-retry", serverUrl: "ws://example.invalid" },
+    runtimeSource: {
+      createClient: () => ({ onMutationError() {} }),
+      createDirectConnection: ({ onFailure }: { onFailure(error: unknown): void }) => {
+        reportFailure = onFailure;
+        return connection;
+      },
+    },
+    isShuttingDown: false,
+    markUnauthenticated() {},
+    clearAuthError() {},
+    onMutationError() {},
+  } as unknown as DbForConnection);
+  manager.getClient({});
+  return { manager, reportFailure: (error) => reportFailure(error) };
+}
 
 describe("DirectConnectionManager explicit offline state", () => {
   it("preserves the private reserved-session capability in the runtime config clone", () => {
@@ -72,5 +96,68 @@ describe("DirectConnectionManager explicit offline state", () => {
     await manager.reconnect();
     await nextTick();
     expect(wakes).toBe(2);
+  });
+
+  it("replaces an initial ready failure after a successful reconnect", async () => {
+    const initialFailure = new Error("initial native relay startup failed");
+    const connection: DirectRuntimeConnection = {
+      ready: vi.fn(async () => {
+        throw initialFailure;
+      }),
+      reconnect: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+    };
+    const { manager } = managerWithDirectConnection(connection);
+
+    await expect(manager.ensureReady("local")).rejects.toBe(initialFailure);
+    await expect(manager.reconnect()).resolves.toBeUndefined();
+    await expect(manager.ensureReady("local")).resolves.toBeUndefined();
+  });
+
+  it("retains a failed reconnect error instead of clearing the prior receipt", async () => {
+    const initialFailure = new Error("initial native relay startup failed");
+    const reconnectFailure = new Error("native relay reconnect failed");
+    const connection: DirectRuntimeConnection = {
+      ready: vi.fn(async () => {
+        throw initialFailure;
+      }),
+      reconnect: vi.fn(async () => {
+        throw reconnectFailure;
+      }),
+      disconnect: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+    };
+    const { manager } = managerWithDirectConnection(connection);
+
+    await expect(manager.ensureReady("local")).rejects.toBe(initialFailure);
+    await expect(manager.reconnect()).rejects.toBe(reconnectFailure);
+    await expect(manager.ensureReady("local")).rejects.toBe(reconnectFailure);
+  });
+
+  it("does not clear a newer native failure that races a successful reconnect", async () => {
+    const initialFailure = new Error("initial native relay startup failed");
+    const concurrentFailure = new Error("native relay lost transport during reconnect");
+    let releaseReconnect!: () => void;
+    const reconnectReady = new Promise<void>((resolve) => {
+      releaseReconnect = resolve;
+    });
+    const connection: DirectRuntimeConnection = {
+      ready: vi.fn(async () => {
+        throw initialFailure;
+      }),
+      reconnect: vi.fn(() => reconnectReady),
+      disconnect: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+    };
+    const { manager, reportFailure } = managerWithDirectConnection(connection);
+
+    await expect(manager.ensureReady("local")).rejects.toBe(initialFailure);
+    const reconnect = manager.reconnect();
+    await nextTick();
+    reportFailure(concurrentFailure);
+    releaseReconnect();
+    await expect(reconnect).resolves.toBeUndefined();
+    await expect(manager.ensureReady("local")).rejects.toBe(concurrentFailure);
   });
 });

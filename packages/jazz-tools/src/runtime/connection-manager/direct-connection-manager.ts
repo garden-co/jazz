@@ -14,6 +14,7 @@ export class DirectConnectionManager extends ConnectionManager {
   private connection: DirectRuntimeConnection | null = null;
   private connectionReady: Promise<void> | null = null;
   private connectionError: Error | null = null;
+  private connectionErrorEpoch = 0;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -22,22 +23,19 @@ export class DirectConnectionManager extends ConnectionManager {
   async start(): Promise<void> {}
 
   protected override onClientCreated({ schema, client }: ConnectionManagerClientInput): void {
-    const connection = this.host.runtimeSource.createDirectConnection?.({
-      config: this.host.config,
-      schema,
-      client,
-      onFailure: (error) => {
-        if (this.connection === connection) this.connectionError = asError(error);
-      },
-    });
+    let connection: DirectRuntimeConnection | null = null;
+    connection =
+      this.host.runtimeSource.createDirectConnection?.({
+        config: this.host.config,
+        schema,
+        client,
+        onFailure: (error) => {
+          if (connection) this.recordConnectionError(connection, error);
+        },
+      }) ?? null;
     if (connection) {
       this.connection = connection;
-      this.connectionReady = connection.ready().catch((error: unknown) => {
-        const failure = asError(error);
-        if (this.connection === connection) this.connectionError = failure;
-        throw failure;
-      });
-      void this.connectionReady.catch(() => undefined);
+      this.trackConnectionReady(connection, connection.ready());
       if (this.isDisconnected) {
         void this.enqueueTransportTransition(() => connection.disconnect()).catch(() => undefined);
       }
@@ -121,8 +119,18 @@ export class DirectConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
     await this.enqueueTransportTransition(async () => {
-      if (this.connection) await this.connection.reconnect();
-      else {
+      const connection = this.connection;
+      if (connection) {
+        // A successful reconnect replaces a rejected initial `ready()` receipt.
+        // Only clear an error observed before this attempt: a concurrent native
+        // failure must remain visible to subsequent ensureReady() calls.
+        const errorEpoch = this.connectionErrorEpoch;
+        const ready = this.trackConnectionReady(connection, connection.reconnect());
+        await ready;
+        if (this.connection === connection && this.connectionErrorEpoch === errorEpoch) {
+          this.connectionError = null;
+        }
+      } else {
         const client = this.clientEntry?.client;
         if (client) this.connectClient(client);
       }
@@ -139,6 +147,25 @@ export class DirectConnectionManager extends ConnectionManager {
     const transition = this.transportTransition.then(run, run);
     this.transportTransition = transition.catch(() => undefined);
     return transition;
+  }
+
+  private trackConnectionReady(
+    connection: DirectRuntimeConnection,
+    ready: Promise<void>,
+  ): Promise<void> {
+    const tracked = ready.catch((error: unknown) => {
+      this.recordConnectionError(connection, error);
+      throw error;
+    });
+    this.connectionReady = tracked;
+    void tracked.catch(() => undefined);
+    return tracked;
+  }
+
+  private recordConnectionError(connection: DirectRuntimeConnection, error: unknown): void {
+    if (this.connection !== connection) return;
+    this.connectionErrorEpoch += 1;
+    this.connectionError = asError(error);
   }
 
   async deleteClientStorage(): Promise<void> {
