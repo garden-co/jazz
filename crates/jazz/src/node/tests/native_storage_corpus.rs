@@ -135,6 +135,40 @@ where
             .collect();
         stores.insert(store_name, rows);
     }
+
+    // Application rows do not live in the authored logical table declarations.
+    // They are lowered into permanent physical table identities, with separate
+    // immutable-history, register, current-winner, and rejected families. A
+    // corpus that scans only `lower_to_groove()` therefore misses the bytes it
+    // exists to freeze.
+    for table in &schema.tables {
+        let table_id = node
+            .physical_table_id_for_schema(schema.version_id(), &table.name)
+            .unwrap_or_else(|error| panic!("resolve physical corpus table {}: {error}", table.name));
+        for storage_table in [
+            physical_history_table_name(table_id),
+            physical_register_table_name(table_id),
+            physical_global_current_table_name(table_id),
+            physical_register_global_current_table_name(table_id),
+            physical_ahead_current_table_name(table_id),
+            physical_register_ahead_current_table_name(table_id),
+            physical_rejected_versions_table_name(table_id),
+        ] {
+            let rows = crate::db::block_on(
+                node.database.primary_key_scan_raw(&storage_table, &[]),
+            )
+            .unwrap_or_else(|error| panic!("scan physical corpus store {storage_table}: {error}"));
+            assert!(
+                stores
+                    .insert(
+                        storage_table.clone(),
+                        rows.into_iter().map(|row| row.into_parts()).collect(),
+                    )
+                    .is_none(),
+                "one permanent physical table identity must have one receipt entry: {storage_table}"
+            );
+        }
+    }
     NativeCorpusReceipt { stores }
 }
 
@@ -160,7 +194,11 @@ fn assert_native_corpus_has_required_families(receipt: &NativeCorpusReceipt) {
     }
 }
 
-fn seed_native_corpus<S>(node: &mut NodeState<S>) -> (RowUuid, TxId)
+fn seed_native_corpus<S>(
+    node: &mut NodeState<S>,
+    first_title: &str,
+    note_body: &str,
+) -> (RowUuid, TxId)
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -171,7 +209,7 @@ where
             MergeableCommit::new("todos", row_uuid, 100)
                 .branch(branch.clone())
                 .cells(BTreeMap::from([
-                    ("title".to_owned(), v("settlement baseline")),
+                    ("title".to_owned(), v(first_title)),
                     ("attachment".to_owned(), Value::Bytes(vec![0, 1, 2, 255])),
                 ])),
         )
@@ -193,7 +231,7 @@ where
         .expect("settle second history version globally");
     node.commit_mergeable_settled(
         MergeableCommit::new("notes", row(0xc3), 102)
-            .cells(BTreeMap::from([("body".to_owned(), v("independent table"))])),
+            .cells(BTreeMap::from([("body".to_owned(), v(note_body))])),
     )
     .expect("seed independent current row");
     (row_uuid, second)
@@ -234,7 +272,11 @@ where
 {
     let mut producer = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
         .expect("open settlement-baseline producer");
-    let (row_uuid, latest) = seed_native_corpus(&mut producer);
+    let (row_uuid, latest) = seed_native_corpus(
+        &mut producer,
+        "settlement baseline",
+        "independent table",
+    );
     let before_close = native_corpus_receipt(&producer, &schema);
     assert_native_corpus_has_required_families(&before_close);
     drop(producer);
@@ -274,7 +316,8 @@ where
     drop(reopened);
 
     let mut after_mixed_write =
-        crate::db::block_on(NodeState::new(node(0xc0), schema, open())).expect("reopen mixed store");
+        crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
+            .expect("reopen mixed store");
     assert_native_corpus_semantics(&mut after_mixed_write, row_uuid, latest);
     assert!(
         after_mixed_write
@@ -284,7 +327,23 @@ where
         .any(|version| version.row_uuid() == row(0xc4)),
         "new writer data survives without rewriting historical transaction bytes"
     );
+    assert_ne!(
+        native_corpus_checksum(&native_corpus_receipt(&after_mixed_write, &schema)),
+        native_corpus_checksum(&before_close),
+        "a real application-row write must change the corpus digest"
+    );
     before_close
+}
+
+fn in_memory_native_corpus_receipt(first_title: &str, note_body: &str) -> NativeCorpusReceipt {
+    let schema = native_corpus_schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = MemoryStorage::new(&refs).expect("open in-memory sensitivity store");
+    let mut node = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), storage))
+        .expect("open in-memory sensitivity node");
+    seed_native_corpus(&mut node, first_title, note_body);
+    native_corpus_receipt(&node, &schema)
 }
 
 /// Proves that both production native adapters share the same full Jazz
@@ -371,7 +430,23 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     );
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "859f5b98e0bd0449219bda3c4c9ff115939438ce6bbbd78e8269acc9f6cb9500",
+        "fd05bb7c4d1fe89a5eb35cb7031e7af18f150eb6377166e858e135eaee35cbc7",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
+}
+
+/// Proves the frozen digest actually observes authored application content.
+///
+/// alice repeats the deterministic producer twice, changing only one branch
+/// row's title, then repeats it again changing only an independent note body.
+/// Both changes must perturb the logical pack; otherwise the receipt has
+/// accidentally fallen back to system metadata only.
+#[test]
+fn native_jazz_corpus_digest_is_sensitive_to_application_row_bytes() {
+    let baseline = in_memory_native_corpus_receipt("settlement baseline", "independent table");
+    let changed_branch = in_memory_native_corpus_receipt("changed branch title", "independent table");
+    let changed_note = in_memory_native_corpus_receipt("settlement baseline", "changed note body");
+
+    assert_ne!(native_corpus_checksum(&baseline), native_corpus_checksum(&changed_branch));
+    assert_ne!(native_corpus_checksum(&baseline), native_corpus_checksum(&changed_note));
 }

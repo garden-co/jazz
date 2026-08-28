@@ -9,17 +9,25 @@ native adapters under the closed `epoch_1_storage_codec_profile`.
 Its settlement-baseline logical-pack SHA-256 is:
 
 ```text
-859f5b98e0bd0449219bda3c4c9ff115939438ce6bbbd78e8269acc9f6cb9500
+fd05bb7c4d1fe89a5eb35cb7031e7af18f150eb6377166e858e135eaee35cbc7
 ```
 
-The digest is over sorted logical store names and, for each store, the exact
-primary-key/value byte pairs in scan order. Direct-record stores use their
-typed semantic key/value fixture because Groove intentionally does not expose
-their raw adapter keys through the public direct-store facade. The test proves
+The digest is over sorted system and physical application store names and, for
+each store, the exact primary-key/value byte pairs in scan order. The physical
+application closure includes each permanent table identity's history,
+register, global-current, ahead-current, and rejected-version stores.
+Direct-record stores use their typed semantic key/value fixture because Groove
+intentionally does not expose their raw adapter keys through the public
+direct-store facade. The test proves
 both adapters produce the same pack, rejects an incomplete stored-codec
 profile before touching it, reopens without application writes, writes a new
 current-format row, and reopens a third time while preserving the older
 history.
+
+A separate planted sensitivity receipt repeats the deterministic producer while
+changing only `todos.title`, then while changing only `notes.body`; each change
+must alter the digest. This prevents a metadata-only exporter from silently
+passing while excluding application rows.
 
 The currently populated historical families are catalogue genesis, durable
 node/schema identities, branch-keyed immutable versions/current projections,
