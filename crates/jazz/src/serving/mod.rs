@@ -31,6 +31,7 @@ use crate::protocol::{
     SyncMessage, TableLens,
 };
 use crate::schema::JazzSchema;
+use crate::storage_codec_profile::epoch_1_storage_codec_profile;
 use crate::wire::{TransportError, WireTransport};
 use futures::lock::Mutex as LocalMutex;
 
@@ -390,7 +391,12 @@ impl ShellDb {
                 })?;
                 let mut config = DbConfig::new(
                     schema,
-                    crate::db::block_on(factory.open(path, refs)).map_err(db_storage_error)?,
+                    crate::db::block_on(factory.open(
+                        path,
+                        refs,
+                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                    ))
+                    .map_err(db_storage_error)?,
                     identity,
                 );
                 if let Some(seed) = row_id_seed {
@@ -745,8 +751,12 @@ impl InMemoryServerShell {
                 })?;
                 let mut db_config = DbConfig::new(
                     config.schema,
-                    crate::db::block_on(factory.open(path.clone(), refs))
-                        .map_err(db_storage_error)?,
+                    crate::db::block_on(factory.open(
+                        path.clone(),
+                        refs,
+                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                    ))
+                    .map_err(db_storage_error)?,
                     config.identity,
                 );
                 if let Some(row_id_seed) = config.row_id_seed {

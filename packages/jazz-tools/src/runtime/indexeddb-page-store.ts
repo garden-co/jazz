@@ -24,6 +24,27 @@ export const INDEXEDDB_PAGE_CHECKSUM = "xxh3-64-le";
 export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
 
 /**
+ * The closed Jazz schema-storage profile carried by a browser durable root.
+ * These are opaque to IndexedDB: the Rust/JS layer that writes each family
+ * owns its interpretation, while the adapter only proves that this root was
+ * opened with the exact epoch-one inventory.
+ */
+export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
+  "groove.ordered-kv.v1",
+  "jazz.branch-key.v1",
+  "jazz.catalogue.activation.v1",
+  "jazz.catalogue.bootstrap-ready.v1",
+  "jazz.catalogue.lens.v1",
+  "jazz.catalogue.lineage.v1",
+  "jazz.catalogue.physical-mapping.v1",
+  "jazz.catalogue.schema.v1",
+  "jazz.catalogue.write-pointer.v1",
+  "jazz.result-member-key.v1",
+  "jazz.result-row-source.v1",
+  "jazz.subscription-program-fact-key.v1",
+] as const;
+
+/**
  * The entire browser physical-open contract. Keep this exact shape pinned:
  * unknown fields are decode-relevant until a later storage epoch says otherwise.
  */
@@ -31,7 +52,7 @@ export interface IndexedDbStorageManifest {
   storageEpoch: typeof INDEXEDDB_STORAGE_EPOCH;
   adapterId: "jazz-idb-tree";
   adapterFormatVersion: typeof INDEXEDDB_BTREE_FORMAT_VERSION;
-  requiredCodecIds: readonly ["groove.ordered-kv.v1"];
+  requiredCodecIds: typeof JAZZ_EPOCH_1_STORAGE_CODEC_IDS;
   pageSize: typeof INDEXEDDB_BTREE_PAGE_SIZE;
   pageChecksum: typeof INDEXEDDB_PAGE_CHECKSUM;
   pageFormatMagic: typeof INDEXEDDB_PAGE_FORMAT_MAGIC;
@@ -42,7 +63,7 @@ export const INDEXEDDB_STORAGE_MANIFEST: IndexedDbStorageManifest = {
   storageEpoch: INDEXEDDB_STORAGE_EPOCH,
   adapterId: "jazz-idb-tree",
   adapterFormatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
-  requiredCodecIds: ["groove.ordered-kv.v1"],
+  requiredCodecIds: JAZZ_EPOCH_1_STORAGE_CODEC_IDS,
   pageSize: INDEXEDDB_BTREE_PAGE_SIZE,
   pageChecksum: INDEXEDDB_PAGE_CHECKSUM,
   pageFormatMagic: INDEXEDDB_PAGE_FORMAT_MAGIC,
@@ -408,8 +429,10 @@ function assertStorageManifest(value: unknown): asserts value is IndexedDbStorag
     manifest.pageFormatMagic !== INDEXEDDB_STORAGE_MANIFEST.pageFormatMagic ||
     manifest.pageFormatVersion !== INDEXEDDB_STORAGE_MANIFEST.pageFormatVersion ||
     !Array.isArray(manifest.requiredCodecIds) ||
-    manifest.requiredCodecIds.length !== 1 ||
-    manifest.requiredCodecIds[0] !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds[0]
+    manifest.requiredCodecIds.length !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds.length ||
+    manifest.requiredCodecIds.some(
+      (codec, index) => codec !== INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds[index],
+    )
   ) {
     throw new Error("Missing or invalid IndexedDB storage epoch manifest");
   }

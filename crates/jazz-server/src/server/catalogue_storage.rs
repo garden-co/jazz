@@ -5,6 +5,7 @@ use std::sync::{Arc, mpsc};
 
 use crate::server::catalogue_entry::CatalogueEntry;
 use jazz::groove::storage::{BoxedStorage, OrderedKvStorage, StorageFactory};
+use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::tools::ObjectId;
 
 pub(crate) type DynCatalogueStorage = Box<dyn CatalogueStorage + Send>;
@@ -93,14 +94,19 @@ impl CatalogueKvStorage {
         factory: Arc<dyn StorageFactory>,
         path: PathBuf,
     ) -> CatalogueStorageResult<Self> {
+        let codec_profile = epoch_1_storage_codec_profile()
+            .and_then(|profile| profile.with_additional_codecs(["jazz.server-catalogue-entry.v1"]))
+            .map_err(storage_error)?;
         let (commands, receiver) = mpsc::channel();
         let (opened_tx, opened_rx) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-catalogue-storage".to_owned())
             .spawn(move || {
-                let storage = match jazz::db::block_on(
-                    factory.open(path, vec![Self::COLUMN_FAMILY.to_owned()]),
-                ) {
+                let storage = match jazz::db::block_on(factory.open(
+                    path,
+                    vec![Self::COLUMN_FAMILY.to_owned()],
+                    codec_profile,
+                )) {
                     Ok(storage) => storage,
                     Err(error) => {
                         let _ = opened_tx.send(Err(storage_error(error)));

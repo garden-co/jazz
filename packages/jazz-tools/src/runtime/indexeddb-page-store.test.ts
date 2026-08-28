@@ -196,6 +196,11 @@ describe("IndexedDbPageStore", () => {
       { ...INDEXEDDB_STORAGE_MANIFEST, pageChecksum: "none" },
       { ...INDEXEDDB_STORAGE_MANIFEST, adapterFormatVersion: 2 },
       { ...INDEXEDDB_STORAGE_MANIFEST, pageFormatVersion: 2 },
+      { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds: ["groove.ordered-kv.v1"] },
+      {
+        ...INDEXEDDB_STORAGE_MANIFEST,
+        requiredCodecIds: [...INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds, "jazz.future.v2"],
+      },
       { ...INDEXEDDB_STORAGE_MANIFEST, futureDecodeParameter: "unknown" },
     ]) {
       const name = databaseName();

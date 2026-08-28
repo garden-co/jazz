@@ -28,6 +28,7 @@ use crate::ids::{
 };
 use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
+use crate::storage_codec_profile::epoch_1_storage_codec_profile;
 use crate::tools::OpenTransactionId;
 use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
 use crate::tools::public_api::types::{
@@ -2022,7 +2023,12 @@ fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Res
                 )
             })?;
             crate::db::block_on(
-                factory.open(context.data_dir.join("jazz-core.rocksdb"), column_families),
+                factory.open(
+                    context.data_dir.join("jazz-core.rocksdb"),
+                    column_families,
+                    epoch_1_storage_codec_profile()
+                        .map_err(|error| JazzError::Connection(error.to_string()))?,
+                ),
             )
             .map_err(|error| JazzError::Connection(error.to_string()))
         }
