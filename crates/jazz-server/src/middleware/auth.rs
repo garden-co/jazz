@@ -347,14 +347,13 @@ impl JwksCache {
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
 
-        // Downgrade forced refresh if within cooldown window.
-        let force_refresh = if force_refresh {
-            let last = self.last_forced_refresh_us.load(Ordering::SeqCst);
-            let age_us = now_timestamp_us().saturating_sub(last);
-            age_us > cooldown_us
-        } else {
-            false
-        };
+        // Reserve a forced refresh before starting network I/O.  A plain
+        // load-then-store here would let every concurrent request carrying an
+        // unknown `kid` observe the old timestamp and trigger its own JWKS
+        // fetch.  The reservation deliberately survives a failed fetch: the
+        // cooldown protects the endpoint from the unauthenticated caller in
+        // precisely that failure case as well.
+        let force_refresh = force_refresh && self.reserve_forced_refresh(cooldown_us);
 
         if !force_refresh {
             let guard = self.cached.read().await;
@@ -394,9 +393,6 @@ impl JwksCache {
         };
 
         let now = now_timestamp_us();
-        if force_refresh {
-            self.last_forced_refresh_us.store(now, Ordering::SeqCst);
-        }
 
         *self.cached.write().await = Some(CachedJwksEntry {
             endpoint: self.endpoint.clone(),
@@ -405,6 +401,27 @@ impl JwksCache {
         });
 
         Ok(jwks)
+    }
+
+    /// Atomically claim the one forced refresh permitted by the cooldown.
+    ///
+    /// This is intentionally independent of cache loading: it must happen
+    /// before an unknown-key request can begin an outbound JWKS request.
+    fn reserve_forced_refresh(&self, cooldown_us: u64) -> bool {
+        loop {
+            let last = self.last_forced_refresh_us.load(Ordering::SeqCst);
+            let now = now_timestamp_us();
+            if now.saturating_sub(last) <= cooldown_us {
+                return false;
+            }
+            if self
+                .last_forced_refresh_us
+                .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
 }
 
@@ -1248,6 +1265,40 @@ mod tests {
 
     fn test_jwks_cache() -> JwksCache {
         JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
+    }
+
+    #[test]
+    fn forced_jwks_refresh_reservation_allows_only_one_concurrent_request() {
+        let cache = std::sync::Arc::new(test_jwks_cache());
+        let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        cache.last_forced_refresh_us.store(
+            now_timestamp_us().saturating_sub(cooldown_us.saturating_add(1)),
+            Ordering::SeqCst,
+        );
+
+        let callers = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(callers));
+        let mut workers = Vec::with_capacity(callers);
+        for _ in 0..callers {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                cache.reserve_forced_refresh(cooldown_us)
+            }));
+        }
+
+        let refreshes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("forced-refresh worker must not panic"))
+            .filter(|claimed| *claimed)
+            .count();
+        assert_eq!(
+            refreshes, 1,
+            "only one unknown-kid request may refresh JWKS"
+        );
     }
 
     fn test_jwt_verifier() -> JwtVerifier {
