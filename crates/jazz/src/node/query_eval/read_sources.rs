@@ -3185,14 +3185,31 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
+        // Root reads address the shared (empty) branch coordinate. Physical
+        // current indexes include that coordinate first so identical user keys
+        // from branch-local rows cannot alias the shared index domain.
+        let index_prefix = |prefix: &[Value]| {
+            std::iter::once(Value::Bytes(BranchKey::default().canonical_bytes()))
+                .chain(prefix.iter().cloned())
+                .collect::<Vec<_>>()
+        };
+        let scan_prefix = index_prefix(prefix);
         let scan = match source_limit {
             Some(max_items) => StaticScanSpec::PrefixLimit {
-                prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                prefix: scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
                 max_items,
             },
-            None => {
-                StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
-            }
+            None => StaticScanSpec::Prefix(
+                scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
+            ),
         };
         let intersections = intersections
             .iter()
@@ -3208,7 +3225,10 @@ where
                 Ok((
                     physical_current_index_name(column_id),
                     StaticScanSpec::Prefix(
-                        prefix.iter().cloned().map(LiteralValue::from).collect(),
+                        index_prefix(prefix)
+                            .into_iter()
+                            .map(LiteralValue::from)
+                            .collect(),
                     ),
                 ))
             })

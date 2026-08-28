@@ -223,6 +223,13 @@ branch key:
 (PhysicalTableId, BranchKey, UserIndexKey..., RowUuid)
 ```
 
+That order is part of the durable coordinate, not a planner convention. For
+example, a `title="open"` probe in branch `Draft` uses
+`(PhysicalTableId, DraftKey, "open")`; it must neither probe
+`(PhysicalTableId, "open")` nor share a `MainKey` probe for the same title and
+`RowUuid`. Rebuilding a current/index table derives exactly those prefixes
+from immutable history coordinates.
+
 The application declares only its user columns. Composing a head over a base
 does not create a new physical index domain: winner masking precedes predicate
 and index-result publication (`INV-BVIEW-6`). This chapter does not add a
@@ -327,6 +334,13 @@ mutation performs copy-on-write into the head branch key (`INV-BVIEW-14`). The h
 may materialize inherited values needed by a merge strategy, but the first head
 version has no cross-branch-key causal parent. Source derivation may be retained
 only as typed non-causal provenance.
+
+For example, when `R` is inherited from `Main` and an update is requested in
+`Draft` over `Main`, the new version is addressed by `(T, DraftKey, R)` with
+no `Main` parent. A subsequent `Draft` read projects `Draft` branch-column
+cells. If `R` remains inherited, its hidden supplying coordinate records
+`MainKey`; once copied, that coordinate records `DraftKey`. Neither case may
+alias another branch merely because the `RowUuid` is the same.
 
 Content writes do not implicitly author `Restored`. An ergonomic update helper
 may deliberately emit content and restoration together in one transaction, but

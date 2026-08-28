@@ -7,6 +7,7 @@ fn branch_view_schema() -> JazzSchema {
                     .column("title", PublicColumnType::Text)
                     .column("owner", PublicColumnType::Uuid)
                     .branch_by("branch_id")
+                    .index_only(["title"])
                     .policies(public_owner_policies("owner")),
             )
             .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
@@ -793,6 +794,7 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
 fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen() {
     let schema = branch_view_schema();
     let branch = branch_selector(0x70);
+    let sibling_branch = branch_selector(0x73);
     let row_uuid = row(0x71);
     let cells = || {
         BTreeMap::from([
@@ -847,11 +849,50 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
         )
         .unwrap();
 
+    // The same application RowUuid is independently addressable in another
+    // branch. Keep the indexed user value identical so this receipt proves the
+    // canonical branch prefix, rather than relying on title discrimination.
+    let sibling_tx = rocks
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 30)
+                .branch(sibling_branch.clone())
+                .cells(cells()),
+        )
+        .unwrap();
+
     let key = schema
         .project_branch_view_selector(&schema.tables[0], &branch)
         .unwrap()
         .0;
-    let table_id = rocks.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id;
+    let sibling_key = schema
+        .project_branch_view_selector(&schema.tables[0], &sibling_branch)
+        .unwrap()
+        .0;
+    let mapping = rocks.catalogue.physical_mappings[&schema.version_id()].tables["todos"].clone();
+    let table_id = mapping.table_id;
+    let title_index = physical_current_index_name(mapping.columns["title"]);
+    let expected_index_columns = vec![
+        "branch_key".to_owned(),
+        physical_user_column_field(mapping.columns["title"]),
+    ];
+    for storage_table in [
+        physical_ahead_current_table_name(table_id),
+        physical_global_current_table_name(table_id),
+    ] {
+        assert_eq!(
+            rocks
+                .database
+                .table_schema(&storage_table)
+                .unwrap()
+                .indices
+                .iter()
+                .find(|index| index.name == title_index)
+                .unwrap()
+                .columns,
+            expected_index_columns,
+            "physical current indexes must put the canonical branch key before their user key"
+        );
+    }
     let prefix = vec![Value::Bytes(key.canonical_bytes())];
     assert_eq!(
         rocks
@@ -893,14 +934,37 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
             .unwrap()
             .len(),
         1,
-        "locally settled deletion uses the same prefix in register ahead-current"
+            "locally settled deletion uses the same prefix in register ahead-current"
     );
+    for branch_key in [&key, &sibling_key] {
+        assert_eq!(
+            rocks
+                .database
+                .index_scan_raw(
+                    &physical_ahead_current_table_name(table_id),
+                    &title_index,
+                    &[Value::Bytes(branch_key.canonical_bytes())],
+                )
+                .unwrap()
+                .len(),
+            1,
+            "same RowUuid/title rows must remain in distinct canonical branch index prefixes"
+        );
+    }
 
     rocks
         .apply_fate_update(
             content_tx,
             Fate::Accepted,
             Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    rocks
+        .apply_fate_update(
+            sibling_tx,
+            Fate::Accepted,
+            Some(GlobalTime(3)),
             Some(DurabilityTier::Global),
         )
         .unwrap();
@@ -932,8 +996,23 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
             .unwrap()
             .len(),
         1,
-        "globally accepted deletion retains the same prefix in register global-current"
+            "globally accepted deletion retains the same prefix in register global-current"
     );
+    for branch_key in [&key, &sibling_key] {
+        assert_eq!(
+            rocks
+                .database
+                .index_scan_raw(
+                    &physical_global_current_table_name(table_id),
+                    &title_index,
+                    &[Value::Bytes(branch_key.canonical_bytes())],
+                )
+                .unwrap()
+                .len(),
+            1,
+            "global-current rebuild must preserve distinct canonical branch index prefixes"
+        );
+    }
     drop(rocks);
 
     let mut reopened = reopen_history_complete_node_at(&dir, NodeUuid::from_bytes([0x72; 16]), schema.clone());
@@ -950,7 +1029,23 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
             .visible_current_cells_in_branch("todos", &branch, row_uuid)
             .unwrap()
             .is_none(),
-        "the reopened deletion current projection still masks the content row"
+            "the reopened deletion current projection still masks the content row"
+    );
+    assert_eq!(
+        reopened
+            .query_row_versions_in_branch("todos", &sibling_key, row_uuid)
+            .unwrap()
+            .len(),
+        1,
+        "reopen must not alias a sibling branch history for the same RowUuid"
+    );
+    assert_eq!(
+        reopened
+            .visible_current_cells_in_branch("todos", &sibling_branch, row_uuid)
+            .unwrap()
+            .unwrap()["title"],
+        v("branch receipt"),
+        "the sibling branch remains visible after rebuilding current/index state"
     );
 }
 
