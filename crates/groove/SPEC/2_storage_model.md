@@ -165,7 +165,9 @@ Groove's resident-publication lifecycle applies that distinction directly. A
 cancelled persistence future may return its publication to `Applied` only while
 it is still waiting for its ordered turn and has not started the storage
 submission. Once submission starts, cancellation permanently marks the
-database unusable. An explicit `PossiblyCommitted` result does the same before
+database unusable and wakes every later publication waiting for its ordered
+turn so each observes the terminal order failure rather than hanging. An
+explicit `PossiblyCommitted` result does the same before
 the host settles its receipt, so holding or dropping that receipt cannot expose
 a retry window. A proven `Uncommitted` result is the only result for which an
 implementation may retry or roll back; conservatively poisoning instead
