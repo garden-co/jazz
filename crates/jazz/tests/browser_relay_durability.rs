@@ -1847,6 +1847,205 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     );
 }
 
+/// A durable worker may retain a formerly visible offset-window row across a
+/// process restart. A fresh Edge one-shot must not settle from that recovered
+/// authority membership after Core revokes the row; it needs a fresh empty
+/// authority view. The fixed turns below model main -> worker -> core ->
+/// worker -> main after all first-worker handles are dropped.
+#[test]
+fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_shot() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb5; 16]);
+    let storage = tempfile::tempdir().expect("persistent worker temp dir");
+    let core = open_core(0x3d, &schema);
+    let seeder = open_db(0x4d, alice, &schema);
+    let (seeder_transport, core_seed_transport) = duplex();
+    let seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
+    let core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    seeder
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("anchor retained while worker is closed".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("seed offset anchor row");
+    let seeded = seeder
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("revoked while worker is closed".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("seed authority-visible row");
+    for _ in 0..3 {
+        seeder.tick().expect("upload seeded authority row");
+        core.tick().expect("accept seeded authority row");
+        seeder.tick().expect("settle seeded authority row");
+    }
+
+    let worker = open_persistent_worker(storage.path(), 0x2d, &schema);
+    worker.set_relay_authority_session_owner();
+    let first_tab = open_db(0x1f, alice, &schema);
+    first_tab.set_non_durable_client();
+    let (first_transport, first_worker_transport) = duplex();
+    let first_connection = block_on(first_tab.connect_upstream(first_transport));
+    let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
+    let (worker_upstream_transport, core_worker_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let core_worker_subscriber = core.accept_subscriber(core_worker_transport, alice);
+    let exact_query = Query::from("todos")
+        .order_by("title", OrderDirection::Asc)
+        .offset(1);
+    let first_query = first_tab
+        .prepare_query(&exact_query)
+        .expect("prepare initial Edge query");
+    let first_attachment = first_tab
+        .attach_query_with_opts(
+            &first_query,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        )
+        .expect("attach initial Edge usage site");
+    for _ in 0..8 {
+        first_tab.tick().expect("register initial Edge usage site");
+        worker.tick().expect("forward initial Edge usage site");
+        core.tick().expect("serve initial authority membership");
+        worker.tick().expect("persist initial authority membership");
+        first_tab.tick().expect("apply initial Edge receipt");
+        if first_tab.query_attachment_is_covered(&first_attachment) {
+            break;
+        }
+    }
+    assert!(first_tab.query_attachment_is_covered(&first_attachment));
+    assert_eq!(
+        block_on(first_tab.all(
+            &first_query,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        ))
+        .expect("read initial authority membership")
+        .len(),
+        1,
+    );
+
+    first_tab.detach_query(first_attachment);
+    for _ in 0..4 {
+        first_tab.tick().expect("retire initial usage site");
+        worker.tick().expect("retire initial relay coverage");
+        core.tick().expect("process initial relay retirement");
+        worker.tick().expect("finish initial relay retirement");
+    }
+    assert!(first_tab.detach_connection(&first_connection));
+    assert!(worker.detach_connection(&first_worker_connection));
+    assert!(worker.detach_connection(&worker_upstream));
+    assert!(core.detach_connection(&core_worker_subscriber));
+    drop(first_connection);
+    drop(first_worker_connection);
+    drop(worker_upstream);
+    drop(core_worker_subscriber);
+    drop(first_tab);
+    drop(worker);
+
+    block_on(seeder.delete("todos", seeded.row_uuid(), Default::default()))
+        .expect("revoke authority-visible row at Core");
+    for _ in 0..3 {
+        seeder.tick().expect("upload authority revocation");
+        core.tick().expect("apply authority revocation");
+        seeder.tick().expect("settle authority revocation");
+    }
+    assert!(
+        core.read(
+            &core
+                .prepare_query(&exact_query)
+                .expect("prepare revoked Core Edge query")
+        )
+        .expect("read revoked Core Edge membership")
+        .is_empty(),
+        "the selected Core Edge membership must be empty before the worker reopens",
+    );
+
+    let reopened_worker = open_persistent_worker(storage.path(), 0x2d, &schema);
+    reopened_worker.set_relay_authority_session_owner();
+    let scheduler = Rc::new(CountingScheduler::default());
+    reopened_worker.set_tick_scheduler(Some(scheduler.clone()));
+    let reopened_tab = open_db(0x20, alice, &schema);
+    reopened_tab.set_non_durable_client();
+    let (reopened_transport, reopened_worker_transport) = duplex();
+    let _reopened_connection = block_on(reopened_tab.connect_upstream(reopened_transport));
+    let _reopened_worker_connection =
+        reopened_worker.accept_subscriber(reopened_worker_transport, alice);
+    let (reopened_upstream_transport, reopened_core_transport) = duplex();
+    let _reopened_upstream =
+        block_on(reopened_worker.connect_upstream(reopened_upstream_transport));
+    let _reopened_core_subscriber = core.accept_subscriber(reopened_core_transport, alice);
+    let reopened_query = reopened_tab
+        .prepare_query(&exact_query)
+        .expect("prepare reopened Edge query");
+    let reopened_attachment = reopened_tab
+        .attach_query_with_opts(
+            &reopened_query,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        )
+        .expect("attach reopened Edge usage site");
+    for _ in 0..8 {
+        reopened_tab
+            .tick()
+            .expect("register reopened Edge usage site");
+        reopened_worker
+            .tick()
+            .expect("forward reopened Edge usage site");
+        core.tick().expect("serve fresh empty authority reset");
+        let schedules_before = scheduler.calls.get();
+        reopened_worker
+            .tick()
+            .expect("apply fresh empty authority reset");
+        if reopened_tab.query_attachment_is_covered(&reopened_attachment) {
+            assert!(
+                scheduler.calls.get() > schedules_before,
+                "fresh authority reset must schedule the reopened Edge handoff",
+            );
+            break;
+        }
+        reopened_tab
+            .tick()
+            .expect("apply reopened authority handoff");
+        if reopened_tab.query_attachment_is_covered(&reopened_attachment) {
+            break;
+        }
+    }
+    assert!(
+        reopened_tab.query_attachment_is_covered(&reopened_attachment),
+        "the reopened Edge usage site must receive a fresh authority receipt",
+    );
+    assert!(
+        block_on(reopened_tab.all(
+            &reopened_query,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        ))
+        .expect("read fresh revoked Edge membership")
+        .is_empty(),
+        "fresh empty authority membership must not expose the recovered row",
+    );
+
+    assert!(seeder.detach_connection(&seeder_connection));
+    assert!(core.detach_connection(&core_seed_subscriber));
+}
+
 /// A write policy changes admission only; it cannot revoke read membership.
 /// A browser-authored exact-row transaction therefore uses the worker's one
 /// ordinary Edge projection. Treating the write-only table as read-scoped

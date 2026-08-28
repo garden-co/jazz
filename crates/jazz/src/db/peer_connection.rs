@@ -3130,14 +3130,6 @@ where
                                 self.node.borrow().permissions_ready(),
                                 ingest_context.trust,
                             );
-                            let local_waiting_for_upstream_settlement = local_subscriber
-                                && opts.propagate_upstream
-                                && opts.tier > DurabilityTier::Local
-                                && !self.node.borrow().has_settled_result_set(BindingViewKey {
-                                    shape_id: shape.shape_id(),
-                                    binding_id: binding.binding_id(),
-                                    read_view: upstream_opts.read_view_key(),
-                                });
                             let opening_pending = if !permissions_ready {
                                 Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                     subscription,
@@ -3170,6 +3162,25 @@ where
                                 .await
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))
                                 .await?;
+                            let upstream_binding_view = BindingViewKey {
+                                shape_id: shape.shape_id(),
+                                binding_id: binding.binding_id(),
+                                read_view: upstream_opts.read_view_key(),
+                            };
+                            if local_subscriber
+                                && upstream_opts.binding_source
+                                    == BindingSource::RelayAuthoritySession
+                            {
+                                // Settled authority membership survives a
+                                // RocksDB reopen, while its wire registration
+                                // does not. Do not let that ownerless result
+                                // settle this fresh Edge usage site before the
+                                // new relay authority registration receives a
+                                // current reset from upstream.
+                                self.node
+                                    .borrow_mut()
+                                    .invalidate_ownerless_settled_result_view(upstream_binding_view);
+                            }
                             let (_, changed, published) = finish_peer_publication_outcome_with_refresh(
                                 &self.node,
                                 &self.subscriptions,
@@ -3181,6 +3192,10 @@ where
                             .await?;
                             stats.subscription_events += changed;
                             needs_subscription_refresh |= published;
+                            let local_waiting_for_upstream_settlement = local_subscriber
+                                && opts.propagate_upstream
+                                && opts.tier > DurabilityTier::Local
+                                && !self.node.borrow().has_settled_result_set(upstream_binding_view);
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())

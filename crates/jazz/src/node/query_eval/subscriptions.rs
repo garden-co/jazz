@@ -289,6 +289,45 @@ where
         })
     }
 
+    /// Forget a recovered authority result that has no live wire owner.
+    ///
+    /// Settled result membership is durable, but relay registration ownership
+    /// is intentionally process-local. A reopened relay therefore cannot use
+    /// an ownerless `RelayAuthoritySession` view to satisfy a new downstream
+    /// usage site: it must first receive a current authoritative reset.
+    pub(crate) fn invalidate_ownerless_settled_result_view(
+        &mut self,
+        binding_view_key: BindingViewKey,
+    ) -> bool {
+        if self.registered_binding_resolves_to_binding_view_key(binding_view_key)
+            || !self
+                .query
+                .settled_result_sets
+                .contains_key(&binding_view_key)
+        {
+            return false;
+        }
+
+        self.clear_settled_result_view(binding_view_key);
+        self.query.settled_program_facts.remove(&binding_view_key);
+        self.query
+            .settled_through_by_binding_view
+            .remove(&binding_view_key);
+        self.query
+            .authorization_progress_by_binding_view
+            .remove(&binding_view_key);
+        self.query
+            .pending_authoritative_reset_binding_views
+            .remove(&binding_view_key);
+        self.query
+            .pending_terminal_operations_by_binding_view
+            .remove(&binding_view_key);
+        self.query
+            .deferred_publication_binding_views
+            .remove(&binding_view_key);
+        true
+    }
+
     pub(crate) fn has_settled_result_set(&self, binding_view_key: BindingViewKey) -> bool {
         self.query
             .settled_result_sets
