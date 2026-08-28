@@ -919,6 +919,7 @@ export function TableDataGrid() {
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.
   const isInitialLoading = queryResult.isLoading;
+  const queryError = queryResult.error;
   const rows = queryResult.data ?? EMPTY_ROWS;
 
   const allGridColumns = useMemo<GridColumn[]>(
@@ -1270,7 +1271,11 @@ export function TableDataGrid() {
       />
       <div className={styles.contentArea}>
         <div className={styles.gridFrame}>
-          {isInitialLoading ? (
+          {queryError ? (
+            <div className={styles.emptyState} role="alert">
+              Could not load rows: {queryError.message}
+            </div>
+          ) : isInitialLoading ? (
             <GridSkeleton />
           ) : (
             <PlainTableView
