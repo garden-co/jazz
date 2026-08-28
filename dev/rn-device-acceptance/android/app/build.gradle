@@ -96,6 +96,13 @@ android {
         versionName "1.0.0"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
+        // Public non-secret compile fixtures; a device job supplies only test material.
+        buildConfigField "String", "JAZZ_DEVICE_APP_NAMESPACE", "\"jazz-device-acceptance\""
+        buildConfigField "String", "JAZZ_DEVICE_STORAGE_NAMESPACE", "\"acceptance-fixture\""
+        buildConfigField "String", "JAZZ_DEVICE_AUTH_SCOPE", "\"fixture-user-a\""
+        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", "\"{}\""
+        buildConfigField "String", "JAZZ_DEVICE_VERIFIED_IDENTITY_JSON", "\"{}\""
+        buildConfigField "String", "JAZZ_DEVICE_VERIFIED_CLAIMS_JSON", "\"{}\""
     }
     signingConfigs {
         debug {
