@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { assertDeviceReceipt } from "./device-driver.mjs";
+import { boundedDiagnostic, relevantAppLogs, sanitizedCommandFailure } from "./ios-diagnostics.mjs";
 import { scenarioPlan } from "../src/scenarios.ts";
 
 const udid = process.env.IOS_SIMULATOR_UDID;
@@ -15,10 +16,9 @@ const buildFingerprint =
 const simctl = (args) => execFileSync("xcrun", ["simctl", ...args], { encoding: "utf8" });
 const trySimctl = (args) => {
   try {
-    return simctl(args).trim();
+    return boundedDiagnostic(simctl(args).trim());
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return `command failed: xcrun simctl ${args.join(" ")}\n${detail}`;
+    return sanitizedCommandFailure(error);
   }
 };
 const startedAt = Date.now();
@@ -64,18 +64,21 @@ const diagnostics = () =>
     `simctl launch PID: ${launchResult}`,
     `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
     `launchd app state:\n${trySimctl(["spawn", udid, "launchctl", "print", "gui/501"])}`,
-    `recent app/device logs:\n${trySimctl([
-      "spawn",
-      udid,
-      "log",
-      "show",
-      "--last",
-      "3m",
-      "--style",
-      "compact",
-      "--predicate",
-      'process == "JazzRNdeviceacceptance" OR eventMessage CONTAINS[c] "JazzDevice" OR eventMessage CONTAINS[c] "ReactNative"',
-    ])}`,
+    `recent app logs (capped):\n${relevantAppLogs(
+      trySimctl([
+        "spawn",
+        udid,
+        "log",
+        "show",
+        "--last",
+        "3m",
+        "--style",
+        "compact",
+        "--predicate",
+        'process == "JazzRNdeviceacceptance"',
+      ]),
+      "JazzRNdeviceacceptance",
+    )}`,
   ].join("\n\n");
 for (let attempt = 0; attempt < 30; attempt += 1) {
   try {
