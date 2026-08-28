@@ -17,4 +17,26 @@ The Expo config plugin copies and registers the Android template during prebuild
 - `scope-isolation` and `logout-auth-switch`: separate scope visibility and revocation before replacement.
 - `backpressure` and `corrupt-store`: bounded frame recovery and fail-closed storage diagnostics.
 
-Run source checks with `pnpm --filter rn-device-acceptance verify`. After a real development build exists, the drivers require `JAZZ_DEVICE_APK` (Android) or `IOS_SIMULATOR_UDID`, `JAZZ_DEVICE_APP`, and immutable `JAZZ_DEVICE_BUILD_FINGERPRINT` (iOS). Each launch receives a fresh nonce and requires exactly one, fresh, strictly ordered receipt for every expected scenario, bound to that platform/device/build/nonce. They reject TODO/blocked/failed, duplicate, unknown, stale, partial, or foreign receipts; a green process cannot be manufactured by a fixture log line.
+Run source checks with `pnpm --filter rn-device-acceptance verify`. After a real development build exists, the drivers require `JAZZ_DEVICE_APK` (Android) or `IOS_SIMULATOR_UDID`, `JAZZ_DEVICE_APP`, and immutable `JAZZ_DEVICE_BUILD_FINGERPRINT` (iOS). Each launch receives a fresh nonce and requires exactly one, fresh, strictly ordered receipt for every implemented scenario, bound to that platform/device/build/nonce. They reject TODO/blocked/failed, duplicate, unknown, stale, partial, or foreign receipts; a green process cannot be manufactured by a fixture log line.
+
+## Local Android bootstrap
+
+The reproducible, lane-local tool cache is `.cache/android-device-acceptance`:
+
+```bash
+dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
+export JAZZ_DEVICE_TOOLCACHE="$PWD/.cache/android-device-acceptance"
+export JAVA_HOME="$JAZZ_DEVICE_TOOLCACHE/jdk"
+export ANDROID_SDK_ROOT="$JAZZ_DEVICE_TOOLCACHE/sdk"
+export PATH="$JAZZ_DEVICE_TOOLCACHE/cargo/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2 pnpm --filter jazz-rn build:relay:android
+JAZZ_DEVICE_APK="$PWD/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk" \
+  NODE_ENV=production pnpm --filter rn-device-acceptance device:android
+```
+
+It pins Temurin 17.0.16+8, command-line tools 13114758, NDK 27.1.12297006,
+Android API/build tools 36, cargo-ndk 4.1.2, and (with `--emulator`) the API 35
+Google APIs x86_64 image. The cache is ignored and never needs system Java,
+Android SDK, adb, or a global cargo-ndk installation. `device:android` compares
+the fixture's `ANDROID_ID` with adb's `settings secure android_id`; an adb
+transport serial is intentionally not used because the app cannot read it.

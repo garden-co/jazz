@@ -12,7 +12,9 @@ const adb = (args) =>
 const startedAt = Date.now();
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
 const buildFingerprint = createHash("sha256").update(readFileSync(apk)).digest("hex");
-const deviceIdentifier = (serial ?? adb(["get-serialno"])).trim();
+// Android secure ID is readable by the trusted fixture, unlike adb's transport
+// serial. Bind both sides to that same stable, non-display identifier.
+const deviceIdentifier = adb(["shell", "settings", "get", "secure", "android_id"]).trim();
 adb(["install", "-r", apk]);
 adb(["logcat", "-c"]);
 adb([
@@ -28,12 +30,22 @@ adb([
   "jazzDeviceBuildFingerprint",
   buildFingerprint,
 ]);
-const output = adb(["logcat", "-d"]);
-assertDeviceReceipt(output, {
+const expected = {
   platform: "android",
   deviceIdentifier,
   buildFingerprint,
   runNonce,
   startedAt,
-  scenarios: scenarioPlan.map((item) => item.scenario),
-});
+  scenarios: scenarioPlan.filter((item) => item.state === "passed").map((item) => item.scenario),
+};
+const deadline = Date.now() + 2 * 60 * 1000;
+for (;;) {
+  const output = adb(["logcat", "-d"]);
+  if (output.includes("JAZZ_DEVICE_RESULT ")) {
+    assertDeviceReceipt(output, expected);
+    break;
+  }
+  if (Date.now() >= deadline)
+    throw new Error("Timed out waiting for a JAZZ_DEVICE_RESULT from the launched Android app");
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+}

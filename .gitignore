@@ -50,6 +50,9 @@ data-multi/
 .env.local
 .turbo/
 
+# Per-lane Android device acceptance JDK/SDK/emulator and Cargo tools.
+/.cache/android-device-acceptance/
+
 .claude/*
 !.claude/CLAUDE.md
 !.claude/commands

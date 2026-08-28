@@ -7,6 +7,7 @@ import com.facebook.react.bridge.ReactMethod
 import com.jazzrn.JazzRelayTrustedAdmission
 import com.jazzrn.TrustedRelayScopeConfig
 import android.util.Base64
+import android.provider.Settings
 
 /**
  * Test-app-only trusted fixture. It is compiled into the development build,
@@ -37,5 +38,31 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     capability?.let(JazzRelayTrustedAdmission::revoke)
     capability = null
     promise.resolve(null)
+  }
+
+  /**
+   * Launch evidence is read by trusted host code. In particular, JavaScript
+   * does not get to select the nonce, artifact fingerprint, or device id that
+   * it later places in a device receipt.
+   */
+  @ReactMethod fun receiptContext(promise: Promise) {
+    try {
+      val activity = reactApplicationContext.currentActivity
+        ?: error("acceptance activity is unavailable")
+      val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
+        ?: error("acceptance launch did not include a run nonce")
+      val buildFingerprint = activity.intent.getStringExtra("jazzDeviceBuildFingerprint")
+        ?: error("acceptance launch did not include an APK fingerprint")
+      val deviceIdentifier = Settings.Secure.getString(
+        reactApplicationContext.contentResolver,
+        Settings.Secure.ANDROID_ID,
+      ) ?: error("Android secure device identifier is unavailable")
+      promise.resolve(mapOf(
+        "platform" to "android",
+        "deviceIdentifier" to deviceIdentifier,
+        "buildFingerprint" to buildFingerprint,
+        "runNonce" to nonce,
+      ))
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
   }
 }
