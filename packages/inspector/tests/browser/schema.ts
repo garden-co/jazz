@@ -14,6 +14,6 @@ export const app: App<AppSchema> = defineApp(schema);
 export const permissions = definePermissions(app, ({ policy }) => {
   policy.todos.allowRead.where({});
   policy.todos.allowInsert.never();
-  policy.todos.allowUpdate.never();
+  policy.todos.allowUpdate.where({});
   policy.todos.allowDelete.never();
 });

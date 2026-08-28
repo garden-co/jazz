@@ -139,14 +139,46 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     await inspector.getByRole("link", { name: "View todos data" }).click();
     await expect(inspector.getByText("First seeded todo")).toBeVisible({ timeout: 30_000 });
 
-    await runtimeSelect.selectOption(secondaryContextValue!);
-    await expect(inspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+    // The attached inspector peer must be admitted as the host's verified
+    // local-first session for writes as well as reads. Leave the host's
+    // readiness row intact while the inspector reconstructs its attachment.
+    const writableRowTitle = "Second seeded todo";
+    const writableRow = inspector.locator('[role="row"]').filter({
+      has: inspector.getByRole("gridcell", { name: writableRowTitle, exact: true }),
+    });
+    const doneToggle = writableRow.getByRole("checkbox");
+    const wasDone = await doneToggle.isChecked();
+    await doneToggle.click();
+    await expect(inspector.getByRole("status")).toContainText("Queued");
+    await inspector.getByRole("button", { name: "Save changes" }).click();
+    await expect(inspector.getByRole("button", { name: "Save changes" })).toHaveCount(0);
+
+    // Reload only the inspector frame. The host remains live, while the
+    // overlay must reconstruct its own peer and read the locally committed
+    // write back through that fresh attachment.
+    await page.locator('iframe[title="jazz-inspector"]').evaluate((iframe) => {
+      iframe.contentWindow?.location.reload();
+    });
+    const reloadedInspector = page.frameLocator('iframe[title="jazz-inspector"]');
+    await expect(reloadedInspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await reloadedInspector.getByRole("link", { name: "View todos data" }).click();
+    const reloadedWritableRow = reloadedInspector.locator('[role="row"]').filter({
+      has: reloadedInspector.getByRole("gridcell", { name: writableRowTitle, exact: true }),
+    });
+    await expect(reloadedWritableRow.getByRole("checkbox")).toHaveJSProperty("checked", !wasDone, {
+      timeout: 30_000,
+    });
+
+    await reloadedInspector.getByLabel("Runtime context").selectOption(secondaryContextValue!);
+    await expect(reloadedInspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
       timeout: 10_000,
     });
 
     // The host's `useAll(app.todos)` subscription is pushed to the Subscriptions tab.
-    await inspector.getByRole("link", { name: "Subscriptions" }).click();
-    await expect(inspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({
+    await reloadedInspector.getByRole("link", { name: "Subscriptions" }).click();
+    await expect(reloadedInspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({
       timeout: 30_000,
     });
     expect(browserErrors).toEqual([]);

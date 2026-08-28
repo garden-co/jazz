@@ -115,6 +115,27 @@ describe("trustAttachedBrowserWorkerSession", () => {
     );
   });
 
+  it("takes attached claims from the identity token, not the forwarded session object", () => {
+    const config = attachedConfig({
+      runtimeSources: {
+        browserWorkerPort: {} as MessagePort,
+        browserWorkerSession: {
+          ...session,
+          claims: { role: "forged" },
+        },
+      },
+    });
+
+    trustAttachedBrowserWorkerSession(config);
+
+    expect(getTrustedReservedSession(config)).toMatchObject({
+      issuer: LOCAL_FIRST_JWT_ISSUER,
+      user_id: "alice",
+      authMode: "local-first",
+      claims: { role: "writer" },
+    });
+  });
+
   it("does not trust forwarded session data without an attached worker port", () => {
     const config = attachedConfig({ runtimeSources: { browserWorkerSession: session } });
     trustAttachedBrowserWorkerSession(config);

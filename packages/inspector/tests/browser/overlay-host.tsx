@@ -22,10 +22,11 @@ function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const { db } = useJazzClient();
   // A real query: creates the host client (so getRuntimeSchema resolves) and
   // registers a public subscription the overlay's Subscriptions tab should display.
-  const { data: todos = [] } = useAll(app.todos.where({ title: "First seeded todo" }).limit(1), {
-    tier: "edge",
-  });
-  const primaryReady = todos.some((todo) => todo.title === "First seeded todo");
+  const { data: readinessTodos = [] } = useAll(
+    app.todos.where({ title: { in: ["First seeded todo", "Second seeded todo"] } }).limit(2),
+    { tier: "edge" },
+  );
+  const primaryReady = readinessTodos.some((todo) => todo.title === "First seeded todo");
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
