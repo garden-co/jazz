@@ -171,7 +171,9 @@ registry, semantic sample, exact bytes, and checksum. Any new persistent opaque
 byte codec must be registered there and requires a new storage epoch. The gate
 rejects omission, addition, and substitution of registry IDs on construction,
 encode, and decode. RocksDB and SQLite consume the closed constructor;
-IndexedDB's missing shared physical manifest remains non-covered under #2160.
+IndexedDB uses the same closed codec-profile contract through its pinned
+physical epoch manifest; #2295 supplies the real-browser raw-page and reopen
+receipt. A full historical WasmDb/Jazz-root corpus remains tracked by #2160.
 
 ### Reserved ids (allocated, not yet cited)
 
