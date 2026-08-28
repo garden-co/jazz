@@ -57,6 +57,43 @@ artifact.
 The wrapper accepts ABI 3, which uses opaque host-generated admission
 capabilities and trusted revocation.
 
+## Expo development-build install path
+
+`jazz-rn` is a direct application dependency: React Native codegen and Expo
+autolinking must discover it from the application, not through `jazz-tools`.
+For an Expo development build, the minimal configuration is:
+
+```bash
+pnpm add jazz-rn@alpha
+```
+
+```json
+{
+  "expo": {
+    "plugins": ["jazz-rn"]
+  }
+}
+```
+
+Then run `npx expo prebuild --clean` and make a development or release build.
+The plugin turns on the New Architecture, and native autolinking registers
+`JazzRelayPackage` on Android and the `JazzRn` pod on iOS. Do not use Expo Go:
+it cannot contain the relay module.
+
+Bare React Native uses the same direct dependency and autolinking metadata, but
+has no Expo plugin: enable the New Architecture in the host project before
+running its platform install/build commands.
+
+The repository's `jazz-rn` packaging receipt packs the actual npm tarball,
+uses it from an otherwise empty Expo SDK 54 app, typechecks an import from its
+published declarations, prebuilds Android and iOS, and verifies Android
+autolinking plus bare React Native discovery. This intentionally proves only
+install-time wiring. A device run also requires a matching release payload with
+the sealed Android relay slices or iOS XCFramework plus platform-owned scope admission; those are produced by
+the native artifact/release workflows and are checked separately by the device
+acceptance app. A source checkout with no staged native artifacts should fail
+at relay use rather than pretend to provide persistence.
+
 ## What remains before React Native is supported
 
 1. Link the staged host lifecycle codec through thin JNI/Swift translation and

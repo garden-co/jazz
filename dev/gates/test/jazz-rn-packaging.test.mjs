@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
@@ -491,6 +491,160 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
       assert.match(iosPodfileText, /use_native_modules!/);
     },
   );
+});
+
+test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", async () => {
+  // The canonical example is useful, but its workspace link can accidentally
+  // hide npm-packaging mistakes. This receipt instead constructs the smallest
+  // possible Expo app in a new directory, mounts the tarball that an adopter
+  // would receive as its direct dependency, and runs the two prebuild paths.
+  // The scaffold borrows Expo's already-installed dependency graph rather than
+  // running a package-manager install: this keeps a packaging receipt fully
+  // offline and deterministic while still proving that the app resolves
+  // `jazz-rn` from the packed bytes rather than from this workspace.
+  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-fresh-expo-"));
+  const packageDirectory = join(directory, "package");
+  const appDirectory = join(directory, "app");
+  const appNodeModules = join(appDirectory, "node_modules");
+  const canonicalNodeModules = new URL(
+    "../../../examples/todo-client-localfirst-expo/node_modules/",
+    import.meta.url,
+  ).pathname;
+  try {
+    await mkdir(packageDirectory, { recursive: true });
+    const packed = JSON.parse(
+      execFileSync(
+        "npm",
+        ["pack", "--ignore-scripts", "--json", "--pack-destination", packageDirectory],
+        {
+          cwd: new URL("../../../crates/jazz-rn/", import.meta.url),
+          encoding: "utf8",
+        },
+      ),
+    );
+    assert.deepEqual(packed.length, 1, "packing jazz-rn must produce one npm tarball");
+    const tarball = join(packageDirectory, packed[0].filename);
+
+    await mkdir(appDirectory, { recursive: true });
+    await writeFile(
+      join(appDirectory, "package.json"),
+      `${JSON.stringify(
+        {
+          name: "jazz-rn-fresh-expo-receipt",
+          version: "0.0.0",
+          private: true,
+          dependencies: {
+            expo: "54.0.37",
+            "jazz-rn": `file:../package/${packed[0].filename}`,
+            react: "19.2.4",
+            "react-native": "0.81.5",
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(appDirectory, "app.json"),
+      `${JSON.stringify(
+        {
+          expo: {
+            name: "Jazz RN fresh install receipt",
+            slug: "jazz-rn-fresh-install-receipt",
+            version: "1.0.0",
+            plugins: ["jazz-rn"],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(appDirectory, "App.tsx"),
+      [
+        'import { NATIVE_RELAY_ABI } from "jazz-rn";',
+        "",
+        "export const relayAbi: number = NATIVE_RELAY_ABI.maximum;",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(appDirectory, "tsconfig.json"),
+      `${JSON.stringify({ extends: "expo/tsconfig.base", include: ["App.tsx"] }, null, 2)}\n`,
+    );
+    await mkdir(appNodeModules, { recursive: true });
+    execFileSync("tar", ["-xzf", tarball, "-C", packageDirectory]);
+    await symlink(join(packageDirectory, "package"), join(appNodeModules, "jazz-rn"));
+    for (const dependency of ["@types", "expo", "react", "react-native", "typescript"]) {
+      await symlink(join(canonicalNodeModules, dependency), join(appNodeModules, dependency));
+    }
+    execFileSync(join(appNodeModules, "typescript", "bin", "tsc"), ["--noEmit"], {
+      cwd: appDirectory,
+      stdio: "inherit",
+    });
+    const bareReactNativeConfig = JSON.parse(
+      execFileSync(join(canonicalNodeModules, ".bin", "react-native"), ["config"], {
+        cwd: appDirectory,
+        encoding: "utf8",
+      }),
+    );
+    assert.equal(
+      bareReactNativeConfig.dependencies["jazz-rn"].platforms.android.packageInstance,
+      "new JazzRelayPackage()",
+      "a bare React Native host must discover the packed relay package too",
+    );
+    for (const platform of ["android", "ios"]) {
+      execFileSync(
+        join(canonicalNodeModules, ".bin", "expo"),
+        ["prebuild", "--platform", platform, "--clean", "--no-install"],
+        {
+          cwd: appDirectory,
+          env: { ...process.env, CI: "1" },
+          stdio: "inherit",
+        },
+      );
+    }
+
+    const [androidProperties, androidSettings, iosProperties, iosPodfile] = await Promise.all([
+      readFile(join(appDirectory, "android/gradle.properties"), "utf8"),
+      readFile(join(appDirectory, "android/settings.gradle"), "utf8"),
+      readFile(join(appDirectory, "ios/Podfile.properties.json"), "utf8"),
+      readFile(join(appDirectory, "ios/Podfile"), "utf8"),
+    ]);
+    assert.match(androidProperties, /^newArchEnabled=true$/m);
+    assert.match(androidSettings, /autolinkLibrariesFromCommand/);
+    assert.match(iosProperties, /"newArchEnabled": "true"/);
+    assert.match(iosPodfile, /use_native_modules!/);
+
+    const androidAutolink = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          "--no-warnings",
+          "--eval",
+          "require('expo/bin/autolinking')",
+          "expo-modules-autolinking",
+          "react-native-config",
+          "--json",
+          "--platform",
+          "android",
+        ],
+        { cwd: appDirectory, encoding: "utf8" },
+      ),
+    );
+    assert.equal(
+      androidAutolink.dependencies["jazz-rn"].platforms.android.packageInstance,
+      "new JazzRelayPackage()",
+      "the packed tarball, not a workspace symlink, must autolink the relay host",
+    );
+    assert.equal(
+      require.resolve("jazz-rn/package.json", { paths: [appDirectory] }),
+      join(packageDirectory, "package", "package.json"),
+      "the receipt must resolve jazz-rn from the extracted npm tarball",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
