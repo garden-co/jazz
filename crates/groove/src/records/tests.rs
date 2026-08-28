@@ -1146,7 +1146,7 @@ const EPOCH_1_RECORD_FIXTURE: &[u8] = &[
     0x00, 0x00, // fixed nullable U8: null flag + canonical zero payload
     0xab, 0xcd, 0x01, // tuple U16 (big-endian) + Bool
     0x0e, 0x00, 0x00, 0x00, // first variable field ends at record byte 14
-    0x02, b'h', b'i', // String primitive scalar: length + payload
+    0x02, b'h', b'i', // String primitive StoredScalar arm tag + payload
     0x02, 0x00, 0x00, 0x00, // variable array count
     0x0a, 0x00, 0x00, 0x00, // first array item ends at array-relative byte 10
     0x02, b'a', 0x02, b'b', b'c',
