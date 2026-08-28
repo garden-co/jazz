@@ -571,6 +571,15 @@ impl<'de> Deserialize<'de> for RecordDescriptor {
         D: Deserializer<'de>,
     {
         let fields = Vec::<DescriptorField>::deserialize(deserializer)?;
+        // Descriptors cross several untrusted byte boundaries (bindings,
+        // network envelopes, and persisted data). `from_logical_fields` keeps
+        // its panic-on-programmer-error contract for trusted construction, but
+        // decoding must report an ordinary serde error instead of allowing an
+        // invalid nested type to unwind across an FFI boundary.
+        for field in &fields {
+            validate_schema_value_type(&field.value_type)
+                .map_err(|error| <D::Error as serde::de::Error>::custom(error.to_string()))?;
+        }
         Ok(Self::from_logical_fields(fields))
     }
 }

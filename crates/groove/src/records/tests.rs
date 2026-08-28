@@ -28,6 +28,21 @@ fn system_enum_registry_identity_survives_trusted_serde_round_trip() {
     assert_ne!(restored.registry_id() & (1 << 63), 0);
 }
 
+#[test]
+fn descriptor_decode_rejects_an_invalid_schema_without_unwinding() {
+    // Descriptor bytes reach untrusted binding and wire boundaries. Trusted
+    // construction may retain its programmer-error panic, but deserialization
+    // must convert the same malformed nested type into an ordinary error.
+    let fields = vec![DescriptorField {
+        name: Some("value".to_owned()),
+        value_type: ValueType::Tuple(vec![ValueType::String]),
+    }];
+    let bytes = postcard::to_allocvec(&fields).unwrap();
+    let result = std::panic::catch_unwind(|| postcard::from_bytes::<RecordDescriptor>(&bytes));
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_err());
+}
+
 crate::define_record! {
     struct TestStaticRow {
         0 => id: u64,
