@@ -474,9 +474,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   const toWitness = migration ? resolveMigrationDefinitionWasmSchema(migration.to) : undefined;
   const fromHash = options.fromHash ?? (await computeSchemaHash(fromWitness!));
   const toHash = options.toHash ?? (await computeSchemaHash(toWitness!));
-  const fromSchema = options.fromHash
-    ? await loadSchema(serverOptions, fromHash)
-    : fromWitness!;
+  const fromSchema = options.fromHash ? await loadSchema(serverOptions, fromHash) : fromWitness!;
   const toSchema = options.toHash ? await loadSchema(serverOptions, toHash) : toWitness!;
 
   if (migration) {
@@ -489,10 +487,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   }
 
   const forward = serializeForwardLenses(migration?.forward ?? []);
-  if (
-    forward.length === 0 &&
-    schemaTransitionRequiresRowTransform(fromSchema, toSchema)
-  ) {
+  if (forward.length === 0 && schemaTransitionRequiresRowTransform(fromSchema, toSchema)) {
     throw new MissingMigrationError(fromHash, toHash);
   }
 

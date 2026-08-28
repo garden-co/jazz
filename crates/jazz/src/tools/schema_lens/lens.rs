@@ -363,7 +363,10 @@ impl Lens {
         let mut final_result = Vec::with_capacity(target_desc.columns.len());
         for target_col in &target_desc.columns {
             let name = target_col.name.as_str();
-            if let Some(idx) = column_names.iter().position(|column_name| column_name == name) {
+            if let Some(idx) = column_names
+                .iter()
+                .position(|column_name| column_name == name)
+            {
                 final_result.push(result[idx].clone().unwrap_or(Value::Null));
             } else {
                 final_result.push(Value::Null);

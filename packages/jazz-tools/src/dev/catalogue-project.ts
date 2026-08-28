@@ -1751,11 +1751,7 @@ async function resolveProjectDeployMigrationChain(
         `fromHash in ${fileName}`,
         knownHashes,
       );
-      const namedToHash = resolveKnownSchemaHash(
-        named.to,
-        `toHash in ${fileName}`,
-        knownHashes,
-      );
+      const namedToHash = resolveKnownSchemaHash(named.to, `toHash in ${fileName}`, knownHashes);
       if (namedFromHash !== fromHash || namedToHash !== toHash) {
         throw new Error(
           `Migration filename ${fileName} does not match its embedded ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} edge.`,

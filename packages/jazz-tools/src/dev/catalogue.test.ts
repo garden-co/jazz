@@ -557,8 +557,7 @@ export default s.defineMigration({
       const toWasmSchema = s.defineApp(toSchema).wasmSchema;
       const fromHash = await computeSchemaHash(fromWasmSchema);
       const toHash = await computeSchemaHash(toWasmSchema);
-      const embeddedFromHash =
-        tamperKind === "hash" ? "eeeeeeeeeeee" : fromHash.slice(0, 12);
+      const embeddedFromHash = tamperKind === "hash" ? "eeeeeeeeeeee" : fromHash.slice(0, 12);
       const fromColumn = tamperKind === "witness" ? "s.int()" : "s.string()";
 
       await writeFile(
@@ -616,8 +615,7 @@ export default s.defineMigration({
       );
 
       const { pushMigration } = await import("./catalogue-project.js");
-      const expectedError =
-        tamperKind === "hash" ? "embedded fromHash" : "from schema witness";
+      const expectedError = tamperKind === "hash" ? "embedded fromHash" : "from schema witness";
       await expect(
         pushMigration({
           appId: APP_ID,
@@ -763,9 +761,9 @@ export default s.defineMigration({
 
       expect(results).toHaveLength(2);
       expect(migrationPublishCount).toBe(2);
-      expect((await readdir(migrationsDir)).filter((entry) => entry.startsWith(".jazz-bundle-"))).toEqual(
-        [],
-      );
+      expect(
+        (await readdir(migrationsDir)).filter((entry) => entry.startsWith(".jazz-bundle-")),
+      ).toEqual([]);
     } finally {
       vi.doUnmock("esbuild");
       vi.resetModules();
