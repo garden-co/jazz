@@ -168,6 +168,95 @@ async fn pending_remote_chunk_install_retries_after_provider_rebuild() {
     );
 }
 
+// Both paths below receive authenticated but otherwise untyped node bytes: a
+// resolver invokes the metadata observer, while peer upload admission invokes
+// the batch ingress. This is necessarily an internal receipt because neither
+// raw chunk envelope is observable through Groove's row API. A future branch
+// is allowed to abandon V1's child layout entirely; the valid content hash
+// proves both callers select its format before attempting V1 decoding.
+#[futures_test::test]
+async fn future_format_node_is_rejected_before_v1_decode_by_metadata_and_upload_ingress() {
+    let encoded = vec![1, crate::large_values::FORMAT_VERSION + 1];
+    let node_ref = crate::large_values::NodeRef {
+        object_hash: crate::large_values::object_hash(&encoded),
+        locator: crate::large_values::Locator::from_seed(b"future-format-node"),
+    };
+
+    let backing =
+        MemoryStorage::new(&[LARGE_VALUE_METADATA_CF]).expect("valid metadata column family");
+    let metadata = Rc::new(
+        LayoutStorage::new(backing, StorageLayout::Identity)
+            .await
+            .unwrap(),
+    );
+    let lifecycle = Arc::new(AsyncMutex::new(()));
+    let observer = MetadataChunkInstallObserver {
+        storage: Rc::downgrade(&metadata),
+        lifecycle: Arc::downgrade(&lifecycle),
+        resident_install: None,
+    };
+    assert_eq!(
+        crate::chunks::ChunkInstallObserver::installed(
+            &observer,
+            node_ref.clone(),
+            Bytes::from(encoded.clone()),
+        )
+        .await,
+        Err(crate::chunks::ChunkError::Integrity),
+        "the metadata observer must dispatch the future node before V1 binding"
+    );
+    assert!(
+        metadata
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&node_ref).unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "rejected future metadata must not gain lifecycle state"
+    );
+
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    assert!(matches!(
+        database
+            .stage_large_value_chunk_batch(
+                crate::large_values::StagedLargeValueId([0x77; 16]),
+                crate::large_values::LargeValueKind::Bytes,
+                vec![crate::large_values::StagedChunk {
+                    node_ref,
+                    encoded,
+                }],
+            )
+            .await,
+        Err(Error::IvmRuntime(
+            crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                crate::large_values::Error::UnsupportedFormat(version)
+            )
+        )) if version == crate::large_values::FORMAT_VERSION + 1
+    ));
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        chunks.len(),
+        0,
+        "upload ingress must not stage future bytes"
+    );
+}
+
 #[derive(Clone)]
 struct CountingFixtureChunkResolver {
     chunks: Rc<std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>>,

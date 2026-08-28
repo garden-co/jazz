@@ -248,12 +248,14 @@ NOT reuse V1's edit-coordinate validation simply because the outer enum tag is
 unchanged.
 
 The raw dispatch preflight reads only the canonical outer enum tag and the
-first fixed `format_version:u8` descriptor payload byte. It does not bind the
-descriptor record, calculate variable-field spans, decode a root `NodeRef`, or
-decode an edit before selecting the codec. Therefore an unknown/future version
-with a truncated or deliberately non-V1 nested layout fails as
-`UnsupportedFormat`, rather than as a V1 malformed record. Once V1 is selected,
-the full current descriptor/edit/scalar payload is decoded and exactly
+first fixed `format_version:u8` payload byte. It does not bind a descriptor or
+node record, calculate variable-field spans, decode a root `NodeRef`, decode
+branch children, or decode an edit before selecting the codec. The same node
+selector is used by descriptor-free metadata observation and descriptor-led
+upload admission. Therefore an unknown/future version with a truncated or
+deliberately non-V1 nested layout fails as `UnsupportedFormat`, rather than as
+a V1 malformed record. Once V1 is selected, the full current
+descriptor/edit/scalar or node payload is decoded and exactly
 re-encoded; V1 malformed or trailing bytes still fail closed.
 
 Staged-root receipts and pending-upload journals store the canonical complete

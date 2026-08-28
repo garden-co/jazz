@@ -3417,7 +3417,15 @@ fn decode_node_for_format(
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
-    let node = LargeValueFormat::from_version(format_version)?.decode_node(encoded)?;
+    // Select both contracts before V1 binds any variable node field. In
+    // particular, a descriptor-led upload must not classify a hash-valid
+    // future branch with an incompatible V1 payload as a malformed V1 node.
+    let descriptor_format = LargeValueFormat::from_version(format_version)?;
+    let node_format = preflight_node_format(encoded)?;
+    if descriptor_format != node_format {
+        return Err(Error::DescriptorMismatch);
+    }
+    let node = descriptor_format.decode_node(encoded)?;
     let encoded_kind = match &node {
         ChunkNode::Leaf { kind, .. } | ChunkNode::Branch { kind, .. } => *kind,
     };
@@ -3451,12 +3459,11 @@ pub(crate) fn decode_node_untyped_authenticated(
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
-    // Durable metadata has no owner descriptor. V1's canonical record has a
-    // fixed structural envelope, so decode it only to recover its committed
-    // format and then dispatch that exact codec. No fallback or try-current
-    // decoding is permitted here.
-    let node = decode_canonical_node_v1(encoded)?;
-    LargeValueFormat::from_version(node_format(&node))?.decode_node(encoded)
+    // Durable metadata has no owner descriptor. Read only the canonical enum
+    // tag and its fixed first format byte to select a codec before V1 binds
+    // any variable node field. No fallback or try-current decoding is
+    // permitted here.
+    preflight_node_format(encoded)?.decode_node(encoded)
 }
 
 /// Encode a chunk node using Groove's ordinary canonical enum/record algebra.
@@ -3658,8 +3665,7 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
 /// persisted descriptor selects the codec before node interpretation.
 #[cfg(test)]
 pub(crate) fn decode_canonical_node(encoded: &[u8]) -> Result<ChunkNode, Error> {
-    let node = decode_canonical_node_v1(encoded)?;
-    LargeValueFormat::from_version(node_format(&node))?.decode_node(encoded)
+    preflight_node_format(encoded)?.decode_node(encoded)
 }
 
 fn preflight_node_bounds(encoded: &[u8], schema: &EnumSchema) -> Result<(), Error> {
@@ -3681,6 +3687,22 @@ fn preflight_node_bounds(encoded: &[u8], schema: &EnumSchema) -> Result<(), Erro
         }
     }
     Ok(())
+}
+
+/// Read precisely the self-describing node selector without binding either
+/// leaf bytes or branch children. This is shared by descriptor-led admission
+/// and descriptor-free durable-metadata observers: future node bytes must
+/// select (and reject through) their own codec even when their remaining bytes
+/// are not a valid V1 record.
+fn preflight_node_format(encoded: &[u8]) -> Result<LargeValueFormat, Error> {
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedNode)?;
+    match tag {
+        0 | 1 => {}
+        _ => return Err(Error::MalformedNode),
+    }
+    let version = *payload.first().ok_or(Error::MalformedNode)?;
+    LargeValueFormat::from_version(version)
 }
 
 fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
@@ -7490,6 +7512,38 @@ mod tests {
             decode_node_untyped_authenticated(matching_hash, &encoded),
             Err(Error::MalformedNode),
             "the size ceiling must win even when the oversized payload's hash matches"
+        );
+    }
+
+    #[test]
+    fn raw_node_selector_rejects_hash_valid_future_branch_before_v1_decode() {
+        // A future branch need not retain V1's child-array layout. Its object
+        // hash is valid, but the only bytes this binary may inspect before
+        // selecting the codec are the canonical outer tag and format byte.
+        let encoded = vec![1, FORMAT_VERSION + 1];
+        let hash = object_hash(&encoded);
+        assert_eq!(
+            decode_node_untyped_authenticated(hash, &encoded),
+            Err(Error::UnsupportedFormat(FORMAT_VERSION + 1))
+        );
+        assert_eq!(
+            decode_node_for_format(FORMAT_VERSION, LargeValueKind::Bytes, hash, &encoded),
+            Err(Error::UnsupportedFormat(FORMAT_VERSION + 1)),
+            "descriptor-led admission must not bind a future branch as V1"
+        );
+        assert_eq!(
+            validate_staged_chunk_batch(
+                LargeValueKind::Bytes,
+                &[StagedChunk {
+                    node_ref: NodeRef {
+                        object_hash: hash,
+                        locator: Locator([0x42; 32]),
+                    },
+                    encoded,
+                }],
+            ),
+            Err(Error::UnsupportedFormat(FORMAT_VERSION + 1)),
+            "upload preflight must select the node format before V1 decoding"
         );
     }
 
