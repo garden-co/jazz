@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # The test-ts runner has 16 CPUs. Turbo gets at most two test tasks, while the
-# jazz-tools browser suite caps Vitest at four file workers so Chromium retains
-# scheduling headroom; both reuse the artifact build completed before this
-# script starts.
+# browser lane runs the Jazz Tools and inspector suites in parallel. Jazz Tools
+# caps Vitest at four file workers so Chromium retains scheduling headroom; all
+# suites reuse the artifact build completed before this script starts.
 set -u
 
 # The runner accepts small command overrides solely so its process-management
@@ -21,7 +21,7 @@ if [[ "${JAZZ_REQUIRE_CI_TEST_COMMANDS:-0}" == "1" ]]; then
 fi
 
 node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2"}
-browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --filter jazz-tools test:browser"}
+browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --parallel --filter jazz-tools --filter inspector test:browser"}
 node_tests_pid=""
 browser_tests_pid=""
 log_dir=${RUNNER_TEMP:-/tmp}
