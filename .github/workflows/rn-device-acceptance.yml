@@ -1,6 +1,7 @@
 name: React Native device scaffold verification
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, reopened, synchronize]
     paths:
@@ -55,3 +56,48 @@ jobs:
       # TODO(#1974): a separate `react-native`-label-gated device workflow
       # will stage the XCFramework, use CocoaPods/Cargo caches, build/install,
       # launch, and run the receipt driver. This source job is not acceptance.
+
+  android-device-acceptance:
+    # Deliberately dispatch-only until the repository assigns a suitably sized
+    # Android/KVM runner to PR labels. Unlike the source jobs, this is a real
+    # artifact -> assemble -> installed-device receipt workflow.
+    if: github.event_name == 'workflow_dispatch'
+    name: Android device acceptance
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with: { version: 10.14.0 }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Bootstrap pinned lane-local Android toolchain
+        run: dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
+      - name: Stage and verify all relay ABI artifacts
+        shell: bash
+        run: |
+          cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
+          export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk"
+          export PATH="$cache/cargo/bin:$PATH"
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
+          export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2
+          pnpm --filter jazz-rn build:relay:android
+          node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+      - name: Assemble, launch, and require the run-bound receipt
+        shell: bash
+        run: |
+          cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
+          export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk" ANDROID_HOME="$cache/sdk"
+          export PATH="$cache/cargo/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
+          export ANDROID_AVD_HOME="$cache/avd"
+          yes no | avdmanager create avd --force --name jazz-device-acceptance-api35 --package 'system-images;android-35;google_apis;x86_64'
+          emulator -avd jazz-device-acceptance-api35 -no-window -no-audio -gpu swiftshader_indirect -no-boot-anim -no-metrics >"$cache/emulator.log" 2>&1 &
+          adb wait-for-device
+          until [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == 1 ]]; do sleep 2; done
+          (cd dev/rn-device-acceptance/android && NODE_ENV=production ./gradlew :app:assembleRelease --console=plain)
+          export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
+          export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
+          pnpm --filter rn-device-acceptance device:android
