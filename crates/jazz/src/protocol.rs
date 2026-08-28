@@ -4645,6 +4645,19 @@ mod tests {
         SchemaVersionId::from_bytes([byte; 16])
     }
 
+    /// Forces postcard's `serialize_bytes` representation rather than the
+    /// collection representation used by `Vec<u8>`.
+    struct PostcardByteBlob<'a>(&'a [u8]);
+
+    impl serde::Serialize for PostcardByteBlob<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
     #[test]
     fn protocol_lens_storage_codec_covers_every_declared_operation_and_value_arm() {
         let values = vec![
@@ -4793,8 +4806,94 @@ mod tests {
             postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&malformed).unwrap())
                 .is_err()
         );
-        // Planted sensitivity: if Deserialize stopped routing through `new`,
-        // this duplicate-source wire would decode and later reach content_id.
+        // Planted sensitivity: if Deserialize stopped routing through the
+        // canonical parser, this trailing wire would decode and later reach
+        // content_id.
+    }
+
+    /// `MigrationLens` deliberately owns a custom byte-blob serde boundary:
+    /// consumers cannot construct a protocol lens without the canonical parser
+    /// re-checking the same bijection enforced by `MigrationLens::new`.
+    #[test]
+    fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking() {
+        // Build the canonical grammar directly instead of calling the checked
+        // constructor: `a -> b` and `a -> c` have a repeated source but
+        // different targets. The table sequence is already canonical, so this
+        // only fails if wire deserialization actually re-applies bijection.
+        let mut malformed = Vec::new();
+        put_str(&mut malformed, "jazz-migration-lens-v1");
+        malformed.extend_from_slice(schema_id(1).as_bytes());
+        malformed.extend_from_slice(schema_id(2).as_bytes());
+        put_len(&mut malformed, 2);
+        for target in ["b", "c"] {
+            put_str(&mut malformed, "a");
+            put_str(&mut malformed, target);
+            put_len(&mut malformed, 0);
+        }
+        let wire = postcard::to_allocvec(&PostcardByteBlob(&malformed)).expect("wrap lens blob");
+
+        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        assert!(
+            decoded.is_ok(),
+            "malformed lens wire must return an error, not panic"
+        );
+        assert!(
+            decoded.unwrap().is_err(),
+            "duplicate source must not enter the catalogue"
+        );
+
+        // Planted sensitivity: changing one source makes the same canonical
+        // shape valid. This proves the rejection above is about bijection, not
+        // postcard framing or an accidentally malformed grammar.
+        let valid = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![
+                TableLens {
+                    source_table: "a".into(),
+                    target_table: "b".into(),
+                    ops: Vec::new(),
+                },
+                TableLens {
+                    source_table: "d".into(),
+                    target_table: "c".into(),
+                    ops: Vec::new(),
+                },
+            ],
+        )
+        .expect("unique coordinates are valid");
+        assert!(
+            postcard::from_bytes::<MigrationLens>(
+                &postcard::to_allocvec(&valid).expect("wrap valid lens blob")
+            )
+            .is_ok()
+        );
+    }
+
+    /// The serde visitor must reject an oversized postcard byte blob while it
+    /// is still borrowed from the input. That prevents allocation or canonical
+    /// grammar parsing based on an attacker-controlled blob length.
+    #[test]
+    fn postcard_migration_lens_rejects_oversized_borrowed_blob_before_parsing() {
+        let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
+        // `serialize_bytes` emits postcard's byte-blob length varint followed
+        // by this data. Its payload is intentionally not a lens marker: the
+        // budget error proves it never reaches the canonical parser.
+        let wire =
+            postcard::to_allocvec(&PostcardByteBlob(&oversized)).expect("wrap oversized blob");
+        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        assert!(
+            decoded.is_ok(),
+            "oversized lens wire must return an error, not panic"
+        );
+        let error = decoded
+            .unwrap()
+            .expect_err("oversized blob must be rejected");
+        assert_eq!(
+            error,
+            postcard::Error::SerdeDeCustom,
+            "the borrowed visitor must reject the declared blob before parsing"
+        );
     }
 
     #[test]
