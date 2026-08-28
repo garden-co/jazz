@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use jazz::storage_codec_profile::JAZZ_EPOCH_1_STORAGE_CODECS;
@@ -12,14 +12,16 @@ const REGISTRY_PATH: &str = concat!(
     "/fixtures/persistent_codec_family_registry.json"
 );
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Registry {
     schema_version: u8,
     purpose: String,
     families: Vec<Family>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Family {
     id: String,
     boundary: String,
@@ -31,7 +33,8 @@ struct Family {
     evidence: Vec<Receipt>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Receipt {
     path: String,
     anchor: String,
@@ -50,6 +53,58 @@ fn workspace_root() -> PathBuf {
         .to_owned()
 }
 
+fn receipt_text(root: &Path, family: &Family, receipt: &Receipt) -> Result<String, String> {
+    let listed_path = Path::new(&receipt.path);
+    if receipt.path.is_empty()
+        || listed_path.is_absolute()
+        || listed_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "{} has an unsafe receipt path `{}`",
+            family.id, receipt.path
+        ));
+    }
+
+    let root = root.canonicalize().map_err(|error| {
+        format!(
+            "{} cannot canonicalize workspace root {}: {error}",
+            family.id,
+            root.display()
+        )
+    })?;
+    let path = root.join(listed_path).canonicalize().map_err(|error| {
+        format!(
+            "{} references unreadable {}: {error}",
+            family.id, receipt.path
+        )
+    })?;
+    if !path.starts_with(&root) {
+        return Err(format!(
+            "{} receipt path escapes the workspace: {}",
+            family.id, receipt.path
+        ));
+    }
+    fs::read_to_string(path)
+        .map_err(|error| format!("{} cannot read {}: {error}", family.id, receipt.path))
+}
+
+fn validate_receipt(root: &Path, family: &Family, receipt: &Receipt) -> Result<(), String> {
+    if receipt.anchor.trim().is_empty() {
+        return Err(format!("{} has an empty receipt anchor", family.id));
+    }
+    let text = receipt_text(root, family, receipt)?;
+    let appearances = text.matches(&receipt.anchor).count();
+    if appearances != 1 {
+        return Err(format!(
+            "{} receipt anchor `{}` in {} must identify exactly one receipt, found {appearances}",
+            family.id, receipt.anchor, receipt.path
+        ));
+    }
+    Ok(())
+}
+
 fn profile_ids(registry: &Registry, profile: &str) -> Vec<String> {
     let mut ids = registry
         .families
@@ -61,7 +116,31 @@ fn profile_ids(registry: &Registry, profile: &str) -> Vec<String> {
     ids
 }
 
-fn validate_registry(registry: &Registry) -> Result<(), String> {
+fn expected_profile_ids() -> BTreeMap<&'static str, Vec<String>> {
+    let groove_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
+        .codec_ids()
+        .map(str::to_owned)
+        .collect();
+    BTreeMap::from([
+        ("groove-root", groove_profile),
+        (
+            "jazz-root",
+            JAZZ_EPOCH_1_STORAGE_CODECS
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect(),
+        ),
+        (
+            "server-catalogue-root",
+            vec!["jazz.server-catalogue-entry.v1".to_owned()],
+        ),
+    ])
+}
+
+fn validate_registry_with_profiles(
+    registry: &Registry,
+    expected_profiles: BTreeMap<&str, Vec<String>>,
+) -> Result<(), String> {
     if registry.schema_version != 1 || registry.purpose.trim().is_empty() {
         return Err("registry must use schema version one and explain its purpose".to_owned());
     }
@@ -87,10 +166,7 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
         ) {
             return Err(format!("{} has an unknown boundary", family.id));
         }
-        if family.semantic_fixture.anchor.trim().is_empty()
-            || family.rejection_receipt.anchor.trim().is_empty()
-            || family.evidence.is_empty()
-        {
+        if family.evidence.is_empty() {
             return Err(format!(
                 "{} is missing a required compatibility receipt",
                 family.id
@@ -101,41 +177,11 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
             .chain(std::iter::once(&family.rejection_receipt))
             .chain(family.evidence.iter())
         {
-            let path = root.join(&receipt.path);
-            let text = fs::read_to_string(&path).map_err(|error| {
-                format!(
-                    "{} references unreadable {}: {error}",
-                    family.id, receipt.path
-                )
-            })?;
-            if receipt.anchor.trim().is_empty() || !text.contains(&receipt.anchor) {
-                return Err(format!(
-                    "{} has a stale receipt anchor `{}` in {}",
-                    family.id, receipt.anchor, receipt.path
-                ));
-            }
+            validate_receipt(&root, family, receipt)?;
         }
     }
 
-    let groove_profile = groove::storage::StorageCodecProfile::groove_epoch_1()
-        .codec_ids()
-        .map(str::to_owned)
-        .collect();
-    let expected: BTreeMap<&str, Vec<String>> = BTreeMap::from([
-        ("groove-root", groove_profile),
-        (
-            "jazz-root",
-            JAZZ_EPOCH_1_STORAGE_CODECS
-                .iter()
-                .map(|id| (*id).to_owned())
-                .collect(),
-        ),
-        (
-            "server-catalogue-root",
-            vec!["jazz.server-catalogue-entry.v1".to_owned()],
-        ),
-    ]);
-    for (profile, expected) in expected {
+    for (profile, expected) in expected_profiles {
         let actual = profile_ids(registry, profile);
         if actual != expected {
             return Err(format!(
@@ -167,6 +213,10 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_registry(registry: &Registry) -> Result<(), String> {
+    validate_registry_with_profiles(registry, expected_profile_ids())
+}
+
 #[test]
 fn authoritative_persistent_codec_family_registry_is_complete_and_current() {
     validate_registry(&registry()).expect("codec registry must remain complete and current");
@@ -181,6 +231,59 @@ fn registry_verifier_rejects_a_planted_known_profile_omission() {
     let error = validate_registry(&registry).expect_err("a missing profile family must fail CI");
     assert!(
         error.contains("jazz-root profile registry drifted"),
+        "{error}"
+    );
+}
+
+#[test]
+fn registry_verifier_rejects_a_planted_future_profile_addition() {
+    let mut profiles = expected_profile_ids();
+    profiles
+        .get_mut("jazz-root")
+        .expect("known Jazz profile")
+        .push("jazz.future-codec.v2".to_owned());
+    let error = validate_registry_with_profiles(&registry(), profiles)
+        .expect_err("a future profile family needs a reviewed registry row");
+    assert!(
+        error.contains("jazz-root profile registry drifted"),
+        "{error}"
+    );
+}
+
+#[test]
+fn registry_verifier_rejects_planted_stale_and_unsafe_receipts() {
+    let mut stale = registry();
+    stale.families[0].semantic_fixture.anchor = "no such exact receipt".to_owned();
+    assert!(
+        validate_registry(&stale)
+            .expect_err("a stale receipt must fail")
+            .contains("must identify exactly one receipt")
+    );
+
+    let mut unsafe_path = registry();
+    unsafe_path.families[0].semantic_fixture.path = "../AGENTS.md".to_owned();
+    assert!(
+        validate_registry(&unsafe_path)
+            .expect_err("a receipt must not escape its checkout")
+            .contains("unsafe receipt path")
+    );
+}
+
+#[test]
+fn registry_parser_rejects_unknown_fields() {
+    // The registry is a CI control surface. Rejecting unknown fields keeps a
+    // misspelled receipt role from silently becoming documentation-only data.
+    let error = serde_json::from_str::<Registry>(
+        r#"{
+            "schema_version": 1,
+            "purpose": "test",
+            "families": [],
+            "unreviewed_extra_field": true
+        }"#,
+    )
+    .expect_err("registry schema must fail closed on unknown fields");
+    assert!(
+        error.to_string().contains("unreviewed_extra_field"),
         "{error}"
     );
 }
