@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::executor::block_on;
-use groove::storage::{Error, OrderedKvStorage, ScanRequest, collect_scan};
+use groove::storage::{Error, OrderedKvStorage, OwnedWriteOperation, ScanRequest, collect_scan};
 use jazz_storage_sqlite::SqliteStorage;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
