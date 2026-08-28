@@ -281,7 +281,7 @@ mod global_state;
 mod ingest;
 pub(crate) mod maintained_subscription_view;
 mod open_tx;
-mod physical;
+pub(crate) mod physical;
 mod policy;
 pub(crate) mod query_engine;
 mod query_eval;

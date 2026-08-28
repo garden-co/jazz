@@ -3349,6 +3349,15 @@ impl PhysicalIdentityManifest {
                 .iter()
                 .find(|table| table.name == table_lens.source_table)
                 .ok_or("physical identity lineage source table missing")?;
+            // Keep the source coordinate while applying name-level lens
+            // operations.  A renamed compatible column retains its permanent
+            // epoch UUID; a transformed/non-additive epoch deliberately does
+            // not, even when its logical name survives the lens.
+            let mut source_name_by_target = source_table
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), Some(column.name.clone())))
+                .collect::<BTreeMap<_, _>>();
             let mut identity = self
                 .tables
                 .get(&table_lens.source_table)
@@ -3362,6 +3371,12 @@ impl PhysicalIdentityManifest {
                             .remove(from)
                             .ok_or("physical identity renamed column missing")?;
                         identity.columns.insert(to.clone(), column);
+                        for source_name in source_name_by_target.values_mut() {
+                            if source_name.as_deref() == Some(from.as_str()) {
+                                *source_name = Some(to.clone());
+                                break;
+                            }
+                        }
                     }
                     LensOp::CopyColumn { to, .. } | LensOp::AddColumn { column: to, .. } => {
                         let target_column = target_table
@@ -3375,6 +3390,12 @@ impl PhysicalIdentityManifest {
                     }
                     LensOp::DropColumn { column, .. } => {
                         identity.columns.remove(column);
+                        for source_name in source_name_by_target.values_mut() {
+                            if source_name.as_deref() == Some(column.as_str()) {
+                                *source_name = None;
+                                break;
+                            }
+                        }
                     }
                     LensOp::RenameTable { .. }
                     | LensOp::TransformColumn { .. }
@@ -3392,6 +3413,23 @@ impl PhysicalIdentityManifest {
                     .columns
                     .entry(target_column.name.clone())
                     .or_insert_with(|| allocate_column_identity(target_column));
+                let compatible = source_name_by_target
+                    .iter()
+                    .find_map(|(source_name, target_name)| {
+                        (target_name.as_deref() == Some(target_column.name.as_str()))
+                            .then_some(source_name)
+                    })
+                    .is_some_and(|source_name| {
+                        crate::node::physical::physical_column_epoch_is_compatible(
+                            source_table,
+                            source_name,
+                            target_table,
+                            &target_column.name,
+                        )
+                    });
+                if !compatible {
+                    *column = allocate_column_identity(target_column);
+                }
                 reconcile_enum_variant_identities(column, &target_column.column_type);
             }
             // The source descriptor is used above to validate the lineage
@@ -3427,36 +3465,73 @@ impl PhysicalIdentityManifest {
             if source_table.id != target_table.id {
                 return Err("physical table identity changed across lineage");
             }
-            let mut inherited = source_table
-                .columns
+            let source_table_schema = source
+                .tables
                 .iter()
-                .map(|(name, identity)| (name.clone(), identity))
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or("physical identity source table schema missing")?;
+            let target_table_schema = target
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.target_table)
+                .ok_or("physical identity target table schema missing")?;
+            // Map each original source name to the target coordinate it still
+            // represents.  This avoids treating a transform (same name) as a
+            // rename-compatible epoch.
+            let mut target_name_by_source = source_table
+                .columns
+                .keys()
+                .map(|name| (name.clone(), Some(name.clone())))
                 .collect::<BTreeMap<_, _>>();
             for op in &table_lens.ops {
                 match op {
                     LensOp::RenameColumn { from, to } => {
-                        if let Some(identity) = inherited.remove(from) {
-                            inherited.insert(to.clone(), identity);
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(from.as_str()) {
+                                *target_name = Some(to.clone());
+                                break;
+                            }
                         }
                     }
                     LensOp::CopyColumn { to, .. } | LensOp::AddColumn { column: to, .. } => {
-                        inherited.remove(to);
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(to.as_str()) {
+                                *target_name = None;
+                            }
+                        }
                     }
                     LensOp::DropColumn { column, .. } => {
-                        inherited.remove(column);
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(column.as_str()) {
+                                *target_name = None;
+                            }
+                        }
                     }
                     LensOp::RenameTable { .. }
                     | LensOp::TransformColumn { .. }
                     | LensOp::RejectSourceDelta { .. } => {}
                 }
             }
-            for (target_name, source_column) in inherited {
+            for (source_name, target_name) in target_name_by_source {
+                let Some(target_name) = target_name else {
+                    continue;
+                };
+                let source_column = &source_table.columns[&source_name];
                 let target_column = target_table
                     .columns
                     .get(&target_name)
                     .ok_or("physical identity inherited column missing")?;
-                if source_column.id != target_column.id {
-                    return Err("physical column identity changed across lineage");
+                let compatible = crate::node::physical::physical_column_epoch_is_compatible(
+                    source_table_schema,
+                    &source_name,
+                    target_table_schema,
+                    &target_name,
+                );
+                if compatible && source_column.id != target_column.id {
+                    return Err("physical compatible column identity changed across lineage");
+                }
+                if !compatible && source_column.id == target_column.id {
+                    return Err("physical incompatible column epoch reused identity");
                 }
                 for (path, source_variants) in &source_column.enum_variants {
                     let Some(target_variants) = target_column.enum_variants.get(path) else {
@@ -3618,6 +3693,10 @@ fn collect_enum_variant_counts(
     }
 }
 
+// Publication validation runs before a node has installed any local physical
+// aliases, so the authority-side permanence rule lives with the wire manifest
+// rather than the local descriptor lowering.  Keep this definition aligned
+// with `node::physical::physical_column_epoch_is_compatible`.
 impl SchemaLineagePublication {
     /// Construct an immutable publication at the catalogue authority. Mapped
     /// entities inherit UUIDs from the source manifest; genuinely new table,
@@ -4451,6 +4530,63 @@ mod tests {
         assert_eq!(
             collision.validate_for_schema(&schema),
             Err("physical identity manifest UUID collision")
+        );
+
+        let renamed_source = SchemaVersion::new(schema.clone());
+        let renamed_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("left_renamed", PublicColumnType::Text)
+                        .column("right", PublicColumnType::Text),
+                )
+                .build(),
+        )
+        .unwrap();
+        let renamed_target = SchemaVersion::new(renamed_schema);
+        let rename_lens = MigrationLens::new(
+            renamed_source.id,
+            renamed_target.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::RenameColumn {
+                    from: "left".to_owned(),
+                    to: "left_renamed".to_owned(),
+                }],
+            }],
+        );
+        let renamed = SchemaLineagePublication::author_from_prior(
+            &renamed_source.schema,
+            &manifest,
+            renamed_target.clone(),
+            rename_lens.clone(),
+            std::iter::empty::<String>(),
+            std::iter::empty::<String>(),
+        )
+        .unwrap();
+        assert_eq!(
+            renamed.physical_identities.tables["items"].columns["left_renamed"].id,
+            manifest.tables["items"].columns["left"].id,
+            "a compatible rename retains the permanent column UUID"
+        );
+        let mut changed_rename = renamed.physical_identities.clone();
+        changed_rename
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("left_renamed")
+            .unwrap()
+            .id = crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4());
+        assert_eq!(
+            manifest.validate_evolution_to(
+                &renamed_source.schema,
+                &changed_rename,
+                &renamed_target.schema,
+                &rename_lens,
+            ),
+            Err("physical compatible column identity changed across lineage")
         );
     }
 

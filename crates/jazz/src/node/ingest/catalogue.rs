@@ -616,6 +616,22 @@ where
                     &publication.new_tables,
                     &publication.dropped_tables,
                 )
+            })
+            .and_then(|()| {
+                self.catalogue
+                    .physical_mappings
+                    .get(&publication.lens.source)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "source physical identity manifest missing",
+                    ))?
+                    .identities
+                    .validate_evolution_to(
+                        &source.schema,
+                        &publication.physical_identities,
+                        &publication.schema.schema,
+                        &publication.lens,
+                    )
+                    .map_err(Error::InvalidCatalogueUpdate)
             });
             if validation.is_err() {
                 self.remove_pending_schema_lineage(next, publication.id)

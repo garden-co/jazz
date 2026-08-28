@@ -5,13 +5,17 @@ use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
-use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{
+    AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, MigrationLensId, NodeUuid,
+    RowUuid, SchemaVersionId,
+};
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
-    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
-    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
+    RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
+    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
+    build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -129,6 +133,44 @@ fn compiled_todos_schema(columns: &[&str]) -> JazzSchema {
     jazz::schema::JazzSchema::new(&source).expect("wire fixture source schema compiles")
 }
 
+/// Wire goldens must be repeatable: these are authority-issued values in a
+/// single synthetic lineage, not production allocations.  The snapshot and
+/// descendant publication deliberately share this exact source manifest.
+fn fixture_physical_manifest(schema: &JazzSchema) -> PhysicalIdentityManifest {
+    let mut next = 0x80_u8;
+    let tables = schema
+        .tables
+        .iter()
+        .map(|table| {
+            let table_id = GlobalPhysicalTableId(uuid::Uuid::from_bytes([next; 16]));
+            next = next.wrapping_add(1);
+            let columns = table
+                .columns
+                .iter()
+                .map(|column| {
+                    let id = GlobalPhysicalColumnId(uuid::Uuid::from_bytes([next; 16]));
+                    next = next.wrapping_add(1);
+                    (
+                        column.name().to_owned(),
+                        PhysicalColumnIdentity {
+                            id,
+                            enum_variants: BTreeMap::new(),
+                        },
+                    )
+                })
+                .collect();
+            (
+                table.name.clone(),
+                PhysicalTableIdentity {
+                    id: table_id,
+                    columns,
+                },
+            )
+        })
+        .collect();
+    PhysicalIdentityManifest { tables }
+}
+
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let node = NodeUuid::from_bytes([0x11; 16]);
     let tx_id = TxId::new(TxTime(12), node);
@@ -167,17 +209,26 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     // This is an isolated codec fixture rather than a live catalogue, but the
     // non-genesis payload still starts from an explicit authority manifest so
     // inherited identities cannot be minted by accident.
-    let lineage_source_identities =
-        jazz::protocol::PhysicalIdentityManifest::allocate(&lineage_source.schema);
-    let lineage_publication = SchemaLineagePublication::author_from_prior(
-        &lineage_source.schema,
-        &lineage_source_identities,
-        lineage_target.clone(),
-        lineage_lens,
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    )
-    .expect("wire fixture authors descendant lineage");
+    let lineage_source_identities = fixture_physical_manifest(&lineage_source.schema);
+    let mut lineage_target_identities = fixture_physical_manifest(&lineage_target.schema);
+    lineage_target_identities
+        .tables
+        .get_mut("todos")
+        .unwrap()
+        .columns
+        .insert(
+            "title".to_owned(),
+            lineage_source_identities.tables["todos"].columns["title"].clone(),
+        );
+    let mut lineage_publication = SchemaLineagePublication {
+        id: jazz::ids::SchemaLineagePublicationId(uuid::Uuid::nil()),
+        schema: lineage_target.clone(),
+        lens: lineage_lens,
+        new_tables: Vec::new(),
+        dropped_tables: Vec::new(),
+        physical_identities: lineage_target_identities,
+    };
+    lineage_publication.id = lineage_publication.content_id();
     let mut large_value = groove::large_values::prepare(
         groove::large_values::LargeValueKind::Bytes,
         &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
@@ -448,9 +499,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "catalogue_snapshot_todos_lineage",
             "CatalogueSnapshot",
             SyncMessage::CatalogueSnapshot(Box::new(CatalogueSnapshot {
-                genesis_physical_identities: jazz::protocol::PhysicalIdentityManifest::allocate(
-                    &lineage_source.schema,
-                ),
+                genesis_physical_identities: lineage_source_identities,
                 schemas: vec![lineage_source, lineage_target],
                 lineages: vec![(9, lineage_publication)],
                 current_write_schema: CurrentWriteSchema {

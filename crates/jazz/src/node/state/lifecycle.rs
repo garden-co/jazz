@@ -2092,9 +2092,16 @@ where
         for lineage in pending.values() {
             // A pending lineage may be durably parked ahead of the publication
             // that introduces its source.  There is nothing authoritative to
-            // compare yet; retain it for ordered replay.  Once a source is
+            // compare yet, but its self-contained target manifest, exact
+            // content id, and structural bounds are authoritative already.
+            // Validate those before retaining it for ordered replay. Once a source is
             // known, however, both its manifest and every evolution rule stay
             // fail-closed (the durable tamper receipt depends on that).
+            Self::validate_schema_lineage_publication(&lineage.publication).map_err(|_| {
+                Error::InvalidStoredValue(
+                    "pending schema lineage violates trusted publication invariants",
+                )
+            })?;
             let Some(source) = schemas.get(&lineage.publication.lens.source) else {
                 continue;
             };

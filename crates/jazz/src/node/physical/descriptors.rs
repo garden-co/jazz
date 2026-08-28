@@ -1363,7 +1363,7 @@ fn physical_rejected_version_field_names_for_case(
     Ok(fields)
 }
 
-pub(super) fn physical_column_epoch_is_compatible(
+pub(crate) fn physical_column_epoch_is_compatible(
     source_table: &TableSchema,
     source_column_name: &str,
     target_table: &TableSchema,
@@ -1389,7 +1389,7 @@ pub(super) fn physical_column_epoch_is_compatible(
             == target_table.merge_strategy(target_column_name)
 }
 
-pub(super) fn physical_value_epoch_is_compatible(
+pub(crate) fn physical_value_epoch_is_compatible(
     source: &records::ValueType,
     target: &records::ValueType,
 ) -> bool {

@@ -301,6 +301,15 @@ never identity; same-shaped siblings therefore remain distinct. Canonical
 manifest bytes participate in the publication content id and travel in lineage
 publications, while the authority snapshot carries the genesis manifest.
 
+A pure rename of a physically compatible column retains its UUID. Any
+incompatible epoch (changed value representation, merge strategy, or
+non-additive structural shape) MUST receive a fresh `GlobalPhysicalColumnId`;
+activation and recovery reject a publication that either changes the former or
+reuses the latter. A pending publication whose source has not arrived is still
+validated for its exact content id, manifest coverage, UUID uniqueness, and
+structural bounds; when the source does arrive, its source-to-target identity
+evolution is validated before the pending receipt can stage or activate.
+
 The stored `PhysicalTableId` and `PhysicalColumnId` `u64` values are only
 node-local compression aliases below the semantic layer. Nodes may allocate
 different aliases or receive publications in different network orders and must
