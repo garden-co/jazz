@@ -157,13 +157,14 @@ Memory storage has no durable manifest and is used solely for semantic
 conformance. Backend files are not interchange formats.
 
 **Implementation-status note.** RocksDB and SQLite persist and validate this
-shared `JSM1` manifest. IndexedDB currently validates its adapter-private
-`jazz-idb-tree` page metadata but does not yet persist the shared epoch
-manifest; therefore it is not covered by the epoch-1 physical-open receipt.
-That remaining acceptance item stays explicitly tracked by #2160.
-The ordered-KV conformance receipt currently exercises `IdbStorage` with
-`MemoryPageStore`; it does not claim a browser IndexedDB/OPFS receipt. Browser
-physical-open and persistence coverage remains part of #2160.
+shared `JSM1` manifest. IndexedDB persists the equivalent structured-clone
+epoch-one manifest at its fixed `storage-manifest`/`epoch` location before the
+caller receives a page-store handle. It includes the epoch, adapter/page
+versions, sole `groove.ordered-kv.v1` codec ID, fixed 16 KiB page size, and
+`xxh3-64-le` page checksum identity. The browser physical-open receipt installs
+the committed page-v2 fixture by raw IndexedDB transaction, opens it read-only,
+writes current data, reopens it, and proves corrupt/unknown manifests fail
+without changing pages.
 
 The only ordering property groove requires from the backing store is unsigned
 lexicographic byte order: bytes compare as `0x00 < ... < 0xff`, never as signed
@@ -383,22 +384,29 @@ clear the bound and let a backend materialize its ordinary unbounded batch.
 
 **Implementation-status note.** The shared storage conformance tests exercise
 ordering, prefix upper-bound handling, and failed-batch atomicity on the host
-memory backend. The wasm-only IndexedDB adapter compiles against an in-memory B-tree
-fixture; coverage of persistence across closing and reopening a real IndexedDB
-namespace remains a browser-harness gap.
+memory backend. `jazz-tools` also runs a real-browser IndexedDB physical-open
+receipt against the production page store; it does not substitute
+`MemoryPageStore` for this boundary.
 
 ### IndexedDB page-store physical format
 
 IndexedDB is one durable adapter, not a second logical Groove layout. Its
-database name, the `pages` and `metadata` object-store names, and the `current`
-metadata key are fixed within a storage epoch. `current` is a structured-clone
-record with magic `jazz-idb-tree`, format version `2`, a power-of-two page size
-between 1024 and `2^31` bytes, generation, nullable root page id, and next page
-id. Missing, malformed, or unknown magic/version metadata fails closed before
-a mutation; a new incompatible layout uses a new epoch instead of guessing at
-these bytes. Browser page ids are JavaScript safe integers, so root, child, and
-next ids are bounded to `0..=2^53-1`; exhaustion fails instead of rounding an
-identity. The stored page size is validated before page write or decode.
+database name; `pages`, `metadata`, and `storage-manifest` object-store names;
+and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
+caller receives a handle, `storage-manifest`/`epoch` must be the exact
+structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
+`2`, required codec IDs `[groove.ordered-kv.v1]`, page size `16384`, page
+checksum `xxh3-64-le`, page magic `IDBTREE\\0`, and page format `2`. Missing,
+unknown, extra, or inconsistent fields fail closed before a mutation. Epoch-one
+starts at the settlement baseline: a version-2 database receives the new store
+but no manifest and is unsupported rather than adopted. `current` is a
+structured-clone record with magic `jazz-idb-tree`, format version `2`, fixed
+16 KiB page size, generation, nullable root page id, and next page id. Missing,
+malformed, or unknown magic/version metadata fails closed before a mutation; a
+new incompatible layout uses a new epoch instead of guessing at these bytes.
+Browser page ids are JavaScript safe integers, so root, child, and next ids are
+bounded to `0..=2^53-1`; exhaustion fails instead of rounding an identity. The
+stored page size is validated before page write or decode.
 
 The IndexedDB B-tree page body is adapter-private but durable. A page is exactly
 `"IDBTREE\\0" | version:u8(2) | xxh3_64(payload):u64le | payload`. The first
