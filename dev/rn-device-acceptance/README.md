@@ -4,6 +4,27 @@ This is the first-party **Expo development-build / bare-host** acceptance app fo
 
 The app has one durable native relay and a scenario plan requiring two UI runtimes. It emits newline-delimited `JAZZ_DEVICE_RESULT {json}` protocol messages automatically on launch. A `passed` state is rejected by the protocol unless it includes platform, device, build, and observation-time evidence. The linked ABI plus trusted-native-admission probe is the sole implemented receipt; every multi-peer or durable scenario remains truthful `todo`, so the full acceptance gate correctly remains red.
 
+## Experimental native foreground read smoke
+
+`packages/jazz-tools/src/react-native/create-jazz-client.test.ts` contains the
+source-level contract for the first capability-gated foreground path. It loads
+the **built installed-package** `jazz-rn/relay` entry point (not a Jazz-owned test shim), has the
+native test host install its JSI factory, then opens an already verified local
+session, reads a seeded row, receives a subscription delta, and shuts down the
+exact native alias. The test proves that this flow neither inspects WASM nor
+uses the generic TurboModule frame executor. It also requires local reads to
+continue through the attached relay while the application is offline, and
+requires mutation and remote-tier attempts to fail closed.
+
+That is deliberately a source/ABI contract, not a claim of production device
+support. The installed device fixture currently has no trusted seed/update
+operation: JavaScript cannot write through the read-only foreground ABI, and
+the fixture must not smuggle a write authority across its capability boundary.
+Consequently, the device app only reports the linked-ABI admission receipt for
+now. Add a native-only seeded fixture and a real device receipt before marking
+the row/subscription scenario `passed`; do not turn this synthetic contract
+into a green device claim.
+
 ## Trusted fixture boundary
 
 `native/android/JazzDeviceFixtureModule.kt` and `native/ios/JazzDeviceFixture.mm` admit a scope entirely in trusted platform code. The relay's opaque 32-byte capability is the only value permitted into JavaScript. The iOS fixture uses fixed non-secret test material and reads the launch nonce, build fingerprint, and simulator UDID only from native process arguments; they must never be populated by Metro variables, intents, a remote config service, or an OTA update. `src/native-fixture.ts` is the narrow JS consumer.
