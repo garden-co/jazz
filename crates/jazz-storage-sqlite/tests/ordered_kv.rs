@@ -1,9 +1,66 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::executor::block_on;
 use groove::storage::{Error, OrderedKvStorage, ScanRequest, collect_scan};
 use jazz_storage_sqlite::SqliteStorage;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
+
+const EPOCH_1_SQLITE_FIXTURE_BASE64: &str =
+    include_str!("../fixtures/epoch-1-historical.sqlite.base64");
+const EPOCH_1_SQLITE_FIXTURE_SHA256: &str =
+    "a5aaa7fdcfab2759d10263e564419d18466d30e6f60ab911405f8e224b5de3d9";
+const EPOCH_1_ORDERED_KV_PACK: &str = include_str!("../../groove/fixtures/epoch-1-ordered-kv.pack");
+const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
+    "5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7";
+
+fn historical_epoch_1_sqlite_bytes() -> Vec<u8> {
+    let bytes = STANDARD
+        .decode(EPOCH_1_SQLITE_FIXTURE_BASE64.lines().collect::<String>())
+        .expect("committed SQLite fixture is base64");
+    assert!(historical_epoch_1_sqlite_checksum_matches(&bytes));
+    bytes
+}
+
+fn historical_epoch_1_sqlite_checksum_matches(bytes: &[u8]) -> bool {
+    format!("{:x}", Sha256::digest(bytes)) == EPOCH_1_SQLITE_FIXTURE_SHA256
+}
+
+fn write_historical_epoch_1_sqlite(path: &Path) {
+    std::fs::write(path, historical_epoch_1_sqlite_bytes()).unwrap();
+}
+
+fn decode_hex(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0, "fixture hex is byte aligned");
+    (0..value.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).unwrap())
+        .collect()
+}
+
+fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    assert_eq!(
+        format!("{:x}", Sha256::digest(EPOCH_1_ORDERED_KV_PACK)),
+        EPOCH_1_ORDERED_KV_PACK_SHA256,
+        "the authoritative logical pack must match its checked-in checksum"
+    );
+    EPOCH_1_ORDERED_KV_PACK
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let mut fields = line.split('\t');
+            let family = fields.next().unwrap().to_owned();
+            let key = decode_hex(fields.next().unwrap());
+            let value = decode_hex(fields.next().unwrap());
+            assert!(
+                fields.next().is_none(),
+                "fixture pack has exactly three fields"
+            );
+            (family, key, value)
+        })
+        .collect()
+}
 
 fn open(dir: &tempfile::TempDir) -> SqliteStorage {
     SqliteStorage::open(dir.path().join("jazz.sqlite"), &["records"]).unwrap()
@@ -18,6 +75,105 @@ fn open_rejects_nul_column_family_before_creating_database() {
         assert!(SqliteStorage::open(&path, &[invalid]).is_err());
     }
     assert!(!path.exists());
+}
+
+#[test]
+fn historical_epoch_1_sqlite_fixture_is_checksum_guarded_before_materialization() {
+    let mut corrupted = historical_epoch_1_sqlite_bytes();
+    corrupted[0] ^= 1;
+    assert!(
+        !historical_epoch_1_sqlite_checksum_matches(&corrupted),
+        "planted physical-fixture corruption must be rejected by the checksum gate"
+    );
+}
+
+#[test]
+fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let historical_path = directory.path().join("epoch-1.sqlite");
+        write_historical_epoch_1_sqlite(&historical_path);
+
+        // The first open is deliberately raw and read-only: it proves the
+        // committed physical file itself has the documented logical snapshot
+        // before the current adapter can alter journal or metadata state.
+        let read_only = rusqlite::Connection::open_with_flags(
+            &historical_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let snapshot = read_only
+            .prepare(
+                "SELECT column_families.name, kv.k, kv.v \
+                 FROM kv JOIN column_families ON kv.cf = column_families.id \
+                 ORDER BY column_families.name, kv.k",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(snapshot, epoch_1_ordered_kv_pack());
+        drop(read_only);
+
+        let current = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        assert_eq!(
+            current
+                .get("records".into(), b"user:2".to_vec())
+                .await
+                .unwrap(),
+            Some(b"Grace".to_vec())
+        );
+        current
+            .write_many(vec![
+                OwnedWriteOperation::Set {
+                    cf: "records".into(),
+                    key: b"user:3".to_vec(),
+                    value: b"Lin".to_vec(),
+                },
+                OwnedWriteOperation::Delete {
+                    cf: "indices".into(),
+                    key: b"name:Ada".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "indices".into(),
+                    key: b"name:Lin".to_vec(),
+                    value: b"3".to_vec(),
+                },
+            ])
+            .await
+            .unwrap();
+        drop(current);
+
+        let reopened = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        assert_eq!(
+            reopened
+                .get("records".into(), b"user:3".to_vec())
+                .await
+                .unwrap(),
+            Some(b"Lin".to_vec())
+        );
+        assert_eq!(
+            reopened
+                .get("indices".into(), b"name:Ada".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened
+                .get("indices".into(), b"name:Lin".to_vec())
+                .await
+                .unwrap(),
+            Some(b"3".to_vec())
+        );
+    });
 }
 
 #[test]

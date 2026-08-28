@@ -28,3 +28,15 @@ formats, not this corpus and not file-level interchange. RocksDB and SQLite
 persist the shared manifest today. IndexedDB only has its adapter-private page
 metadata, so its missing shared physical epoch manifest and historical-store
 fixture capture remain explicitly non-covered acceptance work under #2160.
+
+## Backend-neutral ordered-KV pack
+
+`epoch-1-ordered-kv.pack` is the authoritative logical snapshot used by
+physical adapter fixtures. Its exact UTF-8 SHA-256 is
+`5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7`.
+Each non-header line is an ordered `column-family<TAB>key-hex<TAB>value-hex`
+entry. The ordering is part of the fixture: adapters must scan it in this order
+after a read-only historical open and preserve it through current mixed writes
+and reopen. It is deliberately a logical pack rather than a database-file
+interchange format; each adapter owns its own physical fixture and validates
+its own manifest before admitting the packed data.

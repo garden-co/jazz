@@ -1,0 +1,26 @@
+# Epoch-1 SQLite historical physical fixture
+
+This is a committed physical SQLite database, base64 encoded only so the
+repository can review it as text. Its decoded SHA-256 is
+`a5aaa7fdcfab2759d10263e564419d18466d30e6f60ab911405f8e224b5de3d9`.
+
+The settled epoch-1 fixture records two ordered-KV families:
+
+- `records`: `user:1 -> Ada`, `user:10 -> Ten`, `user:2 -> Grace`
+- `indices`: `name:Ada -> 1`
+
+It freezes the SQLite header (`application_id=JAZZ`, `user_version=1`), exact
+v1 DDL, metadata records, canonical `JSM1` SQLite manifest, and the logical
+ordered snapshot. SQLite pages are deliberately not an interchange format;
+the fixture is opened only by the SQLite adapter that owns this physical layout.
+
+The ordered-KV adapter has no derived state. Higher Jazz derived tables and
+indices are intentionally absent from this fixture: after a future authoritative
+epoch migration they are discarded and rebuilt, never treated as historical
+authoritative bytes.
+
+The compatibility gate first opens the decoded historical file read-only to
+prove its snapshot, then copies it for a current adapter mixed-write/reopen
+receipt. It rejects a deliberately corrupted fixture checksum before any file
+is materialized. Pre-settlement alpha stores remain unsupported; this fixture
+starts at epoch 1.

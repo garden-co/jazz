@@ -2337,9 +2337,11 @@ dependencies = [
 name = "jazz-storage-sqlite"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "groove",
  "rusqlite",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
