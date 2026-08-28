@@ -100,7 +100,7 @@ android {
         buildConfigField "String", "JAZZ_DEVICE_APP_NAMESPACE", "\"jazz-device-acceptance\""
         buildConfigField "String", "JAZZ_DEVICE_STORAGE_NAMESPACE", "\"acceptance-fixture\""
         buildConfigField "String", "JAZZ_DEVICE_AUTH_SCOPE", "\"fixture-user-a\""
-        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", "\"{\\\"tables\\\":{\\\"notes\\\":{\\\"columns\\\":[{\\\"name\\\":\\\"title\\\",\\\"column_type\\\":{\\\"type\\\":\\\"Text\\\"},\\\"nullable\\\":false}]}}}\""
+        buildConfigField "String", "JAZZ_DEVICE_SCHEMA_JSON", "\"{\\\"tables\\\":{\\\"todos\\\":{\\\"columns\\\":[{\\\"name\\\":\\\"title\\\",\\\"column_type\\\":{\\\"type\\\":\\\"Text\\\"},\\\"nullable\\\":false}]}}}\""
         buildConfigField "String", "JAZZ_DEVICE_VERIFIED_IDENTITY_JSON", "\"{\\\"node\\\":\\\"11111111-1111-4111-8111-111111111111\\\",\\\"author\\\":\\\"[\\\\\\\"https://jazz.device.test\\\\\\\",\\\\\\\"fixture-user-a\\\\\\\"]\\\"}\""
         buildConfigField "String", "JAZZ_DEVICE_VERIFIED_CLAIMS_JSON", "\"{}\""
     }
