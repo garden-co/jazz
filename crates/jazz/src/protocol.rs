@@ -3453,6 +3453,14 @@ impl PhysicalIdentityManifest {
     ) -> Result<(), &'static str> {
         self.validate_for_schema(source)?;
         target_manifest.validate_for_schema(target)?;
+        // A UUID is a permanent catalogue identity, not an alias that may be
+        // recycled once its current lookup path disappears.  Start by
+        // forbidding every source UUID in the target.  The mapped, compatible
+        // coordinates below explicitly carve out the only permitted reuse.
+        // This includes source tables and columns that the lens dropped or
+        // replaced, and every recursive enum occurrence beneath them.
+        let source_uuids = self.all_identity_uuids();
+        let mut inherited_uuids = BTreeSet::new();
         for table_lens in &lens.table_lenses {
             let source_table = self
                 .tables
@@ -3465,6 +3473,7 @@ impl PhysicalIdentityManifest {
             if source_table.id != target_table.id {
                 return Err("physical table identity changed across lineage");
             }
+            inherited_uuids.insert(source_table.id.0);
             let source_table_schema = source
                 .tables
                 .iter()
@@ -3533,6 +3542,13 @@ impl PhysicalIdentityManifest {
                 if !compatible && source_column.id == target_column.id {
                     return Err("physical incompatible column epoch reused identity");
                 }
+                if !compatible {
+                    // A changed epoch is an entirely new physical subtree.
+                    // It cannot inherit even a recursively nested enum case
+                    // UUID from the prior epoch.
+                    continue;
+                }
+                inherited_uuids.insert(source_column.id.0);
                 for (path, source_variants) in &source_column.enum_variants {
                     let Some(target_variants) = target_column.enum_variants.get(path) else {
                         continue;
@@ -3541,10 +3557,37 @@ impl PhysicalIdentityManifest {
                     if source_variants[..shared] != target_variants[..shared] {
                         return Err("physical enum identity changed across lineage");
                     }
+                    inherited_uuids
+                        .extend(source_variants[..shared].iter().map(|variant| variant.0));
                 }
             }
         }
+        let target_uuids = target_manifest.all_identity_uuids();
+        if source_uuids
+            .intersection(&target_uuids)
+            .any(|uuid| !inherited_uuids.contains(uuid))
+        {
+            return Err("physical retired identity reused across lineage");
+        }
         Ok(())
+    }
+
+    /// All durable UUIDs in this descriptor, across tables, column epochs,
+    /// and recursive enum case occurrences.  This is deliberately independent
+    /// of the currently visible schema paths so lineage validation can prevent
+    /// reuse after an entity is dropped or replaced.
+    fn all_identity_uuids(&self) -> BTreeSet<uuid::Uuid> {
+        let mut uuids = BTreeSet::new();
+        for table in self.tables.values() {
+            uuids.insert(table.id.0);
+            for column in table.columns.values() {
+                uuids.insert(column.id.0);
+                for variants in column.enum_variants.values() {
+                    uuids.extend(variants.iter().map(|variant| variant.0));
+                }
+            }
+        }
+        uuids
     }
 }
 
@@ -4587,6 +4630,122 @@ mod tests {
                 &rename_lens,
             ),
             Err("physical compatible column identity changed across lineage")
+        );
+    }
+
+    #[test]
+    fn physical_identity_evolution_never_reuses_retired_epochs_or_subtrees() {
+        let scalar_enum = |variants: &[&str]| PublicColumnType::Array {
+            element: Box::new(PublicColumnType::ScalarEnum {
+                name: "phase".to_owned(),
+                variants: variants.iter().map(|value| (*value).to_owned()).collect(),
+            }),
+        };
+        let source_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", scalar_enum(&["draft", "ready"])),
+                )
+                .table(TableSchemaBuilder::new("retired").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let source = SchemaVersion::new(source_schema.clone());
+        let identities = PhysicalIdentityManifest::allocate(&source_schema);
+        let target_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        // This is deliberately an incompatible epoch: the old
+                        // scalar-enum prefix is not retained.
+                        .column("phase", scalar_enum(&["archived"])),
+                )
+                .table(TableSchemaBuilder::new("new_items").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let target = SchemaVersion::new(target_schema.clone());
+        let lens = MigrationLens::new(
+            source.id,
+            target.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "phase".to_owned(),
+                    transform: "replace-enum-epoch".to_owned(),
+                }],
+            }],
+        );
+        let authored = SchemaLineagePublication::author_from_prior(
+            &source.schema,
+            &identities,
+            target.clone(),
+            lens.clone(),
+            ["new_items"],
+            ["retired"],
+        )
+        .unwrap();
+        identities
+            .validate_evolution_to(
+                &source.schema,
+                &authored.physical_identities,
+                &target.schema,
+                &lens,
+            )
+            .unwrap();
+
+        let source_phase = &identities.tables["items"].columns["phase"];
+
+        let mut reused_column = authored.physical_identities.clone();
+        reused_column
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("phase")
+            .unwrap()
+            .id = source_phase.id;
+        assert_eq!(
+            identities.validate_evolution_to(&source.schema, &reused_column, &target.schema, &lens),
+            Err("physical incompatible column epoch reused identity")
+        );
+
+        let mut reused_recursive_enum = authored.physical_identities.clone();
+        reused_recursive_enum
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("phase")
+            .unwrap()
+            .enum_variants
+            .get_mut("root/array")
+            .unwrap()[0] = source_phase.enum_variants["root/array"][0];
+        assert_eq!(
+            identities.validate_evolution_to(
+                &source.schema,
+                &reused_recursive_enum,
+                &target.schema,
+                &lens,
+            ),
+            Err("physical retired identity reused across lineage")
+        );
+
+        let mut reused_dropped_table = authored.physical_identities.clone();
+        reused_dropped_table.tables.get_mut("new_items").unwrap().id =
+            identities.tables["retired"].id;
+        assert_eq!(
+            identities.validate_evolution_to(
+                &source.schema,
+                &reused_dropped_table,
+                &target.schema,
+                &lens,
+            ),
+            Err("physical retired identity reused across lineage")
         );
     }
 

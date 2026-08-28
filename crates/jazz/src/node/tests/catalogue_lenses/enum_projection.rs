@@ -286,6 +286,147 @@ fn direct_payload_enum_append_activates_and_recovers() {
     }));
 }
 
+/// Replacing a scalar enum rather than append-extending it starts a fresh
+/// column epoch.  The old enum UUIDs must not leak into that replacement, but
+/// the fresh epoch still has to activate and survive recovery normally.
+#[test]
+fn incompatible_scalar_enum_epoch_activates_and_recovers() {
+    let base = enum_projection_schema(&["draft", "published"]);
+    let evolved_schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items")
+            .column("title", PublicColumnType::Text)
+            .column(
+                "status_replacement",
+                public_scalar_enum("status", &["archived"]),
+            ),
+    ));
+    let evolved = SchemaVersion::new(evolved_schema);
+    let (dir, mut core) = open_node_with_schema(node(0x7b), base.clone());
+    let source_column = core.catalogue.physical_mappings[&base.version_id()].tables["items"]
+        .columns["status"];
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![
+                    LensOp::DropColumn {
+                        column: "status".to_owned(),
+                        backwards_default: Value::EnumTag(0),
+                    },
+                    LensOp::AddColumn {
+                        column: "status_replacement".to_owned(),
+                        default: Value::EnumTag(0),
+                    },
+                ],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorSubject::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        },
+    })
+    .unwrap();
+    let target_column = core.catalogue.physical_mappings[&evolved.id].tables["items"].columns
+        ["status_replacement"];
+    assert_ne!(target_column, source_column, "replacement gets a fresh epoch");
+    core.commit_mergeable_settled(
+        MergeableCommit::new("items", row(0x7b), 1).cells(BTreeMap::from([
+            ("title".to_owned(), v("fresh enum epoch")),
+            ("status_replacement".to_owned(), Value::EnumTag(0)),
+        ])),
+    )
+    .unwrap();
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x7b), base);
+    assert_eq!(reopened.current_write_schema().unwrap().schema, evolved.id);
+    assert_eq!(reopened.query_table_versions("items").unwrap().len(), 1);
+    assert_eq!(
+        reopened.catalogue.physical_mappings[&evolved.id].tables["items"].columns
+            ["status_replacement"],
+        target_column,
+        "the activated fresh epoch remains stable across reopen"
+    );
+}
+
+/// A catalogue envelope that reuses a retired enum UUID is quarantined before
+/// it can expose its target schema or create durable physical state.  The
+/// original schema remains the complete recovery result.
+#[test]
+fn retired_scalar_enum_uuid_is_quarantined_without_catalogue_mutation() {
+    let base = enum_projection_schema(&["draft", "published"]);
+    let evolved = SchemaVersion::new(build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("items")
+            .column("title", PublicColumnType::Text)
+            .column(
+                "status_replacement",
+                public_scalar_enum("status", &["archived"]),
+            ),
+    )));
+    let lens = MigrationLens::new(
+        base.version_id(),
+        evolved.id,
+        vec![TableLens {
+            source_table: "items".to_owned(),
+            target_table: "items".to_owned(),
+            ops: vec![
+                LensOp::DropColumn {
+                    column: "status".to_owned(),
+                    backwards_default: Value::EnumTag(0),
+                },
+                LensOp::AddColumn {
+                    column: "status_replacement".to_owned(),
+                    default: Value::EnumTag(0),
+                },
+            ],
+        }],
+    );
+    let (dir, mut core) = open_node_with_schema(node(0x7c), base.clone());
+    let source_variant = core.catalogue.physical_mappings[&base.version_id()].identities.tables
+        ["items"]
+        .columns["status"]
+        .enum_variants["root"][0];
+    let mut forged = core
+        .author_schema_lineage_publication(
+            evolved.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    forged.physical_identities.tables.get_mut("items").unwrap().columns.get_mut(
+        "status_replacement",
+    ).unwrap().enum_variants.get_mut("root").unwrap()[0] = source_variant;
+    forged.id = forged.content_id();
+
+    assert!(matches!(
+        core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+            author: AuthorSubject::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(forged),
+        }),
+        Err(Error::InvalidCatalogueUpdate("physical retired identity reused across lineage"))
+    ));
+    assert_eq!(core.active_catalogue_seq(), 0);
+    assert!(!core.catalogue_schemas().contains_key(&evolved.id));
+    drop(core);
+
+    let reopened = reopen_node_at(&dir, node(0x7c), base);
+    assert_eq!(reopened.active_catalogue_seq(), 0);
+    assert!(!reopened.catalogue_schemas().contains_key(&evolved.id));
+}
+
 #[test]
 fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
     let schema = |extra| {

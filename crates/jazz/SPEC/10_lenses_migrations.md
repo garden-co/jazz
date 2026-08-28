@@ -301,6 +301,13 @@ never identity; same-shaped siblings therefore remain distinct. Canonical
 manifest bytes participate in the publication content id and travel in lineage
 publications, while the authority snapshot carries the genesis manifest.
 
+An identity is never returned to an allocation pool. A dropped table or column,
+an incompatible replacement epoch, and every enum UUID recursively beneath it
+are permanently retired: a later new table, column, or enum occurrence MUST
+receive a UUID absent from the entire source manifest, not merely from the
+currently mapped target paths. Only the exact compatible mapped coordinate may
+retain its UUID (including the shared prefix of its recursive enum occurrences).
+
 A pure rename of a physically compatible column retains its UUID. Any
 incompatible epoch (changed value representation, merge strategy, or
 non-additive structural shape) MUST receive a fresh `GlobalPhysicalColumnId`;
