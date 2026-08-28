@@ -1819,7 +1819,8 @@ mod tests {
                     to: "email_address".to_owned(),
                 }],
             }],
-        );
+        )
+        .expect("runtime test lens is valid");
         let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell
@@ -2069,7 +2070,8 @@ mod tests {
                     to: "email_address".to_owned(),
                 }],
             }],
-        );
+        )
+        .expect("runtime test lens is valid");
         let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell

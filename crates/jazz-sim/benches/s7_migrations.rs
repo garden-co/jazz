@@ -478,7 +478,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     default: v(""),
                 }],
             }],
-        ),
+        )
+        .expect("benchmark migration lens is valid"),
         MigrationLens::new(
             v2.version_id(),
             v3.version_id(),
@@ -496,7 +497,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     },
                 ],
             }],
-        ),
+        )
+        .expect("benchmark migration lens is valid"),
         MigrationLens::new(
             v3.version_id(),
             v4.version_id(),
@@ -508,7 +510,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     to: "search_name".to_owned(),
                 }],
             }],
-        ),
+        )
+        .expect("benchmark migration lens is valid"),
     ];
     ([v1, v2, v3, v4], lenses)
 }

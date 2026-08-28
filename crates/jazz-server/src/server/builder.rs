@@ -1450,7 +1450,8 @@ mod tests {
                             default: groove::records::Value::String(String::new()),
                         }],
                     }],
-                ),
+                )
+                .expect("snapshot fixture lens is valid"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
             )
