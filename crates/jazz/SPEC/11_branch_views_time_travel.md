@@ -230,6 +230,13 @@ example, a `title="open"` probe in branch `Draft` uses
 `RowUuid`. Rebuilding a current/index table derives exactly those prefixes
 from immutable history coordinates.
 
+An index-coordinate layout change uses a new physical index identity; it does
+not reinterpret or replace an existing index name. On open, Jazz registers and
+backfills the new derived index from persisted current candidates before serving
+queries, while the older derived index may remain unused. Candidate rows still
+reduce to the canonical layer winner before predicates or publication, so an
+older indexed candidate cannot reappear after rebuild.
+
 The application declares only its user columns. Composing a head over a base
 does not create a new physical index domain: winner masking precedes predicate
 and index-result publication (`INV-BVIEW-6`). This chapter does not add a

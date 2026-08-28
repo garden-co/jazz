@@ -37,6 +37,7 @@ where
                 storage,
                 false,
                 CatalogueBootstrapState::Ready,
+                PhysicalCurrentIndexLayout::BranchPrefixV2,
                 #[cfg(feature = "testing")]
                 None,
             )
@@ -48,6 +49,7 @@ where
             storage,
             false,
             CatalogueBootstrapState::Uninitialized,
+            PhysicalCurrentIndexLayout::BranchPrefixV2,
             #[cfg(feature = "testing")]
             None,
         )
@@ -301,6 +303,33 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, true).await
     }
 
+    #[cfg(feature = "testing")]
+    #[allow(dead_code)] // Reached only by the lib-test predecessor-layout receipt.
+    /// Open using the pre-v2 physical-current index identity.
+    ///
+    /// This exists solely to create an on-disk predecessor fixture for the
+    /// branch-prefix index settlement test; production constructors always
+    /// synchronize the v2 layout before serving reads.
+    pub(super) async fn new_history_complete_with_legacy_current_indexes_for_test(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
+        Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            true,
+            CatalogueBootstrapState::Ready,
+            PhysicalCurrentIndexLayout::LegacyV1,
+            None,
+        )
+        .await
+    }
+
     /// Rebuild the groove layer over the same storage using the standard open path.
     pub async fn reopen_in_place(self) -> Result<NodeState<BoxedStorage>, Error>
     where
@@ -366,6 +395,7 @@ where
             storage,
             history_complete,
             CatalogueBootstrapState::Ready,
+            PhysicalCurrentIndexLayout::BranchPrefixV2,
             #[cfg(feature = "testing")]
             None,
         )
@@ -390,6 +420,7 @@ where
             storage,
             history_complete,
             CatalogueBootstrapState::Ready,
+            PhysicalCurrentIndexLayout::BranchPrefixV2,
             Some(&mut receipt),
         )
         .await?;
@@ -402,6 +433,7 @@ where
         storage: T,
         history_complete: bool,
         catalogue_bootstrap_state: CatalogueBootstrapState,
+        current_index_layout: PhysicalCurrentIndexLayout,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<Self, Error>
     where
@@ -621,7 +653,8 @@ where
             node.ensure_provisional_physical_mapping(schema_version)
                 .await?;
         }
-        node.synchronize_physical_version_tables().await?;
+        node.synchronize_physical_version_tables_with_current_index_layout(current_index_layout)
+            .await?;
         node.recover_pending_schema_lineages().await?;
         node.recover_pending_catalogue_pointers().await?;
         #[cfg(feature = "testing")]
@@ -680,7 +713,7 @@ where
     ) -> Result<Database, Error> {
         debug_assert_lowered_layouts(schema);
         let mut lowered = schema.lower_to_groove();
-        lowered.tables.extend(physical_version_storage_tables(
+        lowered.tables.extend(physical_version_storage_bootstrap_tables(
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
@@ -1418,8 +1451,12 @@ where
         self.local_chunk_reader
             .refresh_from(&database.local_chunk_reader());
         self.database.replace(database);
-        self.register_physical_history_variant_projections().await?;
-        self.register_physical_current_variant_projections().await?;
+        // `open_full_database` deliberately starts from the previous current-index
+        // layout so persisted databases can be opened before their derived
+        // indexes are settled.  A catalogue rebuild must run the same settlement
+        // step as ordinary open; otherwise it would replace a just-synchronized
+        // V2 runtime catalogue with the bootstrap-only V1 catalogue.
+        self.synchronize_physical_version_tables().await?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.invalidate_runtime_handles_after_database_rebuild();
         self.parking = parking;

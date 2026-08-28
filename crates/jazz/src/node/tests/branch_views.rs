@@ -10,7 +10,11 @@ fn branch_view_schema() -> JazzSchema {
                     .index_only(["title"])
                     .policies(public_owner_policies("owner")),
             )
-            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("name", PublicColumnType::Text)
+                    .index_only(["name"]),
+            ),
     )
 }
 
@@ -1047,6 +1051,144 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
         v("branch receipt"),
         "the sibling branch remains visible after rebuilding current/index state"
     );
+}
+
+// This is necessarily an internal persistent-layout receipt: public queries
+// cannot choose the predecessor physical index identity that an already-opened
+// database used before v2. The fixture writes through that real v1 layout,
+// then reopens through the ordinary v2 constructor and observes public query
+// results.
+#[test]
+fn branch_prefixed_current_index_backfills_legacy_rocks_layout_on_reopen() {
+    let schema = branch_view_schema();
+    let directory = tempfile::tempdir().unwrap();
+    let shared = row(0x74);
+    let draft = row(0x75);
+    let draft_selector = branch_selector(0x76);
+    let cells = |title: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), v(title)),
+            ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+        ])
+    };
+
+    {
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(directory.path(), &refs).unwrap();
+        let mut legacy = NodeState::new_history_complete_with_legacy_current_indexes_for_test(
+            node(0x73),
+            schema.clone(),
+            storage,
+        )
+        .unwrap();
+        legacy
+            .commit_mergeable_settled(
+                MergeableCommit::new("users", shared, 10)
+                    .cells(BTreeMap::from([("name".to_owned(), v("root"))])),
+            )
+            .unwrap();
+        let stale = legacy
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", draft, 20)
+                    .branch(draft_selector.clone())
+                    .cells(cells("stale")),
+            )
+            .unwrap();
+        legacy
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", draft, 30)
+                    .branch(draft_selector.clone())
+                    .parents(vec![stale])
+                    .cells(cells("draft")),
+            )
+            .unwrap();
+
+        for (table, indexed_column) in [("users", "name"), ("todos", "title")] {
+            let mapping = legacy.catalogue.physical_mappings[&schema.version_id()].tables[table].clone();
+            let legacy_index =
+                PhysicalCurrentIndexLayout::LegacyV1.name(mapping.columns[indexed_column]);
+            let v2_index = physical_current_index_name(mapping.columns[indexed_column]);
+            for storage_table in [
+                physical_ahead_current_table_name(mapping.table_id),
+                physical_global_current_table_name(mapping.table_id),
+            ] {
+                let indices = &legacy.database.table_schema(&storage_table).unwrap().indices;
+                assert!(indices.iter().any(|index| index.name == legacy_index));
+                assert!(
+                    !indices.iter().any(|index| index.name == v2_index),
+                    "predecessor fixture must not accidentally write the v2 index"
+                );
+            }
+        }
+    }
+
+    let mut reopened = reopen_history_complete_node_at(&directory, node(0x73), schema.clone());
+    let users_mapping = reopened.catalogue.physical_mappings[&schema.version_id()].tables["users"].clone();
+    let todos_mapping = reopened.catalogue.physical_mappings[&schema.version_id()].tables["todos"].clone();
+    let users_v2_index = physical_current_index_name(users_mapping.columns["name"]);
+    let todos_v2_index = physical_current_index_name(todos_mapping.columns["title"]);
+    let draft_key = schema
+        .project_branch_view_selector(&schema.tables[0], &draft_selector)
+        .unwrap()
+        .0;
+    for (table_id, index, branch_key, expected_candidates) in [
+        (
+            users_mapping.table_id,
+            users_v2_index,
+            BranchKey::default(),
+            1,
+        ),
+        (todos_mapping.table_id, todos_v2_index, draft_key, 2),
+    ] {
+        assert_eq!(
+            reopened
+                .database
+                .index_scan_raw(
+                    &physical_ahead_current_table_name(table_id),
+                    &index,
+                    &[Value::Bytes(branch_key.canonical_bytes())],
+                )
+                .unwrap()
+                .len(),
+            expected_candidates,
+            "v2 registration must backfill every persisted current candidate in its branch prefix"
+        );
+    }
+
+    let root_query = Query::from("users").filter(eq(col("name"), lit("root")));
+    let (root_rows, root_metrics) = query_rows_by_uuid(&mut reopened, root_query, DurabilityTier::Local);
+    assert_eq!(root_rows, vec![shared]);
+    assert_eq!(root_metrics.source_index_probes, 1);
+
+    let draft_read_view = crate::protocol::ReadViewSpec {
+        source: crate::protocol::ReadViewSourceSpec::BranchView {
+            head: draft_selector,
+            base: None,
+        },
+    };
+    for (title, expected) in [("draft", vec![draft]), ("stale", Vec::new())] {
+        let shape = Query::from("todos")
+            .filter(eq(col("title"), lit(title)))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let rows = reopened
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorSubject::SYSTEM,
+                &draft_read_view,
+            )
+            .unwrap()
+            .rows;
+        assert_eq!(
+            rows.into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+            expected,
+            "reopen must use the backfilled branch-prefixed current relation without stale index entries"
+        );
+    }
 }
 
 // This is necessarily an internal protocol-boundary regression test: public

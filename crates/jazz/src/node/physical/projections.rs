@@ -948,6 +948,16 @@ where
     }
 
     pub(super) async fn synchronize_physical_version_tables(&mut self) -> Result<(), Error> {
+        self.synchronize_physical_version_tables_with_current_index_layout(
+            PhysicalCurrentIndexLayout::BranchPrefixV2,
+        )
+        .await
+    }
+
+    pub(super) async fn synchronize_physical_version_tables_with_current_index_layout(
+        &mut self,
+        current_index_layout: PhysicalCurrentIndexLayout,
+    ) -> Result<(), Error> {
         // A physical schema is a coupled registry: tables, variants, enum
         // registries, indices, and projection cases all become observable by
         // the same live runtime.  Do not leave a prefix behind if any later
@@ -955,19 +965,35 @@ where
         // durable boundary and retains this checkpoint until its commit; this
         // local boundary also protects callers which only need registration.
         let checkpoint = self.database.runtime_registry_checkpoint();
-        let result = self.synchronize_physical_version_tables_inner().await;
+        let result = self
+            .synchronize_physical_version_tables_inner(current_index_layout)
+            .await;
         if result.is_err() {
             self.database.restore_runtime_registry(checkpoint);
         }
         result
     }
 
-    async fn synchronize_physical_version_tables_inner(&mut self) -> Result<(), Error> {
-        for desired in physical_version_storage_tables(
-            &self.catalogue.catalogue_schemas,
-            &self.catalogue.schema_version_aliases,
-            &self.catalogue.physical_mappings,
-        )? {
+    async fn synchronize_physical_version_tables_inner(
+        &mut self,
+        current_index_layout: PhysicalCurrentIndexLayout,
+    ) -> Result<(), Error> {
+        let desired_tables = match current_index_layout {
+            PhysicalCurrentIndexLayout::BranchPrefixV2 => physical_version_storage_tables(
+                &self.catalogue.catalogue_schemas,
+                &self.catalogue.schema_version_aliases,
+                &self.catalogue.physical_mappings,
+            )?,
+            PhysicalCurrentIndexLayout::LegacyV1 => {
+                physical_version_storage_tables_with_current_index_layout(
+                    &self.catalogue.catalogue_schemas,
+                    &self.catalogue.schema_version_aliases,
+                    &self.catalogue.physical_mappings,
+                    PhysicalCurrentIndexLayout::LegacyV1,
+                )?
+            }
+        };
+        for desired in desired_tables {
             let existing = match self.database.table_schema(&desired.name) {
                 Ok(existing) => Some(existing.clone()),
                 Err(GrooveDbError::TableNotFound(_)) => None,
