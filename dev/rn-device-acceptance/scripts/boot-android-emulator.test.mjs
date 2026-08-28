@@ -120,7 +120,6 @@ test("Android boot receipt supports the macOS test launcher without relaxing the
       env: {
         JAZZ_ANDROID_SESSION_LAUNCHER: "/bin/sh",
         JAZZ_ANDROID_SESSION_PROCESS_GROUP: "0",
-        JAZZ_ANDROID_TIMEOUT_COMMAND: "/usr/bin/timeout",
       },
     },
   );
