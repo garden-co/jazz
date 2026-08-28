@@ -1546,8 +1546,11 @@ where
                     )?;
                     if schema_version.id
                         != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                        || schema_version.id != schema_version.schema.version_id()
                     {
-                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue schema id does not match schema payload",
+                        ));
                     }
                     catalogue_schemas.insert(schema_version.id, schema_version);
                 }
@@ -1557,8 +1560,11 @@ where
                     )?;
                     if lens.id
                         != MigrationLensId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                        || lens.id != lens.content_id()
                     {
-                        return Err(Error::InvalidStoredValue("catalogue lens id mismatch"));
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue lens id does not match lens payload",
+                        ));
                     }
                     catalogue_lenses.insert(lens.id, lens);
                 }
@@ -1633,6 +1639,21 @@ where
                     }
                 }
             }
+        }
+        // A standalone `PublishLens` survives independently of a lineage
+        // receipt.  Decode alone is insufficient on reopen: validate it against
+        // the exact durable endpoints before it becomes resident catalogue
+        // state.
+        for lens in catalogue_lenses.values() {
+            let source = catalogue_schemas.get(&lens.source).ok_or(
+                Error::InvalidStoredValue("catalogue lens source schema is missing"),
+            )?;
+            let target = catalogue_schemas.get(&lens.target).ok_or(
+                Error::InvalidStoredValue("catalogue lens target schema is missing"),
+            )?;
+            Self::validate_migration_lens_between(lens, source, target).map_err(|_| {
+                Error::InvalidStoredValue("catalogue lens violates trusted semantic invariants")
+            })?;
         }
         let mut staged_lineages = BTreeMap::new();
         let mut active_lineages_by_target = BTreeMap::new();
