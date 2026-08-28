@@ -4862,8 +4862,9 @@ pub fn verify_local_first_identity_proof_napi(
 mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use std::collections::{BTreeMap, HashSet, VecDeque};
+    use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     use futures::channel::oneshot;
@@ -4877,8 +4878,7 @@ mod tests {
         core_open_backend_identity, core_open_identity, core_read_opts_from_json,
         core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
         core_update_options, core_upsert_options, encode_core_subscription_delta,
-        requeue_retryable_subscription_batch, terminal_bytes_to_numbers,
-        unknown_transaction_kind_message,
+        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
     };
 
     #[test]
@@ -5018,6 +5018,38 @@ mod tests {
         assert!(
             server.stop().await.is_ok(),
             "later caller replays terminal success"
+        );
+    }
+
+    #[tokio::test]
+    async fn jazz_server_stop_finalization_outlives_the_initiating_future() {
+        let app_id = jazz::tools::AppId::from_name("napi-stop-cancelled-initiator");
+        let built = jazz_server::ServerBuilder::new(app_id)
+            .with_storage(jazz_server::StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build NAPI test server");
+        let server = jazz_server_binding(built, app_id).await;
+
+        // The first poll synchronously transfers Running -> Stopping and
+        // launches the independently owned finalizer. Dropping this future
+        // models cancellation of the Promise which initiated `stop`.
+        let mut initiator = Box::pin(server.stop());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            initiator.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(initiator);
+
+        assert!(
+            server.stop().await.is_ok(),
+            "waiter completes the finalization detached from its initiator"
+        );
+        assert!(
+            server.stop().await.is_ok(),
+            "later caller replays the same completed outcome"
         );
     }
 
