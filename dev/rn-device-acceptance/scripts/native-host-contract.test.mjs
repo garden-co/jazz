@@ -59,11 +59,17 @@ test("Android bootstrap rejects corrupt pinned archives before extraction", () =
   assert.match(bootstrap, /reset_cache_path/);
 });
 
-test("dispatch workflow fails clearly without KVM and bounds emulator boot", () => {
+test("dispatch device workflow uses hosted KVM while source jobs remain cheap", () => {
   const workflow = fs.readFileSync(
     path.join(root, "../../.github/workflows/rn-device-acceptance.yml"),
     "utf8",
   );
+  assert.match(
+    workflow,
+    /android-device-acceptance:[\s\S]*runs-on: ubuntu-24\.04[\s\S]*Grant the runner user access to KVM[\s\S]*setfacl -m "u:\$\{USER\}:rw" \/dev\/kvm/,
+  );
+  assert.match(workflow, /android-source-scaffold:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404/);
+  assert.match(workflow, /ios-source-scaffold:[\s\S]*runs-on: blacksmith-6vcpu-macos-15/);
   assert.match(workflow, /\[\[ -r \/dev\/kvm && -w \/dev\/kvm \]\]/);
   assert.match(workflow, /did not boot within 180s/);
   assert.match(workflow, /tail -200 "\$cache\/emulator\.log"/);
