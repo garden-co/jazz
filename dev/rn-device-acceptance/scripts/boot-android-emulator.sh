@@ -39,17 +39,25 @@ bounded_file() {
 emulator_pid=''
 keep_emulator=0
 cleanup() {
-  if ((keep_emulator == 0)) && [[ -n "$emulator_pid" ]] && kill -0 "$emulator_pid" 2>/dev/null; then
-    kill "$emulator_pid" 2>/dev/null || true
+  # The Android launcher can leave a QEMU child behind.  Start it in a fresh
+  # session and signal that whole process group, rather than merely killing
+  # the launcher shell.
+  if ((keep_emulator == 0)) && [[ -n "$emulator_pid" ]] && kill -0 -- "-$emulator_pid" 2>/dev/null; then
+    kill -- "-$emulator_pid" 2>/dev/null || true
     for _ in {1..10}; do
-      kill -0 "$emulator_pid" 2>/dev/null || break
+      kill -0 -- "-$emulator_pid" 2>/dev/null || break
       sleep 0.1
     done
-    kill -KILL "$emulator_pid" 2>/dev/null || true
+    kill -KILL -- "-$emulator_pid" 2>/dev/null || true
     wait "$emulator_pid" 2>/dev/null || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# A cancellation must terminate this receipt after removing the complete
+# emulator process group; merely running cleanup and resuming the polling loop
+# would leave the workflow step alive.
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 fail_boot() {
   echo "Android acceptance emulator failed to boot: $1" >&2
@@ -58,7 +66,9 @@ fail_boot() {
   exit 1
 }
 
-"$emulator" -avd "$avd_name" -no-window -no-audio -gpu swiftshader_indirect \
+# A dedicated session gives cleanup a single, bounded target even when the
+# launcher spawns the actual emulator process.
+setsid "$emulator" -avd "$avd_name" -no-window -no-audio -gpu swiftshader_indirect \
   -no-boot-anim -no-metrics >"$emulator_log" 2>&1 &
 emulator_pid=$!
 deadline=$((SECONDS + boot_timeout))
@@ -79,9 +89,17 @@ while :; do
   # Both commands are independently bounded so a wedged adb server cannot
   # consume the workflow's full deadline. A missing device is an ordinary
   # polling state, not a fatal command error.
-  state=$(timeout "${probe_timeout}s" "$adb" get-state 2>/dev/null || true)
+  state=$(timeout --signal=KILL "${probe_timeout}s" "$adb" get-state 2>/dev/null || true)
   if [[ "$state" == device ]]; then
-    boot_completed=$(timeout "${probe_timeout}s" "$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+    # `get-state` may have consumed nearly all of the remaining time. Do not
+    # begin a second adb probe using its stale budget.
+    remaining=$((deadline - SECONDS))
+    if ((remaining <= 0)); then
+      fail_boot "no adb device reached sys.boot_completed=1 within ${boot_timeout}s"
+    fi
+    probe_timeout=$remaining
+    if ((probe_timeout > 5)); then probe_timeout=5; fi
+    boot_completed=$(timeout --signal=KILL "${probe_timeout}s" "$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
     if [[ "$boot_completed" == 1 ]]; then
       echo "Android acceptance emulator booted (pid $emulator_pid)."
       # The next workflow commands install and exercise the app on this same
@@ -91,5 +109,11 @@ while :; do
     fi
   fi
 
-  sleep "$poll_interval"
+  # The probes above may have consumed their entire allowance. Recompute the
+  # remaining budget so the poll itself cannot extend the one boot deadline.
+  remaining=$((deadline - SECONDS))
+  if ((remaining <= 0)); then
+    fail_boot "no adb device reached sys.boot_completed=1 within ${boot_timeout}s"
+  fi
+  timeout --signal=KILL "${remaining}s" sleep "$poll_interval" || true
 done

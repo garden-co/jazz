@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import test from "node:test";
 
 const script = new URL("./boot-android-emulator.sh", import.meta.url).pathname;
 
-const withFixture = (name, adbBody, emulatorBody, assertion) => {
+const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
   const fixture = mkdtempSync(join(tmpdir(), `jazz-rn-boot-${name}-`));
   try {
     const adb = join(fixture, "adb");
@@ -27,6 +27,7 @@ const withFixture = (name, adbBody, emulatorBody, assertion) => {
         JAZZ_DEVICE_EMULATOR: emulator,
         JAZZ_ANDROID_BOOT_TIMEOUT_SECONDS: "1",
         JAZZ_ANDROID_BOOT_POLL_SECONDS: "0.05",
+        ...options.env,
       },
       timeout: 5_000,
     });
@@ -45,6 +46,21 @@ test("Android boot receipt fails under its own deadline when adb has no device",
   });
 });
 
+test("Android boot receipt caps a long poll interval at its boot deadline", () => {
+  const started = Date.now();
+  withFixture(
+    "long-poll",
+    '[[ "$1" == get-state ]] && exit 1',
+    'echo "still starting"; sleep 10',
+    (result) => {
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /within 1s/);
+    },
+    { env: { JAZZ_ANDROID_BOOT_POLL_SECONDS: "10" } },
+  );
+  assert.ok(Date.now() - started < 2_500, "long polling must not outlive the boot deadline");
+});
+
 test("Android boot receipt diagnoses an emulator that exits before adb registration", () => {
   withFixture("early-exit", 'exit 1', 'echo "fatal startup"; exit 17', (result) => {
     assert.equal(result.status, 1);
@@ -55,15 +71,75 @@ test("Android boot receipt diagnoses an emulator that exits before adb registrat
 });
 
 test("Android boot receipt accepts the device-to-boot-complete transition", () => {
+  const emulatorFile = join(tmpdir(), `jazz-rn-boot-emulator-${process.pid}-${Date.now()}`);
   withFixture(
     "booted",
     'case "$1" in get-state) echo device ;; shell) echo 1 ;; *) exit 2 ;; esac',
-    'echo "started"; sleep 10',
+    'echo $$ > "$JAZZ_TEST_EMULATOR_PID"; echo "started"; sleep 10',
     (result) => {
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /booted/);
     },
+    { env: { JAZZ_TEST_EMULATOR_PID: emulatorFile } },
   );
+  const emulatorPid = Number(readFileSync(emulatorFile, "utf8").trim());
+  try {
+    assert.doesNotThrow(() => process.kill(emulatorPid, 0));
+  } finally {
+    process.kill(-emulatorPid, "SIGKILL");
+    rmSync(emulatorFile, { force: true });
+  }
+});
+
+test("Android boot receipt cleans up the complete emulator process group on failure", () => {
+  const childFile = join(tmpdir(), `jazz-rn-boot-child-${process.pid}-${Date.now()}`);
+  try {
+    withFixture(
+      "child-cleanup",
+      '[[ "$1" == get-state ]] && exit 1',
+      'sleep 10 & echo $! > "$JAZZ_TEST_CHILD_PID"; wait',
+      (result) => assert.equal(result.status, 1),
+      { env: { JAZZ_TEST_CHILD_PID: childFile } },
+    );
+    const childPid = readFileSync(childFile, "utf8").trim();
+    assert.throws(() => process.kill(Number(childPid), 0), { code: "ESRCH" });
+  } finally {
+    rmSync(childFile, { force: true });
+  }
+});
+
+test("Android boot receipt removes its emulator process group when cancelled", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-rn-boot-cancel-"));
+  const adb = join(fixture, "adb");
+  const emulator = join(fixture, "emulator");
+  const log = join(fixture, "emulator.log");
+  const config = join(fixture, "config.ini");
+  const childFile = join(fixture, "child.pid");
+  writeFileSync(adb, '#!/usr/bin/env bash\nexit 1\n');
+  writeFileSync(emulator, '#!/usr/bin/env bash\nsleep 30 & echo $! > "$JAZZ_TEST_CHILD_PID"; wait\n');
+  writeFileSync(config, "avd.id=acceptance\n");
+  chmodSync(adb, 0o755);
+  chmodSync(emulator, 0o755);
+  try {
+    const receipt = spawn("bash", [script, "test-avd", log, config], {
+      env: {
+        ...process.env,
+        JAZZ_DEVICE_ADB: adb,
+        JAZZ_DEVICE_EMULATOR: emulator,
+        JAZZ_TEST_CHILD_PID: childFile,
+        JAZZ_ANDROID_BOOT_TIMEOUT_SECONDS: "30",
+        JAZZ_ANDROID_BOOT_POLL_SECONDS: "0.05",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    receipt.kill("SIGTERM");
+    const status = await new Promise((resolve) => receipt.on("close", resolve));
+    assert.equal(status, 143);
+    const childPid = Number(readFileSync(childFile, "utf8").trim());
+    assert.throws(() => process.kill(childPid, 0), { code: "ESRCH" });
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("workflow delegates Android boot to the bounded receipt script", () => {
