@@ -203,6 +203,12 @@ export declare class Tx {
   restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
   commit(): Write
   rollback(): void
+  /**
+   * Release this transaction view's core reference. Attached views do not
+   * own the batch lifetime, while owning views abandon an uncommitted batch
+   * just as their Drop implementation does.
+   */
+  close(): boolean
 }
 
 export declare class Write {

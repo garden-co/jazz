@@ -133,6 +133,7 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
+  close?(): boolean;
   insertEncoded(
     table: string,
     cells: Uint8Array,
@@ -529,6 +530,75 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
   await expect(reopened.waitForTransaction(committed, "local")).rejects.toThrow(
     `Wait for transaction failed: unknown transaction ${committed}`,
   );
+});
+
+it("keeps an attached view alive through a failed commit, then releases it once on rollback", async () => {
+  const close = vi.fn(() => true);
+  const nativeRollback = vi.fn();
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          mergeableTx: () => fakeTx({ close }),
+          commitTransaction: () => {
+            throw new Error("injected commit failure");
+          },
+          rollbackTransaction: nativeRollback,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const openBatchId = beginTestBatch(runtime);
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "rollback after failed commit" } },
+    JSON.stringify({ batch_id: openBatchId }),
+  );
+
+  expect(() => runtime.commitTransaction(openBatchId)).toThrow("injected commit failure");
+  expect(close).not.toHaveBeenCalled();
+
+  await expect(runtime.rollbackTransaction(openBatchId)).resolves.toBe(true);
+  expect(nativeRollback).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it("closing a schema view releases only its attached transaction handle", () => {
+  const close = vi.fn(() => true);
+  const nativeDb = fakeDb({ mergeableTx: () => fakeTx({ close }) });
+  Object.assign(nativeDb, { registerSchema: () => nativeDb });
+  const owner = new NativeRuntimeAdapter(
+    {
+      openMemory: () => nativeDb,
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const view = owner.registerSchemaView(testSchema);
+  const openBatchId = beginTestBatch(view);
+  view.insert(
+    "todos",
+    { title: { type: "Text", value: "view closes before parent batch" } },
+    JSON.stringify({ batch_id: openBatchId }),
+  );
+
+  void view.close();
+  expect(close).toHaveBeenCalledOnce();
+  expect(() => owner.commitTransaction(openBatchId)).not.toThrow();
+  expect(close).toHaveBeenCalledOnce();
 });
 
 it("binds the trusted-serving identity when an exclusive transaction begins", () => {

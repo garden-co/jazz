@@ -394,6 +394,8 @@ type Write = {
 type Tx = {
   commit(): Write;
   rollback(): void;
+  /** Release the native transaction view after its owner batch has completed. */
+  close?(): boolean;
   insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
   updateEncoded(
     table: string,
@@ -1096,8 +1098,23 @@ export class NativeRuntimeAdapter implements Runtime {
         closeSubscriptionSource(source.source);
       }
     }
+    // Prepared plans and coverage receipts are valid only while this runtime
+    // is live. Release them before closing the native owner so long-lived JS
+    // Db wrappers cannot retain stale native graph/storage state through a
+    // cache after their context has shut down.
+    this.preparedQueries.clear();
+    this.peerCoveredQueries.clear();
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
+      // A schema view can own an attached transaction handle while its parent
+      // owns the batch. Closing this view must release only that handle; the
+      // parent still needs its batch and sibling views to complete it.
+      for (const pending of this.pendingTxs.values()) {
+        const tx = pending.txByView.get(this);
+        if (!tx) continue;
+        tx.close?.();
+        pending.txByView.delete(this);
+      }
       // Query and subscription futures may still be unwinding through this
       // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
       // use-after-free; let GC release the Rc-backed view after those promises
@@ -1108,6 +1125,9 @@ export class NativeRuntimeAdapter implements Runtime {
       write.close?.();
     }
     this.subscriptions.clear();
+    for (const pending of this.pendingTxs.values()) {
+      this.releaseTransactionViews(pending);
+    }
     this.pendingTxs.clear();
     this.completedTxs.clear();
     this.writes.clear();
@@ -1684,8 +1704,8 @@ export class NativeRuntimeAdapter implements Runtime {
         "Commit transaction failed: empty mergeable transaction has no committed unit; roll it back instead",
       );
     }
-    let write: Write;
-    write = this.db.commitTransaction(openBatchId, pending.kind);
+    const write = this.db.commitTransaction(openBatchId, pending.kind);
+    this.releaseTransactionViews(pending);
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
@@ -1742,8 +1762,12 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!pending) {
       throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
     }
-    this.db.rollbackTransaction(openBatchId);
-    this.pendingTxs.delete(openBatchId);
+    try {
+      this.db.rollbackTransaction(openBatchId);
+    } finally {
+      this.releaseTransactionViews(pending);
+      this.pendingTxs.delete(openBatchId);
+    }
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "rolled_back" });
     return Promise.resolve(true);
   }
@@ -2687,6 +2711,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!tx) throw new Error("Native runtime does not support attached exclusive transactions");
     pending.txByView.set(this, tx);
     return tx;
+  }
+
+  private releaseTransactionViews(pending: PendingTx): void {
+    for (const tx of pending.txByView.values()) {
+      tx.close?.();
+    }
+    pending.txByView.clear();
   }
 
   private exclusiveTx(id: OpenBatchId): Tx {

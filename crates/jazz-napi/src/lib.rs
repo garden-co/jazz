@@ -742,7 +742,11 @@ enum NapiSubscription {
 
 #[napi(js_name = "Tx")]
 pub struct Tx {
-    db: NapiDbInnerStorage,
+    // Attached transaction views retain a core `Rc` independently of their
+    // owner `NapiDb`. They must be explicitly releasable: waiting for the JS
+    // GC finalizer after the owner closes keeps persistent storage alive past
+    // the host-visible close boundary.
+    db: Option<NapiDbInnerStorage>,
     kind: NapiTxKind,
     open_tx: Option<CoreOpenBatchId>,
     owns_lifetime: bool,
@@ -760,7 +764,11 @@ enum NapiTxKind {
 macro_rules! with_napi_mergeable_tx {
     ($transaction:expr, |$tx:ident| $operation:expr) => {{
         let open_tx = $transaction.open_tx()?;
-        match &$transaction.db {
+        let db = $transaction
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        match db {
             NapiDbInnerStorage::Memory(db) => {
                 let $tx = db.mergeable_tx_ref(open_tx);
                 core_block_on($operation)
@@ -777,7 +785,11 @@ macro_rules! with_napi_mergeable_tx {
 macro_rules! with_napi_exclusive_tx {
     ($transaction:expr, |$tx:ident| $operation:expr) => {{
         let open_tx = $transaction.open_tx()?;
-        match &$transaction.db {
+        let db = $transaction
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        match db {
             NapiDbInnerStorage::Memory(db) => {
                 let $tx = db.exclusive_tx_ref(open_tx);
                 core_block_on($operation)
@@ -1248,7 +1260,11 @@ impl Tx {
             ));
         }
         let open_tx = self.open_tx()?;
-        let write = match &self.db {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        let write = match db {
             NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, open_tx),
             NapiDbInnerStorage::Persistent(db) => core_commit_tx_persistent(db, open_tx),
         }?;
@@ -1268,6 +1284,24 @@ impl Tx {
         self.open_tx.take();
         Ok(())
     }
+
+    /// Release this transaction view's core reference. Attached views do not
+    /// own the batch lifetime, while owning views abandon an uncommitted batch
+    /// just as their Drop implementation does.
+    #[napi]
+    pub fn close(&mut self) -> bool {
+        let Some(db) = self.db.take() else {
+            return false;
+        };
+        if self.owns_lifetime {
+            if let Some(open_tx) = self.open_tx.take() {
+                let _ = abandon_transaction_handle(&db, open_tx);
+            }
+        } else {
+            self.open_tx.take();
+        }
+        true
+    }
 }
 
 impl Tx {
@@ -1286,11 +1320,11 @@ impl Tx {
     }
 
     fn abandon(&self, open_tx: CoreOpenBatchId) -> napi::Result<()> {
-        match &self.db {
-            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
-            NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        abandon_transaction_handle(db, open_tx)
     }
 }
 
@@ -1304,6 +1338,17 @@ impl Drop for Tx {
         };
         let _ = self.abandon(open_tx);
     }
+}
+
+fn abandon_transaction_handle(
+    db: &NapiDbInnerStorage,
+    open_tx: CoreOpenBatchId,
+) -> napi::Result<()> {
+    match db {
+        NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
+        NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
+    }
+    .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 #[napi(js_name = "NapiDb")]
@@ -2108,10 +2153,10 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(Tx {
-            db: match db {
+            db: Some(match db {
                 NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
-            },
+            }),
             kind: NapiTxKind::Mergeable,
             open_tx: Some(open_batch_id),
             owns_lifetime: false,
@@ -2133,10 +2178,10 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(Tx {
-            db: match db {
+            db: Some(match db {
                 NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
-            },
+            }),
             kind: NapiTxKind::Exclusive,
             open_tx: Some(open_batch_id),
             owns_lifetime: false,
@@ -2432,7 +2477,11 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        if !db.shares_runtime_with(&tx.db) {
+        let tx_db = tx
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        if !db.shares_runtime_with(tx_db) {
             return Err(napi::Error::from_reason(
                 "transaction belongs to a different database runtime",
             ));
@@ -3452,7 +3501,7 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     core_block_on(db.begin_mergeable(open_batch_id))
@@ -3463,7 +3512,7 @@ impl NapiDb {
                 attributed: false,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     core_block_on(db.begin_mergeable(open_batch_id))
@@ -3492,7 +3541,7 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
@@ -3503,7 +3552,7 @@ impl NapiDb {
                 attributed: false,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
                     core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
@@ -6138,8 +6187,35 @@ mod tests {
         let view = Rc::new(core_block_on(owner.register_schema_view(schema.clone())).unwrap());
         let batch = CoreOpenBatchId::new();
         core_block_on(owner.begin_mergeable(batch)).unwrap();
+        let view_refs_before_attachment = Rc::strong_count(&view);
+        let mut releasable_view = Tx {
+            db: Some(NapiDbInnerStorage::Memory(Rc::clone(&view))),
+            kind: NapiTxKind::Mergeable,
+            open_tx: Some(batch),
+            owns_lifetime: false,
+            attributed: false,
+        };
+        assert_eq!(
+            Rc::strong_count(&view),
+            view_refs_before_attachment + 1,
+            "an attached NAPI transaction view retains the core while it is open"
+        );
+        assert!(
+            releasable_view.close(),
+            "explicit close releases an attached view"
+        );
+        assert_eq!(
+            Rc::strong_count(&view),
+            view_refs_before_attachment,
+            "explicit close must release the retained core before JS GC"
+        );
+        assert!(
+            !releasable_view.close(),
+            "explicit attached-view close is idempotent"
+        );
+        drop(releasable_view);
         drop(Tx {
-            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            db: Some(NapiDbInnerStorage::Memory(Rc::clone(&view))),
             kind: NapiTxKind::Mergeable,
             open_tx: Some(batch),
             owns_lifetime: false,
@@ -6159,7 +6235,7 @@ mod tests {
         let exclusive = CoreOpenBatchId::new();
         core_block_on(owner.begin_exclusive(exclusive)).unwrap();
         drop(Tx {
-            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            db: Some(NapiDbInnerStorage::Memory(Rc::clone(&view))),
             kind: NapiTxKind::Exclusive,
             open_tx: Some(exclusive),
             owns_lifetime: false,
