@@ -18,6 +18,7 @@ Invariant digest:
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
 - `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
 - `INV-STORAGE-33`: A payload `EnumValue` MUST persist its declaration-order `u32` case tag as a minimal little-endian base-128 varint followed immediately by the selected case's canonical record payload; unknown, truncated, overflowing, and non-minimal tags are invalid.
+- `INV-STORAGE-35`: The epoch-1 Jazz class-CF layout MUST use its one frozen marker, classifier precedence, class-family names, and length-framed mapped-key grammar; a missing, malformed, old, or future marker in a nonempty class store fails closed before a logical read or write.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -290,6 +291,56 @@ delta. The manifest deliberately does **not** freeze SST, block, memtable,
 compaction, or WAL file bytes. A successfully WAL-synced write is durable;
 close-time memtable flush is performance maintenance, not a second commit.
 
+### Jazz class-CF layout (epoch 1)
+
+Jazz uses the `JazzClassV1` view above the ordered-KV adapter to keep the
+logical table name at the Groove boundary while grouping known Jazz logical
+families into a small, fixed set of physical families. This is a durable
+layout, not a RocksDB-only tuning: the same keys are stored in SQLite's `kv`
+table and are the bytes that a future logical export/import must preserve.
+
+The class-layout marker is exactly one entry in
+`__groove_class_meta`: key ASCII `groove-storage-layout`, value ASCII
+`class-cf-v1`. A fresh store may create precisely that entry. Every other
+marker value (including `class-cf-v0`, `class-cf-v2`, a prefix/suffix, or empty
+bytes) is invalid. A missing marker is valid only when no classifier-matching
+legacy logical family exists and every class family is empty; otherwise open
+fails closed before a logical read or write. This deliberately rejects even an
+empty legacy logical family, because its existence proves the store was opened
+under a different physical layout. Epoch 1 has no legacy-layout migration or
+dual read.
+
+The classifier runs in this exact precedence order. `JazzClassV1` maps every
+classified logical family; it has no caller-selected subset or alternate
+interpretation under the same marker. Unclassified names remain their own
+physical family with their unmodified keys. V1 requires the adapter to
+enumerate its physical family catalogue before marker creation. An adapter that
+cannot provide that catalogue fails closed: it cannot prove that an apparently
+empty class store is not a legacy logical-family store.
+
+| classifier, in order                                                                                        | physical family                 |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| starts `jazz_`, ends `_history`                                                                             | `__groove_class_history`        |
+| starts `jazz_`, ends `_register`, but not `_register_global_current` or `_register_ahead_current`           | `__groove_class_register`       |
+| starts `jazz_`, ends `_global_current` or `_register_global_current`, and does not contain `_ahead_current` | `__groove_class_global_current` |
+| starts `jazz_`, ends `_ahead_current` or `_register_ahead_current`                                          | `__groove_class_ahead_current`  |
+| exactly `jazz_global_changes`                                                                               | `__groove_class_changes`        |
+| exactly `indices`                                                                                           | `__groove_class_indices`        |
+| starts `jazz_`                                                                                              | `__groove_class_meta`           |
+
+For a mapped logical family `L` and its logical key `K`, the physical key is
+exactly `u32be(len(utf8(L))) | utf8(L) | K`. `len` is the UTF-8 byte length,
+not Unicode scalar or UTF-16 length, and `L` is admitted by the portable
+column-family-name rules before this framing. There is no tag, separator,
+escaping, checksum, or second table prefix. Prefix/range scans frame their
+logical boundary the same way and strip exactly `4 + len(utf8(L))` bytes after
+the physical adapter returns a key. Thus two logical families cannot alias even
+when one name is a prefix of the other. The exact marker, classifier, order,
+and key grammar are part of epoch 1 (`INV-STORAGE-35`); changing any requires
+a new storage epoch rather than a fallback decoder. The layout validates a
+logical family against the portable no-NUL/`u16::MAX` UTF-8 bound before it
+calculates the framing length on every mapped operation.
+
 SQLite v1 freezes header `application_id = 0x4a415a5a` (`JAZZ`),
 `user_version = 1`, the `meta`, `column_families`, and `kv` DDL, and the Jazz
 metadata blobs `format = jazz-groove-ordered-kv`, big-endian
@@ -316,7 +367,7 @@ re-encodes the semantic map byte-identically before replacing resident state.
 Physical-name validation still occurs before replacement. This explicit codec
 is not serde, postcard, or a durable-adapter manifest; a future incompatible
 snapshot requires a new magic/version and an explicit epoch decision
-(`INV-STORAGE-34`).
+(`INV-STORAGE-35`).
 
 An ordered cursor is **not** a snapshot-isolation primitive. A backend may
 observe committed changes between batches; in particular, `MemoryStorage`
