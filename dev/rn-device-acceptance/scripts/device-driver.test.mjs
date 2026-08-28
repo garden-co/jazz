@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertDeviceReceipt } from "./device-driver.mjs";
+import { assertDeviceReceipt, collectResults } from "./device-driver.mjs";
 
 const now = Date.parse("2026-08-28T12:00:00.000Z");
 const expected = {
@@ -26,8 +26,8 @@ test("accepts exactly one fresh canonical receipt per expected scenario", () => 
 });
 
 test("accepts an exact receipt carried in an adb logcat line", () => {
-  const receipt = resultLine("local-write-subscription", 1);
-  assert.equal(collectResults(`08-28 04:00:00.000  100  101 I ReactNativeJS: ${receipt}`).length, 1);
+  const line = receipt("local-write-subscription", 1);
+  assert.equal(collectResults(`08-28 04:00:00.000  100  101 I ReactNativeJS: ${line}`).length, 1);
 });
 
 for (const [name, output] of [
