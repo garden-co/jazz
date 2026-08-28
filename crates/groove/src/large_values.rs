@@ -61,6 +61,16 @@ impl LargeValueFormat {
         }
     }
 
+    fn decode_descriptor_payload(
+        self,
+        kind: LargeValueKind,
+        payload: &[u8],
+    ) -> Result<LargeValueRef, Error> {
+        match self {
+            Self::V2 => decode_descriptor_payload_v2(kind, payload),
+        }
+    }
+
     fn encode_node(self, node: &ChunkNode) -> Result<Vec<u8>, Error> {
         match self {
             Self::V1 => encode_node_v1(node),
@@ -2190,6 +2200,17 @@ pub fn prepare_reusing(
 pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Result<Vec<u8>, Error> {
     #[cfg(test)]
     STORED_SCALAR_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    encode_stored_scalar_canonical(kind, value)
+}
+
+/// The physical scalar encoder shared by public writes and raw canonicality
+/// checks. The test-only public-write counter intentionally lives in the
+/// wrapper above: decoding an already-inline row must not look like a write
+/// that re-encoded its scalar.
+fn encode_stored_scalar_canonical(
+    kind: LargeValueKind,
+    value: &StoredScalar,
+) -> Result<Vec<u8>, Error> {
     let schema = stored_scalar_schema(kind);
     let enum_value = match value {
         StoredScalar::Primitive(bytes) => {
@@ -2247,36 +2268,25 @@ fn stored_scalar_encode_calls() -> usize {
 /// interpreted directly through that schema; indirect values authenticate the
 /// expected kind when their content-addressed nodes are decoded.
 pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<StoredScalar, Error> {
-    let decoded =
-        crate::records::decode_single_field_value(encoded, stored_scalar_value_type(kind))
-            .map_err(|error| match error {
-                crate::records::Error::InvalidUtf8 => Error::InvalidUtf8,
-                _ => Error::MalformedScalar,
-            })?;
-    let Value::Enum(value) = decoded else {
-        return Err(Error::MalformedScalar);
-    };
-    let canonical = crate::records::encode_single_field_value(
-        &Value::Enum(value.clone()),
-        stored_scalar_value_type(kind),
-    )
-    .map_err(|_| Error::MalformedScalar)?;
-    if canonical != encoded {
-        return Err(Error::MalformedScalar);
-    }
-    let values = value
-        .record()
-        .to_values()
-        .map_err(|_| Error::MalformedScalar)?;
-    match value.tag() {
-        2 => {
-            let mut fields = primitive_payload_schema(kind).decode_values(&values)?;
-            let value = take_durable_large_value_field(&mut fields, PRIMITIVE_VALUE_FIELD)?;
-            primitive_bytes(kind, &value).map(StoredScalar::Primitive)
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
+    let decoded = match tag {
+        2 => decode_primitive_payload(kind, payload).map(StoredScalar::Primitive),
+        3 => {
+            // This deliberately reads only the outer tag and the first static
+            // descriptor byte. An unknown format must win before the current
+            // V2 root/edit ValueTypes inspect an adversarial nested payload.
+            let format = preflight_descriptor_format(payload)?;
+            format
+                .decode_descriptor_payload(kind, payload)
+                .map(StoredScalar::Chunked)
         }
-        3 => decode_chunked_values(kind, &values).map(StoredScalar::Chunked),
         _ => Err(Error::MalformedScalar),
+    }?;
+    if encode_stored_scalar_canonical(kind, &decoded)? != encoded {
+        return Err(Error::MalformedScalar);
     }
+    Ok(decoded)
 }
 
 pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8], Error> {
@@ -2750,9 +2760,13 @@ pub(crate) fn encode_large_value_ref(value: &LargeValueRef) -> Result<Vec<u8>, E
 
 #[cfg(test)]
 pub(crate) fn decode_large_value_ref(encoded: &[u8]) -> Result<LargeValueRef, Error> {
-    let value = crate::records::decode_single_field_value(encoded, large_value_ref_value_type())
-        .map_err(|_| Error::MalformedScalar)?;
-    let decoded = large_value_ref_from_value(&value)?;
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
+    let kind = large_value_kind_from_tag(u8::try_from(tag).map_err(|_| Error::MalformedScalar)?)?;
+    // As for a stored scalar, no V2 nested descriptor layout is decoded until
+    // the raw outer descriptor has selected a recognized format.
+    let format = preflight_descriptor_format(payload)?;
+    let decoded = format.decode_descriptor_payload(kind, payload)?;
     if encode_large_value_ref(&decoded)? != encoded {
         return Err(Error::MalformedScalar);
     }
@@ -2778,6 +2792,59 @@ fn primitive_bytes(kind: LargeValueKind, value: &Value) -> Result<Vec<u8>, Error
     }?;
     validate_logical(kind, &bytes)?;
     Ok(bytes)
+}
+
+fn decode_primitive_payload(kind: LargeValueKind, payload: &[u8]) -> Result<Vec<u8>, Error> {
+    let schema = primitive_payload_schema(kind);
+    let values = schema
+        .descriptor
+        .bind(payload)
+        .to_values()
+        .map_err(|error| match error {
+            crate::records::Error::InvalidUtf8 => Error::InvalidUtf8,
+            _ => Error::MalformedScalar,
+        })?;
+    if schema
+        .descriptor
+        .create(&values)
+        .map_err(|_| Error::MalformedScalar)?
+        != payload
+    {
+        return Err(Error::MalformedScalar);
+    }
+    let mut fields = schema.decode_values(&values)?;
+    let value = take_durable_large_value_field(&mut fields, PRIMITIVE_VALUE_FIELD)?;
+    primitive_bytes(kind, &value)
+}
+
+/// Read precisely the V2-independent selector: the descriptor payload starts
+/// with its fixed-width `format_version:u8` field. Do not bind the enclosing
+/// record here: binding computes spans for the root and edit-tail fields and
+/// would let a future-format payload fail as malformed before dispatch.
+fn preflight_descriptor_format(payload: &[u8]) -> Result<LargeValueFormat, Error> {
+    let version = *payload.first().ok_or(Error::MalformedScalar)?;
+    LargeValueFormat::from_version(version)
+}
+
+fn decode_descriptor_payload_v2(
+    kind: LargeValueKind,
+    payload: &[u8],
+) -> Result<LargeValueRef, Error> {
+    let schema = large_value_ref_payload_schema();
+    let values = schema
+        .descriptor
+        .bind(payload)
+        .to_values()
+        .map_err(|_| Error::MalformedScalar)?;
+    if schema
+        .descriptor
+        .create(&values)
+        .map_err(|_| Error::MalformedScalar)?
+        != payload
+    {
+        return Err(Error::MalformedScalar);
+    }
+    decode_chunked_values(kind, &values)
 }
 
 fn raw_bytes(value: &Value) -> Result<[u8; 32], Error> {
@@ -5192,7 +5259,6 @@ mod tests {
         fn hex(bytes: &[u8]) -> String {
             bytes.iter().map(|byte| format!("{byte:02x}")).collect()
         }
-
         let leaf = ChunkNode::Leaf {
             format: FORMAT_VERSION,
             kind: LargeValueKind::Bytes,
@@ -5500,6 +5566,17 @@ mod tests {
             Err(Error::UnsupportedFormat(FORMAT_VERSION + 1)),
             "stored scalar must use the descriptor's same joint dispatch"
         );
+        // These deliberately omit every V2 root/edit field. The unknown
+        // selector must still win: no current nested ValueType may inspect a
+        // future payload before the dispatch boundary rejects it.
+        assert_eq!(
+            decode_large_value_ref(&[LARGE_VALUE_REF_JSON_TAG, FORMAT_VERSION + 1, 0xff]),
+            Err(Error::UnsupportedFormat(FORMAT_VERSION + 1))
+        );
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Json, &[3, FORMAT_VERSION + 1, 0xff]),
+            Err(Error::UnsupportedFormat(FORMAT_VERSION + 1))
+        );
 
         let mut alternate = scalar.clone();
         alternate.push(0);
@@ -5555,6 +5632,156 @@ mod tests {
             materialize_attempt(&consolidated.value_ref, &mut inputs).unwrap(),
             replacement,
             "tail consolidation preserves literal JSON replacement bytes"
+        );
+    }
+
+    #[test]
+    fn v2_content_defined_profile_manifest_is_permanent() {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        let mut state = 0x4d59_5df4_d0f3_3173_u64;
+        let bytes = (0..(LEAF_MAX_BYTES * 12 + LEAF_TARGET_BYTES))
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (gear(0), gear(1), gear(0x7f), gear(u8::MAX)),
+            (
+                0xe220_a839_7b1d_cdaf,
+                0x910a_2dec_8902_5cc1,
+                0x3fad_b6bd_e928_5e98,
+                0x338c_5071_4628_3fb4,
+            ),
+            "V2 gear vectors are storage-format data"
+        );
+        assert_eq!(
+            leaf_ranges(LargeValueKind::Bytes, &bytes).unwrap(),
+            [
+                0..145537,
+                145537..180487,
+                180487..333056,
+                333056..374799,
+                374799..417781,
+                417781..487110,
+                487110..543713,
+                543713..668001,
+                668001..741970,
+                741970..827720,
+                827720..912126,
+                912126..935212,
+                935212..1047063,
+                1047063..1130487,
+                1130487..1271830,
+                1271830..1340443,
+                1340443..1388172,
+                1388172..1463168,
+                1463168..1536176,
+                1536176..1622009,
+                1622009..1833371,
+                1833371..1906888,
+                1906888..1988979,
+                1988979..2008288,
+                2008288..2092742,
+                2092742..2253159,
+                2253159..2379622,
+                2379622..2464077,
+                2464077..2543777,
+                2543777..2582151,
+                2582151..2628177,
+                2628177..2699778,
+                2699778..2769680,
+                2769680..2805165,
+                2805165..2849502,
+                2849502..2868543,
+                2868543..3007861,
+                3007861..3058280,
+                3058280..3131945,
+                3131945..3211264,
+            ],
+            "both short and long masks must choose the same leaf boundaries"
+        );
+        assert_eq!(
+            leaf_ranges(LargeValueKind::Bytes, &vec![0; LEAF_MAX_BYTES * 2 + 1]).unwrap(),
+            [
+                0..LEAF_MAX_BYTES,
+                LEAF_MAX_BYTES..LEAF_MAX_BYTES * 2,
+                LEAF_MAX_BYTES * 2..LEAF_MAX_BYTES * 2 + 1
+            ],
+            "V2's hard maximum cuts even when the rolling mask never does"
+        );
+        let mut text = Vec::new();
+        while text.len() < LEAF_MAX_BYTES * 2 + 100 {
+            text.extend_from_slice("a🙂".as_bytes());
+        }
+        assert_eq!(
+            leaf_ranges(LargeValueKind::String, &text).unwrap(),
+            [0..262141, 262141..524285, 524285..524390],
+            "the hard boundary is repaired backwards to the preceding UTF-8 code-point boundary"
+        );
+
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &bytes, deterministic_locator).unwrap();
+        let branches = prepared
+            .staged_chunks
+            .iter()
+            .filter_map(|chunk| {
+                let node = decode_node(
+                    LargeValueKind::Bytes,
+                    chunk.node_ref.object_hash,
+                    &chunk.encoded,
+                )
+                .unwrap();
+                let logical = node_logical_hash(&node);
+                match node {
+                    ChunkNode::Leaf { .. } => None,
+                    ChunkNode::Branch { children, .. } => Some((
+                        children
+                            .iter()
+                            .map(|child| child.metrics.byte_length)
+                            .collect::<Vec<_>>(),
+                        hex(&chunk.node_ref.object_hash.0),
+                        hex(&logical.0),
+                    )),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            branches,
+            vec![
+                (
+                    vec![
+                        145537, 34950, 152569, 41743, 42982, 69329, 56603, 124288, 73969, 85750,
+                        84406, 23086, 111851, 83424
+                    ],
+                    "8e0e4ba73b814dec723f825eb147de2710e41a8b7ebbae3be638d12d2ecab055".to_owned(),
+                    "7b4803eacbf8b1b3141f8de6c51505401523d4b9cc8ec2b89d1c41cf55ea1049".to_owned()
+                ),
+                (
+                    vec![
+                        141343, 68613, 47729, 74996, 73008, 85833, 211362, 73517, 82091, 19309,
+                        84454, 160417, 126463, 84455, 79700, 38374, 46026, 71601, 69902, 35485,
+                        44337, 19041, 139318, 50419
+                    ],
+                    "9a9d69b5577928dee1c315fa67f65dd9e106c246c97ec8e02940062401bc4c6c".to_owned(),
+                    "6185a6d7577f8de1be4a5131b9405f616f20ffc09115e677babdfe5b4738d826".to_owned()
+                ),
+                (
+                    vec![73665, 79319],
+                    "df7b53c850c1574950adb5cf0e7ed6b852c4d165cba55feebe949668b2cf8cf4".to_owned(),
+                    "d7e0e23658973115f1b0742d182e2315f2e867b0130c883e465594d82189c659".to_owned()
+                ),
+                (
+                    vec![1130487, 1927793, 152984],
+                    "da561219c038a1ba3728d5cd66bf21ee4bd20920e83774089a7907b9cb7f3d9f".to_owned(),
+                    "9e6e0ae09aa0afc9367f30980cad725e49c30081b0ff1689e3548fd6214fcb12".to_owned()
+                ),
+            ],
+            "multi-branch grouping and every locator-bearing object receipt are frozen"
         );
     }
 

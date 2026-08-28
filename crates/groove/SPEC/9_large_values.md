@@ -247,6 +247,15 @@ reviewed descriptor/edit/scalar decoder as well as its node decoder. It MUST
 NOT reuse V2's edit-coordinate validation simply because the outer enum tag is
 unchanged.
 
+The raw dispatch preflight reads only the canonical outer enum tag and the
+first fixed `format_version:u8` descriptor payload byte. It does not bind the
+descriptor record, calculate variable-field spans, decode a root `NodeRef`, or
+decode an edit before selecting the codec. Therefore an unknown/future version
+with a truncated or deliberately non-V2 nested layout fails as
+`UnsupportedFormat`, rather than as a V2 malformed record. Once V2 is selected,
+the full current descriptor/edit/scalar payload is decoded and exactly
+re-encoded; V2 malformed or trailing bytes still fail closed.
+
 V2's content-defined profile is permanent format data:
 
 ```text
@@ -264,6 +273,12 @@ on the short mask; at/after target they cut on the long mask; the stated hard
 maximum always cuts. These values include the gear construction, not merely
 the visible size constants. They cannot be tuned, seeded from a runtime RNG,
 or changed for one backend without a new immutable format version.
+`v2_content_defined_profile_manifest_is_permanent` freezes gear vectors,
+short- and long-mask leaf ranges over a deterministic multi-megabyte input,
+the no-match hard maximum, UTF-8 boundary repair, and every object/logical hash
+of a multi-branch grouping manifest. This is a planted sensitivity receipt:
+changing either mask or any gear parameter changes at least one frozen range
+or branch object/logical hash.
 
 V2 JSON is literal validated UTF-8 source, never a normalized serialization.
 Its canonical receipt uses the exact source

@@ -82,13 +82,15 @@ must not add an object-like patch, merge, or locator API at this boundary.
 
 The descriptor's V2 format selector jointly governs its root, nested edit
 records, and schema-known `Chunked = 3` physical scalar arm before Groove
-interprets any of them. The permanent V2 FastCDC/content-defined-grouping
+interprets any of them. Groove reads only the outer enum tag and fixed version
+byte before dispatch, so a future version with malformed current-layout nested
+bytes fails `UnsupportedFormat` without being decoded as V2. The permanent V2 FastCDC/content-defined-grouping
 profile is owned by Groove and applies identically to in-memory, RocksDB,
 SQLite/OPFS/IDB, and remote byte-plane adapters. A backend cannot tune chunk
 boundaries or use locator layout to alter logical identity. The authoritative
 literal JSON, duplicate-key, numeric, Unicode, malformed, replay, tail,
-UTF-8/UTF-16, and consolidation receipts live in Groove spec §9.2 and its
-named hard-coded codec test.
+UTF-8/UTF-16, consolidation, and content-defined profile receipts live in
+Groove spec §9.2 and its named hard-coded codec tests.
 
 Remaining lifecycle scope is intentionally unchanged: Jazz still owns
 authorization, staging expiry/admission, atomic owner-row publication,
