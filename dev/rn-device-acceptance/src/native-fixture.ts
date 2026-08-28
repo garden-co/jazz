@@ -2,9 +2,6 @@ import { NativeModules } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
 import type { Platform } from "./protocol";
 
-type NativeRelayCapability = Uint8Array;
-type NativeRelayExecutor = { execute(commandBase64: string): Promise<string> };
-
 export type DeviceReceiptContext = {
   platform: Platform;
   deviceIdentifier: string;
@@ -16,6 +13,17 @@ type FixtureModule = {
   admittedCapability(): Promise<string>;
   logout(): Promise<void>;
   receiptContext(): Promise<DeviceReceiptContext>;
+  recordReceipt(receipt: string): Promise<void>;
+};
+
+/**
+ * The native fixture is an adapter for the public command function, not part of
+ * jazz-tools' internal relay-frame API. Keep its boundary structural so it
+ * cannot make those low-level implementation types public by accident.
+ */
+type AdmittedNativeRelay = {
+  executor: { execute: typeof executeNativeRelayCommand };
+  capability: Uint8Array;
 };
 
 function fixtureModule(): FixtureModule {
@@ -33,15 +41,15 @@ function decodeCapability(value: string): Uint8Array {
 }
 
 /** The only fixture material that crosses to JS is the opaque 32-byte lease. */
-export async function admittedNativeRelay(): Promise<{
-  executor: NativeRelayExecutor;
-  capability: NativeRelayCapability;
-}> {
+export async function admittedNativeRelay(): Promise<AdmittedNativeRelay> {
   const fixture = fixtureModule();
   const capability = decodeCapability(await fixture.admittedCapability());
   if (capability.byteLength !== 32)
     throw new Error("JazzDeviceFixture returned a non-opaque admission capability");
-  return { executor: { execute: executeNativeRelayCommand }, capability };
+  return {
+    executor: { execute: executeNativeRelayCommand },
+    capability,
+  };
 }
 
 /** Trusted package/launch identity used solely to bind observed device receipts. */
@@ -56,4 +64,14 @@ export async function deviceReceiptContext(): Promise<DeviceReceiptContext> {
     throw new Error("JazzDeviceFixture returned an invalid trusted receipt context");
   }
   return context;
+}
+
+/**
+ * Release iOS builds do not provide a reliable unified-log sink for React
+ * Native's `console.log`. The test-only native fixture persists the exact
+ * protocol line only after JavaScript has completed its proof; the host reads
+ * that app-sandbox file and still validates it independently.
+ */
+export async function recordDeviceReceipt(receipt: string): Promise<void> {
+  await fixtureModule().recordReceipt(receipt);
 }

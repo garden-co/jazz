@@ -7,6 +7,7 @@ export async function proveAdmittedRelay(
   capability: NativeRelayCapability,
 ): Promise<void> {
   const openedRelay = decodeOpened(await executor.execute(encodeOpen(capability)));
+  const attachedClient = decodeAttached(await executor.execute(encodeAttach(openedRelay)));
   try {
     const response = Uint8Array.from(globalThis.atob(await executor.execute("AA==")), (byte) =>
       byte.charCodeAt(0),
@@ -14,6 +15,8 @@ export async function proveAdmittedRelay(
     if (response.length !== 2 || response[0] !== 0 || response[1] !== 3)
       throw new Error("installed Jazz relay returned an unexpected ABI probe response");
   } finally {
+    if (!decodeClosed(await executor.execute(encodeCloseClient(attachedClient))))
+      throw new Error("native relay did not close the admitted UI peer");
     if (!decodeClosed(await executor.execute(encodeCloseRelay(openedRelay))))
       throw new Error("native relay did not close the admitted scope");
   }
@@ -26,6 +29,12 @@ function encodeOpen(capability: Uint8Array): string {
 }
 function encodeCloseRelay(relay: bigint): string {
   return encode([4, ...varint(relay)]);
+}
+function encodeAttach(relay: bigint): string {
+  return encode([2, ...varint(relay)]);
+}
+function encodeCloseClient(client: bigint): string {
+  return encode([3, ...varint(client)]);
 }
 function encode(bytes: number[]): string {
   return globalThis.btoa(String.fromCharCode(...bytes));
@@ -49,6 +58,14 @@ function decodeOpened(encoded: string): bigint {
 function decodeClosed(encoded: string): boolean {
   const bytes = bytesOf(encoded);
   return bytes.length === 2 && bytes[0] === 3 && bytes[1] === 1;
+}
+function decodeAttached(encoded: string): bigint {
+  const bytes = bytesOf(encoded);
+  if (bytes[0] !== 2)
+    throw new Error("native relay did not attach a UI peer to the admitted scope");
+  const [client, offset] = readVarint(bytes, 1);
+  if (offset !== bytes.length) throw new Error("native relay returned malformed Attach response");
+  return client;
 }
 function bytesOf(encoded: string): Uint8Array {
   return Uint8Array.from(globalThis.atob(encoded), (byte) => byte.charCodeAt(0));
