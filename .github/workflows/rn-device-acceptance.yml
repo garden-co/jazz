@@ -142,7 +142,9 @@ jobs:
     # artifact -> assemble -> installed-device receipt workflow.
     if: github.event_name == 'workflow_dispatch'
     name: Android device acceptance
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # GitHub-hosted Linux runners expose Android hardware acceleration; this
+    # Blacksmith image did not expose a usable /dev/kvm.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -153,6 +155,12 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Grant the runner user access to KVM
+        shell: bash
+        run: |
+          [[ -c /dev/kvm ]] || { echo "Android acceptance requires a GitHub-hosted KVM device" >&2; exit 1; }
+          sudo setfacl -m "u:${USER}:rw" /dev/kvm
+          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance could not grant the runner user KVM access" >&2; exit 1; }
       - name: Bootstrap pinned lane-local Android toolchain
         run: dev/rn-device-acceptance/scripts/bootstrap-android.sh --emulator
       - name: Stage and verify all relay ABI artifacts
@@ -173,7 +181,7 @@ jobs:
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk" ANDROID_HOME="$cache/sdk"
           export PATH="$cache/cargo/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
           export ANDROID_AVD_HOME="$cache/avd"
-          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance requires readable/writable /dev/kvm; choose a KVM-enabled runner" >&2; exit 1; }
+          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "Android acceptance requires readable/writable /dev/kvm after the KVM access step" >&2; exit 1; }
           yes no | avdmanager create avd --force --name jazz-device-acceptance-api35 --package 'system-images;android-35;google_apis;x86_64'
           emulator -avd jazz-device-acceptance-api35 -no-window -no-audio -gpu swiftshader_indirect -no-boot-anim -no-metrics >"$cache/emulator.log" 2>&1 &
           adb wait-for-device
