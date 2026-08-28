@@ -1,0 +1,52 @@
+name: React Native device acceptance (WIP)
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+    paths:
+      - "dev/rn-device-acceptance/**"
+      - "crates/jazz-rn/**"
+      - "crates/jazz-native-relay/**"
+      - "packages/jazz-tools/src/react-native/**"
+      - ".github/workflows/rn-device-acceptance.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rn-device-acceptance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    # Expensive emulator work is maintainer-opt-in and never trusts fork code.
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'react-native') && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with: { version: 10.14.0 }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter rn-device-acceptance verify
+      # TODO(#1974): stage matching relay libraries, register the fixture,
+      # assemble/install a development build, then invoke device:android.
+
+  ios:
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'react-native') && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with: { version: 10.14.0 }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter rn-device-acceptance verify
+      # TODO(#1974): stage XCFramework, register fixture, build/install app,
+      # then invoke device:ios. This job is source/prebuild scaffolding only.

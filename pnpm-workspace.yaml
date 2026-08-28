@@ -8,6 +8,7 @@ packages:
   - examples/docs/*
   - "!examples/docs/todo-client-localfirst-expo"
   - dev/stress-tests/*
+  - dev/rn-device-acceptance
   - "!dev/stress-tests/stress-test-expo"
   - dev/local-telemetry/web
   - crates
