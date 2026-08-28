@@ -1,6 +1,9 @@
 #import "JazzRelay.h"
 
-#if __has_include("jazz_native_relay.h")
+#if __has_include(<JazzNativeRelay/jazz_native_relay.h>)
+#import <JazzNativeRelay/jazz_native_relay.h>
+#define JAZZ_RELAY_ARTIFACT_AVAILABLE 1
+#elif __has_include("jazz_native_relay.h")
 #import "jazz_native_relay.h"
 #define JAZZ_RELAY_ARTIFACT_AVAILABLE 1
 #else

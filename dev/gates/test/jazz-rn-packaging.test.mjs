@@ -471,6 +471,13 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
     ]);
 
   assert.match(podspec, /JazzNativeRelay\.xcframework/);
+  assert.match(podspec, /relay_header_search_path/);
+  assert.match(podspec, /current_header_paths/);
+  assert.match(
+    podspec,
+    /HEADER_SEARCH_PATHS" => "#\{current_header_paths\} \\\"\$\(PODS_ROOT\)\/boost\\\""/,
+    "the legacy RN pod branch must retain the staged relay ABI header path",
+  );
   assert.match(podspec, /https:\/\/github\.com\/garden-co\/jazz\.git/);
   assert.doesNotMatch(podspec, /https:\/\/https:\/\//);
   assert.doesNotMatch(podspec, /uniffi-bindgen-react-native/);
@@ -486,6 +493,7 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assertNoLegacyIosMacroToken(iosRelay);
   assert.match(iosRelay, /JAZZ_RELAY_ARTIFACT_AVAILABLE/);
   assert.match(iosRelay, /jazz_native_relay_host_execute/);
+  assert.match(iosRelay, /<JazzNativeRelay\/jazz_native_relay\.h>/);
   assert.match(iosRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
   assert.match(iosRelay, /NativeJazzRelaySpecJSI/);
   assert.doesNotMatch(packageRoot, /NativeJazzRn|uniffi/);
