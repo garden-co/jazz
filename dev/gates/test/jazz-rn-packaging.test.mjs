@@ -61,15 +61,6 @@ function assertExactNames(surface, actual, allowed) {
   );
 }
 
-function assertOnlyAllowedNames(surface, actual, allowed) {
-  const unexpected = [...actual].filter((name) => !allowed.has(name));
-  assert.deepEqual(
-    unexpected,
-    [],
-    `${surface} has unexpected JavaScript-facing name(s): ${unexpected.join(", ")}`,
-  );
-}
-
 function exportedStatements(surface, source) {
   const file = ts.createSourceFile(
     `${surface}.ts`,
@@ -142,6 +133,56 @@ function assertNamedRelayReexport(surface, statement, names, typeOnly) {
   assert.ok(
     statement.exportClause.elements.every((item) => item.propertyName === undefined),
     `${surface} must not alias-re-export the relay ABI`,
+  );
+}
+
+function assertExactNativeSpecMethod(member, name) {
+  assert.ok(member, `NativeJazzRelay Spec omits ${name}`);
+  assert.ok(
+    ts.isMethodSignature(member),
+    `NativeJazzRelay Spec member ${name} must be a method signature, not another TypeScript member kind`,
+  );
+  assert.ok(ts.isIdentifier(member.name));
+  assert.equal(member.name.text, name);
+  assert.equal(member.questionToken, undefined, `${name} must not be optional`);
+  assert.equal(
+    member.typeParameters,
+    undefined,
+    `${name} must not be generic`,
+  );
+
+  if (name === "getAbiVersion") {
+    assert.equal(member.parameters.length, 0, "getAbiVersion takes no arguments");
+    assert.equal(
+      member.type?.kind,
+      ts.SyntaxKind.NumberKeyword,
+      "getAbiVersion returns exactly number",
+    );
+    return;
+  }
+
+  assert.equal(member.parameters.length, 1, "execute takes exactly one argument");
+  const parameter = member.parameters[0];
+  assert.ok(ts.isIdentifier(parameter.name));
+  assert.equal(parameter.name.text, "commandBase64");
+  assert.equal(parameter.dotDotDotToken, undefined, "execute must not be variadic");
+  assert.equal(parameter.questionToken, undefined, "execute argument must not be optional");
+  assert.equal(
+    parameter.type?.kind,
+    ts.SyntaxKind.StringKeyword,
+    "execute accepts exactly a string command",
+  );
+  assert.ok(
+    member.type && ts.isTypeReferenceNode(member.type),
+    "execute returns exactly Promise<string>",
+  );
+  assert.ok(ts.isIdentifier(member.type.typeName));
+  assert.equal(member.type.typeName.text, "Promise");
+  assert.equal(member.type.typeArguments?.length, 1);
+  assert.equal(
+    member.type.typeArguments?.[0]?.kind,
+    ts.SyntaxKind.StringKeyword,
+    "execute returns exactly Promise<string>",
   );
 }
 
@@ -236,16 +277,36 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     true,
   );
 
-  const spec = braceBody(
-    commentFreeSpec,
-    "export interface Spec extends TurboModule",
+  const spec = specExports[0];
+  const membersByName = new Map();
+  for (const member of spec.members) {
+    assert.ok(
+      ts.isMethodSignature(member) && ts.isIdentifier(member.name),
+      "NativeJazzRelay TurboModule may contain only named method signatures",
+    );
+    assert.ok(
+      nativeSpecMethods.has(member.name.text),
+      `NativeJazzRelay TurboModule has unexpected member ${member.name.text}`,
+    );
+    assert.ok(
+      !membersByName.has(member.name.text),
+      `NativeJazzRelay TurboModule repeats member ${member.name.text}`,
+    );
+    membersByName.set(member.name.text, member);
+  }
+  assert.equal(
+    spec.members.length,
+    nativeSpecMethods.size,
+    "NativeJazzRelay TurboModule has exactly its two ABI methods",
   );
-  const methods = new Set(
-    [...spec.matchAll(/(?:^|[;\n])\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)].map(
-      (match) => match[1],
-    ),
+  assertExactNames(
+    "NativeJazzRelay TurboModule",
+    new Set(membersByName.keys()),
+    nativeSpecMethods,
   );
-  assertExactNames("NativeJazzRelay TurboModule", methods, nativeSpecMethods);
+  for (const name of nativeSpecMethods) {
+    assertExactNativeSpecMethod(membersByName.get(name), name);
+  }
   assert.match(
     commentFreeSpec,
     /^\s*export\s+default\s+TurboModuleRegistry\.get<Spec>\('JazzRelay'\);\s*$/m,
@@ -280,16 +341,14 @@ function assertOpaqueAndroidRelaySurface(androidModule) {
   );
 }
 
-function macroDeclarations(source, macro) {
+function legacyExportMacros(source) {
   const declarations = [];
-  const pattern = new RegExp(`\\b${macro}\\s*\\(`, "g");
-  let from = 0;
-  while (true) {
-    pattern.lastIndex = from;
-    const occurrence = pattern.exec(source);
-    if (occurrence === null) return declarations;
-    const start = occurrence.index;
-    const opening = source.indexOf("(", start + macro.length);
+  const pattern = /\b(RCT_[A-Za-z0-9_]*(?:EXPORT|REMAP)[A-Za-z0-9_]*)\s*\(/g;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    const macro = match[1];
+    if (macro === "RCT_EXPORT_MODULE") continue;
+    const opening = source.indexOf("(", match.index + macro.length);
     let depth = 0;
     let quote = null;
     let escaped = false;
@@ -307,8 +366,8 @@ function macroDeclarations(source, macro) {
       else if (character === ")") {
         depth -= 1;
         if (depth === 0) {
-          declarations.push(source.slice(start, index + 1));
-          from = index + 1;
+          declarations.push({ macro, declaration: source.slice(match.index, index + 1) });
+          pattern.lastIndex = index + 1;
           closed = true;
           break;
         }
@@ -316,6 +375,7 @@ function macroDeclarations(source, macro) {
     }
     if (!closed) assert.fail(`unterminated ${macro} declaration`);
   }
+  return declarations;
 }
 
 function objcMethodNames(source) {
@@ -326,12 +386,6 @@ function objcMethodNames(source) {
       ),
     ].map((match) => match[1]),
   );
-}
-
-function macroExportName(declaration, macro) {
-  const body = declaration.slice(declaration.indexOf("(") + 1, -1).trim();
-  if (macro === "RCT_REMAP_METHOD") return body.split(",", 1)[0].trim();
-  return /^([A-Za-z_$][A-Za-z0-9_$]*)\s*:/.exec(body)?.[1] ?? body;
 }
 
 function objcImplementations(source) {
@@ -384,18 +438,13 @@ function assertOpaqueIosRelaySurface(iosRelay) {
     exportedMethods,
     iosRelaySelectors,
   );
-  const macroExports = new Set([
-    ...macroDeclarations(relayModule, "RCT_EXPORT_METHOD").map((item) =>
-      macroExportName(item, "RCT_EXPORT_METHOD"),
-    ),
-    ...macroDeclarations(relayModule, "RCT_REMAP_METHOD").map((item) =>
-      macroExportName(item, "RCT_REMAP_METHOD"),
-    ),
-  ]);
-  assertOnlyAllowedNames(
-    "iOS RCT JavaScript export",
-    macroExports,
-    nativeSpecMethods,
+  // The generated New-Architecture spec is the sole iOS JavaScript ABI. An
+  // RCT export/remap macro would create a parallel old-architecture entry
+  // point, so reject every family (including future spelling variants).
+  assert.deepEqual(
+    legacyExportMacros(relayModule),
+    [],
+    "iOS JazzRelay must not add legacy RCT export/remap JavaScript entry points",
   );
 }
 
@@ -708,6 +757,19 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   assert.throws(
     () =>
       assertExactTsRelaySurface(
+        nativeSpec.replace(
+          "  execute(commandBase64: string): Promise<string>;\n}",
+          "  execute(commandBase64: string): Promise<string>;\n  configure: string;\n}",
+        ),
+        relay,
+        relayIndex,
+      ),
+    /method signature|member kind|configure/,
+    "a property-shaped TurboModule member must not enter the fixed ABI",
+  );
+  assert.throws(
+    () =>
+      assertExactTsRelaySurface(
         nativeSpec,
         `${relay}\nexport function configure() {}`,
         relayIndex,
@@ -859,6 +921,22 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     /begin/,
     "a multiline RCT_REMAP_METHOD must not introduce an arbitrary iOS JS export",
   );
+  for (const fixture of [
+    "RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(configure)",
+    "RCT_EXPORT_SYNCHRONOUS_TYPED_METHOD(NSString *, configure)",
+    "RCT_REMAP_BLOCKING_SYNCHRONOUS_METHOD(configure, configure)",
+    "RCT_REMAP_SYNCHRONOUS_TYPED_METHOD(NSString *, configure, configure)",
+    "RCT_EXPORT_FUTURE_METHOD(configure)",
+  ]) {
+    assert.throws(
+      () =>
+        assertOpaqueIosRelaySurface(
+          iosRelay.replace("- (void)invalidate", `${fixture}\n\n- (void)invalidate`),
+        ),
+      /RCT_/,
+      `${fixture} must not add a legacy iOS relay export`,
+    );
+  }
   assert.throws(
     () =>
       assertOpaqueIosRelaySurface(
