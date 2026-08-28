@@ -8,16 +8,35 @@ import type { ScenarioResult } from "./protocol";
  */
 export const scenarioPlan: readonly ScenarioResult[] = [
   ["linked-abi-admission", "Installed relay admits an opaque scope and reports ABI 3"],
+  [
+    "foreground-byte-abi",
+    "Installed JSI foreground executes ABI v1 Probe, Tick, Close, and revoke",
+  ],
+  [
+    "foreground-write-transaction",
+    "JSI foreground commits and rolls back native mergeable/exclusive transactions",
+  ],
   ["local-write-subscription", "Two UI runtimes observe a write through one relay"],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
   ["reopen", "Process/app relaunch reopens the durable relay store"],
   ["scope-isolation", "Distinct app/storage/auth scopes cannot observe each other"],
-  ["logout-auth-switch", "Trusted native code revokes old admission before new scope admission"],
+  ["logout-revocation", "Trusted native code revokes old admission aliases before any replacement"],
+  [
+    "logout-auth-switch",
+    "Trusted native code revokes scope A foreground and relay aliases before admitting scope B",
+  ],
   ["backpressure", "Relay frame progress resumes after bounded backpressure"],
   ["corrupt-store", "Corrupt durable store fails closed with a structured diagnostic"],
 ].map(([scenario, detail]) => ({
   protocol: 1,
   scenario,
-  state: scenario === "linked-abi-admission" ? "passed" : "todo",
+  state:
+    scenario === "linked-abi-admission" ||
+    scenario === "foreground-byte-abi" ||
+    scenario === "foreground-write-transaction" ||
+    scenario === "logout-revocation" ||
+    scenario === "logout-auth-switch"
+      ? "passed"
+      : "todo",
   detail,
 })) as readonly ScenarioResult[];

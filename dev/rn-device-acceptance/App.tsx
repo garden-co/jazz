@@ -3,15 +3,55 @@ import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-nat
 import { encodeResult } from "./src/protocol";
 import { scenarioPlan } from "./src/scenarios";
 import {
+  proveForegroundByteAbi,
+  proveForegroundRevoked,
+  proveForegroundWriteAbi,
+} from "./src/foreground-byte-abi";
+import {
   admittedNativeRelay,
   deviceReceiptContext,
+  logoutNativeRelay,
   recordDeviceReceipt,
+  switchNativeRelayAuthScope,
 } from "./src/native-fixture";
-import { proveAdmittedRelay } from "./src/relay-admission";
+import {
+  decodeNativeForegroundResponse,
+  encodeNativeForegroundCommand,
+  installNativeForegroundRuntime,
+} from "jazz-rn";
+import {
+  proveAdmittedRelay,
+  proveAuthScopeSwitch,
+  proveLogoutRevocation,
+} from "./src/relay-admission";
 
-async function observeLinkedAbiAdmission() {
-  const { executor, capability } = await admittedNativeRelay();
+async function observeTrustedAdmissionLifecycle() {
+  const admitted = await admittedNativeRelay();
+  const { executor, capability } = admitted;
   await proveAdmittedRelay(executor, capability);
+  const foregroundFactory = installNativeForegroundRuntime();
+  const foregroundCodec = {
+    encode: encodeNativeForegroundCommand,
+    decode: decodeNativeForegroundResponse,
+  };
+  proveForegroundByteAbi(foregroundFactory, capability, foregroundCodec);
+  const revocableForeground = foregroundFactory.openAttached(capability);
+  await proveLogoutRevocation(
+    admitted,
+    async () => {
+      await logoutNativeRelay();
+      proveForegroundRevoked(revocableForeground, foregroundCodec.encode);
+    },
+    admittedNativeRelay,
+  );
+  const scopeA = await admittedNativeRelay();
+  const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
+  const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
+  proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
+  proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  // This remains byte-only JSI transport: the fixed test record envelope is
+  // decoded by the compiled Rust relay, never reconstructed as a JS row API.
+  proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
   return await deviceReceiptContext();
 }
 
@@ -20,20 +60,23 @@ export default function App() {
   const [error, setError] = useState<string>();
   useEffect(() => {
     void (async () => {
-      const receipt = await observeLinkedAbiAdmission();
-      const linked = scenarioPlan.find((scenario) => scenario.scenario === "linked-abi-admission")!;
-      const result = encodeResult({
-        ...linked,
-        receipt: { ...receipt, sequence: 1, observedAt: new Date().toISOString() },
-      });
+      const receipt = await observeTrustedAdmissionLifecycle();
+      const results = scenarioPlan
+        .filter((scenario) => scenario.state === "passed")
+        .map((scenario, index) =>
+          encodeResult({
+            ...scenario,
+            receipt: { ...receipt, sequence: index + 1, observedAt: new Date().toISOString() },
+          }),
+        );
       // The host validates this independently. Persisting it is necessary on
       // iOS release builds, where console output is not a dependable receipt
       // transport; it must happen after the JS-side relay proof.
-      await recordDeviceReceipt(result);
-      console.log(result);
+      await recordDeviceReceipt(results.join("\n"));
+      for (const result of results) console.log(result);
       return receipt;
     })()
-      .then((receipt) => {
+      .then(() => {
         setShown(true);
       })
       .catch((reason: unknown) => {
