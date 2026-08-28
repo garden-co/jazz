@@ -15,20 +15,25 @@ const EPOCH_1_ORDERED_KV_PACK: &str = include_str!("../../groove/fixtures/epoch-
 const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
     "5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7";
 
-fn historical_epoch_1_sqlite_bytes() -> Vec<u8> {
+fn decode_historical_epoch_1_sqlite_fixture(base64: &str) -> Result<Vec<u8>, String> {
     let bytes = STANDARD
-        .decode(EPOCH_1_SQLITE_FIXTURE_BASE64.lines().collect::<String>())
-        .expect("committed SQLite fixture is base64");
-    assert!(historical_epoch_1_sqlite_checksum_matches(&bytes));
-    bytes
+        .decode(base64.lines().collect::<String>())
+        .map_err(|error| format!("committed SQLite fixture is not base64: {error}"))?;
+    if !historical_epoch_1_sqlite_checksum_matches(&bytes) {
+        return Err("committed SQLite fixture checksum does not match".to_owned());
+    }
+    Ok(bytes)
 }
 
 fn historical_epoch_1_sqlite_checksum_matches(bytes: &[u8]) -> bool {
     format!("{:x}", Sha256::digest(bytes)) == EPOCH_1_SQLITE_FIXTURE_SHA256
 }
 
-fn write_historical_epoch_1_sqlite(path: &Path) {
-    std::fs::write(path, historical_epoch_1_sqlite_bytes()).unwrap();
+fn write_historical_epoch_1_sqlite(path: &Path, base64: &str) -> Result<(), String> {
+    // Check the immutable corpus before creating the target, so a corrupt
+    // checked-in payload cannot be mistaken for a corrupt SQLite database.
+    let bytes = decode_historical_epoch_1_sqlite_fixture(base64)?;
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
 }
 
 fn decode_hex(value: &str) -> Vec<u8> {
@@ -39,15 +44,18 @@ fn decode_hex(value: &str) -> Vec<u8> {
         .collect()
 }
 
-fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
-    assert_eq!(
-        format!("{:x}", Sha256::digest(EPOCH_1_ORDERED_KV_PACK)),
-        EPOCH_1_ORDERED_KV_PACK_SHA256,
-        "the authoritative logical pack must match its checked-in checksum"
-    );
-    EPOCH_1_ORDERED_KV_PACK
-        .lines()
-        .skip(1)
+fn parse_epoch_1_ordered_kv_pack(
+    pack: &str,
+    expected_sha256: &str,
+) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> {
+    if format!("{:x}", Sha256::digest(pack)) != expected_sha256 {
+        return Err("authoritative logical pack checksum does not match".to_owned());
+    }
+    let mut lines = pack.lines();
+    if lines.next() != Some("JAZZ-ORDERED-KV-PACK-1") {
+        return Err("authoritative logical pack has an unsupported header".to_owned());
+    }
+    Ok(lines
         .map(|line| {
             let mut fields = line.split('\t');
             let family = fields.next().unwrap().to_owned();
@@ -59,7 +67,12 @@ fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
             );
             (family, key, value)
         })
-        .collect()
+        .collect())
+}
+
+fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    parse_epoch_1_ordered_kv_pack(EPOCH_1_ORDERED_KV_PACK, EPOCH_1_ORDERED_KV_PACK_SHA256)
+        .expect("the authoritative logical pack must be canonical")
 }
 
 fn open(dir: &tempfile::TempDir) -> SqliteStorage {
@@ -79,12 +92,25 @@ fn open_rejects_nul_column_family_before_creating_database() {
 
 #[test]
 fn historical_epoch_1_sqlite_fixture_is_checksum_guarded_before_materialization() {
-    let mut corrupted = historical_epoch_1_sqlite_bytes();
-    corrupted[0] ^= 1;
+    let corrupted = EPOCH_1_SQLITE_FIXTURE_BASE64.replacen('U', "V", 1);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("must-not-exist.sqlite");
     assert!(
-        !historical_epoch_1_sqlite_checksum_matches(&corrupted),
-        "planted physical-fixture corruption must be rejected by the checksum gate"
+        write_historical_epoch_1_sqlite(&path, &corrupted).is_err(),
+        "planted source-payload corruption must fail in the materializer"
     );
+    assert!(
+        !path.exists(),
+        "checksum rejection must precede target creation"
+    );
+}
+
+#[test]
+fn historical_epoch_1_ordered_kv_pack_requires_its_exact_header() {
+    let corrupt_header =
+        EPOCH_1_ORDERED_KV_PACK.replacen("JAZZ-ORDERED-KV-PACK-1", "JAZZ-ORDERED-KV-PACK-0", 1);
+    let corrupt_header_sha256 = format!("{:x}", Sha256::digest(&corrupt_header));
+    assert!(parse_epoch_1_ordered_kv_pack(&corrupt_header, &corrupt_header_sha256).is_err());
 }
 
 #[test]
@@ -92,7 +118,7 @@ fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen()
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let historical_path = directory.path().join("epoch-1.sqlite");
-        write_historical_epoch_1_sqlite(&historical_path);
+        write_historical_epoch_1_sqlite(&historical_path, EPOCH_1_SQLITE_FIXTURE_BASE64).unwrap();
 
         // The first open is deliberately raw and read-only: it proves the
         // committed physical file itself has the documented logical snapshot

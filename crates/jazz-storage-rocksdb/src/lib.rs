@@ -978,24 +978,30 @@ mod tests {
     const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
         "5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7";
 
-    fn historical_epoch_1_rocksdb_archive() -> Vec<u8> {
+    fn decode_historical_epoch_1_rocksdb_fixture(base64: &str) -> Result<Vec<u8>, String> {
         let archive = STANDARD
-            .decode(EPOCH_1_ROCKSDB_FIXTURE_BASE64.lines().collect::<String>())
-            .expect("committed RocksDB fixture is base64");
-        assert!(historical_epoch_1_rocksdb_checksum_matches(&archive));
-        archive
+            .decode(base64.lines().collect::<String>())
+            .map_err(|error| format!("committed RocksDB fixture is not base64: {error}"))?;
+        if !historical_epoch_1_rocksdb_checksum_matches(&archive) {
+            return Err("committed RocksDB fixture checksum does not match".to_owned());
+        }
+        Ok(archive)
     }
 
     fn historical_epoch_1_rocksdb_checksum_matches(archive: &[u8]) -> bool {
         format!("{:x}", Sha256::digest(archive)) == EPOCH_1_ROCKSDB_FIXTURE_SHA256
     }
 
-    fn unpack_historical_epoch_1_rocksdb(root: &std::path::Path) -> std::path::PathBuf {
-        let archive = historical_epoch_1_rocksdb_archive();
+    fn unpack_historical_epoch_1_rocksdb(
+        root: &std::path::Path,
+        base64: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        // Check the immutable corpus before creating the extraction root.
+        let archive = decode_historical_epoch_1_rocksdb_fixture(base64)?;
         Archive::new(GzDecoder::new(Cursor::new(archive)))
             .unpack(root)
-            .expect("committed RocksDB fixture is a safe archive");
-        root.join("rocksdb-epoch-1")
+            .map_err(|error| format!("committed RocksDB fixture is not a safe archive: {error}"))?;
+        Ok(root.join("rocksdb-epoch-1"))
     }
 
     fn decode_hex(value: &str) -> Vec<u8> {
@@ -1006,15 +1012,18 @@ mod tests {
             .collect()
     }
 
-    fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
-        assert_eq!(
-            format!("{:x}", Sha256::digest(EPOCH_1_ORDERED_KV_PACK)),
-            EPOCH_1_ORDERED_KV_PACK_SHA256,
-            "the authoritative logical pack must match its checked-in checksum"
-        );
-        EPOCH_1_ORDERED_KV_PACK
-            .lines()
-            .skip(1)
+    fn parse_epoch_1_ordered_kv_pack(
+        pack: &str,
+        expected_sha256: &str,
+    ) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> {
+        if format!("{:x}", Sha256::digest(pack)) != expected_sha256 {
+            return Err("authoritative logical pack checksum does not match".to_owned());
+        }
+        let mut lines = pack.lines();
+        if lines.next() != Some("JAZZ-ORDERED-KV-PACK-1") {
+            return Err("authoritative logical pack has an unsupported header".to_owned());
+        }
+        Ok(lines
             .map(|line| {
                 let mut fields = line.split('\t');
                 let family = fields.next().unwrap().to_owned();
@@ -1026,7 +1035,12 @@ mod tests {
                 );
                 (family, key, value)
             })
-            .collect()
+            .collect())
+    }
+
+    fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
+        parse_epoch_1_ordered_kv_pack(EPOCH_1_ORDERED_KV_PACK, EPOCH_1_ORDERED_KV_PACK_SHA256)
+            .expect("the authoritative logical pack must be canonical")
     }
 
     fn settled_epoch_1_rocksdb_manifest_bytes() -> Vec<u8> {
@@ -1050,18 +1064,30 @@ mod tests {
 
     #[test]
     fn historical_epoch_1_rocksdb_fixture_is_checksum_guarded_before_extraction() {
-        let mut corrupted = historical_epoch_1_rocksdb_archive();
-        corrupted[0] ^= 1;
+        let corrupted = EPOCH_1_ROCKSDB_FIXTURE_BASE64.replacen('H', "I", 1);
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("must-not-exist");
         assert!(
-            !historical_epoch_1_rocksdb_checksum_matches(&corrupted),
-            "planted physical-fixture corruption must be rejected by the checksum gate"
+            unpack_historical_epoch_1_rocksdb(&root, &corrupted).is_err(),
+            "planted source-payload corruption must fail in the extractor"
         );
+        assert!(!root.exists(), "checksum rejection must precede extraction");
+    }
+
+    #[test]
+    fn historical_epoch_1_ordered_kv_pack_requires_its_exact_header() {
+        let corrupt_header =
+            EPOCH_1_ORDERED_KV_PACK.replacen("JAZZ-ORDERED-KV-PACK-1", "JAZZ-ORDERED-KV-PACK-0", 1);
+        let corrupt_header_sha256 = format!("{:x}", Sha256::digest(&corrupt_header));
+        assert!(parse_epoch_1_ordered_kv_pack(&corrupt_header, &corrupt_header_sha256).is_err());
     }
 
     #[test]
     fn historical_epoch_1_rocksdb_fixture_read_only_snapshot_mixed_write_and_reopen() {
         let directory = tempfile::tempdir().unwrap();
-        let historical_path = unpack_historical_epoch_1_rocksdb(directory.path());
+        let historical_path =
+            unpack_historical_epoch_1_rocksdb(directory.path(), EPOCH_1_ROCKSDB_FIXTURE_BASE64)
+                .unwrap();
 
         // The first open cannot create a file or column family. It reads the
         // released physical store before the current adapter sees it.
