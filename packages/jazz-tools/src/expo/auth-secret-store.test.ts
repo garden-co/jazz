@@ -128,13 +128,14 @@ describe("ExpoAuthSecretStore operation ordering", () => {
     const creating = store.getOrCreateSecret();
     await vi.waitFor(() => expect(secureStore.getItemAsync).toHaveBeenCalledOnce());
 
-    const saving = store.saveSecret("imported-secret");
+    const importedSecret = generateAuthSecret();
+    const saving = store.saveSecret(importedSecret);
     firstRead.resolve(null);
     await Promise.all([creating, saving]);
 
-    expect(events.at(-1)).toBe("save:imported-secret");
-    expect(value()).toBe("imported-secret");
-    expect(await store.getOrCreateSecret()).toBe("imported-secret");
+    expect(events.at(-1)).toBe(`save:${importedSecret}`);
+    expect(value()).toBe(importedSecret);
+    expect(await store.getOrCreateSecret()).toBe(importedSecret);
   });
 
   it("does not let an older get-or-create resurrect a cleared secret", async () => {
