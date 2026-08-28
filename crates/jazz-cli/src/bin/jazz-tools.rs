@@ -307,7 +307,10 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
 
     let external_jwt_key_configured = jwks_url.is_some() || jwt_public_key.is_some();
     if external_jwt_key_configured {
-        if jwt_issuer.as_deref().is_none_or(|value| value.trim().is_empty()) {
+        if jwt_issuer
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
             return Err(
                 "--jwt-issuer / JAZZ_JWT_ISSUER is required with --jwks-url or --jwt-public-key"
                     .to_owned(),

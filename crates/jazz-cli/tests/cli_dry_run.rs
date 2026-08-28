@@ -461,7 +461,11 @@ fn help_lists_dev_server_commands() {
             .any(|line| line.contains("JAZZ_SERVER_AUTH_STATIC_BEARER"))
     );
     assert!(!lines.iter().any(|line| line.contains("JAZZ_ADMIN_SECRET")));
-    assert!(!lines.iter().any(|line| line.contains("JAZZ_BACKEND_SECRET")));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("JAZZ_BACKEND_SECRET"))
+    );
     assert!(lines.iter().any(|line| line.contains("JAZZ_JWT_ISSUER")));
     assert!(lines.iter().any(|line| line.contains("JAZZ_JWT_AUDIENCE")));
     assert!(

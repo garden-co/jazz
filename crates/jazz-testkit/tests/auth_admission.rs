@@ -171,8 +171,13 @@ fn external_jwt_rejects_every_jazz_reserved_issuer_with_typed_error() {
         let config = local_first_config(false)
             .with_expected_issuer(issuer)
             .with_expected_audience("auth-app");
-        let token =
-            local_first_token("alice", expires_in(60), Some(issuer), Some("auth-app"), None);
+        let token = local_first_token(
+            "alice",
+            expires_in(60),
+            Some(issuer),
+            Some("auth-app"),
+            None,
+        );
         assert_eq!(
             admit_bearer_jwt(&config, Some(&token), AdmissionSource::AuthorizationHeader),
             Err(AuthAdmissionError::InvalidAuthorSubject(

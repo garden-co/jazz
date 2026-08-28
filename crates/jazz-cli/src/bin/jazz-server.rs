@@ -583,12 +583,10 @@ impl CliOptions {
                     );
                 }
                 "--jwt-issuer" => {
-                    options.auth_admission.expected_issuer =
-                        Some(next_value(&mut args, &arg)?);
+                    options.auth_admission.expected_issuer = Some(next_value(&mut args, &arg)?);
                 }
                 "--jwt-audience" => {
-                    options.auth_admission.expected_audience =
-                        Some(next_value(&mut args, &arg)?);
+                    options.auth_admission.expected_audience = Some(next_value(&mut args, &arg)?);
                 }
                 "--allow-local-first-auth" => {
                     options.auth_admission.allow_local_first_auth =
@@ -701,8 +699,7 @@ impl CliOptions {
         }
         if let Ok(value) = env::var("JAZZ_SERVER_AUTH_JWT_ED_PUBLIC_KEY_PEM") {
             options.auth_admission.static_bearer_token = None;
-            options.auth_admission.jwt_verifier =
-                Some(JwtVerifierConfig::ed_public_key_pem(value));
+            options.auth_admission.jwt_verifier = Some(JwtVerifierConfig::ed_public_key_pem(value));
         }
         if let Ok(value) = env::var("JAZZ_JWT_ISSUER") {
             options.auth_admission.expected_issuer = Some(value);

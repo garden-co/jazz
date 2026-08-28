@@ -832,8 +832,7 @@ fn ensure_external_jwt_claims_at(
 ) -> Result<(), JwtError> {
     let expected_issuer = config.jwt_issuer.as_deref().ok_or_else(|| {
         JwtError::Invalid(
-            "external JWT issuer is not configured; set --jwt-issuer / JAZZ_JWT_ISSUER"
-                .to_owned(),
+            "external JWT issuer is not configured; set --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
         )
     })?;
     let expected_audience = config.jwt_audience.as_deref().ok_or_else(|| {
@@ -864,7 +863,10 @@ fn ensure_external_jwt_claims_at(
     if exp <= now {
         return Err(JwtError::Expired);
     }
-    if verified.not_before.is_some_and(|not_before| not_before > now) {
+    if verified
+        .not_before
+        .is_some_and(|not_before| not_before > now)
+    {
         return Err(JwtError::Invalid("JWT is not valid yet".to_owned()));
     }
 
@@ -1261,10 +1263,7 @@ mod tests {
         if object.get("exp").is_none_or(serde_json::Value::is_null) {
             object.insert("exp".to_owned(), serde_json::json!(4_102_444_800_u64));
         }
-        object.insert(
-            "aud".to_owned(),
-            serde_json::json!("jazz-audience"),
-        );
+        object.insert("aud".to_owned(), serde_json::json!("jazz-audience"));
         encode(&header, &claims, &key).unwrap()
     }
 

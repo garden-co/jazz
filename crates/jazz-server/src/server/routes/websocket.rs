@@ -2403,7 +2403,6 @@ mod tests {
         received
     }
 
-
     /// Complete the protocol's catalogue/session setup before a route test
     /// attributes a later response to its own operation. A newly admitted
     /// session may first receive the authority catalogue, so treating that

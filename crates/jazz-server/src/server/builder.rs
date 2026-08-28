@@ -792,8 +792,7 @@ fn validate_server_config(
         }
         (Some(_), None) => {
             return Err(
-                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE"
-                    .to_owned(),
+                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE".to_owned(),
             );
         }
         (None, Some(_)) => {
