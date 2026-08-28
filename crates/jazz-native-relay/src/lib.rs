@@ -935,9 +935,12 @@ pub fn ensure_native_relay_abi_compatible(
 
 /// Explicit process-local persistence/synchronization scope.
 ///
-/// Authentication material is intentionally absent. `auth_scope` is an opaque
-/// stable subject/tenant discriminator supplied by the host after validation;
-/// tokens are sent to an upstream connection, never used as storage names.
+/// Authentication material is intentionally absent. `auth_scope` is an opaque,
+/// required stable subject/tenant discriminator supplied by the host after
+/// validation; tokens are sent to an upstream connection, never used as storage
+/// names. The `Option` preserves the strict JSON boundary's ability to reject
+/// an omitted or `null` field rather than silently manufacturing an anonymous
+/// persistent scope.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RelayScope {
     pub app_namespace: String,
@@ -957,14 +960,18 @@ impl RelayScope {
                 )));
             }
         }
-        if self
-            .auth_scope
-            .as_deref()
-            .is_some_and(|auth_scope| auth_scope.trim().is_empty())
-        {
-            return Err(RelayError::InvalidScope(
-                "auth scope must not be empty when supplied".to_owned(),
-            ));
+        match self.auth_scope.as_deref() {
+            Some(auth_scope) if !auth_scope.trim().is_empty() => {}
+            Some(_) => {
+                return Err(RelayError::InvalidScope(
+                    "auth scope must not be empty".to_owned(),
+                ));
+            }
+            None => {
+                return Err(RelayError::InvalidScope(
+                    "auth scope is required for a persistent relay".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -2190,7 +2197,7 @@ mod tests {
                     scope: RelayScopeRequest {
                         app_namespace: "abi-rejection".to_owned(),
                         storage_namespace: "default".to_owned(),
-                        auth_scope: None,
+                        auth_scope: Some("opaque-subject".to_owned()),
                     },
                     sqlite_path: sqlite_path.display().to_string(),
                     schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
@@ -2277,6 +2284,60 @@ mod tests {
                 "claims": serde_json::to_value(claims).unwrap(),
             })
         };
+
+        // The platform-owned C ABI is the only production path that can mint
+        // a capability. Exercise the JSON forms serde would otherwise map to
+        // `Option::None` here, and prove they fail before either registry can
+        // change. This is intentionally an ABI-boundary test rather than a
+        // Rust-only `RelayScope` unit test.
+        for (case, auth_scope) in [
+            ("omitted", None),
+            ("null", Some(serde_json::Value::Null)),
+            ("empty", Some(serde_json::Value::String(String::new()))),
+            (
+                "whitespace",
+                Some(serde_json::Value::String(" \t\n ".to_owned())),
+            ),
+        ] {
+            let mut rejected = request(BTreeMap::new());
+            let scope = rejected["scope"]
+                .as_object_mut()
+                .expect("trusted request has an object scope");
+            match auth_scope {
+                Some(auth_scope) => {
+                    scope.insert("auth_scope".to_owned(), auth_scope);
+                }
+                None => {
+                    scope.remove("auth_scope");
+                }
+            }
+            let rejected = serde_json::to_vec(&rejected).unwrap();
+            let mut output = JazzNativeRelayBytes {
+                data: std::ptr::dangling_mut(),
+                len: 99,
+            };
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_admit_scope_json(
+                        host,
+                        rejected.as_ptr(),
+                        rejected.len(),
+                        &mut output,
+                    )
+                },
+                JazzNativeRelayStatus::LifecycleFailure,
+                "{case} auth scope must fail closed",
+            );
+            assert!(output.data.is_null(), "{case} must not return a capability");
+            assert_eq!(output.len, 0, "{case} must not return a capability");
+            let host_state = unsafe { (*host).inner.lock().unwrap() };
+            assert!(
+                host_state.admitted_scopes.is_empty(),
+                "{case} must not mutate the admission registry"
+            );
+            assert!(host_state.relays.is_empty(), "{case} must not open a relay");
+        }
+
         let encoded = serde_json::to_vec(&request(BTreeMap::from([(
             "role".to_owned(),
             Value::String("member".to_owned()),
@@ -2453,16 +2514,14 @@ mod tests {
     }
 
     #[test]
-    fn relay_scope_rejects_an_empty_authenticated_scope() {
+    fn relay_scope_requires_a_nonempty_authenticated_scope() {
         let directory = tempfile::tempdir().unwrap();
         let mut relay = config(directory.path().join("empty-auth.sqlite"), Some("   "));
 
         assert!(matches!(relay.validate(), Err(RelayError::InvalidScope(_))));
 
         relay.scope.auth_scope = None;
-        relay
-            .validate()
-            .expect("unauthenticated scopes remain an explicit host choice");
+        assert!(matches!(relay.validate(), Err(RelayError::InvalidScope(_))));
     }
 
     #[test]

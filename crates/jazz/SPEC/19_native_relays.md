@@ -70,7 +70,9 @@ object or a method that accepts it. Its exact top-level fields are:
 Unknown fields at the top level, scope, or identity level fail closed. Rust
 parses the schema JSON, serializes it to its normalized JSON spelling, builds
 the `JazzSchema`, validates scope and the non-`SYSTEM` author, and validates
-the typed claims before it admits the scope. Admission input is bounded to
+the typed claims before it admits the scope. `auth_scope` is required: omitted,
+`null`, empty, and whitespace-only values fail before a capability is minted or
+a relay registry entry can exist. Admission input is bounded to
 1 MiB independently of peer-frame limits. Credential-bearing claims named
 `authorization`, `access_token`, `refresh_token`, `id_token`,
 `bearer_token`, or `token` (case-insensitive) fail closed. This is a boundary
