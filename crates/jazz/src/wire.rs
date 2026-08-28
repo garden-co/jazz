@@ -1420,15 +1420,68 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "transport-compression-lz4",
+        feature = "transport-compression-zstd"
+    ))]
     #[test]
     fn dual_compression_negotiation_gives_outbound_lz4_precedence() {
         let both = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
+        let remote = WireHello::current(WirePeerRole::Core, both);
+        let negotiated =
+            negotiate_wire(&remote, WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION, both)
+                .expect("peers offering both codecs negotiate both capability bits");
+        assert_eq!(negotiated.features, both);
 
-        assert_eq!(WireCompression::from_features(both), WireCompression::Lz4);
+        let mut encoder = WireStreamEncoder::new(negotiated.features)
+            .expect("both negotiated codecs are compiled in");
+        assert_eq!(encoder.active_feature(), FEATURE_PAYLOAD_LZ4);
+        let semantic = b"dual-codec negotiated payload";
+        let payload = encoder.encode_message(semantic).expect("LZ4 encodes");
+        let emitted_features =
+            (negotiated.features & !FEATURE_PAYLOAD_COMPRESSION_MASK) | encoder.active_feature();
+        let frame = decode_frame(
+            &encode_frame(&WireFrame::Message(WireEnvelope::new(
+                negotiated.protocol_version,
+                emitted_features,
+                payload.clone(),
+            )))
+            .expect("selected-codec envelope encodes"),
+        )
+        .expect("selected-codec envelope decodes");
+        let WireFrame::Message(envelope) = frame else {
+            panic!("expected message envelope")
+        };
         assert_eq!(
-            outbound_wire_compression_from_features(both),
-            WireCompression::Lz4,
-            "the outbound envelope must carry only the selected LZ4 bit"
+            envelope.features & FEATURE_PAYLOAD_COMPRESSION_MASK,
+            FEATURE_PAYLOAD_LZ4,
+            "the emitted envelope carries LZ4 and clears negotiated-but-inactive Zstd"
+        );
+        assert_eq!(envelope.features & FEATURE_PAYLOAD_ZSTD, 0);
+        let mut decoder = WireStreamDecoder::new(both).expect("both codecs decode");
+        assert_eq!(
+            decoder
+                .decode_message(&payload, envelope.features)
+                .expect("emitted LZ4 payload decodes"),
+            semantic
+        );
+
+        // Planted sensitivity controls: union negotiation or swapped codec-bit
+        // mapping would turn this Zstd-only peer into LZ4 and fail these checks.
+        let zstd_only = WireHello::current(WirePeerRole::Core, FEATURE_PAYLOAD_ZSTD);
+        let zstd_negotiated = negotiate_wire(
+            &zstd_only,
+            WIRE_PROTOCOL_VERSION,
+            WIRE_PROTOCOL_VERSION,
+            both,
+        )
+        .expect("Zstd-only remote still has one common codec");
+        assert_eq!(zstd_negotiated.features, FEATURE_PAYLOAD_ZSTD);
+        assert_eq!(
+            WireStreamEncoder::new(zstd_negotiated.features)
+                .expect("Zstd encoder is compiled in")
+                .active_feature(),
+            FEATURE_PAYLOAD_ZSTD
         );
     }
 
