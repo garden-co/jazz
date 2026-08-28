@@ -2720,45 +2720,23 @@ fn large_value_ref_schema() -> &'static EnumSchema {
     })
 }
 
-pub(crate) fn large_value_ref_value_type() -> &'static ValueType {
-    static VALUE_TYPE: OnceLock<ValueType> = OnceLock::new();
-    VALUE_TYPE.get_or_init(|| ValueType::Enum(Box::new(large_value_ref_schema().clone())))
-}
-
-pub(crate) fn large_value_ref_value(value: &LargeValueRef) -> Result<Value, Error> {
+pub(crate) fn encode_large_value_ref(value: &LargeValueRef) -> Result<Vec<u8>, Error> {
     validate_descriptor(value)?;
     let tag = u32::from(large_value_kind_tag(value.kind));
-    let payload = large_value_ref_schema()
+    let schema = large_value_ref_schema();
+    let payload = schema
         .case(tag)
         .map_err(|_| Error::MalformedScalar)?
         .payload;
     let value = EnumValue::create(tag, payload, &chunked_values(value))
         .map_err(|_| Error::MalformedScalar)?;
-    Ok(Value::Enum(value))
-}
-
-pub(crate) fn large_value_ref_from_value(value: &Value) -> Result<LargeValueRef, Error> {
-    let Value::Enum(value) = value else {
-        return Err(Error::MalformedScalar);
-    };
-    let kind =
-        large_value_kind_from_tag(u8::try_from(value.tag()).map_err(|_| Error::MalformedScalar)?)?;
-    let values = value
-        .record()
-        .to_values()
-        .map_err(|_| Error::MalformedScalar)?;
-    decode_chunked_values(kind, &values)
-}
-
-pub(crate) fn encode_large_value_ref(value: &LargeValueRef) -> Result<Vec<u8>, Error> {
     crate::records::encode_single_field_value(
-        &large_value_ref_value(value)?,
-        large_value_ref_value_type(),
+        &Value::Enum(value),
+        &ValueType::Enum(Box::new(schema.clone())),
     )
     .map_err(|_| Error::MalformedScalar)
 }
 
-#[cfg(test)]
 pub(crate) fn decode_large_value_ref(encoded: &[u8]) -> Result<LargeValueRef, Error> {
     let (tag, payload) =
         crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;

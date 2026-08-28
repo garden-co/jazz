@@ -256,6 +256,17 @@ with a truncated or deliberately non-V2 nested layout fails as
 the full current descriptor/edit/scalar payload is decoded and exactly
 re-encoded; V2 malformed or trailing bytes still fail closed.
 
+Staged-root receipts and pending-upload journals store the canonical complete
+`LargeValueRef` encoding as an opaque `bytes` metadata field (nullable bytes
+for an unbound pending descriptor), not as a nested generic descriptor value.
+On every recovery/read path Groove runs that byte field through the same raw
+preflight and codec decoder before it interprets root or edit fields. The
+`future_descriptor_metadata_fails_before_v2_binding_without_mutation` reopen
+receipt installs a future outer tag/version plus invalid nested bytes in both
+journals, requires `UnsupportedFormat`, and proves the durable records remain
+byte-identical after rejection. No metadata reader may create a V2 decoding
+bypass by embedding a descriptor inside another record.
+
 V2's content-defined profile is permanent format data:
 
 ```text

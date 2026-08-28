@@ -303,7 +303,10 @@ fn staged_large_value_schema() -> &'static DurableMetadataRecordSchema {
             (
                 STAGED_VALUE_REF_FIELD,
                 "value_ref",
-                crate::large_values::large_value_ref_value_type().clone(),
+                // Keep the canonical descriptor as opaque bytes at the
+                // metadata envelope boundary. Its own raw decoder must select
+                // format before inspecting V2 root/edit layout.
+                records::ValueType::raw_bytes(),
             ),
             (
                 STAGED_VALUE_ENCODED_BYTES_FIELD,
@@ -336,9 +339,7 @@ fn pending_large_value_upload_schema() -> &'static DurableMetadataRecordSchema {
             (
                 PENDING_UPLOAD_DESCRIPTOR_FIELD,
                 "descriptor",
-                records::ValueType::Nullable(Box::new(
-                    crate::large_values::large_value_ref_value_type().clone(),
-                )),
+                records::ValueType::Nullable(Box::new(records::ValueType::raw_bytes())),
             ),
             (
                 PENDING_UPLOAD_RECEIPT_ID_FIELD,
@@ -642,11 +643,15 @@ fn encode_staged_large_value(
             ),
             (
                 STAGED_VALUE_REF_FIELD,
-                crate::large_values::large_value_ref_value(&staged.value_ref).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode staged large value: {error}"
-                    ))
-                })?,
+                records::Value::Bytes(
+                    crate::large_values::encode_large_value_ref(&staged.value_ref).map_err(
+                        |error| {
+                            Error::InvalidLargeValueMetadata(format!(
+                                "cannot encode staged large value: {error}"
+                            ))
+                        },
+                    )?,
+                ),
             ),
             (
                 STAGED_VALUE_ENCODED_BYTES_FIELD,
@@ -674,7 +679,13 @@ fn decode_staged_large_value(
         "staged large value",
     )?;
     let id = take_metadata_field(&mut values, STAGED_VALUE_ID_FIELD, "staged large value")?;
-    let value_ref = take_metadata_field(&mut values, STAGED_VALUE_REF_FIELD, "staged large value")?;
+    let records::Value::Bytes(value_ref) =
+        take_metadata_field(&mut values, STAGED_VALUE_REF_FIELD, "staged large value")?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode staged large value: invalid descriptor bytes".to_owned(),
+        ));
+    };
     let records::Value::U64(encoded_bytes) = take_metadata_field(
         &mut values,
         STAGED_VALUE_ENCODED_BYTES_FIELD,
@@ -707,13 +718,11 @@ fn decode_staged_large_value(
     };
     Ok(crate::large_values::StagedLargeValue {
         id: staged_large_value_id_from_value(&id)?,
-        value_ref: crate::large_values::large_value_ref_from_value(&value_ref).map_err(
-            |error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode staged large value descriptor: {error}"
-                ))
-            },
-        )?,
+        value_ref: crate::large_values::decode_large_value_ref(&value_ref).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot decode staged large value descriptor: {error}"
+            ))
+        })?,
         accounting: crate::large_values::StagedLargeValueAccounting {
             encoded_bytes,
             node_count,
@@ -728,7 +737,7 @@ fn encode_pending_large_value_upload(
     let descriptor = upload
         .descriptor
         .as_ref()
-        .map(crate::large_values::large_value_ref_value)
+        .map(crate::large_values::encode_large_value_ref)
         .transpose()
         .map_err(|error| {
             Error::InvalidLargeValueMetadata(format!(
@@ -744,7 +753,9 @@ fn encode_pending_large_value_upload(
             ),
             (
                 PENDING_UPLOAD_DESCRIPTOR_FIELD,
-                records::Value::Nullable(descriptor.map(Box::new)),
+                records::Value::Nullable(
+                    descriptor.map(|bytes| Box::new(records::Value::Bytes(bytes))),
+                ),
             ),
             (
                 PENDING_UPLOAD_RECEIPT_ID_FIELD,
@@ -846,7 +857,10 @@ fn decode_pending_large_value_upload(
     )?;
     let descriptor = descriptor
         .as_deref()
-        .map(crate::large_values::large_value_ref_from_value)
+        .map(|value| match value {
+            records::Value::Bytes(bytes) => crate::large_values::decode_large_value_ref(bytes),
+            _ => Err(crate::large_values::Error::MalformedScalar),
+        })
         .transpose()
         .map_err(|error| {
             Error::InvalidLargeValueMetadata(format!(

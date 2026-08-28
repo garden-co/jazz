@@ -92,6 +92,13 @@ literal JSON, duplicate-key, numeric, Unicode, malformed, replay, tail,
 UTF-8/UTF-16, consolidation, and content-defined profile receipts live in
 Groove spec §9.2 and its named hard-coded codec tests.
 
+The same boundary applies to recovery: Groove's staged receipt and pending
+upload metadata retain opaque canonical descriptor bytes and delegate their
+decode to the shared raw dispatcher. Jazz cannot observe, repair, or reinterpret
+those bytes. A future-format malformed receipt is rejected before any V2 nested
+metadata decoding and remains durable-but-unconsumed for a future explicitly
+supported format; recovery reads do not mutate it.
+
 Remaining lifecycle scope is intentionally unchanged: Jazz still owns
 authorization, staging expiry/admission, atomic owner-row publication,
 retention, and cross-backend durability verification; Groove still owns

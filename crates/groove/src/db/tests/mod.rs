@@ -539,3 +539,121 @@ fn large_value_metadata_records_are_canonical_groove_records() {
         "56b8e4a2c8d0c22a9ca73b21d372744f"
     );
 }
+
+// This internal reopen receipt protects the metadata envelope boundary. The
+// descriptor bytes are intentionally a future selector followed by a payload
+// that cannot possibly bind as V2; reads must return the selector failure and
+// leave both persisted journals untouched for a future implementation.
+#[futures_test::test]
+async fn future_descriptor_metadata_fails_before_v2_binding_without_mutation() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    let future_descriptor = vec![0, crate::large_values::FORMAT_VERSION + 1, 0xff];
+    let staged_id = crate::large_values::StagedLargeValueId([0x91; 16]);
+    let pending_id = crate::large_values::StagedLargeValueId([0x92; 16]);
+    let staged = encode_large_value_metadata_record(
+        staged_large_value_schema(),
+        [
+            (
+                STAGED_VALUE_ID_FIELD,
+                staged_large_value_id_value(staged_id),
+            ),
+            (
+                STAGED_VALUE_REF_FIELD,
+                records::Value::Bytes(future_descriptor.clone()),
+            ),
+            (STAGED_VALUE_ENCODED_BYTES_FIELD, records::Value::U64(0)),
+            (STAGED_VALUE_NODE_COUNT_FIELD, records::Value::U64(0)),
+            (STAGED_VALUE_CREATED_AT_MS_FIELD, records::Value::U64(0)),
+        ],
+        "staged large value",
+    )
+    .unwrap();
+    let pending = encode_large_value_metadata_record(
+        pending_large_value_upload_schema(),
+        [
+            (
+                PENDING_UPLOAD_ID_FIELD,
+                staged_large_value_id_value(pending_id),
+            ),
+            (
+                PENDING_UPLOAD_DESCRIPTOR_FIELD,
+                records::Value::Nullable(Some(Box::new(records::Value::Bytes(future_descriptor)))),
+            ),
+            (
+                PENDING_UPLOAD_RECEIPT_ID_FIELD,
+                records::Value::Nullable(None),
+            ),
+            (PENDING_UPLOAD_ENCODED_BYTES_FIELD, records::Value::U64(0)),
+            (PENDING_UPLOAD_NODE_COUNT_FIELD, records::Value::U64(0)),
+            (PENDING_UPLOAD_CREATED_AT_MS_FIELD, records::Value::U64(0)),
+            (
+                PENDING_UPLOAD_CHUNKS_FIELD,
+                records::Value::Array(Vec::new()),
+            ),
+        ],
+        "pending large-value upload",
+    )
+    .unwrap();
+    let staged_key = staged_large_value_key(staged_id);
+    let pending_key = pending_large_value_upload_key(pending_id);
+    database
+        .storage
+        .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: staged_key.clone(),
+                value: staged.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: pending_key.clone(),
+                value: pending.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+    drop(database);
+
+    let reopened = Database::new(schema, storage.clone()).await.unwrap();
+    let staged_result = reopened.staged_large_values().await;
+    assert!(
+        matches!(
+            staged_result,
+            Err(Error::InvalidLargeValueMetadata(message))
+                if message.contains("unsupported large-value format version 3")
+        ),
+        "staged journal must dispatch before V2 binding"
+    );
+    assert!(
+        matches!(
+            reopened.pending_large_value_uploads().await,
+            Err(Error::InvalidLargeValueMetadata(message))
+                if message.contains("unsupported large-value format version 3")
+        ),
+        "pending journal must dispatch before V2 binding"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key)
+            .await
+            .unwrap(),
+        Some(staged),
+        "a rejected staged receipt must not mutate lifecycle metadata"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), pending_key)
+            .await
+            .unwrap(),
+        Some(pending),
+        "a rejected pending journal must not mutate lifecycle metadata"
+    );
+}
