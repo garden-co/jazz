@@ -400,16 +400,16 @@
       },
       "semantic_fixture": {
         "path": "crates/jazz-server/src/server/catalogue_entry.rs",
-        "anchor": "catalogue_entry_metadata_json_is_sorted_and_noncanonical_spelling_is_rejected"
+        "anchor": "storage_row_v1_golden_is_exact_and_rejects_alternates"
       },
       "rejection_receipt": {
         "path": "crates/jazz-server/src/server/catalogue_storage.rs",
-        "anchor": "catalogue_storage_rejects_malformed_entry_key_without_publishing_entries"
+        "anchor": "scan_rejects_one_malformed_entry_before_returning_partial_catalogue"
       },
       "evidence": [
         {
           "path": "crates/jazz-server/src/server/catalogue_storage.rs",
-          "anchor": "adapter_catalogue_reads_the_settled_default_cf_layout"
+          "anchor": "adapter_catalogue_reopens_only_the_v1_default_cf_layout"
         }
       ]
     },
