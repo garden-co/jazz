@@ -1,6 +1,7 @@
 # todo-client-localfirst-expo
 
 Expo example scaffolding for local-first todos using `jazz-tools/react` + `jazz-rn`.
+It demonstrates the native-relay install/ABI boundary, not a finished runtime.
 
 > **Alpha boundary:** this is compile/build scaffolding, not a runnable persistent Jazz client.
 > The SQLite and native-relay Rust foundations exist, but are not connected to

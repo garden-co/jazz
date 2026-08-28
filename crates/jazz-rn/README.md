@@ -105,6 +105,13 @@ The plugin turns on the New Architecture, and native autolinking registers
 `JazzRelayPackage` on Android and the `JazzRn` pod on iOS. Do not use Expo Go:
 it cannot contain the relay module.
 
+Expo Go is not supported. For a bare Android host set `newArchEnabled=true`;
+for iOS install pods with `RCT_NEW_ARCH_ENABLED=1 bundle exec pod install`.
+Use the `rn-preview-release` pull-request label when a preview must build the
+native relay artifacts. This is still not yet a supported high-level React Native Jazz client:
+the install path is intentionally documented separately
+from the unfinished general runtime facade.
+
 Bare React Native uses the same direct dependency and autolinking metadata, but
 has no Expo plugin: enable the New Architecture in the host project before
 running its platform install/build commands.
