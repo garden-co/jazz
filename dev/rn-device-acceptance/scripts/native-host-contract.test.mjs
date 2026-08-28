@@ -66,15 +66,6 @@ test("Expo config plugin describes the real iOS receipt boundary without claimin
   assert.doesNotMatch(plugin, /this workflow is source-only/);
 });
 
-test("Expo config plugin describes the real iOS receipt boundary without claiming TODO scenarios", () => {
-  const plugin = read("plugins/with-jazz-device-fixture.cjs");
-  assert.match(plugin, /label-gated iOS simulator workflow/);
-  assert.match(plugin, /requires its linked/);
-  assert.match(plugin, /ABI\/admission receipt/);
-  assert.match(plugin, /Multi-peer acceptance remains TODO \(#2291\)/);
-  assert.doesNotMatch(plugin, /this workflow is source-only/);
-});
-
 test("device fixture does not import internal jazz-tools relay-frame types", () => {
   const fixture = read("src/native-fixture.ts");
   assert.doesNotMatch(fixture, /NativeRelay(?:Capability|Executor)/);
