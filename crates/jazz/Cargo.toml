@@ -65,6 +65,7 @@ insta = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 jazz-storage-rocksdb.workspace = true
+jazz-storage-sqlite.workspace = true
 futures = "0.3"
 tokio = { version = "1", features = [
   "macros",

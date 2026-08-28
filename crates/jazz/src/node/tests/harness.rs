@@ -71,3 +71,4 @@ include!("recovery.rs");
 include!("edge_authority.rs");
 include!("general.rs");
 include!("view_update_capture.rs");
+include!("native_storage_corpus.rs");
