@@ -92,7 +92,7 @@ const relationalRecipientApp = s.defineApp({
 });
 const relationalRecipientPermissions = {
   ...betterAuthPermissions,
-  ...s.definePermissions(relationalRecipientApp, ({ policy, session, anyOf, allowedTo }) => {
+  ...s.definePermissions(relationalRecipientApp, ({ policy, session, allOf, anyOf, allowedTo }) => {
     policy.albums.allowRead.where({});
     policy.albums.allowInsert.where({ $createdBy: session.user });
     policy.tracks.allowRead.where({});
@@ -133,21 +133,28 @@ const relationalRecipientPermissions = {
     policy.invitations.allowInsert.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
-    policy.invitations.allowUpdate.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
-    );
     policy.invitations.allowUpdate
-      .whereOld({ subject: session.user, status: "pending" })
-      .whereNew((invite) =>
-        policy.invitations.exists.where({
-          id: invite.id,
-          playlist_id: invite.playlist_id,
-          subject: invite.subject,
-          role: invite.role,
-          status: "pending",
-        }),
+      .whereOld((invite) =>
+        anyOf([
+          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          { subject: session.user, status: "pending" },
+        ]),
       )
-      .whereNew({ subject: session.user, status: "accepted" });
+      .whereNew((invite) =>
+        anyOf([
+          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          allOf([
+            policy.invitations.exists.where({
+              id: invite.id,
+              playlist_id: invite.playlist_id,
+              subject: invite.subject,
+              role: invite.role,
+              status: "pending",
+            }),
+            { subject: session.user, status: "accepted" },
+          ]),
+        ]),
+      );
     policy.invitations.allowDelete.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
