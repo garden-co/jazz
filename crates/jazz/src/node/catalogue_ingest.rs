@@ -74,7 +74,7 @@ where
             batch.update(
                 "jazz_catalogue",
                 vec![
-                    Value::Bytes(b"genesis".to_vec()),
+                    Value::U64(codec::CatalogueRecordKind::Genesis.key()),
                     Value::Uuid(plan.catalogue.current_schema_version_id.0),
                     Value::Bytes(Vec::new()),
                 ],
@@ -87,7 +87,7 @@ where
             batch.update(
                 "jazz_catalogue",
                 vec![
-                    Value::Bytes(b"bootstrap_ready".to_vec()),
+                    Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
                     Value::Uuid(ready.genesis.0),
                     Value::Bytes(serde_json::to_vec(&ready)?),
                 ],
@@ -97,7 +97,7 @@ where
             batch.update(
                 "jazz_catalogue",
                 vec![
-                    Value::Bytes(b"schema".to_vec()),
+                    Value::U64(codec::CatalogueRecordKind::Schema.key()),
                     Value::Uuid(schema.id.0),
                     Value::Bytes(serde_json::to_vec(schema)?),
                 ],

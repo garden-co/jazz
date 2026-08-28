@@ -596,7 +596,7 @@ fn write_catalogue_record(
     batch.update(
         "jazz_catalogue",
         vec![
-            Value::Bytes(kind.to_vec()),
+            Value::U64(test_catalogue_kind(kind).key()),
             Value::Uuid(id),
             Value::Bytes(payload),
         ],
@@ -611,13 +611,89 @@ fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id
     batch.delete(
         "jazz_catalogue",
         groove::db::PrimaryKeyValue::Composite(vec![
-            groove::db::PrimaryKeyValue::Bytes(kind.to_vec()),
+            groove::db::PrimaryKeyValue::U64(test_catalogue_kind(kind).key()),
             groove::db::PrimaryKeyValue::Uuid(id),
         ]),
     );
     let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
 let persisted = crate::db::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
+}
+
+fn test_catalogue_kind(kind: &[u8]) -> crate::node::codec::CatalogueRecordKind {
+    use crate::node::codec::CatalogueRecordKind;
+    match kind {
+        b"genesis" => CatalogueRecordKind::Genesis,
+        b"schema" => CatalogueRecordKind::Schema,
+        b"lens" => CatalogueRecordKind::Lens,
+        b"schema_lineage_staged" => CatalogueRecordKind::SchemaLineageStaged,
+        b"schema_lineage_pending" => CatalogueRecordKind::SchemaLineagePending,
+        b"schema_lineage_active" => CatalogueRecordKind::SchemaLineageActive,
+        b"write_pointer_pending" => CatalogueRecordKind::WritePointerPending,
+        b"bootstrap_ready" => CatalogueRecordKind::BootstrapReady,
+        _ => panic!("unknown test catalogue kind: {kind:?}"),
+    }
+}
+
+fn write_raw_catalogue_kind(
+    node: &mut NodeState<RocksDbStorage>,
+    kind: u64,
+    id: uuid::Uuid,
+) {
+    let mut batch = node.database.open_batch();
+    batch.update(
+        "jazz_catalogue",
+        vec![Value::U64(kind), Value::Uuid(id), Value::Bytes(Vec::new())],
+    );
+    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
+    let persisted = crate::db::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
+}
+
+/// The epoch-pinned kernel is closed.  An unrecognized record kind must not
+/// be ignored as a future extension or decoded under a current descriptor.
+#[test]
+fn dynamic_edge_reopen_fails_closed_on_unknown_catalogue_kernel_kind() {
+    let empty_schema = empty_public_test_schema();
+    let temp_dir = tempfile::tempdir().expect("create edge store");
+    let cfs = empty_schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).expect("open empty edge store");
+    let mut edge = NodeState::new_catalogue_uninitialized(node(0xa0), storage)
+        .expect("open explicit uninitialized edge");
+    write_raw_catalogue_kind(&mut edge, 0xff, uuid::Uuid::from_bytes([0xa0; 16]));
+    drop(edge);
+
+    for attempt in 0..2 {
+        assert!(fresh_dynamic_edge_open(temp_dir.path(), node(0xa0)).is_err(),
+            "open attempt {attempt} must reject an unknown catalogue kernel kind");
+    }
+}
+
+/// This is an internal storage-boundary receipt: the public API cannot expose
+/// the epoch bootstrap row directly.  Pin every byte identity here so a future
+/// Rust enum reorder cannot silently reinterpret an existing catalogue.
+#[test]
+fn catalogue_kernel_kind_fixture_is_exact_and_closed() {
+    use crate::node::codec::CatalogueRecordKind;
+
+    let fixture = [
+        (CatalogueRecordKind::Genesis, 0),
+        (CatalogueRecordKind::Schema, 1),
+        (CatalogueRecordKind::Lens, 2),
+        (CatalogueRecordKind::SchemaLineageStaged, 3),
+        (CatalogueRecordKind::SchemaLineagePending, 4),
+        (CatalogueRecordKind::SchemaLineageActive, 5),
+        (CatalogueRecordKind::WritePointerPending, 6),
+        (CatalogueRecordKind::BootstrapReady, 7),
+    ];
+
+    for (kind, bytes) in fixture {
+        assert_eq!(kind.key(), bytes, "epoch-pinned kind fixture changed");
+        assert_eq!(CatalogueRecordKind::from_key(bytes).unwrap(), kind);
+    }
+    assert!(CatalogueRecordKind::from_key(8).is_err());
+    assert!(CatalogueRecordKind::from_key(u64::MAX).is_err());
 }
 
 fn delete_catalogue_pointer(node: &mut NodeState<RocksDbStorage>, revision: u64) {
@@ -1064,6 +1140,67 @@ fn reopen_rejects_staged_table_partition_mismatch() {
             staged.publication.new_tables.push("todos".to_owned());
             staged.publication.id = staged.publication.content_id();
         },
+    );
+}
+
+/// A schema row is independently durable from its activation receipt. Reopen
+/// must recompute its content-derived ID before putting it in the resident
+/// catalogue; matching the row primary key alone is not sufficient.
+#[test]
+fn reopen_rejects_standalone_schema_content_identity_mismatch() {
+    let base = schema();
+    let (dir, mut receiver) = open_node_with_schema(node(0x4c), base.clone());
+    let mut tampered = SchemaVersion::new(base.clone());
+    tampered.id = SchemaVersionId(uuid::Uuid::nil());
+    write_catalogue_record(
+        &mut receiver,
+        b"schema",
+        tampered.id.0,
+        serde_json::to_vec(&tampered).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x4c),
+        base,
+        "catalogue schema id does not match schema payload",
+    );
+}
+
+/// A standalone cross-lens is not covered by a lineage receipt. This planted
+/// durable mutation keeps its key and content ID coherent while removing the
+/// operation that makes the endpoints semantically compatible.
+#[test]
+fn reopen_rejects_standalone_lens_semantic_tamper() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x4d), base.clone());
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    let mut tampered = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .publication
+        .lens
+        .clone();
+    tampered.table_lenses[0].ops.clear();
+    tampered.id = tampered.content_id();
+    write_catalogue_record(
+        &mut receiver,
+        b"lens",
+        tampered.id.0,
+        serde_json::to_vec(&tampered).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x4d),
+        base,
+        "catalogue lens violates trusted semantic invariants",
     );
 }
 

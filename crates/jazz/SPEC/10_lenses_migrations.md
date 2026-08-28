@@ -31,6 +31,11 @@ Invariant digest:
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
+- `INV-LENS-23`: The `jazz_catalogue` bootstrap kernel uses only the fixed
+  numeric record kinds `0..=7` described in §10.2. Unknown kinds fail closed
+  during discovery and reopen. This freezes the kernel discriminator only; it
+  does not yet freeze descriptor identity or the remaining catalogue payload
+  encodings.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 
 ## Details
@@ -61,6 +66,22 @@ ordered lens ops, and recursively tagged default values. The embedded
 rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
 
 ### 10.2 The catalogue
+
+#### Epoch-pinned catalogue kernel
+
+`jazz_catalogue.kind` is stored as a `U64` and forms the composite primary key
+`(kind, id)` with the record UUID. The current storage epoch permanently maps
+`genesis = 0`, `schema = 1`, `lens = 2`, `schema_lineage_staged = 3`,
+`schema_lineage_pending = 4`, `schema_lineage_active = 5`,
+`write_pointer_pending = 6`, and `bootstrap_ready = 7`. Discovery and reopen
+reject every other numeric kind rather than guessing how to decode it.
+
+This freezes only that numeric discriminator and primary-key layout. It does
+not freeze the catalogue payload codecs, schema-descriptor identity model,
+physical identity allocation, or catalogue lifecycle guarantees. Those remain
+part of the catalogue storage settlement tracked by
+[#2037](https://github.com/garden-co/jazz/issues/2037) and
+[#1779](https://github.com/garden-co/jazz/issues/1779).
 
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue

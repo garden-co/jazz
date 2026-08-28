@@ -1335,13 +1335,17 @@ fn catalogue_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_catalogue",
         [
-            column("kind", GrooveColumnType::Bytes),
+            // The only hard-coded catalogue schema is a small, epoch-pinned
+            // kernel. Its record kind is a permanent numeric discriminator;
+            // all ordinary Jazz system and application descriptors live in
+            // the catalogue itself.
+            column("kind", GrooveColumnType::U64),
             column("id", GrooveColumnType::Uuid),
             column("payload", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("kind"),
+        PrimaryKeyColumn::integer("kind", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("id"),
     ]))
 }

@@ -7,7 +7,7 @@ where
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Schema.key()),
                 Value::Uuid(schema.id.0),
                 Value::Bytes(serde_json::to_vec(schema)?),
             ],
@@ -652,7 +652,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_staged".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
                 Value::Bytes(serde_json::to_vec(staged)?),
             ],
@@ -671,7 +671,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_pending".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
                 Value::Uuid(pending.publication.id.0),
                 Value::Bytes(serde_json::to_vec(pending)?),
             ],
@@ -691,7 +691,7 @@ self.database.finish_persistence(persisted)?;
         batch.delete(
             "jazz_catalogue",
             PrimaryKeyValue::Composite(vec![
-                PrimaryKeyValue::Bytes(b"schema_lineage_pending".to_vec()),
+                PrimaryKeyValue::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
                 PrimaryKeyValue::Uuid(publication_id.0),
             ]),
         );
@@ -714,7 +714,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_staged".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
                 Value::Bytes(serde_json::to_vec(staged)?),
             ],
@@ -722,7 +722,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Schema.key()),
                 Value::Uuid(schema.id.0),
                 Value::Bytes(serde_json::to_vec(schema)?),
             ],
@@ -730,7 +730,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"lens".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
                 Value::Bytes(serde_json::to_vec(lens)?),
             ],
@@ -748,7 +748,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_active".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineageActive.key()),
                 Value::Uuid(active.id.0),
                 Value::Bytes(serde_json::to_vec(&active)?),
             ],
@@ -765,7 +765,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"lens".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
                 Value::Bytes(serde_json::to_vec(lens)?),
             ],
@@ -827,7 +827,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"write_pointer_pending".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::WritePointerPending.key()),
                 Value::Uuid(id),
                 Value::Bytes(serde_json::to_vec(&pointer)?),
             ],
