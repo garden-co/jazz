@@ -3966,16 +3966,32 @@ impl SchemaVersion {
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MigrationLens {
     /// Content-addressed lens id.
-    pub id: MigrationLensId,
+    pub(crate) id: MigrationLensId,
     /// Source schema version.
-    pub source: SchemaVersionId,
+    pub(crate) source: SchemaVersionId,
     /// Target schema version.
-    pub target: SchemaVersionId,
+    pub(crate) target: SchemaVersionId,
     /// Per-table lens definitions.
-    pub table_lenses: Vec<TableLens>,
+    pub(crate) table_lenses: Vec<TableLens>,
 }
 
 impl MigrationLens {
+    /// Immutable content-addressed identity.
+    pub fn id(&self) -> MigrationLensId {
+        self.id
+    }
+    /// Published source schema identity.
+    pub fn source(&self) -> SchemaVersionId {
+        self.source
+    }
+    /// Published target schema identity.
+    pub fn target(&self) -> SchemaVersionId {
+        self.target
+    }
+    /// Canonically ordered, bijective table-lens declarations.
+    pub fn table_lenses(&self) -> &[TableLens] {
+        &self.table_lenses
+    }
     /// Construct a migration lens and derive its content-addressed id.
     pub fn new(
         source: SchemaVersionId,
