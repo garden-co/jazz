@@ -15,6 +15,91 @@ const packageJson = JSON.parse(
 );
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
 
+// The JavaScript-facing relay ABI is deliberately only an ABI probe and an
+// opaque command transport. Keep this check on declarations rather than broad
+// source text: trusted platform code may legitimately use these words in its
+// own private admission implementation, comments, and imports.
+const forbiddenRelaySurfaceNames = new Set([
+  "authscope",
+  "sqlitepath",
+  "schemajson",
+  "admit",
+  "revoke",
+  "claims",
+  "token",
+]);
+
+function identifierTokens(signature) {
+  return signature.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
+}
+
+function normalizedIdentifier(identifier) {
+  return identifier.replace(/_/g, "").toLowerCase();
+}
+
+function isForbiddenRelaySurfaceIdentifier(identifier) {
+  const normalized = normalizedIdentifier(identifier);
+  return [...forbiddenRelaySurfaceNames].some((forbidden) => normalized.includes(forbidden));
+}
+
+function assertOpaqueRelaySurface(surface, declarations) {
+  for (const declaration of declarations) {
+    for (const identifier of identifierTokens(declaration)) {
+      if (isForbiddenRelaySurfaceIdentifier(identifier)) {
+        assert.fail(
+          `${surface} exposes trusted relay input ${identifier} in JS-facing declaration: ${declaration.trim()}`,
+        );
+      }
+    }
+  }
+}
+
+function braceBody(source, opening) {
+  const openingIndex = source.indexOf(opening);
+  assert.notEqual(openingIndex, -1, `could not find ${opening}`);
+  const start = source.indexOf("{", openingIndex + opening.length);
+  assert.notEqual(start, -1, `could not find ${opening} body`);
+  let depth = 0;
+  for (let index = start; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start + 1, index);
+    }
+  }
+  assert.fail(`unterminated ${opening} body`);
+}
+
+function assertOpaqueJsRelaySurface(nativeSpec, relay) {
+  const spec = braceBody(nativeSpec, "export interface Spec extends TurboModule");
+  const exportedFunctions = relay.match(/export\s+(?:async\s+)?function\s+[^{]+\{/g) ?? [];
+  assertOpaqueRelaySurface("NativeJazzRelay TurboModule", spec.split(";").filter(Boolean));
+  assertOpaqueRelaySurface("relay TypeScript export", exportedFunctions);
+}
+
+function assertOpaqueAndroidRelaySurface(androidModule) {
+  const module = braceBody(
+    androidModule,
+    "public class JazzRelayModule extends NativeJazzRelaySpec",
+  );
+  const publicMethods = module.match(/@Override\s+public\s+[^{};]+\{/g) ?? [];
+  assertOpaqueRelaySurface("Android TurboModule", publicMethods);
+}
+
+function assertOpaqueIosRelaySurface(iosRelay) {
+  const implementationStart = iosRelay.indexOf("@implementation JazzRelay");
+  assert.notEqual(implementationStart, -1, "could not find JazzRelay Objective-C implementation");
+  const trustedAdmissionStart = iosRelay.indexOf("@implementation JazzRelayTrustedAdmission");
+  assert.notEqual(
+    trustedAdmissionStart,
+    -1,
+    "could not separate trusted Objective-C admission from exported relay module",
+  );
+  const relayModule = iosRelay.slice(implementationStart, trustedAdmissionStart);
+  const exportedMethods = relayModule.match(/^-\s*\([^)]*\)\s*[^{]+\{/gm) ?? [];
+  assertOpaqueRelaySurface("iOS TurboModule", exportedMethods);
+}
+
 test("jazz-rn publishes an Expo config plugin for a New Architecture development build", () => {
   const original = { name: "example", ios: { bundleIdentifier: "dev.jazz.example" } };
   const configured = withJazzRn(original);
@@ -212,9 +297,29 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
     "utf8",
   );
 
-  assert.doesNotMatch(nativeSpec, /admit|revoke|claims|token/i);
-  assert.doesNotMatch(relay, /admit|revoke|claims|token|sqlite_path|schema_json/i);
-  assert.doesNotMatch(androidModule, /admit|revoke|claims|token|sqlitePath|schemaJson/i);
+  assertOpaqueJsRelaySurface(nativeSpec, relay);
+  assertOpaqueAndroidRelaySurface(androidModule);
+  assertOpaqueIosRelaySurface(iosRelay);
+  assert.throws(
+    () =>
+      assertOpaqueJsRelaySurface(
+        nativeSpec.replace("getAbiVersion(): number;", "getAuthScope(): string;"),
+        relay,
+      ),
+    /getAuthScope/,
+    "a camel-case auth scope accessor must not enter the generated TypeScript spec",
+  );
+  assert.throws(
+    () =>
+      assertOpaqueAndroidRelaySurface(
+        androidModule.replace(
+          "execute(String encodedCommand, Promise promise)",
+          "execute(String sqlitePath, Promise promise)",
+        ),
+      ),
+    /sqlitePath/,
+    "a camel-case SQLite path parameter must not enter the Android TurboModule",
+  );
   assert.match(androidBridge, /object JazzRelayTrustedAdmission/);
   assert.match(androidBridge, /TrustedRelayScopeConfig/);
   assert.match(androidBridge, /nativeAdmitTrustedScopeJson/);
