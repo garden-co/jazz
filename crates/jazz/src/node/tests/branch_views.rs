@@ -1820,8 +1820,13 @@ fn branch_column_evolution_rejects_non_monotone_changes() {
         let (_dir, mut core) =
             open_history_complete_node_with_schema(node(0x9a), source.clone());
         let target = SchemaVersion::new(target);
-        let error = publish_schema_lineage(
-            &mut core,
+        // These deliberately malformed targets cannot be authored by the
+        // authority factory.  Keep the fixture explicit so this test reaches
+        // the branch-schema validator rather than weakening that factory.
+        let error = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+            author: AuthorSubject::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new_genesis_fixture(
             target.clone(),
             MigrationLens::new(
                 source.version_id(),
@@ -1834,7 +1839,8 @@ fn branch_column_evolution_rejects_non_monotone_changes() {
             ),
             Vec::<String>::new(),
             Vec::<String>::new(),
-        )
+        )),
+        })
         .unwrap_err();
         assert!(matches!(
             error,

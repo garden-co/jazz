@@ -1827,9 +1827,9 @@ where
             }
         }
         match genesis_schema {
-            Some(genesis) if genesis != current_schema_version_id => {
+            Some(_) if !catalogue_schemas.contains_key(&current_schema_version_id) => {
                 return Err(Error::InvalidStoredValue(
-                    "opened schema does not match durable catalogue genesis",
+                    "opened schema is absent from the durable catalogue",
                 ));
             }
             None if !catalogue_schemas.is_empty() => {
@@ -2090,9 +2090,14 @@ where
                 .map_err(|_| Error::InvalidStoredValue("durable identity publication evolution is invalid"))?;
         }
         for lineage in pending.values() {
-            let source = schemas.get(&lineage.publication.lens.source).ok_or(Error::InvalidStoredValue(
-                "pending identity publication source schema is missing",
-            ))?;
+            // A pending lineage may be durably parked ahead of the publication
+            // that introduces its source.  There is nothing authoritative to
+            // compare yet; retain it for ordered replay.  Once a source is
+            // known, however, both its manifest and every evolution rule stay
+            // fail-closed (the durable tamper receipt depends on that).
+            let Some(source) = schemas.get(&lineage.publication.lens.source) else {
+                continue;
+            };
             let source_mapping = mappings.get(&lineage.publication.lens.source).ok_or(
                 Error::InvalidStoredValue("pending identity publication source mapping is missing"),
             )?;

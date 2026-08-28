@@ -65,13 +65,13 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
             }],
         }],
     );
-    let publication = SchemaLineagePublication::new(
+    let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
+    let publication = core.author_schema_lineage_publication(
         target.clone(),
         lens.clone(),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
-    let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
+    ).unwrap();
 
     let standalone = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
         author: AuthorSubject::SYSTEM,
@@ -141,7 +141,7 @@ fn durable_genesis_rejects_reopen_with_a_different_schema() {
     assert!(matches!(
         reopened,
         Err(Error::InvalidStoredValue(
-            "opened schema does not match durable catalogue genesis"
+            "opened schema is absent from the durable catalogue"
         ))
     ));
 }
@@ -162,12 +162,15 @@ fn pending_lineage_reserves_its_target_and_sequence() {
             }],
         }],
     );
-    let publication = SchemaLineagePublication::new(
-        target.clone(),
-        lens,
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    );
+    let (_dir, mut core) = open_node_with_schema(node(0x2b), base.clone());
+    let publication = core
+        .author_schema_lineage_publication(
+            target.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
     let conflicting_lens = MigrationLens::new(
         base.version_id(),
         target.id,
@@ -180,13 +183,14 @@ fn pending_lineage_reserves_its_target_and_sequence() {
             }],
         }],
     );
-    let conflict = SchemaLineagePublication::new(
-        target,
-        conflicting_lens,
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    );
-    let (_dir, mut core) = open_node_with_schema(node(0x2b), base);
+    let conflict = core
+        .author_schema_lineage_publication(
+            target,
+            conflicting_lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
 
     assert!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
@@ -247,13 +251,13 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
             ops: Vec::new(),
         }],
     );
-    let publication = SchemaLineagePublication::new(
+    let (_dir, mut core) = open_node_with_schema(node(0x29), base);
+    let publication = core.author_schema_lineage_publication(
         target.clone(),
         incomplete_lens,
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
-    let (_dir, mut core) = open_node_with_schema(node(0x29), base);
+    ).unwrap();
     let next_table = core.catalogue.next_physical_table_id;
     let next_column = core.catalogue.next_physical_column_id;
 
@@ -272,7 +276,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
     assert_eq!(core.catalogue.next_physical_table_id, next_table);
     assert_eq!(core.catalogue.next_physical_column_id, next_column);
 
-    let correction = SchemaLineagePublication::new(
+    let correction = core.author_schema_lineage_publication(
         target.clone(),
         MigrationLens::new(
             core.catalogue.schema.version_id(),
@@ -288,7 +292,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    ).unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
@@ -327,19 +331,21 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
             }],
         }],
     );
-    let publication_1 = SchemaLineagePublication::new(
+    let (dir, mut core) = open_node_with_schema(node(0x2c), v1.clone());
+    let publication_1 = core.author_schema_lineage_publication(
         v2.clone(),
         lens_12,
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
-    let publication_2 = SchemaLineagePublication::new(
+    ).unwrap();
+    let publication_2 = SchemaLineagePublication::author_from_prior(
+        &publication_1.schema.schema,
+        &publication_1.physical_identities,
         v3.clone(),
         lens_23,
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
-    let (dir, mut core) = open_node_with_schema(node(0x2c), v1.clone());
+    ).unwrap();
 
     let parked = core
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
@@ -391,7 +397,8 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
     let v1 = schema();
     let v2 = SchemaVersion::new(catalogue_evolved_schema());
     let v3 = SchemaVersion::new(catalogue_v3_schema());
-    let parent = SchemaLineagePublication::new(
+    let (dir, mut core) = open_node_with_schema(node(0x2d), v1.clone());
+    let parent = core.author_schema_lineage_publication(
         v2.clone(),
         MigrationLens::new(
             v1.version_id(),
@@ -407,8 +414,10 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
-    let malformed = SchemaLineagePublication::new(
+    ).unwrap();
+    let malformed = SchemaLineagePublication::author_from_prior(
+        &parent.schema.schema,
+        &parent.physical_identities,
         v3.clone(),
         MigrationLens::new(
             v2.id,
@@ -421,8 +430,10 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
-    let valid = SchemaLineagePublication::new(
+    ).unwrap();
+    let valid = SchemaLineagePublication::author_from_prior(
+        &parent.schema.schema,
+        &parent.physical_identities,
         v3.clone(),
         MigrationLens::new(
             v2.id,
@@ -438,8 +449,7 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
-    let (dir, mut core) = open_node_with_schema(node(0x2d), v1.clone());
+    ).unwrap();
 
     assert!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
@@ -493,13 +503,13 @@ fn staged_lineage_resumes_after_each_activation_crash_boundary() {
                 }],
             }],
         );
-        let publication = SchemaLineagePublication::new(
+        let (dir, mut core) = open_node_with_schema(node(byte), base.clone());
+        let publication = core.author_schema_lineage_publication(
             target.clone(),
             lens,
             Vec::<String>::new(),
             Vec::<String>::new(),
-        );
-        let (dir, mut core) = open_node_with_schema(node(byte), base.clone());
+        ).unwrap();
         core.set_catalogue_activation_failpoint(failpoint);
 
         assert!(matches!(
@@ -726,7 +736,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
+        publication: Box::new(core.author_schema_lineage_publication(
             evolved,
             MigrationLens::new(
                 base.version_id(),
@@ -742,7 +752,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
             ),
             Vec::<String>::new(),
             Vec::<String>::new(),
-        )),
+        ).unwrap()),
     })
     .unwrap();
 

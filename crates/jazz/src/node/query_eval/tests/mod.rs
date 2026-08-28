@@ -449,23 +449,26 @@ fn evolved_todos_version() -> (
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            evolved_payload.clone(),
-            MigrationLens::new(
-                base.version_id(),
-                evolved_payload.id,
-                vec![TableLens {
-                    source_table: "todos".to_owned(),
-                    target_table: "todos".to_owned(),
-                    ops: vec![LensOp::AddColumn {
-                        column: "body".to_owned(),
-                        default: Value::String("base-default".to_owned()),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved_payload.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_payload.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String("base-default".to_owned()),
+                        }],
                     }],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .unwrap();
     node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {

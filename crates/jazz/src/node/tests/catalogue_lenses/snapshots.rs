@@ -1711,7 +1711,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     .unwrap();
 
     let target = SchemaVersion::new(catalogue_evolved_schema());
-    let publication = SchemaLineagePublication::new(
+    let publication = edge.author_schema_lineage_publication(
         target.clone(),
         MigrationLens::new(
             base.version_id(),
@@ -1727,7 +1727,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    ).unwrap();
     edge.set_catalogue_activation_failpoint(CatalogueActivationFailpoint::AfterStaged);
     assert!(matches!(
         edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {

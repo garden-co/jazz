@@ -36,12 +36,29 @@ where
         let bootstrap_uninitialized =
             self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized;
         let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;
+        let catalogue_genesis = |catalogue: &SchemaCatalogue| {
+            let lineage_targets = catalogue
+                .active_lineages_by_target
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            catalogue
+                .catalogue_schemas
+                .keys()
+                .find(|schema| !lineage_targets.contains(schema))
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "catalogue genesis schema is missing",
+                ))
+        };
+        let planned_genesis = catalogue_genesis(&plan.catalogue)?;
         let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
             || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
             || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
             || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
             || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
+        let previous_genesis = catalogue_genesis(&previous_catalogue)?;
         // Snapshot replay can install widened mappings after a persistent edge
         // restart. Rebuild the live projection registry as part of that
         // semantic transition, not after client traffic begins. An identical
@@ -63,7 +80,23 @@ where
         }
 
         let mut batch = self.database.open_batch();
-        if bootstrap_uninitialized || self.catalogue_bootstrap_marker {
+        // A snapshot's root is the authority's permanent genesis, rather than
+        // its current write schema.  A pre-bootstrap receiver may have opened
+        // against a descendant-shaped local schema; replace that provisional
+        // marker atomically with the authority root before it can be recovered.
+        if previous_genesis != planned_genesis {
+            batch.delete(
+                "jazz_catalogue",
+                groove::db::PrimaryKeyValue::Composite(vec![
+                    groove::db::PrimaryKeyValue::U64(codec::CatalogueRecordKind::Genesis.key()),
+                    groove::db::PrimaryKeyValue::Uuid(previous_genesis.0),
+                ]),
+            );
+        }
+        if bootstrap_uninitialized
+            || self.catalogue_bootstrap_marker
+            || previous_genesis != planned_genesis
+        {
             // This is intentionally in the same batch as every imported
             // schema, physical mapping, lineage activation, and write
             // pointer.  A dynamic edge must never recover an empty local
@@ -75,12 +108,12 @@ where
                 "jazz_catalogue",
                 vec![
                     Value::U64(codec::CatalogueRecordKind::Genesis.key()),
-                    Value::Uuid(plan.catalogue.current_schema_version_id.0),
+                    Value::Uuid(planned_genesis.0),
                     Value::Bytes(Vec::new()),
                 ],
             );
             let ready = CatalogueBootstrapReady {
-                genesis: plan.catalogue.current_schema_version_id,
+                genesis: planned_genesis,
                 current_write_schema: plan.catalogue.current_write_schema,
                 active_catalogue_seq: plan.catalogue.active_catalogue_seq,
             };

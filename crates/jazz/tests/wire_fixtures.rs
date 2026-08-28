@@ -440,6 +440,9 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "catalogue_snapshot_todos_lineage",
             "CatalogueSnapshot",
             SyncMessage::CatalogueSnapshot(Box::new(CatalogueSnapshot {
+                genesis_physical_identities: jazz::protocol::PhysicalIdentityManifest::allocate(
+                    &lineage_source.schema,
+                ),
                 schemas: vec![lineage_source, lineage_target],
                 lineages: vec![(9, lineage_publication)],
                 current_write_schema: CurrentWriteSchema {

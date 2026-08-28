@@ -264,7 +264,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
     ));
 
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
-    let publication = SchemaLineagePublication::new(
+    let publication = edge.author_schema_lineage_publication(
         evolved.clone(),
         MigrationLens::new(
             schema().version_id(),
@@ -280,7 +280,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         ),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    ).unwrap();
     assert!(matches!(
         edge.apply_sync_message_settled(SyncMessage::PublishSchemaWithLens {
             author: user(0xee),

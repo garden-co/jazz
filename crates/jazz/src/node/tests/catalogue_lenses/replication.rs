@@ -7,6 +7,11 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
     let (_core_dir, mut core) = open_node_with_schema(node(0x33), base.clone());
     let (_client_dir, mut client) = open_node_with_schema(node(0x34), base.clone());
     let payload = SchemaVersion::new(evolved.clone());
+    // A lineage carries only descendant identities; receivers first learn the
+    // authority's permanent genesis manifest through its catalogue snapshot.
+    client
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
+        .unwrap();
     let lens = MigrationLens::new(
         base.version_id(),
         payload.id,
@@ -19,15 +24,18 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
             }],
         }],
     );
-    let publish = SyncMessage::PublishSchemaWithLens {
-        author: AuthorSubject::SYSTEM,
-        catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
+    let publication = core
+        .author_schema_lineage_publication(
             payload.clone(),
             lens,
             Vec::<String>::new(),
             Vec::<String>::new(),
-        )),
+        )
+        .unwrap();
+    let publish = SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
     };
 
     let ack = core
@@ -85,12 +93,14 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         }],
     );
 
-    let publication = SchemaLineagePublication::new(
-        target.clone(),
-        lens.clone(),
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    );
+    let publication = core
+        .author_schema_lineage_publication(
+            target.clone(),
+            lens.clone(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
     let non_admin = core.apply_sync_message_settled(SyncMessage::PublishSchemaWithLens {
         author: user(7),
         catalogue_seq: 1,
