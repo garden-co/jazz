@@ -128,12 +128,7 @@ impl Database {
                         "accepted staging id is missing or already consumed".to_owned(),
                     )
                 })?;
-            let staged: crate::large_values::StagedLargeValue = postcard::from_bytes(&encoded)
-                .map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode accepted staging root: {error}"
-                    ))
-                })?;
+            let staged = decode_staged_large_value(&encoded)?;
             accepted_staging.push(staged);
         }
         for staged in &accepted_staging {
@@ -290,11 +285,7 @@ impl Database {
                     .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                     .await?
                 {
-                    Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot decode root references: {error}"
-                        ))
-                    })?,
+                    Some(encoded) => decode_large_value_root_references(&encoded)?,
                     None => LargeValueRootReferences::default(),
                 };
                 let previous_total = references.durable.saturating_add(references.staged);
@@ -335,11 +326,7 @@ impl Database {
                 lifecycle_operations.push(OwnedWriteOperation::Set {
                     cf: LARGE_VALUE_METADATA_CF.to_owned(),
                     key,
-                    value: postcard::to_allocvec(&references).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode root references: {error}"
-                        ))
-                    })?,
+                    value: encode_large_value_root_references(&references)?,
                 });
             }
             lifecycle_operations.extend(

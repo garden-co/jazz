@@ -7,7 +7,9 @@
 
 use super::query_engine::{left_field, user_column_field};
 use super::*;
+use crate::protocol::{ResultRowLayer, ResultRowSource, SnapshotRef, SyntheticReplacementToken};
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -135,6 +137,11 @@ groove::impl_record_field_enum!(DeletionEvent {
 groove::impl_record_field_enum!(MergeAspect {
     MergeAspect::Content = 0,
     MergeAspect::Deletion = 1,
+});
+groove::impl_record_field_enum!(ResultRowLayer {
+    ResultRowLayer::Content = 0,
+    ResultRowLayer::Deletion = 1,
+    ResultRowLayer::ContentOrDeletion = 2,
 });
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,8 +297,104 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    struct ContributionOperationStorageRecord {
-        0 => identity: Vec<u8>,
+    pub(super) struct ContributionOperationStorageRecord {
+        0 => physical_column_id: u64,
+        1 => identity: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberUnionArmStorageRecord {
+        0 => position: u32,
+        1 => label: String,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberOccurrenceStorageRecord {
+        0 => root: uuid::Uuid,
+        1 => joined: Vec<Value>,
+        2 => union_arms: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberSnapshotSourceStorageRecord {
+        0 => owner: uuid::Uuid,
+        1 => global_base: u64,
+        2 => local_base: u64,
+        3 => dots: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberHistoryCutSourceStorageRecord {
+        0 => global_time: u64,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberMergeSourceStorageRecord {
+        0 => inputs: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberLensSourceStorageRecord {
+        0 => schema_version: uuid::Uuid,
+        1 => base: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberOverlaySourceStorageRecord {
+        0 => tx: Value,
+        1 => base: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberRealRowStorageRecord {
+        0 => table: String,
+        1 => row_uuid: uuid::Uuid,
+        2 => occurrence_id: Option<OwnedRecord>,
+        3 => content_tx: Option<Value>,
+        4 => layer: ResultRowLayer,
+        5 => deletion_tx: Option<Value>,
+        6 => source: records::EnumValue,
+        7 => read_view: uuid::Uuid,
+        8 => schema_version: Option<uuid::Uuid>,
+        9 => branch_or_prefix: Option<Vec<u8>>,
+        10 => row_digest: Option<Vec<u8>>,
+        11 => batch: Option<Value>,
+        12 => settle_position: Option<u64>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberSyntheticStorageRecord {
+        0 => table: String,
+        1 => row: Vec<u8>,
+        2 => replacement: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberPathTupleStorageRecord {
+        0 => path: String,
+        1 => source_table: String,
+        2 => source_row: uuid::Uuid,
+        3 => target_table: String,
+        4 => target_row: uuid::Uuid,
+        5 => edge_id: Option<Vec<u8>>,
+        6 => revision: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberTypedRowStorageRecord {
+        0 => row: OwnedRecord,
+        1 => occurrence_key: OwnedRecord,
     }
 }
 
@@ -1129,7 +1232,7 @@ fn contribution_component_storage_value(
     };
     let case_name = match component {
         ContributionComponent::Column(_) => "column",
-        ContributionComponent::Operation(_) => "operation",
+        ContributionComponent::Operation { .. } => "operation",
         ContributionComponent::Register => "register",
     };
     let tag = schema
@@ -1151,8 +1254,14 @@ fn contribution_component_storage_value(
                 .record()
                 .clone()
         }
-        ContributionComponent::Operation(identity) => {
-            ContributionOperationStorageRecord::encode(payload, identity.clone())?
+        ContributionComponent::Operation { column, identity } => {
+            let id = resolve_column_id(&coordinate.table, column)?;
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "contribution physical column id must be nonzero",
+                ));
+            }
+            ContributionOperationStorageRecord::encode(payload, id.0, identity.clone())?
                 .record()
                 .clone()
         }
@@ -1279,7 +1388,7 @@ pub(super) fn contribution_merge_storage_value(
     Ok(records::RecordField::to_value(&record))
 }
 
-fn contribution_component_from_storage(
+pub(super) fn contribution_component_from_storage(
     value: records::EnumValue,
     schema: &records::EnumSchema,
     table: &str,
@@ -1303,9 +1412,19 @@ fn contribution_component_from_storage(
                 table, id,
             )?))
         }
-        "operation" => Ok(ContributionComponent::Operation(
-            ContributionOperationStorageRecord::new(payload).identity()?,
-        )),
+        "operation" => {
+            let payload = ContributionOperationStorageRecord::new(payload);
+            let id = PhysicalColumnId(payload.physical_column_id()?);
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "stored contribution physical column id must be nonzero",
+                ));
+            }
+            Ok(ContributionComponent::Operation {
+                column: resolve_column_name(table, id)?,
+                identity: payload.identity()?,
+            })
+        }
         "register" if payload.descriptor().fields().is_empty() => {
             payload.to_values()?;
             Ok(ContributionComponent::Register)
@@ -1433,6 +1552,837 @@ pub(super) fn contribution_merge_from_storage_record(
         Error::InvalidStoredValue("transaction contribution provenance must be canonical")
     })?;
     Ok(provenance)
+}
+
+const RESULT_MEMBER_STORAGE_MAGIC: &[u8; 4] = b"JRME";
+const RESULT_MEMBER_STORAGE_VERSION: u8 = 1;
+const RESULT_ROW_SOURCE_STORAGE_MAGIC: &[u8; 4] = b"JRSE";
+const RESULT_ROW_SOURCE_STORAGE_VERSION: u8 = 1;
+const RESULT_MEMBER_STORAGE_ENVELOPE_HEADER_LEN: usize = 4 + 1 + 4;
+const RESULT_MEMBER_ROW_TAG: u32 = 0;
+const RESULT_MEMBER_SYNTHETIC_TAG: u32 = 1;
+const RESULT_MEMBER_PATH_TUPLE_TAG: u32 = 2;
+const RESULT_MEMBER_TYPED_ROW_TAG: u32 = 3;
+const RESULT_ROW_SOURCE_CURRENT_TAG: u32 = 0;
+const RESULT_ROW_SOURCE_SNAPSHOT_TAG: u32 = 1;
+const RESULT_ROW_SOURCE_HISTORY_CUT_TAG: u32 = 2;
+const RESULT_ROW_SOURCE_MERGE_TAG: u32 = 3;
+const RESULT_ROW_SOURCE_LENS_PROJECTION_TAG: u32 = 4;
+const RESULT_ROW_SOURCE_OVERLAY_TAG: u32 = 5;
+const MAX_RESULT_MEMBER_STORAGE_BYTES: usize = 1024 * 1024;
+const MAX_RESULT_ROW_SOURCE_DEPTH: usize = 32;
+const MAX_RESULT_MEMBER_JOINED_SOURCES: usize = 256;
+const MAX_RESULT_MEMBER_UNION_ARM_LABEL_BYTES: usize = 4 * 1024;
+
+struct ResultMemberStorageLayout {
+    member_envelope: records::RecordDescriptor,
+    member_schema: records::EnumSchema,
+    source_envelope: records::RecordDescriptor,
+    source_schema: records::EnumSchema,
+    occurrence: records::RecordDescriptor,
+    union_arm: records::RecordDescriptor,
+    real_row: records::RecordDescriptor,
+}
+
+fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
+    static LAYOUT: std::sync::LazyLock<ResultMemberStorageLayout> =
+        std::sync::LazyLock::new(|| {
+            let tx_id =
+                records::ValueType::Tuple(vec![records::ValueType::U64, records::ValueType::Uuid]);
+            let union_arm = records::RecordDescriptor::new([
+                ("position", records::ValueType::U32),
+                ("label", records::ValueType::String),
+            ]);
+            let occurrence = records::RecordDescriptor::new([
+                ("root", records::ValueType::Uuid),
+                (
+                    "joined",
+                    records::ValueType::Array(Box::new(records::ValueType::Uuid)),
+                ),
+                (
+                    "union_arms",
+                    records::ValueType::Array(Box::new(records::ValueType::Record(Box::new(
+                        union_arm,
+                    )))),
+                ),
+            ]);
+            let snapshot_source = records::RecordDescriptor::new([
+                ("owner", records::ValueType::Uuid),
+                ("global_base", records::ValueType::U64),
+                ("local_base", records::ValueType::U64),
+                ("dots", records::ValueType::Array(Box::new(tx_id.clone()))),
+            ]);
+            let history_cut_source =
+                records::RecordDescriptor::new([("global_time", records::ValueType::U64)]);
+            let merge_source = records::RecordDescriptor::new([(
+                "inputs",
+                records::ValueType::Array(Box::new(records::ValueType::Bytes)),
+            )]);
+            let lens_source = records::RecordDescriptor::new([
+                ("schema_version", records::ValueType::Uuid),
+                ("base", records::ValueType::Bytes),
+            ]);
+            let overlay_source = records::RecordDescriptor::new([
+                ("tx", tx_id.clone()),
+                ("base", records::ValueType::Bytes),
+            ]);
+            let source_cases = [
+                (
+                    RESULT_ROW_SOURCE_CURRENT_TAG,
+                    records::EnumCase::new(
+                        "Current",
+                        records::RecordDescriptor::new(std::iter::empty::<(
+                            &'static str,
+                            records::ValueType,
+                        )>()),
+                    ),
+                ),
+                (
+                    RESULT_ROW_SOURCE_SNAPSHOT_TAG,
+                    records::EnumCase::new("Snapshot", snapshot_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_HISTORY_CUT_TAG,
+                    records::EnumCase::new("HistoryCut", history_cut_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_MERGE_TAG,
+                    records::EnumCase::new("Merge", merge_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_LENS_PROJECTION_TAG,
+                    records::EnumCase::new("LensProjection", lens_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_OVERLAY_TAG,
+                    records::EnumCase::new("Overlay", overlay_source),
+                ),
+            ];
+            debug_assert!(
+                source_cases
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (tag, _))| usize::try_from(*tag) == Ok(index))
+            );
+            let source_schema = records::EnumSchema::new(
+                "jazz.internal.result_row_source.v1",
+                source_cases.map(|(_, case)| case),
+            )
+            .expect("fixed result-row-source storage schema is valid");
+            let source_envelope = records::RecordDescriptor::new([(
+                "source",
+                records::ValueType::Enum(Box::new(source_schema.clone())),
+            )]);
+
+            let layer = records::ScalarEnumSchema::new(
+                "jazz.internal.result_row_layer.v1",
+                ["Content", "Deletion", "ContentOrDeletion"],
+            )
+            .expect("fixed result-row-layer storage schema is valid");
+            debug_assert_eq!(
+                [
+                    ResultRowLayer::Content.discriminant(),
+                    ResultRowLayer::Deletion.discriminant(),
+                    ResultRowLayer::ContentOrDeletion.discriminant(),
+                ],
+                [0, 1, 2]
+            );
+            let real_row = records::RecordDescriptor::new([
+                ("table", records::ValueType::String),
+                ("row_uuid", records::ValueType::Uuid),
+                (
+                    "occurrence_id",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Record(Box::new(
+                        occurrence,
+                    )))),
+                ),
+                (
+                    "content_tx",
+                    records::ValueType::Nullable(Box::new(tx_id.clone())),
+                ),
+                ("layer", records::ValueType::EnumTag(layer)),
+                (
+                    "deletion_tx",
+                    records::ValueType::Nullable(Box::new(tx_id.clone())),
+                ),
+                (
+                    "source",
+                    records::ValueType::Enum(Box::new(source_schema.clone())),
+                ),
+                ("read_view", records::ValueType::Uuid),
+                (
+                    "schema_version",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Uuid)),
+                ),
+                (
+                    "branch_or_prefix",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Bytes)),
+                ),
+                (
+                    "row_digest",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Bytes)),
+                ),
+                ("batch", records::ValueType::Nullable(Box::new(tx_id))),
+                (
+                    "settle_position",
+                    records::ValueType::Nullable(Box::new(records::ValueType::U64)),
+                ),
+            ]);
+            let synthetic = records::RecordDescriptor::new([
+                ("table", records::ValueType::String),
+                ("row", records::ValueType::Bytes),
+                ("replacement", records::ValueType::Bytes),
+            ]);
+            let path_tuple = records::RecordDescriptor::new([
+                ("path", records::ValueType::String),
+                ("source_table", records::ValueType::String),
+                ("source_row", records::ValueType::Uuid),
+                ("target_table", records::ValueType::String),
+                ("target_row", records::ValueType::Uuid),
+                (
+                    "edge_id",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Bytes)),
+                ),
+                ("revision", records::ValueType::Bytes),
+            ]);
+            let typed_row = records::RecordDescriptor::new([
+                ("row", records::ValueType::Record(Box::new(real_row))),
+                (
+                    "occurrence_key",
+                    records::ValueType::Record(Box::new(occurrence)),
+                ),
+            ]);
+            let member_cases = [
+                (
+                    RESULT_MEMBER_ROW_TAG,
+                    records::EnumCase::new("Row", real_row),
+                ),
+                (
+                    RESULT_MEMBER_SYNTHETIC_TAG,
+                    records::EnumCase::new("Synthetic", synthetic),
+                ),
+                (
+                    RESULT_MEMBER_PATH_TUPLE_TAG,
+                    records::EnumCase::new("PathTuple", path_tuple),
+                ),
+                (
+                    RESULT_MEMBER_TYPED_ROW_TAG,
+                    records::EnumCase::new("TypedRow", typed_row),
+                ),
+            ];
+            debug_assert!(
+                member_cases
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (tag, _))| usize::try_from(*tag) == Ok(index))
+            );
+            let member_schema = records::EnumSchema::new(
+                "jazz.internal.result_member.v1",
+                member_cases.map(|(_, case)| case),
+            )
+            .expect("fixed result-member storage schema is valid");
+            let member_envelope = records::RecordDescriptor::new([(
+                "member",
+                records::ValueType::Enum(Box::new(member_schema.clone())),
+            )]);
+            ResultMemberStorageLayout {
+                member_envelope,
+                member_schema,
+                source_envelope,
+                source_schema,
+                occurrence,
+                union_arm,
+                real_row,
+            }
+        });
+    &LAYOUT
+}
+
+fn encode_result_member_envelope(
+    magic: &[u8; 4],
+    version: u8,
+    descriptor: records::RecordDescriptor,
+    value: records::EnumValue,
+) -> Result<Vec<u8>, Error> {
+    let payload = descriptor.create(&[Value::Enum(value)])?;
+    let total_len = magic
+        .len()
+        .checked_add(1)
+        .and_then(|len| len.checked_add(4))
+        .and_then(|len| len.checked_add(payload.len()))
+        .ok_or(Error::InvalidStoredValue(
+            "settled result member encoding is too large",
+        ))?;
+    if total_len > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled result member encoding is too large",
+        ));
+    }
+    let mut encoded = Vec::with_capacity(total_len);
+    encoded.extend_from_slice(magic);
+    encoded.push(version);
+    encoded.extend_from_slice(
+        &u32::try_from(payload.len())
+            .map_err(|_| Error::InvalidStoredValue("settled result member encoding is too large"))?
+            .to_le_bytes(),
+    );
+    encoded.extend_from_slice(&payload);
+    Ok(encoded)
+}
+
+fn decode_result_member_envelope(
+    encoded: &[u8],
+    magic: &[u8; 4],
+    version: u8,
+    descriptor: records::RecordDescriptor,
+    context: &'static str,
+) -> Result<records::EnumValue, Error> {
+    if encoded.len() > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    let Some((header, payload)) =
+        encoded.split_at_checked(RESULT_MEMBER_STORAGE_ENVELOPE_HEADER_LEN)
+    else {
+        return Err(Error::InvalidStoredValue(context));
+    };
+    if &header[..magic.len()] != magic || header[magic.len()] != version {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    let payload_len = u32::from_le_bytes(
+        header[magic.len() + 1..RESULT_MEMBER_STORAGE_ENVELOPE_HEADER_LEN]
+            .try_into()
+            .expect("result-member payload length has fixed width"),
+    );
+    if usize::try_from(payload_len) != Ok(payload.len()) {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    let values = descriptor.bind(payload).to_values()?;
+    let [Value::Enum(value)] = values.as_slice() else {
+        return Err(Error::InvalidStoredValue(context));
+    };
+    if descriptor.create(&values)? != payload {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    Ok(value.clone())
+}
+
+fn result_member_case_descriptor(
+    schema: &records::EnumSchema,
+    tag: u32,
+) -> Result<records::RecordDescriptor, Error> {
+    schema
+        .case(tag)
+        .map(|case| case.payload)
+        .map_err(|_| Error::InvalidStoredValue("settled result member tag is invalid"))
+}
+
+fn result_member_occurrence_storage_record(
+    occurrence: &OutputOccurrenceId,
+) -> Result<OwnedRecord, Error> {
+    let layout = result_member_storage_layout();
+    if occurrence.joined_sources().len() > MAX_RESULT_MEMBER_JOINED_SOURCES {
+        return Err(Error::InvalidStoredValue(
+            "settled result member has too many joined sources",
+        ));
+    }
+    let mut previous_position = None;
+    let mut union_arms = Vec::with_capacity(occurrence.union_arms().len());
+    for (position, label) in occurrence.union_arms() {
+        if *position >= occurrence.joined_sources().len()
+            || label.is_empty()
+            || label.len() > MAX_RESULT_MEMBER_UNION_ARM_LABEL_BYTES
+            || previous_position.is_some_and(|previous| previous >= *position)
+        {
+            return Err(Error::InvalidStoredValue(
+                "settled result member occurrence is not canonical",
+            ));
+        }
+        previous_position = Some(*position);
+        let position = u32::try_from(*position).map_err(|_| {
+            Error::InvalidStoredValue("settled result member occurrence position is too large")
+        })?;
+        union_arms.push(Value::Record(
+            ResultMemberUnionArmStorageRecord::encode(&layout.union_arm, position, label.clone())?
+                .record()
+                .clone(),
+        ));
+    }
+    Ok(ResultMemberOccurrenceStorageRecord::encode(
+        &layout.occurrence,
+        *occurrence.root_source().uuid(),
+        occurrence
+            .joined_sources()
+            .iter()
+            .map(|source| Value::Uuid(*source.uuid()))
+            .collect(),
+        union_arms,
+    )?
+    .record()
+    .clone())
+}
+
+fn result_member_occurrence_from_storage_record(
+    record: OwnedRecord,
+) -> Result<OutputOccurrenceId, Error> {
+    let layout = result_member_storage_layout();
+    if record.descriptor() != &layout.occurrence {
+        return Err(Error::InvalidStoredValue(
+            "settled result member occurrence descriptor is invalid",
+        ));
+    }
+    let record = ResultMemberOccurrenceStorageRecord::new(record);
+    let joined = record.joined()?;
+    if joined.len() > MAX_RESULT_MEMBER_JOINED_SOURCES {
+        return Err(Error::InvalidStoredValue(
+            "settled result member has too many joined sources",
+        ));
+    }
+    let joined = joined
+        .into_iter()
+        .map(|value| match value {
+            Value::Uuid(value) => Ok(ObjectId::from_uuid(value)),
+            _ => Err(Error::InvalidStoredValue(
+                "settled result member joined source must be a UUID",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut previous_position = None;
+    let mut union_arms = Vec::new();
+    for value in record.union_arms()? {
+        let Value::Record(arm) = value else {
+            return Err(Error::InvalidStoredValue(
+                "settled result member union arm must be a record",
+            ));
+        };
+        if arm.descriptor() != &layout.union_arm {
+            return Err(Error::InvalidStoredValue(
+                "settled result member union arm descriptor is invalid",
+            ));
+        }
+        let arm = ResultMemberUnionArmStorageRecord::new(arm);
+        let position = usize::try_from(arm.position()?).map_err(|_| {
+            Error::InvalidStoredValue("settled result member occurrence position is too large")
+        })?;
+        let label = arm.label()?;
+        if position >= joined.len()
+            || label.is_empty()
+            || label.len() > MAX_RESULT_MEMBER_UNION_ARM_LABEL_BYTES
+            || previous_position.is_some_and(|previous| previous >= position)
+        {
+            return Err(Error::InvalidStoredValue(
+                "settled result member occurrence is not canonical",
+            ));
+        }
+        previous_position = Some(position);
+        union_arms.push((position, label));
+    }
+    let root = ObjectId::from_uuid(record.root()?);
+    if union_arms.is_empty() {
+        Ok(OutputOccurrenceId::new(root, joined))
+    } else {
+        OutputOccurrenceId::with_union_arms(root, joined, union_arms).ok_or(
+            Error::InvalidStoredValue("settled result member occurrence is invalid"),
+        )
+    }
+}
+
+fn result_row_source_storage_value(
+    source: &ResultRowSource,
+    depth: usize,
+) -> Result<records::EnumValue, Error> {
+    if depth > MAX_RESULT_ROW_SOURCE_DEPTH {
+        return Err(Error::InvalidStoredValue(
+            "settled result member source is too deeply nested",
+        ));
+    }
+    let layout = result_member_storage_layout();
+    let (tag, record) = match source {
+        ResultRowSource::Current => {
+            let payload = result_member_case_descriptor(
+                &layout.source_schema,
+                RESULT_ROW_SOURCE_CURRENT_TAG,
+            )?;
+            (
+                RESULT_ROW_SOURCE_CURRENT_TAG,
+                OwnedRecord::new(payload.create(&[])?, payload),
+            )
+        }
+        ResultRowSource::Snapshot { snapshot } => {
+            let tag = RESULT_ROW_SOURCE_SNAPSHOT_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record = ResultMemberSnapshotSourceStorageRecord::encode(
+                &payload,
+                snapshot.owner.0,
+                snapshot.global_base.0,
+                snapshot.local_base.0,
+                snapshot.dots.iter().copied().map(tx_id_value).collect(),
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultRowSource::HistoryCut { global_time } => {
+            let tag = RESULT_ROW_SOURCE_HISTORY_CUT_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record =
+                ResultMemberHistoryCutSourceStorageRecord::encode(&payload, global_time.0)?
+                    .record()
+                    .clone();
+            (tag, record)
+        }
+        ResultRowSource::Merge { inputs } => {
+            let tag = RESULT_ROW_SOURCE_MERGE_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let inputs = inputs
+                .iter()
+                .map(|input| result_row_source_storage_bytes(input, depth + 1).map(Value::Bytes))
+                .collect::<Result<Vec<_>, _>>()?;
+            let record = ResultMemberMergeSourceStorageRecord::encode(&payload, inputs)?
+                .record()
+                .clone();
+            (tag, record)
+        }
+        ResultRowSource::LensProjection {
+            schema_version,
+            base,
+        } => {
+            let tag = RESULT_ROW_SOURCE_LENS_PROJECTION_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record = ResultMemberLensSourceStorageRecord::encode(
+                &payload,
+                schema_version.0,
+                result_row_source_storage_bytes(base, depth + 1)?,
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultRowSource::Overlay { tx, base } => {
+            let tag = RESULT_ROW_SOURCE_OVERLAY_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record = ResultMemberOverlaySourceStorageRecord::encode(
+                &payload,
+                tx_id_value(*tx),
+                result_row_source_storage_bytes(base, depth + 1)?,
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+    };
+    Ok(records::EnumValue::new(tag, record))
+}
+
+fn result_row_source_storage_bytes(
+    source: &ResultRowSource,
+    depth: usize,
+) -> Result<Vec<u8>, Error> {
+    let layout = result_member_storage_layout();
+    encode_result_member_envelope(
+        RESULT_ROW_SOURCE_STORAGE_MAGIC,
+        RESULT_ROW_SOURCE_STORAGE_VERSION,
+        layout.source_envelope,
+        result_row_source_storage_value(source, depth)?,
+    )
+}
+
+fn result_row_source_from_storage_value(
+    value: records::EnumValue,
+    depth: usize,
+) -> Result<ResultRowSource, Error> {
+    if depth > MAX_RESULT_ROW_SOURCE_DEPTH {
+        return Err(Error::InvalidStoredValue(
+            "settled result member source is too deeply nested",
+        ));
+    }
+    let tag = value.tag();
+    let record = value.into_record();
+    match tag {
+        RESULT_ROW_SOURCE_CURRENT_TAG => {
+            record.to_values()?;
+            if !record.descriptor().fields().is_empty() {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member current source is invalid",
+                ));
+            }
+            Ok(ResultRowSource::Current)
+        }
+        RESULT_ROW_SOURCE_SNAPSHOT_TAG => {
+            let record = ResultMemberSnapshotSourceStorageRecord::new(record);
+            let dots = record.dots()?;
+            Ok(ResultRowSource::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid(record.owner()?),
+                    global_base: GlobalTime(record.global_base()?),
+                    local_base: TxTime(record.local_base()?),
+                    dots: dots
+                        .into_iter()
+                        .map(tx_id_from_value)
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+            })
+        }
+        RESULT_ROW_SOURCE_HISTORY_CUT_TAG => {
+            let record = ResultMemberHistoryCutSourceStorageRecord::new(record);
+            Ok(ResultRowSource::HistoryCut {
+                global_time: GlobalTime(record.global_time()?),
+            })
+        }
+        RESULT_ROW_SOURCE_MERGE_TAG => {
+            let record = ResultMemberMergeSourceStorageRecord::new(record);
+            let inputs = record.inputs()?;
+            Ok(ResultRowSource::Merge {
+                inputs: inputs
+                    .into_iter()
+                    .map(|input| match input {
+                        Value::Bytes(bytes) => {
+                            result_row_source_from_storage_bytes(&bytes, depth + 1)
+                        }
+                        _ => Err(Error::InvalidStoredValue(
+                            "settled result member merge input must be bytes",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        }
+        RESULT_ROW_SOURCE_LENS_PROJECTION_TAG => {
+            let record = ResultMemberLensSourceStorageRecord::new(record);
+            Ok(ResultRowSource::LensProjection {
+                schema_version: SchemaVersionId(record.schema_version()?),
+                base: Box::new(result_row_source_from_storage_bytes(
+                    &record.base()?,
+                    depth + 1,
+                )?),
+            })
+        }
+        RESULT_ROW_SOURCE_OVERLAY_TAG => {
+            let record = ResultMemberOverlaySourceStorageRecord::new(record);
+            Ok(ResultRowSource::Overlay {
+                tx: tx_id_from_value(record.tx()?)?,
+                base: Box::new(result_row_source_from_storage_bytes(
+                    &record.base()?,
+                    depth + 1,
+                )?),
+            })
+        }
+        _ => Err(Error::InvalidStoredValue(
+            "settled result member source tag is invalid",
+        )),
+    }
+}
+
+fn result_row_source_from_storage_bytes(
+    encoded: &[u8],
+    depth: usize,
+) -> Result<ResultRowSource, Error> {
+    let layout = result_member_storage_layout();
+    let value = decode_result_member_envelope(
+        encoded,
+        RESULT_ROW_SOURCE_STORAGE_MAGIC,
+        RESULT_ROW_SOURCE_STORAGE_VERSION,
+        layout.source_envelope,
+        "settled result member source encoding is invalid",
+    )?;
+    let source = result_row_source_from_storage_value(value, depth)?;
+    if result_row_source_storage_bytes(&source, depth)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result member source encoding is not canonical",
+        ));
+    }
+    Ok(source)
+}
+
+fn result_member_real_row_storage_record(row: &RealRowMemberEntry) -> Result<OwnedRecord, Error> {
+    let layout = result_member_storage_layout();
+    Ok(ResultMemberRealRowStorageRecord::encode(
+        &layout.real_row,
+        row.table.as_str().to_owned(),
+        row.row_uuid.0,
+        row.occurrence_id
+            .as_ref()
+            .map(result_member_occurrence_storage_record)
+            .transpose()?,
+        row.content_tx.map(tx_id_value),
+        row.layer,
+        row.deletion_tx.map(tx_id_value),
+        result_row_source_storage_value(&row.source, 0)?,
+        row.read_view.id,
+        row.schema_version.map(|value| value.0),
+        row.branch_or_prefix.clone(),
+        row.row_digest.clone(),
+        row.batch.map(tx_id_value),
+        row.settle_position.map(|value| value.0),
+    )?
+    .record()
+    .clone())
+}
+
+fn result_member_real_row_from_storage_record(
+    record: OwnedRecord,
+) -> Result<RealRowMemberEntry, Error> {
+    let layout = result_member_storage_layout();
+    if record.descriptor() != &layout.real_row {
+        return Err(Error::InvalidStoredValue(
+            "settled real-row member descriptor is invalid",
+        ));
+    }
+    let record = ResultMemberRealRowStorageRecord::new(record);
+    Ok(RealRowMemberEntry {
+        table: record.table()?.into(),
+        row_uuid: RowUuid(record.row_uuid()?),
+        occurrence_id: record
+            .occurrence_id()?
+            .map(result_member_occurrence_from_storage_record)
+            .transpose()?,
+        content_tx: record.content_tx()?.map(tx_id_from_value).transpose()?,
+        layer: record.layer()?,
+        deletion_tx: record.deletion_tx()?.map(tx_id_from_value).transpose()?,
+        source: result_row_source_from_storage_value(record.source()?, 0)?,
+        read_view: ReadViewKey {
+            id: record.read_view()?,
+        },
+        schema_version: record.schema_version()?.map(SchemaVersionId),
+        branch_or_prefix: record.branch_or_prefix()?,
+        row_digest: record.row_digest()?,
+        batch: record.batch()?.map(tx_id_from_value).transpose()?,
+        settle_position: record.settle_position()?.map(GlobalTime),
+    })
+}
+
+fn result_member_storage_value(member: &ResultMemberEntry) -> Result<records::EnumValue, Error> {
+    let layout = result_member_storage_layout();
+    let (tag, record) = match member {
+        ResultMemberEntry::Row(row) => (
+            RESULT_MEMBER_ROW_TAG,
+            result_member_real_row_storage_record(row)?,
+        ),
+        ResultMemberEntry::Synthetic {
+            table,
+            row,
+            replacement,
+        } => {
+            let tag = RESULT_MEMBER_SYNTHETIC_TAG;
+            let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
+            let record = ResultMemberSyntheticStorageRecord::encode(
+                &payload,
+                table.clone(),
+                row.clone(),
+                replacement.encoded_record().to_vec(),
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultMemberEntry::PathTuple {
+            path,
+            source_table,
+            source_row,
+            target_table,
+            target_row,
+            edge_id,
+            revision,
+        } => {
+            let tag = RESULT_MEMBER_PATH_TUPLE_TAG;
+            let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
+            let record = ResultMemberPathTupleStorageRecord::encode(
+                &payload,
+                path.clone(),
+                source_table.as_str().to_owned(),
+                source_row.0,
+                target_table.as_str().to_owned(),
+                target_row.0,
+                edge_id.clone(),
+                revision.clone(),
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultMemberEntry::TypedRow {
+            row,
+            occurrence_key,
+        } => {
+            let tag = RESULT_MEMBER_TYPED_ROW_TAG;
+            let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
+            let record = ResultMemberTypedRowStorageRecord::encode(
+                &payload,
+                result_member_real_row_storage_record(row)?,
+                result_member_occurrence_storage_record(occurrence_key.as_occurrence())?,
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+    };
+    Ok(records::EnumValue::new(tag, record))
+}
+
+pub(super) fn result_member_storage_bytes(member: &ResultMemberEntry) -> Result<Vec<u8>, Error> {
+    let layout = result_member_storage_layout();
+    encode_result_member_envelope(
+        RESULT_MEMBER_STORAGE_MAGIC,
+        RESULT_MEMBER_STORAGE_VERSION,
+        layout.member_envelope,
+        result_member_storage_value(member)?,
+    )
+}
+
+pub(super) fn result_member_from_storage_bytes(encoded: &[u8]) -> Result<ResultMemberEntry, Error> {
+    let layout = result_member_storage_layout();
+    let value = decode_result_member_envelope(
+        encoded,
+        RESULT_MEMBER_STORAGE_MAGIC,
+        RESULT_MEMBER_STORAGE_VERSION,
+        layout.member_envelope,
+        "settled result member encoding is invalid",
+    )?;
+    let tag = value.tag();
+    let record = value.into_record();
+    let member = match tag {
+        RESULT_MEMBER_ROW_TAG => {
+            ResultMemberEntry::Row(result_member_real_row_from_storage_record(record)?)
+        }
+        RESULT_MEMBER_SYNTHETIC_TAG => {
+            let record = ResultMemberSyntheticStorageRecord::new(record);
+            ResultMemberEntry::Synthetic {
+                table: record.table()?,
+                row: record.row()?,
+                replacement: SyntheticReplacementToken::from_encoded_record(record.replacement()?),
+            }
+        }
+        RESULT_MEMBER_PATH_TUPLE_TAG => {
+            let record = ResultMemberPathTupleStorageRecord::new(record);
+            ResultMemberEntry::PathTuple {
+                path: record.path()?,
+                source_table: record.source_table()?.into(),
+                source_row: RowUuid(record.source_row()?),
+                target_table: record.target_table()?.into(),
+                target_row: RowUuid(record.target_row()?),
+                edge_id: record.edge_id()?,
+                revision: record.revision()?,
+            }
+        }
+        RESULT_MEMBER_TYPED_ROW_TAG => {
+            let record = ResultMemberTypedRowStorageRecord::new(record);
+            ResultMemberEntry::TypedRow {
+                row: result_member_real_row_from_storage_record(record.row()?)?,
+                occurrence_key: ResultKey::from_occurrence(
+                    result_member_occurrence_from_storage_record(record.occurrence_key()?)?,
+                ),
+            }
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "settled result member tag is invalid",
+            ));
+        }
+    };
+    if result_member_storage_bytes(&member)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result member encoding is not canonical",
+        ));
+    }
+    Ok(member)
 }
 
 pub(super) fn transaction_values(
@@ -2617,6 +3567,34 @@ pub(super) fn validate_canonical_version_parts(
     validate_parent_tx_ids(parents)
 }
 
+pub(super) fn merge_heads_value(heads: &BTreeSet<TxId>) -> Value {
+    Value::Array(heads.iter().copied().map(tx_id_value).collect())
+}
+
+pub(super) fn merge_heads_from_value(value: Value) -> Result<BTreeSet<TxId>, Error> {
+    // This is an intentional pre-v1 storage cut. Do not accept the former
+    // postcard-in-Bytes representation: this derived table has one
+    // schema-declared representation and can be rebuilt from history.
+    let Value::Array(values) = value else {
+        return Err(Error::InvalidStoredValue(
+            "merge heads must be an array of transaction ids",
+        ));
+    };
+    let mut heads = BTreeSet::new();
+    let mut previous = None;
+    for value in values {
+        let head = tx_id_from_value(value)?;
+        if previous.is_some_and(|previous| previous >= head) {
+            return Err(Error::InvalidStoredValue(
+                "merge heads must be strictly increasing",
+            ));
+        }
+        previous = Some(head);
+        heads.insert(head);
+    }
+    Ok(heads)
+}
+
 pub(super) fn tx_id_from_value(value: Value) -> Result<TxId, Error> {
     match value {
         Value::Tuple(values) if values.len() == 2 => {
@@ -2731,5 +3709,222 @@ pub(super) fn version_layer_string(layer: VersionLayer) -> String {
     match layer {
         VersionLayer::Content => "content".to_owned(),
         VersionLayer::Deletion => "deletion".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod result_member_storage_codec_tests {
+    use super::*;
+
+    fn tx(time: u64, node: u8) -> TxId {
+        TxId::new(TxTime(time), NodeUuid::from_bytes([node; 16]))
+    }
+
+    fn ordinary_row() -> RealRowMemberEntry {
+        let mut row = RealRowMemberEntry::current_content((
+            "todos".to_owned().into(),
+            RowUuid::from_bytes([0x11; 16]),
+            tx(7, 0x22),
+        ))
+        .with_settle_position(Some(GlobalTime(9)));
+        row.read_view = ReadViewKey {
+            id: uuid::Uuid::from_bytes([0x19; 16]),
+        };
+        row
+    }
+
+    // These stay internal because exact physical key bytes and malformed
+    // engine-owned payloads cannot be observed through Jazz's public API.
+    // The ordinary persisted/reopen behavior is covered by the known-state
+    // restart tests.
+    #[test]
+    fn result_member_storage_codec_has_permanent_tags_and_golden_bytes() {
+        let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x31; 16]));
+        let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x32; 16]));
+        let typed_key =
+            ResultKey::from_union_occurrence(root, [joined], [(0, "direct".to_owned())]).unwrap();
+        let members = [
+            ResultMemberEntry::Row(ordinary_row()),
+            ResultMemberEntry::Synthetic {
+                table: "totals".to_owned(),
+                row: vec![1, 2],
+                replacement: SyntheticReplacementToken::from_encoded_record(vec![3, 4]),
+            },
+            ResultMemberEntry::PathTuple {
+                path: "owner".to_owned(),
+                source_table: "todos".to_owned().into(),
+                source_row: RowUuid::from_bytes([0x41; 16]),
+                target_table: "users".to_owned().into(),
+                target_row: RowUuid::from_bytes([0x42; 16]),
+                edge_id: Some(vec![5, 6]),
+                revision: vec![7, 8],
+            },
+            ResultMemberEntry::TypedRow {
+                row: ordinary_row(),
+                occurrence_key: typed_key,
+            },
+        ];
+        let encoded = members
+            .iter()
+            .map(|member| result_member_storage_bytes(member).unwrap())
+            .collect::<Vec<_>>();
+        for (expected_tag, (member, encoded)) in members.iter().zip(&encoded).enumerate() {
+            assert_eq!(&encoded[..4], RESULT_MEMBER_STORAGE_MAGIC);
+            assert_eq!(encoded[4], RESULT_MEMBER_STORAGE_VERSION);
+            assert_eq!(
+                decode_result_member_envelope(
+                    encoded,
+                    RESULT_MEMBER_STORAGE_MAGIC,
+                    RESULT_MEMBER_STORAGE_VERSION,
+                    result_member_storage_layout().member_envelope,
+                    "test member",
+                )
+                .unwrap()
+                .tag(),
+                u32::try_from(expected_tag).unwrap()
+            );
+            assert_eq!(result_member_from_storage_bytes(encoded).unwrap(), *member);
+        }
+        assert_eq!(
+            encoded
+                .iter()
+                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "0e1d541c58211d93e04f7f53eff924c639ce7640989384430236be315222072b",
+                "ea51cdbe5077c2236ddb62f192dc50a5e9b9e5306d4d1ec8a5935b73cc016de6",
+                "67b1049e3ab2654cac0076a2894e16f97667cee5bd9defa51f86dd4dd890fb49",
+                "64d9489980bb8678717621a02b7518748e019a2a55104cbb9a0614498d7ed01f",
+            ]
+        );
+    }
+
+    #[test]
+    fn result_member_storage_codec_round_trips_all_source_variants_and_rejects_v0() {
+        let source = ResultRowSource::Merge {
+            inputs: vec![
+                ResultRowSource::Current,
+                ResultRowSource::Snapshot {
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x51; 16]),
+                        global_base: GlobalTime(11),
+                        local_base: TxTime(12),
+                        dots: vec![tx(13, 0x52), tx(14, 0x53)],
+                    },
+                },
+                ResultRowSource::HistoryCut {
+                    global_time: GlobalTime(15),
+                },
+                ResultRowSource::LensProjection {
+                    schema_version: SchemaVersionId::from_bytes([0x54; 16]),
+                    base: Box::new(ResultRowSource::Current),
+                },
+                ResultRowSource::Overlay {
+                    tx: tx(16, 0x55),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ],
+        };
+        let mut row = ordinary_row();
+        row.source = source;
+        row.layer = ResultRowLayer::ContentOrDeletion;
+        row.deletion_tx = Some(tx(17, 0x56));
+        row.schema_version = Some(SchemaVersionId::from_bytes([0x57; 16]));
+        row.branch_or_prefix = Some(vec![1, 2, 3]);
+        row.row_digest = Some(vec![4, 5, 6]);
+        row.batch = Some(tx(18, 0x58));
+        let member = ResultMemberEntry::Row(row);
+        let encoded = result_member_storage_bytes(&member).unwrap();
+        assert_eq!(result_member_from_storage_bytes(&encoded).unwrap(), member);
+
+        let mut wrong_version = encoded.clone();
+        wrong_version[4] = RESULT_MEMBER_STORAGE_VERSION + 1;
+        assert!(result_member_from_storage_bytes(&wrong_version).is_err());
+        assert!(result_member_from_storage_bytes(&[0, 1, 2, 3]).is_err());
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(result_member_from_storage_bytes(&trailing).is_err());
+    }
+
+    #[test]
+    fn result_row_source_storage_codec_has_permanent_tags_and_golden_bytes() {
+        let sources = [
+            (0_u32, ResultRowSource::Current),
+            (
+                1_u32,
+                ResultRowSource::Snapshot {
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x61; 16]),
+                        global_base: GlobalTime(21),
+                        local_base: TxTime(22),
+                        dots: vec![tx(23, 0x62)],
+                    },
+                },
+            ),
+            (
+                2_u32,
+                ResultRowSource::HistoryCut {
+                    global_time: GlobalTime(24),
+                },
+            ),
+            (
+                3_u32,
+                ResultRowSource::Merge {
+                    inputs: vec![ResultRowSource::Current],
+                },
+            ),
+            (
+                4_u32,
+                ResultRowSource::LensProjection {
+                    schema_version: SchemaVersionId::from_bytes([0x63; 16]),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ),
+            (
+                5_u32,
+                ResultRowSource::Overlay {
+                    tx: tx(25, 0x64),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ),
+        ];
+        let encoded = sources
+            .iter()
+            .map(|(_, source)| result_row_source_storage_bytes(source, 0).unwrap())
+            .collect::<Vec<_>>();
+        for ((expected_tag, source), encoded) in sources.iter().zip(&encoded) {
+            assert_eq!(&encoded[..4], RESULT_ROW_SOURCE_STORAGE_MAGIC);
+            assert_eq!(encoded[4], RESULT_ROW_SOURCE_STORAGE_VERSION);
+            assert_eq!(
+                decode_result_member_envelope(
+                    encoded,
+                    RESULT_ROW_SOURCE_STORAGE_MAGIC,
+                    RESULT_ROW_SOURCE_STORAGE_VERSION,
+                    result_member_storage_layout().source_envelope,
+                    "test source",
+                )
+                .unwrap()
+                .tag(),
+                *expected_tag
+            );
+            assert_eq!(
+                result_row_source_from_storage_bytes(encoded, 0).unwrap(),
+                *source
+            );
+        }
+        assert_eq!(
+            encoded
+                .iter()
+                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "c3615f39f699ab18ffe7c4290ae9b4f8e030c68c51b79745fa3b53960d4f74d7",
+                "b2cd10a88cae72fb030756f53633cd03ecd1a5d624275d4c4aeb5dc6dcc5c425",
+                "7d10fac91f6c2a8a9a340ed5e79cec1fc09552790ab7d60dad91a5e01dc369c7",
+                "26c05aa7fabf7867acfbdfc37e3c27dc9c4fc64b2757a11b42800fe32fe1e54f",
+                "fa9739e0513bdf9accde5901ddcf1a9a7beabd2f61a491cc2c627dfd30ad739d",
+                "d07b06377c81e1dadee1cc2a148bf988f2fbdbcab79931016683e91a60eb252d",
+            ],
+        );
     }
 }

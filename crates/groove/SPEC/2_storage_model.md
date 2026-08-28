@@ -243,6 +243,54 @@ memory backend. The wasm-only IndexedDB adapter compiles against an in-memory B-
 fixture; coverage of persistence across closing and reopening a real IndexedDB
 namespace remains a browser-harness gap.
 
+### IndexedDB page-store physical format
+
+IndexedDB is one durable adapter, not a second logical Groove layout. Its
+database name, the `pages` and `metadata` object-store names, and the `current`
+metadata key are fixed within a storage epoch. `current` is a structured-clone
+record with magic `jazz-idb-tree`, format version `2`, a power-of-two page size
+between 1024 and `2^31` bytes, generation, nullable root page id, and next page
+id. Missing, malformed, or unknown magic/version metadata fails closed before
+a mutation; a new incompatible layout uses a new epoch instead of guessing at
+these bytes. Browser page ids are JavaScript safe integers, so root, child, and
+next ids are bounded to `0..=2^53-1`; exhaustion fails instead of rounding an
+identity. The stored page size is validated before page write or decode.
+
+The IndexedDB B-tree page body is adapter-private but durable. A page is exactly
+`"IDBTREE\\0" | version:u8(2) | xxh3_64(payload):u64le | payload`. The first
+payload byte is a fixed page tag: leaf `0`, internal `1`, or overflow `2`. All
+collection and byte lengths are `u32le`; page ids and logical overflow lengths
+are `u64le`. The logical overflow length stays `u64` in memory until a host
+materializes bytes, so native and wasm32 accept the same canonical page. No
+`usize`, serde/postcard layout, omitted option field, or trailing payload byte
+is durable.
+
+Leaf entries are strictly key-ordered. Internal keys are strictly ordered and
+their explicit child count is exactly one larger than their key count. Overflow
+next tags are exactly `0` (none) or `1 | page_id:u64le`. Unknown tags, malformed
+lengths, checksum failures, and noncanonical trailing bytes fail closed. Exact
+Rust/TypeScript fixtures include a logical overflow length above `u32` to pin
+this cross-architecture contract.
+
+Every logical operation keeps one page-identity ownership set across its
+structural root-to-leaf walk and every overflow edge it follows. Repeated page
+ids are cycle or shared-subgraph corruption—including two leaf values naming
+the same overflow head—not deduplication.
+
+Tree writes are copy-on-write: the changed leaf and every changed ancestor get
+fresh page ids, then one IndexedDB transaction writes the new immutable closure
+and replaces `current` after checking the observed generation. A crash before
+publication leaves at most unreachable new pages; a published root never names
+a torn or missing child. Reclamation is a separate reachability operation and
+may delete only pages proven unreachable from the published root, never pages
+merely replaced by an in-flight write. Reopening observes either the old root
+and complete closure or the new root and complete closure.
+Before persistence, one logical write—including every operation in a
+`write_many` call—is also locally atomic. If page construction or validation
+fails, the tree restores its prior root and allocation frontier and discards
+every newly staged page; a later successful flush cannot publish those orphans
+or an earlier operation from the failed batch.
+
 ### 2.2 Records: logical fields, physical bytes
 
 A **record** is the stored byte representation of a typed tuple. Its schema is

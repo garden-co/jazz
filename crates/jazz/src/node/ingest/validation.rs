@@ -466,6 +466,10 @@ where
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<Vec<VersionRow>, Error> {
+        // Provenance operation identities participate in merge deduplication.
+        // Admit them before accepting staged values or writing any derived
+        // transaction/current state, on every local, remote, and view ingress.
+        let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
         let large_value_descriptors = version_indirect_descriptors(&versions);
         for staged_id in self
             .current_staged_ids_for_descriptors(&large_value_descriptors, false)
@@ -493,9 +497,11 @@ where
         } else {
             &tx
         };
-        let contribution_merge = self.contribution_merge_storage_value(
-            storage_tx.contribution_merge.as_ref(),
-        )?;
+        let contribution_merge = if std::ptr::eq(storage_tx, &tx) {
+            contribution_merge
+        } else {
+            self.admit_contribution_merge_for_storage(storage_tx)?
+        };
         let tx_values = transaction_values_with_cardinality_scope(
             tx_node_alias,
             storage_tx,
@@ -950,11 +956,11 @@ where
         tx: Transaction,
         fate: Fate,
     ) -> Result<(), Error> {
+        let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
         if self.query_transaction(tx.tx_id).await?.is_some() {
             return self.apply_fate_update(tx.tx_id, fate, None, None).await;
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
-        let contribution_merge = self.contribution_merge_storage_value(tx.contribution_merge.as_ref())?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",

@@ -584,6 +584,128 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
     assert_eq!(chunks.len(), 0);
 }
 
+// This is intentionally a facade-level internal receipt: a mismatched reclaim
+// key/value pair can only be introduced by corrupt durable engine metadata,
+// not through Groove's public row API. It proves corruption fails closed
+// before the maintenance path deletes either the queue work, metadata, or the
+// immutable blob, including after a reopen.
+#[futures_test::test]
+async fn reclaim_rejects_mismatched_queue_identity_without_mutation_after_reopen() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        chunks.len(),
+        1,
+        "this focused receipt uses one node so its corrupt queue is the only reclaim work"
+    );
+    let queued_ref = staged.value_ref.root.clone();
+    assert!(database.evict_staged_large_value(staged.id).await.unwrap());
+    let queue_key = large_value_reclaim_key(&queued_ref).unwrap();
+    let node_key = large_value_node_key(&queued_ref).unwrap();
+    let node_before = database
+        .storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+        .await
+        .unwrap()
+        .expect("eviction retains node metadata for reclaim");
+    let mismatched_ref = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x6b; crate::large_values::INLINE_VALUE_MAX_BYTES + 2],
+    )
+    .unwrap()
+    .value_ref
+    .root;
+    let mismatched_value = crate::large_values::encode_node_ref(&mismatched_ref).unwrap();
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: queue_key.clone(),
+            value: mismatched_value.clone(),
+        }])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("identify different nodes")
+    ));
+    assert_eq!(
+        chunks.len(),
+        1,
+        "corrupt reclaim work cannot delete the blob"
+    );
+    assert_eq!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), queue_key.clone())
+            .await
+            .unwrap(),
+        Some(mismatched_value.clone()),
+        "corrupt reclaim work remains for inspection rather than being consumed"
+    );
+    assert_eq!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+            .await
+            .unwrap(),
+        Some(node_before.clone()),
+        "corrupt reclaim work cannot delete its metadata"
+    );
+
+    drop(database);
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks.clone());
+    assert!(matches!(
+        reopened
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("identify different nodes")
+    ));
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        reopened
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
+            .await
+            .unwrap(),
+        Some(mismatched_value)
+    );
+    assert_eq!(
+        reopened
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key)
+            .await
+            .unwrap(),
+        Some(node_before)
+    );
+}
+
 // This facade-level test is intentionally below Jazz's public mutation API:
 // only a hostile peer can call the raw chunk/finalization split directly. It
 // proves finalization is its own admission boundary rather than trusting the
@@ -725,9 +847,6 @@ async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail(
             delete_utf16_length: 1,
             insert_utf16_length: 1,
         });
-    let forged_text: crate::large_values::LargeValueRef =
-        postcard::from_bytes(&postcard::to_allocvec(&forged_text).expect("encode peer descriptor"))
-            .expect("decode peer descriptor");
     let text_upload = crate::large_values::StagedLargeValueId([0xa1; 16]);
     database
         .stage_large_value_chunk_batch(text_upload, text.value_ref.kind, text.staged_chunks)
@@ -755,9 +874,6 @@ async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail(
             delete_utf16_length: 1,
             insert_utf16_length: 1,
         });
-    let forged_json: crate::large_values::LargeValueRef =
-        postcard::from_bytes(&postcard::to_allocvec(&forged_json).expect("encode peer descriptor"))
-            .expect("decode peer descriptor");
     let json_upload = crate::large_values::StagedLargeValueId([0xa2; 16]);
     database
         .stage_large_value_chunk_batch(json_upload, json.value_ref.kind, json.staged_chunks)
@@ -1163,7 +1279,7 @@ async fn repeated_child_dag_finalizes_once_per_node_and_reclaims_without_leaks()
             .await
             .unwrap()
             .expect("every finalized physical node has metadata");
-        let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+        let metadata = decode_large_value_node_references(&encoded).unwrap();
         assert_eq!(
             metadata.references, 1,
             "one active physical parent/root contributes one reference"
@@ -1235,7 +1351,7 @@ async fn shared_child_dag_counts_distinct_parent_edges_and_reclaims_once() {
             .await
             .unwrap()
             .expect("every finalized physical node has metadata");
-        let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+        let metadata = decode_large_value_node_references(&encoded).unwrap();
         assert_eq!(
             metadata.references,
             if index == 0 { 2 } else { 1 },
@@ -1302,12 +1418,12 @@ async fn resolver_installed_shared_dag_recursively_activates_and_reclaims_descen
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: staged_large_value_key(staged.id),
-                value: postcard::to_allocvec(&staged).unwrap(),
+                value: encode_staged_large_value(&staged).unwrap(),
             },
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_root_key(&staged.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueRootReferences {
+                value: encode_large_value_root_references(&LargeValueRootReferences {
                     durable: 0,
                     staged: 1,
                     node_active: false,
@@ -1336,7 +1452,7 @@ async fn resolver_installed_shared_dag_recursively_activates_and_reclaims_descen
             .await
             .unwrap()
             .expect("resolver-installed active node has metadata");
-        let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+        let metadata = decode_large_value_node_references(&encoded).unwrap();
         assert_eq!(metadata.references, 1);
         assert!(metadata.children.len() <= 1);
     }
@@ -1408,7 +1524,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_root_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueRootReferences {
+                value: encode_large_value_root_references(&LargeValueRootReferences {
                     durable: 0,
                     staged: 1,
                     node_active: false,
@@ -1418,7 +1534,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                value: encode_large_value_node_references(&LargeValueNodeReferences {
                     references: 1,
                     upload_references: 0,
                     children: Vec::new(),
@@ -1440,7 +1556,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
             .unwrap(),
     );
 
-    let root: LargeValueNodeReferences = postcard::from_bytes(
+    let root = decode_large_value_node_references(
         &database
             .storage
             .get(
@@ -1454,7 +1570,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
     .unwrap();
     assert_eq!(root.references, 2, "the newly activated root is retained");
     assert_eq!(root.children, children);
-    let child: LargeValueNodeReferences = postcard::from_bytes(
+    let child = decode_large_value_node_references(
         &database
             .storage
             .get(
@@ -1522,7 +1638,7 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
     database.finish_persistence(first).unwrap();
     database.finish_persistence(second).unwrap();
 
-    let references: LargeValueRootReferences = postcard::from_bytes(
+    let references = decode_large_value_root_references(
         &database
             .storage
             .get(
@@ -1591,7 +1707,7 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                value: encode_large_value_node_references(&LargeValueNodeReferences {
                     references: 1,
                     upload_references: 0,
                     children: Vec::new(),
@@ -1601,7 +1717,8 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&child).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences::default()).unwrap(),
+                value: encode_large_value_node_references(&LargeValueNodeReferences::default())
+                    .unwrap(),
             },
         ])
         .await
@@ -1648,7 +1765,7 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
         .await
         .unwrap()
         .unwrap();
-    let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+    let metadata = decode_large_value_node_references(&encoded).unwrap();
     assert_eq!(metadata.references, 0);
 }
 
@@ -1823,7 +1940,7 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                value: encode_large_value_node_references(&LargeValueNodeReferences {
                     references: 1,
                     upload_references: 0,
                     children: Vec::new(),
@@ -1833,7 +1950,8 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&child).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences::default()).unwrap(),
+                value: encode_large_value_node_references(&LargeValueNodeReferences::default())
+                    .unwrap(),
             },
         ])
         .await
@@ -1883,7 +2001,7 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
         .await
         .unwrap()
         .unwrap();
-    let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+    let metadata = decode_large_value_node_references(&encoded).unwrap();
     assert_eq!(metadata.references, 0);
 }
 

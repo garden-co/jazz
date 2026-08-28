@@ -1,10 +1,18 @@
-export const INDEXEDDB_BTREE_FORMAT_VERSION = 1;
+/** Durable IndexedDB metadata/page-store epoch, independent of browser IDB's version. */
+export const INDEXEDDB_BTREE_FORMAT_VERSION = 2;
+export const INDEXEDDB_BTREE_FORMAT_MAGIC = "jazz-idb-tree";
+export const INDEXEDDB_BTREE_DATABASE_VERSION = 2;
 
-const PAGES_STORE = "pages";
-const METADATA_STORE = "metadata";
+// These names are part of the physical browser format. Do not rename them
+// without introducing a new durable storage epoch and explicit migration.
+export const INDEXEDDB_BTREE_PAGES_STORE = "pages";
+export const INDEXEDDB_BTREE_METADATA_STORE = "metadata";
 const CURRENT_METADATA_KEY = "current";
+const MIN_PAGE_SIZE = 1024;
+const MAX_PAGE_SIZE = 0x8000_0000;
 
 export interface IndexedDbBtreeMetadata {
+  formatMagic: typeof INDEXEDDB_BTREE_FORMAT_MAGIC;
   formatVersion: typeof INDEXEDDB_BTREE_FORMAT_VERSION;
   pageSize: number;
   generation: number;
@@ -15,7 +23,7 @@ export interface IndexedDbBtreeMetadata {
 export interface IndexedDbPageCommit {
   /** The generation observed when the dirty snapshot was taken. */
   expectedGeneration: number;
-  metadata: Omit<IndexedDbBtreeMetadata, "formatVersion" | "generation">;
+  metadata: Omit<IndexedDbBtreeMetadata, "formatMagic" | "formatVersion" | "generation">;
   pages: ReadonlyMap<number, Uint8Array>;
   deletedPageIds?: readonly number[];
 }
@@ -50,20 +58,24 @@ export class IndexedDbPageStore {
     name: string,
     onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void,
   ): Promise<IndexedDbPageStore> {
-    const request = indexedDB.open(name, 1);
+    const request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(PAGES_STORE)) db.createObjectStore(PAGES_STORE);
-      if (!db.objectStoreNames.contains(METADATA_STORE)) db.createObjectStore(METADATA_STORE);
+      if (!db.objectStoreNames.contains(INDEXEDDB_BTREE_PAGES_STORE))
+        db.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
+      if (!db.objectStoreNames.contains(INDEXEDDB_BTREE_METADATA_STORE))
+        db.createObjectStore(INDEXEDDB_BTREE_METADATA_STORE);
     };
     return new IndexedDbPageStore(await requestResult(request), name, onInvalidated);
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
     this.assertValid();
-    const tx = this.db.transaction(METADATA_STORE, "readonly");
+    const tx = this.db.transaction(INDEXEDDB_BTREE_METADATA_STORE, "readonly");
     const done = transactionDone(tx);
-    const value = await requestResult(tx.objectStore(METADATA_STORE).get(CURRENT_METADATA_KEY));
+    const value = await requestResult(
+      tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE).get(CURRENT_METADATA_KEY),
+    );
     await done;
     if (value === undefined) return null;
     assertMetadata(value);
@@ -73,9 +85,9 @@ export class IndexedDbPageStore {
   async readPage(pageId: number): Promise<Uint8Array | null> {
     this.assertValid();
     assertPageId(pageId);
-    const tx = this.db.transaction(PAGES_STORE, "readonly");
+    const tx = this.db.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
     const done = transactionDone(tx);
-    const value = await requestResult(tx.objectStore(PAGES_STORE).get(pageId));
+    const value = await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(pageId));
     await done;
     if (value === undefined) return null;
     if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) {
@@ -90,10 +102,14 @@ export class IndexedDbPageStore {
 
   async commit(commit: IndexedDbPageCommit): Promise<IndexedDbBtreeMetadata> {
     this.assertValid();
-    const tx = relaxedReadWriteTransaction(this.db, [PAGES_STORE, METADATA_STORE]);
+    assertCommit(commit);
+    const tx = relaxedReadWriteTransaction(this.db, [
+      INDEXEDDB_BTREE_PAGES_STORE,
+      INDEXEDDB_BTREE_METADATA_STORE,
+    ]);
     const done = transactionDone(tx);
-    const pages = tx.objectStore(PAGES_STORE);
-    const metadataStore = tx.objectStore(METADATA_STORE);
+    const pages = tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE);
+    const metadataStore = tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE);
     const currentValue = await requestResult(metadataStore.get(CURRENT_METADATA_KEY));
     const currentGeneration = currentValue === undefined ? 0 : metadataGeneration(currentValue);
 
@@ -105,24 +121,44 @@ export class IndexedDbPageStore {
       );
     }
 
-    for (const [pageId, bytes] of commit.pages) {
-      assertPageId(pageId);
-      pages.put(bytes.slice().buffer, pageId);
-    }
-    for (const pageId of commit.deletedPageIds ?? []) {
-      assertPageId(pageId);
-      pages.delete(pageId);
-    }
-
     const metadata: IndexedDbBtreeMetadata = {
       ...commit.metadata,
+      formatMagic: INDEXEDDB_BTREE_FORMAT_MAGIC,
       formatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
       generation: currentGeneration + 1,
     };
+    // Validate the exact metadata to be published before queuing a mutation.
     assertMetadata(metadata);
-    metadataStore.put(metadata, CURRENT_METADATA_KEY);
-    await done;
-    return metadata;
+
+    try {
+      if (
+        metadata.rootPageId !== null &&
+        !commit.pages.has(metadata.rootPageId) &&
+        (await requestResult(pages.get(metadata.rootPageId))) === undefined
+      ) {
+        throw new Error(`IndexedDB B-tree root page ${metadata.rootPageId} is missing`);
+      }
+      for (const [pageId, bytes] of commit.pages) {
+        if (bytes.byteLength > metadata.pageSize) {
+          throw new Error(`IndexedDB B-tree page ${pageId} exceeds configured page size`);
+        }
+        pages.put(bytes.slice().buffer, pageId);
+      }
+      for (const pageId of commit.deletedPageIds ?? []) {
+        pages.delete(pageId);
+      }
+      metadataStore.put(metadata, CURRENT_METADATA_KEY);
+      await done;
+      return metadata;
+    } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+        // The transaction may already have aborted because an IDB request failed.
+      }
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   /** Narrow bridge used by wasm without serializing page bytes through serde. */
@@ -157,10 +193,13 @@ export class IndexedDbPageStore {
 
   async clear(): Promise<void> {
     this.assertValid();
-    const tx = relaxedReadWriteTransaction(this.db, [PAGES_STORE, METADATA_STORE]);
+    const tx = relaxedReadWriteTransaction(this.db, [
+      INDEXEDDB_BTREE_PAGES_STORE,
+      INDEXEDDB_BTREE_METADATA_STORE,
+    ]);
     const done = transactionDone(tx);
-    tx.objectStore(PAGES_STORE).clear();
-    tx.objectStore(METADATA_STORE).clear();
+    tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).clear();
+    tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE).clear();
     await done;
   }
 
@@ -230,17 +269,53 @@ function assertMetadata(value: unknown): asserts value is IndexedDbBtreeMetadata
   if (!value || typeof value !== "object") throw new Error("Invalid IndexedDB B-tree metadata");
   const metadata = value as Partial<IndexedDbBtreeMetadata>;
   if (
+    metadata.formatMagic !== INDEXEDDB_BTREE_FORMAT_MAGIC ||
     metadata.formatVersion !== INDEXEDDB_BTREE_FORMAT_VERSION ||
-    !Number.isSafeInteger(metadata.pageSize) ||
-    Number(metadata.pageSize) <= 0 ||
+    !isPageSize(metadata.pageSize) ||
     !Number.isSafeInteger(metadata.generation) ||
     Number(metadata.generation) < 1 ||
     (metadata.rootPageId !== null && !isPageId(metadata.rootPageId)) ||
     !Number.isSafeInteger(metadata.nextPageId) ||
-    Number(metadata.nextPageId) < 0
+    Number(metadata.nextPageId) < 0 ||
+    (metadata.rootPageId !== null && Number(metadata.rootPageId) >= Number(metadata.nextPageId))
   ) {
     throw new Error("Invalid IndexedDB B-tree metadata");
   }
+}
+
+function assertCommit(commit: IndexedDbPageCommit): void {
+  if (!Number.isSafeInteger(commit.expectedGeneration) || commit.expectedGeneration < 0) {
+    throw new Error("Invalid IndexedDB B-tree expected generation");
+  }
+  const { pageSize, rootPageId, nextPageId } = commit.metadata;
+  if (!isPageSize(pageSize) || !isPageId(nextPageId)) {
+    throw new Error("Invalid IndexedDB B-tree commit metadata");
+  }
+  if (rootPageId !== null && (!isPageId(rootPageId) || rootPageId >= nextPageId)) {
+    throw new Error("Invalid IndexedDB B-tree commit root page id");
+  }
+  const written = new Set<number>();
+  for (const [pageId, bytes] of commit.pages) {
+    if (!isPageId(pageId) || pageId >= nextPageId || bytes.byteLength > pageSize) {
+      throw new Error("Invalid IndexedDB B-tree page commit");
+    }
+    written.add(pageId);
+  }
+  for (const pageId of commit.deletedPageIds ?? []) {
+    if (!isPageId(pageId) || pageId >= nextPageId || pageId === rootPageId || written.has(pageId)) {
+      throw new Error("Invalid IndexedDB B-tree deleted page commit");
+    }
+  }
+}
+
+function isPageSize(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= MIN_PAGE_SIZE &&
+    value <= MAX_PAGE_SIZE &&
+    Number.isInteger(Math.log2(value))
+  );
 }
 
 function assertPageId(pageId: number): void {
