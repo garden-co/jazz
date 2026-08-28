@@ -11,7 +11,7 @@ mod store;
 mod web;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 pub use store::{BoxFuture, Commit, MemoryPageStore, Metadata, PageStore};
@@ -22,10 +22,29 @@ use page::{Page, PageId, ValueCell, decode_page, encode_page};
 
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const MIN_PAGE_SIZE: usize = 1024;
+const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 type LeafEntry = (Vec<u8>, ValueCell);
-type Descent = (PageId, Vec<LeafEntry>, Vec<(PageId, usize)>);
+/// A resident root-to-leaf walk. `visited` belongs to the whole logical
+/// operation, rather than merely to the structural descent: an overflow chain
+/// must not alias a structural page, and a caller which goes on to inspect a
+/// value must continue using this same ownership set.
+type Descent = (
+    PageId,
+    Vec<LeafEntry>,
+    Vec<(PageId, usize)>,
+    HashSet<PageId>,
+);
+
+enum PageReplacement {
+    One(PageId),
+    Split {
+        left: PageId,
+        separator: Vec<u8>,
+        right: PageId,
+    },
+}
 
 pub enum WriteOperation {
     Set { key: Vec<u8>, value: Vec<u8> },
@@ -65,9 +84,13 @@ impl Default for Options {
 
 impl Options {
     fn validate(self) -> Result<Self, Error> {
-        if self.page_size < MIN_PAGE_SIZE || !self.page_size.is_power_of_two() {
+        if self.page_size < MIN_PAGE_SIZE
+            || !self.page_size.is_power_of_two()
+            || self.page_size > u32::MAX as usize
+        {
             return Err(Error::InvalidOptions(format!(
-                "page_size must be a power of two and at least {MIN_PAGE_SIZE}"
+                "page_size must be a power of two between {MIN_PAGE_SIZE} and {}",
+                u32::MAX
             )));
         }
         Ok(self)
@@ -84,6 +107,14 @@ struct TreeCore<S> {
     dirty: BTreeMap<PageId, Page>,
     deleted: Vec<PageId>,
     commit_in_flight: bool,
+}
+
+/// A write only appends fresh COW page ids and advances root/allocation
+/// metadata. Remember that small frontier instead of cloning the resident page
+/// cache for every operation.
+struct WriteCheckpoint {
+    metadata: Metadata,
+    deleted: Vec<PageId>,
 }
 
 #[derive(Debug)]
@@ -140,7 +171,10 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         loop {
-            let attempt = self.inner.borrow_mut().try_put(&key, &value)?;
+            let attempt = self
+                .inner
+                .borrow_mut()
+                .with_write_attempt_checkpoint(|tree| tree.try_put(&key, &value))?;
             match attempt {
                 Attempt::Ready(()) => return Ok(()),
                 Attempt::Missing(page_id) => self.hydrate(page_id).await?,
@@ -150,7 +184,10 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
         loop {
-            let attempt = self.inner.borrow_mut().try_delete(key)?;
+            let attempt = self
+                .inner
+                .borrow_mut()
+                .with_write_attempt_checkpoint(|tree| tree.try_delete(key))?;
             match attempt {
                 Attempt::Ready(deleted) => return Ok(deleted),
                 Attempt::Missing(page_id) => self.hydrate(page_id).await?,
@@ -172,19 +209,9 @@ impl<S: PageStore + Clone> IdbTree<S> {
             }
         }
 
-        let mut tree = self.inner.borrow_mut();
-        for operation in operations {
-            let attempt = match operation {
-                WriteOperation::Set { key, value } => tree.try_put(&key, &value)?,
-                WriteOperation::Delete { key } => tree.try_delete(&key)?.map(|_| ()),
-            };
-            if let Attempt::Missing(page_id) = attempt {
-                return Err(Error::InvalidPage(format!(
-                    "prepared batch unexpectedly missed page {page_id}"
-                )));
-            }
-        }
-        Ok(())
+        self.inner
+            .borrow_mut()
+            .with_write_checkpoint(|tree| tree.apply_write_many(operations))
     }
 
     pub async fn range(&self, start: &[u8], end: &[u8]) -> Result<Vec<KeyValue>, Error> {
@@ -248,6 +275,10 @@ impl<S: PageStore + Clone> IdbTree<S> {
             .await
             .map_err(Error::Store)?
             .ok_or(Error::MissingPage(page_id))?;
+        let page_size = self.inner.borrow().options.page_size;
+        if bytes.len() > page_size {
+            return Err(Error::PageTooLarge { page_id, page_size });
+        }
         let page = decode_page(&bytes).map_err(Error::InvalidPage)?;
         self.inner.borrow_mut().pages.entry(page_id).or_insert(page);
         Ok(())
@@ -261,6 +292,72 @@ impl PreparedCommit {
 }
 
 impl<S: PageStore> TreeCore<S> {
+    fn apply_write_many(&mut self, operations: Vec<WriteOperation>) -> Result<(), Error> {
+        for operation in operations {
+            let attempt = match operation {
+                WriteOperation::Set { key, value } => self.try_put(&key, &value)?,
+                WriteOperation::Delete { key } => self.try_delete(&key)?.map(|_| ()),
+            };
+            if let Attempt::Missing(page_id) = attempt {
+                return Err(Error::InvalidPage(format!(
+                    "prepared batch unexpectedly missed page {page_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_checkpoint(&self) -> WriteCheckpoint {
+        WriteCheckpoint {
+            metadata: self.metadata.clone(),
+            deleted: self.deleted.clone(),
+        }
+    }
+
+    fn with_write_checkpoint<T>(
+        &mut self,
+        write: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let checkpoint = self.write_checkpoint();
+        match write(self) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.rollback_write(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn with_write_attempt_checkpoint<T>(
+        &mut self,
+        write: impl FnOnce(&mut Self) -> Result<Attempt<T>, Error>,
+    ) -> Result<Attempt<T>, Error> {
+        let checkpoint = self.write_checkpoint();
+        match write(self) {
+            Ok(Attempt::Ready(value)) => Ok(Attempt::Ready(value)),
+            Ok(Attempt::Missing(page_id)) => {
+                self.rollback_write(checkpoint);
+                Ok(Attempt::Missing(page_id))
+            }
+            Err(error) => {
+                self.rollback_write(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn rollback_write(&mut self, checkpoint: WriteCheckpoint) {
+        let allocated_start = checkpoint.metadata.next_page_id;
+        let allocated_end = self.metadata.next_page_id;
+        debug_assert!(allocated_end >= allocated_start);
+        for page_id in allocated_start..allocated_end {
+            self.pages.remove(&page_id);
+            self.dirty.remove(&page_id);
+        }
+        self.deleted = checkpoint.deleted;
+        self.metadata = checkpoint.metadata;
+    }
+
     pub async fn open(store: S, options: Options) -> Result<Self, Error> {
         let options = options.validate()?;
         let metadata = store.load_metadata().await.map_err(Error::Store)?;
@@ -280,14 +377,14 @@ impl<S: PageStore> TreeCore<S> {
             )));
         }
         if tree.metadata.root_page_id.is_none() {
-            let root = tree.allocate_page(Page::leaf());
+            let root = tree.allocate_page(Page::leaf())?;
             tree.metadata.root_page_id = Some(root);
         }
         Ok(tree)
     }
 
     fn try_get(&self, key: &[u8]) -> Result<Attempt<Option<Vec<u8>>>, Error> {
-        let Some((_, entries, _)) = self.resident_descent(key)? else {
+        let Some((_, entries, _, mut visited)) = self.resident_descent(key)? else {
             return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
         };
         let value = entries
@@ -296,7 +393,7 @@ impl<S: PageStore> TreeCore<S> {
             .map(|index| entries[index].1.clone());
         match value {
             Some(value) => self
-                .read_value_resident(&value)
+                .read_value_resident(&value, &mut visited)
                 .map(|attempt| match attempt {
                     Attempt::Ready(value) => Attempt::Ready(Some(value)),
                     Attempt::Missing(page_id) => Attempt::Missing(page_id),
@@ -306,20 +403,20 @@ impl<S: PageStore> TreeCore<S> {
     }
 
     fn try_put(&mut self, key: &[u8], value: &[u8]) -> Result<Attempt<()>, Error> {
-        let Some((page_id, entries, path)) = self.resident_descent(key)? else {
+        let Some((page_id, entries, path, mut visited)) = self.resident_descent(key)? else {
             return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
         };
-        if let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
-            && let Attempt::Missing(page_id) = self.value_resident(&entries[index].1)?
-        {
+        // A write copies this complete leaf into a new immutable page. Verify
+        // every retained value edge under the same ownership set before doing
+        // so; otherwise a point update could silently perpetuate a malformed
+        // sibling overflow graph.
+        if let Attempt::Missing(page_id) = self.leaf_values_resident(&entries, &mut visited)? {
             return Ok(Attempt::Missing(page_id));
         }
-
         let mut entries = entries;
         let new_value = self.build_value(value.to_vec())?;
         match entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key)) {
             Ok(index) => {
-                self.retire_value_resident(&entries[index].1)?;
                 entries[index].1 = new_value;
             }
             Err(index) => entries.insert(index, (key.to_vec(), new_value)),
@@ -329,32 +426,28 @@ impl<S: PageStore> TreeCore<S> {
     }
 
     fn try_delete(&mut self, key: &[u8]) -> Result<Attempt<bool>, Error> {
-        let Some((page_id, entries, _)) = self.resident_descent(key)? else {
+        let Some((page_id, entries, path, mut visited)) = self.resident_descent(key)? else {
             return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
         };
         let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
         else {
             return Ok(Attempt::Ready(false));
         };
-        if let Attempt::Missing(page_id) = self.value_resident(&entries[index].1)? {
+        // Deletion also republishes all surviving cells in this leaf.
+        if let Attempt::Missing(page_id) = self.leaf_values_resident(&entries, &mut visited)? {
             return Ok(Attempt::Missing(page_id));
         }
         let mut entries = entries;
-        let (_, value) = entries.remove(index);
-        self.retire_value_resident(&value)?;
-        self.replace_page(page_id, Page::Leaf { entries });
+        entries.remove(index);
+        self.finish_leaf_write(page_id, entries, path)?;
         Ok(Attempt::Ready(true))
     }
 
     fn write_path_resident(&self, key: &[u8]) -> Result<Attempt<()>, Error> {
-        let Some((_, entries, _)) = self.resident_descent(key)? else {
+        let Some((_, entries, _, mut visited)) = self.resident_descent(key)? else {
             return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
         };
-        let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
-        else {
-            return Ok(Attempt::Ready(()));
-        };
-        self.value_resident(&entries[index].1)
+        self.leaf_values_resident(&entries, &mut visited)
     }
 
     fn try_range(
@@ -364,14 +457,20 @@ impl<S: PageStore> TreeCore<S> {
         limit: usize,
     ) -> Result<Attempt<Vec<KeyValue>>, Error> {
         let mut cells = Vec::new();
-        if let Some(page_id) =
-            self.collect_range_resident(self.root_page_id(), start, end, limit, &mut cells)?
-        {
+        let mut visited = HashSet::new();
+        if let Some(page_id) = self.collect_range_resident(
+            self.root_page_id(),
+            start,
+            end,
+            limit,
+            &mut cells,
+            &mut visited,
+        )? {
             return Ok(Attempt::Missing(page_id));
         }
         let mut rows = Vec::with_capacity(cells.len());
         for (key, value) in cells {
-            match self.read_value_resident(&value)? {
+            match self.read_value_resident(&value, &mut visited)? {
                 Attempt::Ready(value) => rows.push((key, value)),
                 Attempt::Missing(page_id) => return Ok(Attempt::Missing(page_id)),
             }
@@ -386,14 +485,20 @@ impl<S: PageStore> TreeCore<S> {
         limit: usize,
     ) -> Result<Attempt<Vec<KeyValue>>, Error> {
         let mut cells = Vec::new();
-        if let Some(page_id) =
-            self.collect_range_reverse_resident(self.root_page_id(), start, end, limit, &mut cells)?
-        {
+        let mut visited = HashSet::new();
+        if let Some(page_id) = self.collect_range_reverse_resident(
+            self.root_page_id(),
+            start,
+            end,
+            limit,
+            &mut cells,
+            &mut visited,
+        )? {
             return Ok(Attempt::Missing(page_id));
         }
         let mut rows = Vec::with_capacity(cells.len());
         for (key, value) in cells {
-            match self.read_value_resident(&value)? {
+            match self.read_value_resident(&value, &mut visited)? {
                 Attempt::Ready(value) => rows.push((key, value)),
                 Attempt::Missing(page_id) => return Ok(Attempt::Missing(page_id)),
             }
@@ -493,13 +598,19 @@ impl<S: PageStore> TreeCore<S> {
     fn resident_descent(&self, key: &[u8]) -> Result<Option<Descent>, Error> {
         let mut page_id = self.root_page_id();
         let mut path = Vec::new();
+        let mut visited = HashSet::new();
         loop {
+            if !visited.insert(page_id) {
+                return Err(Error::InvalidPage(
+                    "tree child graph contains a cycle or shared page".to_owned(),
+                ));
+            }
             let Some(page) = self.pages.get(&page_id) else {
                 return Ok(None);
             };
             match page {
                 Page::Leaf { entries } => {
-                    return Ok(Some((page_id, entries.clone(), path)));
+                    return Ok(Some((page_id, entries.clone(), path, visited)));
                 }
                 Page::Internal { keys, children } => {
                     let child_index = keys.partition_point(|separator| separator.as_slice() <= key);
@@ -517,7 +628,13 @@ impl<S: PageStore> TreeCore<S> {
 
     fn missing_page_for_key(&self, key: &[u8]) -> Result<PageId, Error> {
         let mut page_id = self.root_page_id();
+        let mut visited = HashSet::new();
         loop {
+            if !visited.insert(page_id) {
+                return Err(Error::InvalidPage(
+                    "tree child graph contains a cycle or shared page".to_owned(),
+                ));
+            }
             let Some(page) = self.pages.get(&page_id) else {
                 return Ok(page_id);
             };
@@ -547,9 +664,15 @@ impl<S: PageStore> TreeCore<S> {
         end: &[u8],
         limit: usize,
         output: &mut Vec<(Vec<u8>, ValueCell)>,
+        visited: &mut HashSet<PageId>,
     ) -> Result<Option<PageId>, Error> {
         if output.len() == limit {
             return Ok(None);
+        }
+        if !visited.insert(page_id) {
+            return Err(Error::InvalidPage(
+                "tree child graph contains a cycle or shared page".to_owned(),
+            ));
         }
         let Some(page) = self.pages.get(&page_id) else {
             return Ok(Some(page_id));
@@ -569,7 +692,7 @@ impl<S: PageStore> TreeCore<S> {
                     if below_end
                         && above_start
                         && let Some(missing) =
-                            self.collect_range_resident(child, start, end, limit, output)?
+                            self.collect_range_resident(child, start, end, limit, output, visited)?
                     {
                         return Ok(Some(missing));
                     }
@@ -594,9 +717,15 @@ impl<S: PageStore> TreeCore<S> {
         end: &[u8],
         limit: usize,
         output: &mut Vec<LeafEntry>,
+        visited: &mut HashSet<PageId>,
     ) -> Result<Option<PageId>, Error> {
         if output.len() == limit {
             return Ok(None);
+        }
+        if !visited.insert(page_id) {
+            return Err(Error::InvalidPage(
+                "tree child graph contains a cycle or shared page".to_owned(),
+            ));
         }
         let Some(page) = self.pages.get(&page_id) else {
             return Ok(Some(page_id));
@@ -622,6 +751,7 @@ impl<S: PageStore> TreeCore<S> {
                             end,
                             limit,
                             output,
+                            visited,
                         )?
                     {
                         return Ok(Some(missing));
@@ -640,53 +770,72 @@ impl<S: PageStore> TreeCore<S> {
         Ok(None)
     }
 
-    fn allocate_page(&mut self, page: Page) -> PageId {
+    fn allocate_page(&mut self, page: Page) -> Result<PageId, Error> {
         let page_id = self.metadata.next_page_id;
-        self.metadata.next_page_id += 1;
+        if page_id >= MAX_JS_SAFE_INTEGER {
+            return Err(Error::InvalidPage(
+                "IDBTree page id space exceeds JavaScript's safe integer range".to_owned(),
+            ));
+        }
+        if self.pages.contains_key(&page_id) || self.dirty.contains_key(&page_id) {
+            return Err(Error::InvalidPage(
+                "IDBTree next page id already exists".to_owned(),
+            ));
+        }
+        if encode_page(&page).map_err(Error::InvalidPage)?.len() > self.options.page_size {
+            return Err(Error::PageTooLarge {
+                page_id,
+                page_size: self.options.page_size,
+            });
+        }
+        self.metadata.next_page_id = page_id + 1;
         self.pages.insert(page_id, page.clone());
         self.dirty.insert(page_id, page);
-        page_id
+        Ok(page_id)
     }
 
     fn finish_leaf_write(
         &mut self,
         page_id: PageId,
         entries: Vec<(Vec<u8>, ValueCell)>,
-        mut path: Vec<(PageId, usize)>,
+        path: Vec<(PageId, usize)>,
     ) -> Result<(), Error> {
         let page = Page::Leaf { entries };
-        if self.page_fits(&page)? {
-            self.replace_page(page_id, page);
-            return Ok(());
-        }
-
-        let Page::Leaf { mut entries } = page else {
-            unreachable!()
+        let replacement = if self.page_fits(&page)? {
+            PageReplacement::One(self.allocate_page(page)?)
+        } else {
+            let Page::Leaf { mut entries } = page else {
+                unreachable!()
+            };
+            if entries.len() < 2 {
+                return Err(Error::PageTooLarge {
+                    page_id,
+                    page_size: self.options.page_size,
+                });
+            }
+            let right_entries = entries.split_off(entries.len() / 2);
+            let separator = right_entries[0].0.clone();
+            PageReplacement::Split {
+                left: self.allocate_page(Page::Leaf { entries })?,
+                separator,
+                right: self.allocate_page(Page::Leaf {
+                    entries: right_entries,
+                })?,
+            }
         };
-        if entries.len() < 2 {
-            return Err(Error::PageTooLarge {
-                page_id,
-                page_size: self.options.page_size,
-            });
-        }
-        let right_entries = entries.split_off(entries.len() / 2);
-        let separator = right_entries[0].0.clone();
-        self.replace_page(page_id, Page::Leaf { entries });
-        let right_page_id = self.allocate_page(Page::Leaf {
-            entries: right_entries,
-        });
-        self.propagate_split(page_id, separator, right_page_id, &mut path)
+        self.publish_replacement(replacement, path)
     }
 
-    fn propagate_split(
+    /// Rebuild every changed ancestor under fresh page ids. A committed root
+    /// therefore names a complete immutable closure. Reclamation is deferred
+    /// to a reachability-based maintenance pass, rather than deleting pages
+    /// while an older root could still name them.
+    fn publish_replacement(
         &mut self,
-        left_page_id: PageId,
-        mut separator: Vec<u8>,
-        mut right_page_id: PageId,
-        path: &mut Vec<(PageId, usize)>,
+        mut replacement: PageReplacement,
+        path: Vec<(PageId, usize)>,
     ) -> Result<(), Error> {
-        let mut left_page_id = left_page_id;
-        while let Some((parent_id, child_index)) = path.pop() {
+        for (parent_id, child_index) in path.into_iter().rev() {
             let Page::Internal {
                 mut keys,
                 mut children,
@@ -700,45 +849,62 @@ impl<S: PageStore> TreeCore<S> {
                     "descent parent is not internal".to_owned(),
                 ));
             };
-            debug_assert_eq!(children[child_index], left_page_id);
-            keys.insert(child_index, separator);
-            children.insert(child_index + 1, right_page_id);
-            let page = Page::Internal { keys, children };
-            if self.page_fits(&page)? {
-                self.replace_page(parent_id, page);
-                return Ok(());
-            }
-
-            let Page::Internal {
-                mut keys,
-                mut children,
-            } = page
-            else {
-                unreachable!()
+            replacement = match replacement {
+                PageReplacement::One(page_id) => {
+                    children[child_index] = page_id;
+                    PageReplacement::One(self.allocate_page(Page::Internal { keys, children })?)
+                }
+                PageReplacement::Split {
+                    left,
+                    separator,
+                    right,
+                } => {
+                    children[child_index] = left;
+                    keys.insert(child_index, separator);
+                    children.insert(child_index + 1, right);
+                    let page = Page::Internal { keys, children };
+                    if self.page_fits(&page)? {
+                        PageReplacement::One(self.allocate_page(page)?)
+                    } else {
+                        let Page::Internal {
+                            mut keys,
+                            mut children,
+                        } = page
+                        else {
+                            unreachable!()
+                        };
+                        let middle = keys.len() / 2;
+                        let separator = keys.remove(middle);
+                        let right_keys = keys.split_off(middle);
+                        let right_children = children.split_off(middle + 1);
+                        PageReplacement::Split {
+                            left: self.allocate_page(Page::Internal { keys, children })?,
+                            separator,
+                            right: self.allocate_page(Page::Internal {
+                                keys: right_keys,
+                                children: right_children,
+                            })?,
+                        }
+                    }
+                }
             };
-            let middle = keys.len() / 2;
-            separator = keys.remove(middle);
-            let right_keys = keys.split_off(middle);
-            let right_children = children.split_off(middle + 1);
-            self.replace_page(parent_id, Page::Internal { keys, children });
-            right_page_id = self.allocate_page(Page::Internal {
-                keys: right_keys,
-                children: right_children,
-            });
-            left_page_id = parent_id;
         }
 
-        let root = self.allocate_page(Page::Internal {
-            keys: vec![separator],
-            children: vec![left_page_id, right_page_id],
-        });
+        let root = match replacement {
+            PageReplacement::One(root) => root,
+            PageReplacement::Split {
+                left,
+                separator,
+                right,
+            } => self.allocate_page(Page::Internal {
+                keys: vec![separator],
+                children: vec![left, right],
+            })?,
+        };
         self.metadata.root_page_id = Some(root);
+        // The old closure remains durable until a future mark/sweep collector
+        // proves it unreachable from the published root.
         Ok(())
-    }
-
-    fn replace_page(&mut self, page_id: PageId, page: Page) {
-        self.pages.insert(page_id, page.clone());
-        self.dirty.insert(page_id, page);
     }
 
     fn page_fits(&self, page: &Page) -> Result<bool, Error> {
@@ -753,7 +919,8 @@ impl<S: PageStore> TreeCore<S> {
             return Ok(ValueCell::Inline(value));
         }
 
-        let len = value.len();
+        let len = u64::try_from(value.len())
+            .map_err(|_| Error::InvalidPage("overflow value length exceeds u64".to_owned()))?;
         let mut next = None;
         let chunk_size = self.options.page_size.saturating_sub(64);
         for chunk in value.rchunks(chunk_size) {
@@ -766,7 +933,7 @@ impl<S: PageStore> TreeCore<S> {
                     "overflow chunk does not fit configured page".to_owned(),
                 ));
             }
-            next = Some(self.allocate_page(page));
+            next = Some(self.allocate_page(page)?);
         }
         Ok(ValueCell::Overflow {
             head: next.expect("large values have at least one chunk"),
@@ -774,12 +941,21 @@ impl<S: PageStore> TreeCore<S> {
         })
     }
 
-    fn value_resident(&self, value: &ValueCell) -> Result<Attempt<()>, Error> {
+    fn value_resident(
+        &self,
+        value: &ValueCell,
+        visited: &mut HashSet<PageId>,
+    ) -> Result<Attempt<()>, Error> {
         let ValueCell::Overflow { head, .. } = value else {
             return Ok(Attempt::Ready(()));
         };
         let mut current = Some(*head);
         while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(Error::InvalidPage(
+                    "tree graph contains a cycle or shared page".to_owned(),
+                ));
+            }
             let Some(page) = self.pages.get(&page_id) else {
                 return Ok(Attempt::Missing(page_id));
             };
@@ -793,13 +969,42 @@ impl<S: PageStore> TreeCore<S> {
         Ok(Attempt::Ready(()))
     }
 
-    fn read_value_resident(&self, value: &ValueCell) -> Result<Attempt<Vec<u8>>, Error> {
+    /// Validate all value edges retained by a copied leaf. `visited` already
+    /// owns the root-to-leaf structural path, so this detects aliases both
+    /// between sibling cells and between a value chain and that structure.
+    fn leaf_values_resident(
+        &self,
+        entries: &[LeafEntry],
+        visited: &mut HashSet<PageId>,
+    ) -> Result<Attempt<()>, Error> {
+        for (_, value) in entries {
+            if let Attempt::Missing(page_id) = self.value_resident(value, visited)? {
+                return Ok(Attempt::Missing(page_id));
+            }
+        }
+        Ok(Attempt::Ready(()))
+    }
+
+    fn read_value_resident(
+        &self,
+        value: &ValueCell,
+        visited: &mut HashSet<PageId>,
+    ) -> Result<Attempt<Vec<u8>>, Error> {
         match value {
             ValueCell::Inline(value) => Ok(Attempt::Ready(value.clone())),
             ValueCell::Overflow { head, len } => {
-                let mut output = Vec::with_capacity(*len);
+                // The persisted logical length is u64 so page decoding stays
+                // architecture-independent. Do not turn an untrusted durable
+                // length into a host-sized allocation: grow only for actual
+                // overflow page bytes as they are validated and materialized.
+                let mut output = Vec::new();
                 let mut current = Some(*head);
                 while let Some(page_id) = current {
+                    if !visited.insert(page_id) {
+                        return Err(Error::InvalidPage(
+                            "tree graph contains a cycle or shared page".to_owned(),
+                        ));
+                    }
                     let Some(page) = self.pages.get(&page_id) else {
                         return Ok(Attempt::Missing(page_id));
                     };
@@ -811,7 +1016,7 @@ impl<S: PageStore> TreeCore<S> {
                     output.extend_from_slice(bytes);
                     current = *next;
                 }
-                if output.len() != *len {
+                if u64::try_from(output.len()).ok() != Some(*len) {
                     return Err(Error::InvalidPage(format!(
                         "overflow value length is {}, expected {len}",
                         output.len()
@@ -820,26 +1025,6 @@ impl<S: PageStore> TreeCore<S> {
                 Ok(Attempt::Ready(output))
             }
         }
-    }
-
-    fn retire_value_resident(&mut self, value: &ValueCell) -> Result<(), Error> {
-        let ValueCell::Overflow { head, .. } = value else {
-            return Ok(());
-        };
-        let mut current = Some(*head);
-        while let Some(page_id) = current {
-            let Some(Page::Overflow { next, .. }) = self.pages.get(&page_id) else {
-                return Err(Error::InvalidPage(
-                    "value references a nonresident or non-overflow page".to_owned(),
-                ));
-            };
-            let next = *next;
-            self.pages.remove(&page_id);
-            self.dirty.remove(&page_id);
-            self.deleted.push(page_id);
-            current = next;
-        }
-        Ok(())
     }
 }
 
@@ -930,6 +1115,445 @@ mod tests {
 
             let reopened = IdbTree::open(store, options).await.unwrap();
             assert_eq!(reopened.get(b"large").await.unwrap(), Some(second));
+        });
+    }
+
+    #[test]
+    fn point_updates_publish_a_fresh_root_without_deleting_the_old_closure() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            tree.put(b"key".to_vec(), b"before".to_vec()).await.unwrap();
+            tree.flush().await.unwrap();
+            let old_root = tree.metadata().root_page_id.unwrap();
+
+            tree.put(b"key".to_vec(), b"after".to_vec()).await.unwrap();
+            let new_root = tree.metadata().root_page_id.unwrap();
+            assert_ne!(new_root, old_root);
+            let prepared = tree.inner.borrow_mut().prepare_commit().unwrap().unwrap();
+            assert!(
+                prepared
+                    .commit()
+                    .pages
+                    .iter()
+                    .any(|(id, _)| *id == new_root)
+            );
+            assert!(prepared.commit().deleted_page_ids.is_empty());
+
+            // Until root publication, a separate opener still sees the old
+            // immutable closure.
+            let before_publish = IdbTree::open(store.clone(), options).await.unwrap();
+            assert_eq!(
+                before_publish.get(b"key").await.unwrap(),
+                Some(b"before".to_vec())
+            );
+            let outcome = store.commit(prepared.commit()).await;
+            tree.inner
+                .borrow_mut()
+                .complete_commit(prepared, outcome)
+                .unwrap();
+            let after_publish = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(
+                after_publish.get(b"key").await.unwrap(),
+                Some(b"after".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn failed_oversized_put_leaves_no_local_or_durable_orphans() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            tree.flush().await.unwrap();
+            let before = tree.metadata();
+            let dirty_before = tree.dirty_page_count();
+            let key = vec![b'k'; 1100];
+
+            assert!(matches!(
+                tree.put(key.clone(), vec![7; 2000]).await,
+                Err(Error::PageTooLarge { .. })
+            ));
+            assert_eq!(tree.metadata(), before);
+            assert_eq!(tree.dirty_page_count(), dirty_before);
+
+            tree.flush().await.unwrap();
+            drop(tree);
+            let reopened = IdbTree::open(store.clone(), options).await.unwrap();
+            assert_eq!(reopened.metadata(), before);
+            assert_eq!(reopened.get(&key).await.unwrap(), None);
+            for page_id in before.next_page_id..before.next_page_id + 8 {
+                assert_eq!(store.read_page(page_id).await.unwrap(), None);
+            }
+        });
+    }
+
+    #[test]
+    fn failed_write_many_rolls_back_earlier_operations_and_allocations() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            tree.flush().await.unwrap();
+            let before = tree.metadata();
+            let oversized_key = vec![b'z'; 1100];
+
+            assert!(matches!(
+                tree.write_many(vec![
+                    WriteOperation::Set {
+                        key: b"first".to_vec(),
+                        value: b"must roll back".to_vec(),
+                    },
+                    WriteOperation::Set {
+                        key: oversized_key.clone(),
+                        value: vec![9; 2000],
+                    },
+                ])
+                .await,
+                Err(Error::PageTooLarge { .. })
+            ));
+            assert_eq!(tree.metadata(), before);
+            assert_eq!(tree.dirty_page_count(), 0);
+
+            tree.flush().await.unwrap();
+            drop(tree);
+            let reopened = IdbTree::open(store.clone(), options).await.unwrap();
+            assert_eq!(reopened.get(b"first").await.unwrap(), None);
+            assert_eq!(reopened.get(&oversized_key).await.unwrap(), None);
+            for page_id in before.next_page_id..before.next_page_id + 8 {
+                assert_eq!(store.read_page(page_id).await.unwrap(), None);
+            }
+        });
+    }
+
+    #[test]
+    fn published_root_with_a_missing_page_fails_closed_after_reopen() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let metadata = Metadata {
+                page_size: 1024,
+                generation: 0,
+                root_page_id: Some(41),
+                next_page_id: 42,
+            };
+            store
+                .commit(&Commit {
+                    expected_generation: 0,
+                    metadata,
+                    pages: Vec::new(),
+                    deleted_page_ids: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let reopened = IdbTree::open(store, Options { page_size: 1024 })
+                .await
+                .unwrap();
+            assert!(matches!(
+                reopened.get(b"anything").await,
+                Err(Error::MissingPage(41))
+            ));
+        });
+    }
+
+    #[test]
+    fn corrupt_overflow_cycle_fails_instead_of_spinning() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let metadata = Metadata {
+                page_size: 1024,
+                generation: 0,
+                root_page_id: Some(1),
+                next_page_id: 3,
+            };
+            store
+                .commit(&Commit {
+                    expected_generation: 0,
+                    metadata,
+                    pages: vec![
+                        (
+                            1,
+                            encode_page(&Page::Leaf {
+                                entries: vec![(
+                                    b"cycle".to_vec(),
+                                    ValueCell::Overflow { head: 2, len: 1 },
+                                )],
+                            })
+                            .unwrap(),
+                        ),
+                        (
+                            2,
+                            encode_page(&Page::Overflow {
+                                next: Some(2),
+                                bytes: vec![1],
+                            })
+                            .unwrap(),
+                        ),
+                    ],
+                    deleted_page_ids: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let tree = IdbTree::open(store, Options { page_size: 1024 })
+                .await
+                .unwrap();
+            assert!(matches!(
+                tree.get(b"cycle").await,
+                Err(Error::InvalidPage(message)) if message.contains("cycle")
+            ));
+        });
+    }
+
+    /// These pages have valid page framing and checksums. Their failure is a
+    /// graph-integrity failure discovered only while the persisted closure is
+    /// traversed, not a decoder shortcut for a malformed byte body.
+    #[test]
+    fn checksum_valid_leaf_cells_cannot_share_an_overflow_page() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            persist_malformed_pages(
+                &store,
+                Some(1),
+                3,
+                vec![
+                    (
+                        1,
+                        Page::Leaf {
+                            entries: vec![
+                                (b"a".to_vec(), ValueCell::Overflow { head: 2, len: 1 }),
+                                (b"b".to_vec(), ValueCell::Overflow { head: 2, len: 1 }),
+                            ],
+                        },
+                    ),
+                    (
+                        2,
+                        Page::Overflow {
+                            next: None,
+                            bytes: vec![7],
+                        },
+                    ),
+                ],
+            )
+            .await;
+
+            let tree = IdbTree::open(store, Options { page_size: 1024 })
+                .await
+                .unwrap();
+            let root_before = tree.metadata().root_page_id;
+            assert_shared_graph(tree.range(b"", b"z").await);
+            // A point write would otherwise copy and republish this leaf;
+            // prove the same operation-wide ownership check rejects it before
+            // allocating a new root or making a dirty page.
+            assert_shared_error(tree.put(b"c".to_vec(), b"new".to_vec()).await);
+            assert_eq!(tree.metadata().root_page_id, root_before);
+            assert_eq!(tree.dirty_page_count(), 0);
+        });
+    }
+
+    #[test]
+    fn checksum_valid_cross_branch_leaves_cannot_share_an_overflow_page() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            persist_malformed_pages(
+                &store,
+                Some(1),
+                5,
+                vec![
+                    (
+                        1,
+                        Page::Internal {
+                            keys: vec![b"m".to_vec()],
+                            children: vec![2, 3],
+                        },
+                    ),
+                    (
+                        2,
+                        Page::Leaf {
+                            entries: vec![(b"a".to_vec(), ValueCell::Overflow { head: 4, len: 1 })],
+                        },
+                    ),
+                    (
+                        3,
+                        Page::Leaf {
+                            entries: vec![(b"n".to_vec(), ValueCell::Overflow { head: 4, len: 1 })],
+                        },
+                    ),
+                    (
+                        4,
+                        Page::Overflow {
+                            next: None,
+                            bytes: vec![7],
+                        },
+                    ),
+                ],
+            )
+            .await;
+
+            let tree = IdbTree::open(store, Options { page_size: 1024 })
+                .await
+                .unwrap();
+            assert_shared_graph(tree.range(b"", b"z").await);
+        });
+    }
+
+    #[test]
+    fn corrupt_internal_cycle_or_shared_child_fails_instead_of_looping_or_duplication() {
+        futures::executor::block_on(async {
+            let cycle_store = MemoryPageStore::default();
+            cycle_store
+                .commit(&Commit {
+                    expected_generation: 0,
+                    metadata: Metadata {
+                        page_size: 1024,
+                        generation: 0,
+                        root_page_id: Some(1),
+                        next_page_id: 2,
+                    },
+                    pages: vec![(
+                        1,
+                        encode_page(&Page::Internal {
+                            keys: vec![],
+                            children: vec![1],
+                        })
+                        .unwrap(),
+                    )],
+                    deleted_page_ids: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let cycle = IdbTree::open(cycle_store, Options { page_size: 1024 })
+                .await
+                .unwrap();
+            assert!(matches!(
+                cycle.get(b"loop").await,
+                Err(Error::InvalidPage(message)) if message.contains("cycle or shared")
+            ));
+
+            let shared_store = MemoryPageStore::default();
+            shared_store
+                .commit(&Commit {
+                    expected_generation: 0,
+                    metadata: Metadata {
+                        page_size: 1024,
+                        generation: 0,
+                        root_page_id: Some(1),
+                        next_page_id: 5,
+                    },
+                    pages: vec![
+                        (
+                            1,
+                            encode_page(&Page::Internal {
+                                keys: vec![b"middle".to_vec()],
+                                children: vec![2, 3],
+                            })
+                            .unwrap(),
+                        ),
+                        (
+                            2,
+                            encode_page(&Page::Internal {
+                                keys: vec![],
+                                children: vec![4],
+                            })
+                            .unwrap(),
+                        ),
+                        (
+                            3,
+                            encode_page(&Page::Internal {
+                                keys: vec![],
+                                children: vec![4],
+                            })
+                            .unwrap(),
+                        ),
+                        (
+                            4,
+                            encode_page(&Page::Leaf {
+                                entries: vec![(
+                                    b"key".to_vec(),
+                                    ValueCell::Inline(b"value".to_vec()),
+                                )],
+                            })
+                            .unwrap(),
+                        ),
+                    ],
+                    deleted_page_ids: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let shared = IdbTree::open(shared_store, Options { page_size: 1024 })
+                .await
+                .unwrap();
+            assert!(matches!(
+                shared.range(b"", b"z").await,
+                Err(Error::InvalidPage(message)) if message.contains("shared")
+            ));
+        });
+    }
+
+    async fn persist_malformed_pages(
+        store: &MemoryPageStore,
+        root_page_id: Option<PageId>,
+        next_page_id: PageId,
+        pages: Vec<(PageId, Page)>,
+    ) {
+        store
+            .commit(&Commit {
+                expected_generation: 0,
+                metadata: Metadata {
+                    page_size: 1024,
+                    generation: 0,
+                    root_page_id,
+                    next_page_id,
+                },
+                pages: pages
+                    .into_iter()
+                    .map(|(page_id, page)| (page_id, encode_page(&page).unwrap()))
+                    .collect(),
+                deleted_page_ids: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    fn assert_shared_graph(result: Result<Vec<KeyValue>, Error>) {
+        assert_shared_error(result);
+    }
+
+    fn assert_shared_error<T>(result: Result<T, Error>) {
+        assert!(matches!(
+            result,
+            Err(Error::InvalidPage(message)) if message.contains("cycle or shared")
+        ));
+    }
+
+    #[test]
+    fn oversized_persisted_page_is_rejected_before_decode() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            store
+                .commit(&Commit {
+                    expected_generation: 0,
+                    metadata: Metadata {
+                        page_size: 1024,
+                        generation: 0,
+                        root_page_id: Some(1),
+                        next_page_id: 2,
+                    },
+                    pages: vec![(1, vec![0; 1025])],
+                    deleted_page_ids: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let tree = IdbTree::open(store, Options { page_size: 1024 })
+                .await
+                .unwrap();
+            assert!(matches!(
+                tree.get(b"anything").await,
+                Err(Error::PageTooLarge {
+                    page_id: 1,
+                    page_size: 1024
+                })
+            ));
         });
     }
 

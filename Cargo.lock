@@ -1862,8 +1862,6 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "js-sys",
- "postcard",
- "serde",
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-futures",

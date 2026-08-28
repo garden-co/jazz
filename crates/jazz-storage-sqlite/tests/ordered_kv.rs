@@ -307,6 +307,66 @@ fn physical_header_ddl_and_jazz_blobs_are_pinned_across_reopen() {
 }
 
 #[test]
+fn missing_epoch_manifest_rejects_legacy_postcard_collision_before_reopen_mutates_data() {
+    // This 24-byte payload is the former postcard `Vec<TxId>` spelling for
+    // one transaction. A new fixed-width `Array<Tuple<U64, Uuid>>` can also
+    // parse any 24-byte field, so testing the row codec alone would not prove
+    // old persistent data is rejected. The epoch gate must run before this
+    // ordinary value is visible to any Jazz/Groove decoder.
+    let legacy_postcard_tx_ids = vec![
+        0x01, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 0x10, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+        0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+    ];
+    assert_eq!(legacy_postcard_tx_ids.len(), 24);
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy-postcard-collision.sqlite");
+    let storage = SqliteStorage::open(&path, &["jazz_merge_heads"]).unwrap();
+    block_on(storage.set(
+        "jazz_merge_heads".into(),
+        b"physical-row-coordinate".to_vec(),
+        legacy_postcard_tx_ids.clone(),
+    ))
+    .unwrap();
+    drop(storage);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute("DELETE FROM meta WHERE key = 'epoch_manifest'", [])
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteStorage::open(&path, &["jazz_merge_heads", "must-not-be-created"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let preserved = connection
+        .query_row(
+            "SELECT kv.v FROM kv \
+             JOIN column_families ON kv.cf = column_families.id \
+             WHERE column_families.name = 'jazz_merge_heads' \
+             AND kv.k = ?1",
+            rusqlite::params![b"physical-row-coordinate".to_vec()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .unwrap();
+    assert_eq!(preserved, legacy_postcard_tx_ids);
+    let created: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM column_families WHERE name = 'must-not-be-created'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        created, 0,
+        "manifest rejection must precede all reopen mutation"
+    );
+}
+
+#[test]
 fn rejects_wrong_sqlite_header_before_changing_foreign_store() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("foreign.sqlite");

@@ -2216,6 +2216,10 @@ impl SyntheticReplacementToken {
     pub(crate) fn from_encoded_record(value: Vec<u8>) -> Self {
         Self(value)
     }
+
+    pub(crate) fn encoded_record(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 #[cfg(test)]

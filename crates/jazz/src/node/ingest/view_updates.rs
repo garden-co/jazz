@@ -264,17 +264,6 @@ where
         Ok(cells)
     }
 
-    fn encode_merge_heads(heads: &BTreeSet<TxId>) -> Result<Vec<u8>, Error> {
-        postcard::to_allocvec(&heads.iter().copied().collect::<Vec<_>>())
-            .map_err(|_| Error::InvalidStoredValue("merge head set failed to encode"))
-    }
-
-    fn decode_merge_heads(bytes: &[u8]) -> Result<BTreeSet<TxId>, Error> {
-        let heads: Vec<TxId> = postcard::from_bytes(bytes)
-            .map_err(|_| Error::InvalidStoredValue("merge head set failed to decode"))?;
-        Ok(heads.into_iter().collect())
-    }
-
     async fn read_merge_heads(
         &mut self,
         table_id: PhysicalTableId,
@@ -293,8 +282,7 @@ where
         let Some(row) = row else {
             return Ok(None);
         };
-        let heads = row.record().get_bytes(3)?;
-        Self::decode_merge_heads(heads).map(Some)
+        merge_heads_from_value(row.record().get_idx(3)?).map(Some)
     }
 
     async fn read_merge_heads_in_batch(
@@ -317,8 +305,7 @@ where
         let Some(row) = row else {
             return Ok(None);
         };
-        let heads = row.record().get_bytes(3)?;
-        Self::decode_merge_heads(heads).map(Some)
+        merge_heads_from_value(row.record().get_idx(3)?).map(Some)
     }
 
     async fn require_merge_heads(
@@ -346,7 +333,7 @@ where
                 Value::U64(table_id.0),
                 Value::Bytes(branch_key.canonical_bytes()),
                 Value::Uuid(row_uuid.0),
-                Value::Bytes(Self::encode_merge_heads(heads)?),
+                merge_heads_value(heads),
             ],
         );
         Ok(())
