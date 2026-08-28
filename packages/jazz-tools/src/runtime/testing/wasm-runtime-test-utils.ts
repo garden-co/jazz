@@ -86,7 +86,7 @@ export function hasJazzWasmBuild(): boolean {
   return resolveJazzWasmPaths() !== null;
 }
 
-function loadWasmModule(): Promise<any> {
+export function loadWasmModuleForTest(): Promise<any> {
   if (!wasmModulePromise) {
     wasmModulePromise = (async () => {
       const paths = resolveJazzWasmPaths();
@@ -113,7 +113,7 @@ export async function createWasmRuntime(
     peerId?: string;
   },
 ): Promise<TestRuntime> {
-  const wasmModule = await loadWasmModule();
+  const wasmModule = await loadWasmModuleForTest();
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const peerId = opts?.peerId ?? "default";

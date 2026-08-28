@@ -69,6 +69,14 @@ pub fn native_artifact_fingerprint() -> String {
         .to_owned()
 }
 
+/// Test-only bridge for executing the Rust-owned v1 binding corpus through the
+/// generated WASM artifact. The JavaScript test still uses the production
+/// decoder for every returned postcard payload.
+#[wasm_bindgen(js_name = __testBindingCodecGoldenFixture)]
+pub fn test_binding_codec_golden_fixture() -> String {
+    jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
+}
+
 /// Generate a new UUID v7 (time-ordered).
 ///
 /// Useful when a caller wants the default generated row-id shape.

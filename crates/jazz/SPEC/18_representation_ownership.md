@@ -86,8 +86,9 @@ envelope, never a reordered field, permissive fallback, or in-place migration.
 
 `binding_codec_golden.json` is the frozen cross-language corpus for this v1
 binding layout. Rust creates the hard-coded semantic cases and exact bytes;
-the TypeScript reader independently decodes them. NAPI and WASM use the same
-Rust producers, so a change needs this corpus, both binding paths, and the
+the TypeScript reader independently decodes them, and the generated NAPI and
+WASM artifacts directly return the Rust-owned corpus in the binding
+compatibility matrix. A change needs this corpus, both binding paths, and the
 SPEC decision reviewed together. Terminal operations remain JSON-native
 metadata rather than an alternative row byte layout.
 

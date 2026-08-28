@@ -8,6 +8,8 @@ import {
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
 } from "./native-row-codec.js";
+import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
+import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 
 type BindingCodecGoldenFixture = {
   format: string;
@@ -26,6 +28,38 @@ type BindingCodecGoldenFixture = {
 // encoder. This keeps byte-level representations and the actual TS reducer in
 // one fast contract, rather than waiting for a browser integration failure.
 describe("binding codec golden contract", () => {
+  it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
+    "executes the Rust-owned corpus through both generated native artifacts",
+    async () => {
+      const expected = bindingCodecGoldenFixture();
+      const napi = (await loadNapiModule()) as typeof import("jazz-napi") & {
+        __testBindingCodecGoldenFixture(): string;
+      };
+      const wasm = (await loadWasmModuleForTest()) as {
+        __testBindingCodecGoldenFixture(): string;
+      };
+      const corpus = [
+        napi.__testBindingCodecGoldenFixture(),
+        wasm.__testBindingCodecGoldenFixture(),
+      ].map((encoded) => JSON.parse(encoded) as BindingCodecGoldenFixture);
+
+      expect(corpus).toEqual([expected, expected]);
+      for (const nativeFixture of corpus) {
+        for (const relation of nativeFixture.relation_snapshots) {
+          const snapshot = readNativeRelationSubscriptionSnapshot(
+            new PostcardReader(hexToBytes(relation.payload_hex)),
+          );
+          expect(snapshot.rootCount).toBeGreaterThanOrEqual(0);
+        }
+        for (const delta of nativeFixture.subscription_deltas) {
+          expect(
+            readNativeSubscriptionDelta(new PostcardReader(hexToBytes(delta.payload_hex))),
+          ).toBeDefined();
+        }
+      }
+    },
+  );
+
   it("decodes empty, adjacent, nonadjacent, and deleted-row relation snapshots", () => {
     const fixture = bindingCodecGoldenFixture();
     expect(fixture.format).toBe("jazz-binding-codec-golden-v1");

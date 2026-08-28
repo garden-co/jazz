@@ -111,6 +111,14 @@ pub fn native_artifact_fingerprint() -> String {
         .to_owned()
 }
 
+/// Test-only bridge for executing the Rust-owned v1 binding corpus through the
+/// generated NAPI artifact. It intentionally returns the frozen corpus rather
+/// than a TypeScript reimplementation of its byte layouts.
+#[napi(js_name = "__testBindingCodecGoldenFixture", skip_typescript)]
+pub fn test_binding_codec_golden_fixture() -> String {
+    jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
     identity: CoreOpenDbIdentity,
