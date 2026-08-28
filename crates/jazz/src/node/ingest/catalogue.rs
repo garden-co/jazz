@@ -1036,6 +1036,8 @@ where
         source: &SchemaVersion,
         target: &SchemaVersion,
     ) -> Result<(), Error> {
+        let mut seen_sources = BTreeSet::new();
+        let mut seen_targets = BTreeSet::new();
         for pair in lens.table_lenses.windows(2) {
             if (&pair[0].source_table, &pair[0].target_table)
                 >= (&pair[1].source_table, &pair[1].target_table)
@@ -1046,6 +1048,13 @@ where
             }
         }
         for table_lens in &lens.table_lenses {
+            if !seen_sources.insert(&table_lens.source_table)
+                || !seen_targets.insert(&table_lens.target_table)
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "table lens endpoints must be bijective",
+                ));
+            }
             let source_table = source
                 .schema
                 .tables

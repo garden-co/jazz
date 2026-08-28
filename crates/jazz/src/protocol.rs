@@ -3987,11 +3987,12 @@ impl MigrationLens {
                 .cmp(&(&right.source_table, &right.target_table))
         });
         validate_protocol_lens_defaults(&table_lenses)?;
-        if table_lenses.windows(2).any(|pair| {
-            (&pair[0].source_table, &pair[0].target_table)
-                == (&pair[1].source_table, &pair[1].target_table)
-        }) {
-            return Err("duplicate migration lens table coordinate");
+        let mut sources = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for table in &table_lenses {
+            if !sources.insert(&table.source_table) || !targets.insert(&table.target_table) {
+                return Err("migration lens table coordinates must be bijective");
+            }
         }
         let mut lens = Self {
             id: MigrationLensId(uuid::Uuid::nil()),
@@ -4069,7 +4070,12 @@ pub(crate) fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
 /// schema-editor `LensTransform`: the two carry different operations and must
 /// never be lossily converted into one another.
 pub(crate) fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens, &'static str> {
-    let mut c = ProtocolCodecCursor { bytes, offset: 0 };
+    let mut c = ProtocolCodecCursor {
+        bytes,
+        offset: 0,
+        budget: ProtocolCodecCursor::MAX_TOTAL_BYTES,
+        items: 0,
+    };
     if c.string()? != "jazz-migration-lens-v1" {
         return Err("invalid migration lens marker");
     }
@@ -4090,7 +4096,8 @@ pub(crate) fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens,
         });
     }
     c.finish()?;
-    let lens = MigrationLens::new(source, target, table_lenses).expect("valid migration lens");
+    let lens =
+        MigrationLens::new(source, target, table_lenses).map_err(|_| "invalid migration lens")?;
     if canonical_lens_bytes(&lens) != bytes {
         return Err("noncanonical migration lens");
     }
@@ -4100,12 +4107,19 @@ pub(crate) fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens,
 struct ProtocolCodecCursor<'a> {
     bytes: &'a [u8],
     offset: usize,
+    budget: usize,
+    items: u32,
 }
 impl<'a> ProtocolCodecCursor<'a> {
     const MAX_COUNT: u32 = 16_384;
     const MAX_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+    const MAX_TOTAL_ITEMS: u32 = 65_536;
     const MAX_DEPTH: usize = 64;
     fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+        if n > self.budget {
+            return Err("protocol aggregate byte budget exceeds limit");
+        }
         let e = self
             .offset
             .checked_add(n)
@@ -4115,6 +4129,7 @@ impl<'a> ProtocolCodecCursor<'a> {
             .get(self.offset..e)
             .ok_or("truncated protocol codec")?;
         self.offset = e;
+        self.budget -= n;
         Ok(out)
     }
     fn u8(&mut self) -> Result<u8, &'static str> {
@@ -4137,7 +4152,11 @@ impl<'a> ProtocolCodecCursor<'a> {
     }
     fn count(&mut self) -> Result<u32, &'static str> {
         let count = self.u32()?;
-        if count > Self::MAX_COUNT {
+        self.items = self
+            .items
+            .checked_add(count)
+            .ok_or("protocol aggregate item budget exceeds limit")?;
+        if count > Self::MAX_COUNT || self.items > Self::MAX_TOTAL_ITEMS {
             Err("protocol collection count exceeds limit")
         } else {
             Ok(count)
