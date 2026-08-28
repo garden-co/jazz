@@ -174,6 +174,24 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
     assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
     assert!(core.query_transaction(tx.tx_id).unwrap().is_none());
 
+    // Parking an unavailable authored unit never decodes it as a normal
+    // transaction. A process restart therefore relies on the peer's canonical
+    // reconnect retransmission; receiving that same unit again before the
+    // lineage is active recreates the parked obligation rather than exposing
+    // an incomplete row.
+    drop(core);
+    let mut core = reopen_node_at(&core_dir, node(0x37), base.clone());
+    assert!(core.query_transaction(tx.tx_id).unwrap().is_none());
+    assert!(
+        core.apply_sync_message_settled(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: versions.clone(),
+        })
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(core.sync_metrics().parked_catalogue_orphans, 1);
+
     let updates = publish_schema_lineage(
         &mut core,
         SchemaVersion::new(evolved.clone()),

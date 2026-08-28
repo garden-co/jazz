@@ -169,7 +169,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
             }],
         }],
     );
-    let (_dir, mut core) = open_node_with_schema(node(0x2b), base.clone());
+    let (dir, mut core) = open_node_with_schema(node(0x2b), base.clone());
     let publication = core
         .author_schema_lineage_publication(
             target.clone(),
@@ -208,6 +208,11 @@ fn pending_lineage_reserves_its_target_and_sequence() {
         .unwrap()
         .is_empty()
     );
+    // The unavailable lineage is a durable catalogue obligation. Reopen must
+    // preserve its exact reservation so a reconnect cannot replace sequence 2
+    // (or reuse its target) with a conflicting transition.
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(0x2b), base);
     assert!(matches!(
         core.apply_sync_message_with_ingest_context(
             SyncMessage::PublishSchemaWithLens {

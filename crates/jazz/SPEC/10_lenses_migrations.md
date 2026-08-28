@@ -240,6 +240,14 @@ only after the complete schema-and-lineage bundle is durable and its Groove
 variants are registered (`INV-LENS-5`, `INV-LENS-6`, ch. 8). There is no
 partially-known or provisionally writeable schema state.
 
+An incoming parked commit unit is link-delivery state, not a decoded
+transaction/history row. If the receiver restarts before its schema lineage is
+active, reconnect re-delivers the unchanged canonical commit unit; it parks
+again until activation and then ingests/projects exactly once. Restart never
+uses the caller schema to decode the unavailable unit, and a retransmit with
+the same `tx_id` but different canonical content fails as a conflicting commit
+unit.
+
 Current-pointer messages and child schema bundles whose dependencies are not
 Active park durably across reopen. They retry after each activation, in
 catalogue order; a transient missing dependency is not a terminal rejection and
