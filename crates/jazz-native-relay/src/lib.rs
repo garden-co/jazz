@@ -7,10 +7,12 @@
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::c_void;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 
 #[cfg(test)]
@@ -18,15 +20,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, PeerConnection, PreparedQuery, ReadOpts, SubscriptionEvent,
-    SubscriptionStream, TickScheduler, TickUrgency, Transport, block_on,
+    Db, DbConfig, DbIdentity, DeleteOptions, ExclusiveTxOps, MergeableTxOps, PeerConnection,
+    PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream, Transport, UpdateOptions,
+    UpsertOptions, block_on,
 };
-use jazz::groove::records::Value;
+use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::MemoryStorage;
+use jazz::ids::RowUuid;
 use jazz::protocol::SyncMessage;
 use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_len};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
+use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
 use jazz_storage_sqlite::SqliteStorage;
 use thiserror::Error;
@@ -35,25 +40,7 @@ use thiserror::Error;
 /// JS wrappers must compare this with their expected range during startup and
 /// explain that an OTA update needs a new native development build when it is
 /// incompatible.
-pub const NATIVE_RELAY_ABI_VERSION: u16 = 6;
-
-/// Stable wake classes crossing from a foreground core owner into an installed
-/// platform scheduler.  This is deliberately separate from
-/// [`ForegroundDbCommandRequest`]: registering a callback must not grow or
-/// reinterpret the shared byte command vocabulary.
-const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
-const FOREGROUND_WAKE_DEFERRED: u8 = 1;
-const FOREGROUND_WAKE_AFTER: u8 = 2;
-const FOREGROUND_WAKE_CANCELLED: u8 = 3;
-
-/// A platform-owned, non-borrowing foreground wake callback.
-///
-/// The callback may run on the relay owner thread. It must only enqueue work
-/// onto the JavaScript runtime (for RN, through `CallInvoker`); it must never
-/// call JavaScript or reenter the relay synchronously. `context` is retained
-/// by the platform until it synchronously unregisters this callback.
-pub type ForegroundWakeCallback =
-    unsafe extern "C" fn(context: *mut c_void, foreground: u64, wake_kind: u8, delay_ms: u64);
+pub const NATIVE_RELAY_ABI_VERSION: u16 = 7;
 
 const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
 const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
@@ -65,6 +52,17 @@ const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
 const NATIVE_RELAY_DRAIN_MAX_MESSAGES: usize = 64;
 const NATIVE_RELAY_DRAIN_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_RELAY_PUMP_MAX_CLIENTS: usize = 64;
+/// Foreground commands must remain bounded even while large-value hydration is
+/// waiting for peer I/O. Each operation retains only one local future and is
+/// owned by exactly one foreground alias.
+const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
+/// Foreground commands are copied across the JSI/C boundary and decoded before
+/// they reach a foreground owner. Keep this independent from both peer-frame
+/// and trusted-admission budgets.
+const NATIVE_RELAY_FOREGROUND_COMMAND_MAX_BYTES: usize = 1024 * 1024;
+/// Open core transactions retain mutable runtime state. Their handles are
+/// foreground-local and bounded exactly like suspended foreground operations.
+const NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX: usize = 64;
 /// Trusted platform admission carries schema and validated claims, but must
 /// remain bounded independently of the generic peer-frame budget.
 const NATIVE_RELAY_ADMISSION_MAX_BYTES: usize = 1024 * 1024;
@@ -289,8 +287,8 @@ pub enum RelayCommandResponse {
 /// first capability-gated slice; non-default tiers/views remain unavailable
 /// until their shared codec is added.
 ///
-/// Adding these variants changed what an ABI-4 wrapper could safely request,
-/// so this extension is gated by native-relay ABI 5.  Future changes follow
+/// Adding these variants changed what an ABI-6 wrapper could safely request,
+/// so this extension is gated by native-relay ABI 7. Future changes follow
 /// the same rule: additive commands which a caller must understand require a
 /// new relay ABI, while a command's established payload is immutable.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -312,6 +310,58 @@ pub enum ForegroundDbCommandRequest {
     Unsubscribe { subscription: u64 },
     /// Close this foreground alias. Repeated closes report `closed: false`.
     Close,
+    /// Poll one foreground-owned operation which previously suspended on
+    /// chunk or peer I/O. Polling never drives the owner thread to completion.
+    Poll { operation: u64 },
+    /// Drop one suspended operation. Repeated or unknown cancels report
+    /// `cancelled: false`.
+    Cancel { operation: u64 },
+    /// Open a foreground-owned core transaction. The host chooses the opaque
+    /// handle and binds it permanently to this foreground identity.
+    BeginTransaction { kind: ForegroundTransactionKind },
+    /// Stage one full-cell insert under an open foreground transaction. This
+    /// reuses the existing native encoded-cell record vocabulary.
+    Insert {
+        transaction: u64,
+        table: String,
+        cells: Vec<u8>,
+        row_id: Option<[u8; 16]>,
+    },
+    /// Stage one full-cell patch under an open foreground transaction.
+    Update {
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+        patch: Vec<u8>,
+    },
+    /// Stage one full-cell upsert under an open foreground transaction.
+    Upsert {
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+        cells: Vec<u8>,
+    },
+    /// Stage one soft delete under an open foreground transaction.
+    Delete {
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+    },
+    /// Commit one open foreground transaction. The response returns the
+    /// public committed `txId`, not the mutable transaction handle.
+    CommitTransaction { transaction: u64 },
+    /// Roll back one open foreground transaction. Closing or revoking a
+    /// foreground also abandons all its still-open transactions.
+    RollbackTransaction { transaction: u64 },
+}
+
+/// The two existing Jazz transaction semantics. This native byte vocabulary
+/// merely selects them; it never interprets permissions, snapshots, or
+/// transaction read/write sets itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundTransactionKind {
+    Mergeable,
+    Exclusive,
 }
 
 /// Response for [`ForegroundDbCommandRequest`].
@@ -338,6 +388,33 @@ pub enum ForegroundDbCommandResponse {
     },
     Closed {
         closed: bool,
+    },
+    /// The operation has suspended; callers must return to the owner loop so
+    /// an ordinary Tick can advance peer/chunk I/O before polling again.
+    Pending {
+        operation: u64,
+    },
+    /// A previously pending foreground operation failed without producing a
+    /// partial binding payload. This is terminal for that operation only.
+    OperationError {
+        reason: String,
+    },
+    /// A pending foreground operation was explicitly cancelled.
+    Cancelled {
+        cancelled: bool,
+    },
+    TransactionOpened {
+        transaction: u64,
+    },
+    Inserted {
+        row_id: [u8; 16],
+    },
+    MutationStaged,
+    TransactionCommitted {
+        tx_id: [u8; 16],
+    },
+    TransactionRolledBack {
+        rolled_back: bool,
     },
 }
 
@@ -421,28 +498,6 @@ struct OpenedRelay {
 struct OpenedForeground {
     relay: u64,
     client: u64,
-    wake: Option<ForegroundWakeRegistration>,
-}
-
-#[derive(Clone, Copy)]
-struct ForegroundWakeRegistration {
-    callback: ForegroundWakeCallback,
-    context: usize,
-}
-
-impl ForegroundWakeRegistration {
-    fn cancelled(self, foreground: u64) {
-        // SAFETY: the platform keeps this context alive until it synchronously
-        // clears the callback, foreground close/revocation, or lease release.
-        unsafe {
-            (self.callback)(
-                self.context as *mut c_void,
-                foreground,
-                FOREGROUND_WAKE_CANCELLED,
-                0,
-            );
-        }
-    }
 }
 
 impl Default for NativeRelayHost {
@@ -729,7 +784,6 @@ impl NativeRelayHost {
             OpenedForeground {
                 relay: relay_handle,
                 client: client_handle,
-                wake: None,
             },
         );
         Ok(foreground)
@@ -764,13 +818,10 @@ impl NativeRelayHost {
             .ok_or(JazzNativeRelayStatus::InvalidHandle)
     }
 
-    fn close_foreground(&mut self, foreground_handle: u64) -> Result<bool, JazzNativeRelayStatus> {
-        let Some(foreground) = self.foregrounds.remove(&foreground_handle) else {
+    fn close_foreground(&mut self, foreground: u64) -> Result<bool, JazzNativeRelayStatus> {
+        let Some(foreground) = self.foregrounds.remove(&foreground) else {
             return Ok(false);
         };
-        if let Some(wake) = foreground.wake {
-            wake.cancelled(foreground_handle);
-        }
         let Some(opened) = self.relays.remove(&foreground.relay) else {
             return Ok(false);
         };
@@ -787,29 +838,6 @@ impl NativeRelayHost {
                 .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         }
         Ok(true)
-    }
-
-    /// Register or clear the platform-owned wake sink for exactly one
-    /// foreground Db. The sink lives outside Rust and is only allowed to
-    /// enqueue a later JavaScript turn; the Db itself remains owner-thread
-    /// affine. Clearing waits for the owner turn which removes the scheduler,
-    /// so platform teardown can then safely release its callback context.
-    fn set_foreground_wake_callback(
-        &mut self,
-        foreground: u64,
-        callback: Option<ForegroundWakeCallback>,
-        context: usize,
-    ) -> Result<(), JazzNativeRelayStatus> {
-        let client = self.foreground_client(foreground)?.clone();
-        client
-            .set_foreground_wake_callback(foreground, callback, context)
-            .map_err(relay_status)?;
-        let opened = self
-            .foregrounds
-            .get_mut(&foreground)
-            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-        opened.wake = callback.map(|callback| ForegroundWakeRegistration { callback, context });
-        Ok(())
     }
 
     fn admit_scope(
@@ -873,15 +901,8 @@ impl NativeRelayHost {
                 (opened.admitted_scope == admitted_scope).then_some(*handle)
             })
             .collect::<Vec<_>>();
-        self.foregrounds.retain(|foreground_handle, foreground| {
-            if !relay_handles.contains(&foreground.relay) {
-                return true;
-            }
-            if let Some(wake) = foreground.wake {
-                wake.cancelled(*foreground_handle);
-            }
-            false
-        });
+        self.foregrounds
+            .retain(|_, foreground| !relay_handles.contains(&foreground.relay));
         let mut removed_scopes = Vec::new();
         for relay_handle in relay_handles {
             if let Some(opened) = self.relays.remove(&relay_handle) {
@@ -1389,40 +1410,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_close_attached_foreground(
     }
 }
 
-/// Register or clear the native-to-JavaScript wake sink for one attached
-/// foreground runtime. This is a lifecycle seam, not a foreground command:
-/// the supplied callback only asks the platform to schedule a later JS turn.
-/// Passing a null `callback` clears the scheduler synchronously, after which
-/// the platform may release `context` without a late owner-thread wake using
-/// it.
-///
-/// # Safety
-/// `lease` must be live. When `callback` is non-null, `context` must remain
-/// valid until a successful null-callback clear for this foreground, its
-/// foreground is closed/revoked, or the retained lease has been released.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn jazz_native_relay_host_lease_set_foreground_wake_callback(
-    lease: *mut JazzNativeRelayHostLease,
-    foreground: u64,
-    callback: Option<ForegroundWakeCallback>,
-    context: *mut c_void,
-) -> JazzNativeRelayStatus {
-    // A non-null callback receives `context` asynchronously from the relay
-    // owner. Accepting a null context would turn one malformed platform call
-    // into a later null dereference on that thread.
-    if lease.is_null() || foreground == 0 || (callback.is_some() && context.is_null()) {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let mut host = match unsafe { (&*lease).inner.lock() } {
-        Ok(host) => host,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    match host.set_foreground_wake_callback(foreground, callback, context as usize) {
-        Ok(()) => JazzNativeRelayStatus::Ok,
-        Err(status) => status,
-    }
-}
-
 /// Execute one complete postcard [`ForegroundDbCommandRequest`] against an
 /// attached foreground `Db` retained by a private JSI factory.
 ///
@@ -1448,7 +1435,11 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         return JazzNativeRelayStatus::InvalidArgument;
     }
     unsafe { *out = JazzNativeRelayBytes::EMPTY };
-    if lease.is_null() || foreground == 0 || (request.is_null() && request_len != 0) {
+    if lease.is_null()
+        || foreground == 0
+        || request_len > NATIVE_RELAY_FOREGROUND_COMMAND_MAX_BYTES
+        || (request.is_null() && request_len != 0)
+    {
         return JazzNativeRelayStatus::InvalidArgument;
     }
     let request = if request_len == 0 {
@@ -1495,8 +1486,8 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 Ok(client) => client,
                 Err(status) => return status,
             };
-            match client.all_foreground_query(query) {
-                Ok(rows) => ForegroundDbCommandResponse::Rows { rows },
+            match client.start_foreground_read(query) {
+                Ok(poll) => foreground_operation_response(poll),
                 Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
             }
         }
@@ -1516,7 +1507,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 Err(status) => return status,
             };
             match client.drain_foreground_subscription(subscription) {
-                Ok(events) => ForegroundDbCommandResponse::SubscriptionEvents { events },
+                Ok(poll) => foreground_operation_response(poll),
                 Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
             }
         }
@@ -1534,6 +1525,142 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
             Ok(closed) => ForegroundDbCommandResponse::Closed { closed },
             Err(status) => return status,
         },
+        ForegroundDbCommandRequest::Poll { operation } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.poll_foreground_operation(operation) {
+                Ok(poll) => foreground_operation_response(poll),
+                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+            }
+        }
+        ForegroundDbCommandRequest::Cancel { operation } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.cancel_foreground_operation(operation) {
+                Ok(cancelled) => ForegroundDbCommandResponse::Cancelled { cancelled },
+                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+            }
+        }
+        ForegroundDbCommandRequest::BeginTransaction { kind } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.begin_foreground_transaction(kind) {
+                Ok(transaction) => ForegroundDbCommandResponse::TransactionOpened { transaction },
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::Insert {
+            transaction,
+            table,
+            cells,
+            row_id,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.insert_foreground_transaction(transaction, table, cells, row_id) {
+                Ok(row_id) => ForegroundDbCommandResponse::Inserted {
+                    row_id: *row_id.as_bytes(),
+                },
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::Update {
+            transaction,
+            table,
+            row_id,
+            patch,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.update_foreground_transaction(transaction, table, row_id, patch) {
+                Ok(()) => ForegroundDbCommandResponse::MutationStaged,
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::Upsert {
+            transaction,
+            table,
+            row_id,
+            cells,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.upsert_foreground_transaction(transaction, table, row_id, cells) {
+                Ok(()) => ForegroundDbCommandResponse::MutationStaged,
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::Delete {
+            transaction,
+            table,
+            row_id,
+        } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.delete_foreground_transaction(transaction, table, row_id) {
+                Ok(()) => ForegroundDbCommandResponse::MutationStaged,
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::CommitTransaction { transaction } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.commit_foreground_transaction(transaction) {
+                Ok(tx_id) => ForegroundDbCommandResponse::TransactionCommitted {
+                    tx_id: *tx_id.as_bytes(),
+                },
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
+        ForegroundDbCommandRequest::RollbackTransaction { transaction } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.rollback_foreground_transaction(transaction) {
+                Ok(rolled_back) => {
+                    ForegroundDbCommandResponse::TransactionRolledBack { rolled_back }
+                }
+                Err(error) => match foreground_command_error(error) {
+                    Ok(response) => response,
+                    Err(status) => return status,
+                },
+            }
+        }
     };
     let bytes = match postcard::to_allocvec(&response) {
         Ok(bytes) => bytes,
@@ -1725,11 +1852,11 @@ impl NativeRelayClient {
     pub fn close(self) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
-            worker
+            let mut client = worker
                 .clients
                 .remove(&id)
-                .map(|_| ())
-                .ok_or(RelayError::UnknownClient(id))
+                .ok_or(RelayError::UnknownClient(id))?;
+            client.abandon_foreground_transactions()
         })
     }
 
@@ -1743,10 +1870,10 @@ impl NativeRelayClient {
             .run(move |worker| worker.prepare_foreground_query(id, query))
     }
 
-    fn all_foreground_query(&self, query: u64) -> Result<Vec<u8>, RelayError> {
+    fn start_foreground_read(&self, query: u64) -> Result<ForegroundOperationPoll, RelayError> {
         let id = self.id;
         self.relay
-            .run(move |worker| worker.all_foreground_query(id, query))
+            .run(move |worker| worker.start_foreground_read(id, query))
     }
 
     fn subscribe_foreground_query(&self, query: u64) -> Result<u64, RelayError> {
@@ -1758,10 +1885,25 @@ impl NativeRelayClient {
     fn drain_foreground_subscription(
         &self,
         subscription: u64,
-    ) -> Result<Vec<ForegroundSubscriptionEvent>, RelayError> {
+    ) -> Result<ForegroundOperationPoll, RelayError> {
         let id = self.id;
         self.relay
             .run(move |worker| worker.drain_foreground_subscription(id, subscription))
+    }
+
+    fn poll_foreground_operation(
+        &self,
+        operation: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.poll_foreground_operation(id, operation))
+    }
+
+    fn cancel_foreground_operation(&self, operation: u64) -> Result<bool, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.cancel_foreground_operation(id, operation))
     }
 
     fn close_foreground_subscription(&self, subscription: u64) -> Result<bool, RelayError> {
@@ -1770,65 +1912,75 @@ impl NativeRelayClient {
             .run(move |worker| worker.close_foreground_subscription(id, subscription))
     }
 
-    fn set_foreground_wake_callback(
+    fn begin_foreground_transaction(
         &self,
-        foreground: u64,
-        callback: Option<ForegroundWakeCallback>,
-        context: usize,
+        kind: ForegroundTransactionKind,
+    ) -> Result<u64, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.begin_foreground_transaction(id, kind))
+    }
+
+    fn insert_foreground_transaction(
+        &self,
+        transaction: u64,
+        table: String,
+        cells: Vec<u8>,
+        row_id: Option<[u8; 16]>,
+    ) -> Result<RowUuid, RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.insert_foreground_transaction(id, transaction, table, cells, row_id)
+        })
+    }
+
+    fn update_foreground_transaction(
+        &self,
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+        patch: Vec<u8>,
     ) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
-            let client = worker
-                .clients
-                .get(&id)
-                .ok_or(RelayError::UnknownClient(id))?;
-            let scheduler = callback.map(|callback| {
-                Rc::new(ForegroundWakeScheduler {
-                    callback,
-                    context,
-                    foreground,
-                }) as Rc<dyn TickScheduler>
-            });
-            client.db.set_tick_scheduler(scheduler);
-            Ok(())
+            worker.update_foreground_transaction(id, transaction, table, row_id, patch)
         })
     }
-}
 
-/// The Rust half of the native-to-JS wake bridge. It has no JavaScript or
-/// platform references beyond the opaque callback/context pair. The C++ host
-/// coalesces calls and schedules the eventual JS turn; each foreground has a
-/// distinct handle in every callback to prevent cross-runtime wake delivery.
-struct ForegroundWakeScheduler {
-    callback: ForegroundWakeCallback,
-    context: usize,
-    foreground: u64,
-}
-
-impl ForegroundWakeScheduler {
-    fn wake(&self, kind: u8, delay_ms: u64) {
-        // SAFETY: registration accepts only a platform callback. Its context
-        // remains live until the platform synchronously clears this Db's
-        // scheduler through `set_foreground_wake_callback(None, ...)`.
-        unsafe {
-            (self.callback)(self.context as *mut c_void, self.foreground, kind, delay_ms);
-        }
-    }
-}
-
-impl TickScheduler for ForegroundWakeScheduler {
-    fn schedule_tick(&self, urgency: TickUrgency) {
-        self.wake(
-            match urgency {
-                TickUrgency::Immediate => FOREGROUND_WAKE_IMMEDIATE,
-                TickUrgency::Deferred => FOREGROUND_WAKE_DEFERRED,
-            },
-            0,
-        );
+    fn upsert_foreground_transaction(
+        &self,
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+        cells: Vec<u8>,
+    ) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.upsert_foreground_transaction(id, transaction, table, row_id, cells)
+        })
     }
 
-    fn schedule_tick_after(&self, delay_ms: u64) {
-        self.wake(FOREGROUND_WAKE_AFTER, delay_ms);
+    fn delete_foreground_transaction(
+        &self,
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+    ) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.delete_foreground_transaction(id, transaction, table, row_id))
+    }
+
+    fn commit_foreground_transaction(&self, transaction: u64) -> Result<TransactionId, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.commit_foreground_transaction(id, transaction))
+    }
+
+    fn rollback_foreground_transaction(&self, transaction: u64) -> Result<bool, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.rollback_foreground_transaction(id, transaction))
     }
 }
 
@@ -2095,15 +2247,103 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
 }
 
 struct ConnectedClient {
-    db: Db<MemoryStorage>,
+    db: Rc<Db<MemoryStorage>>,
     wire: NativeRelayWire,
     prepared_queries: BTreeMap<u64, PreparedQuery>,
     subscriptions: BTreeMap<u64, SubscriptionStream>,
+    pending_operations: BTreeMap<u64, ForegroundPendingOperation>,
+    transactions: BTreeMap<u64, ForegroundTransaction>,
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
     _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
     _served: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+}
+
+#[derive(Clone, Copy)]
+struct ForegroundTransaction {
+    open_tx_id: OpenTransactionId,
+    kind: ForegroundTransactionKind,
+}
+
+impl ConnectedClient {
+    /// Abandon every foreground-owned transaction before dropping the client.
+    /// An attached foreground can be closed explicitly, revoked, or retired
+    /// during host shutdown; none of those paths may leave a mutable core
+    /// transaction reusable by a later foreground handle.
+    fn abandon_foreground_transactions(&mut self) -> Result<(), RelayError> {
+        let transactions = std::mem::take(&mut self.transactions);
+        let mut first_error = None;
+        for transaction in transactions.into_values() {
+            if let Err(error) = self.db.abandon_transaction_handle(transaction.open_tx_id) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), |error| Err(RelayError::Db(error)))
+    }
+}
+
+impl Drop for ConnectedClient {
+    fn drop(&mut self) {
+        let _ = self.abandon_foreground_transactions();
+    }
+}
+
+type ForegroundOperationFuture =
+    Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
+
+/// A pending binding operation is foreground-owned, bounded, and deliberately
+/// independent from the JSI call that started it. Dropping it cancels any
+/// chunk-demand waiter held by the future.
+struct ForegroundPendingOperation {
+    subscription: Option<u64>,
+    future: ForegroundOperationFuture,
+}
+
+enum ForegroundOperationResult {
+    Rows(Vec<u8>),
+    SubscriptionEvents(Vec<ForegroundSubscriptionEvent>),
+}
+
+enum ForegroundOperationPoll {
+    Pending { operation: u64 },
+    Ready(ForegroundOperationResult),
+    Error { reason: String },
+}
+
+fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbCommandResponse {
+    match poll {
+        ForegroundOperationPoll::Pending { operation } => {
+            ForegroundDbCommandResponse::Pending { operation }
+        }
+        ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) => {
+            ForegroundDbCommandResponse::Rows { rows }
+        }
+        ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(events)) => {
+            ForegroundDbCommandResponse::SubscriptionEvents { events }
+        }
+        ForegroundOperationPoll::Error { reason } => {
+            ForegroundDbCommandResponse::OperationError { reason }
+        }
+    }
+}
+
+/// Keep logical core failures in the foreground command vocabulary so the
+/// shared adapter can preserve its normal permission/schema/error behavior.
+/// Lifecycle failures remain C-ABI statuses: a stale foreground must never
+/// look like a recoverable user mutation error.
+fn foreground_command_error(
+    error: RelayError,
+) -> Result<ForegroundDbCommandResponse, JazzNativeRelayStatus> {
+    match error {
+        RelayError::Closed | RelayError::Poisoned(_) | RelayError::OwnerThread(_) => {
+            Err(JazzNativeRelayStatus::LifecycleFailure)
+        }
+        RelayError::QueueCapacityExceeded { .. } => Err(JazzNativeRelayStatus::Backpressure),
+        error => Ok(ForegroundDbCommandResponse::OperationError {
+            reason: error.to_string(),
+        }),
+    }
 }
 
 struct RelayWorker {
@@ -2151,13 +2391,15 @@ impl RelayWorker {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let db = block_on(Db::open(DbConfig {
-            schema: self.schema.clone(),
-            storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
-            identity,
-            id_source: None,
-        }))
-        .map_err(RelayError::Db)?;
+        let db = Rc::new(
+            block_on(Db::open(DbConfig {
+                schema: self.schema.clone(),
+                storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
+                identity,
+                id_source: None,
+            }))
+            .map_err(RelayError::Db)?,
+        );
         let (client_transport, relay_transport, wire) = duplex();
         let upstream = block_on(db.connect_upstream(client_transport));
         let served =
@@ -2175,6 +2417,8 @@ impl RelayWorker {
                 wire,
                 prepared_queries: BTreeMap::new(),
                 subscriptions: BTreeMap::new(),
+                pending_operations: BTreeMap::new(),
+                transactions: BTreeMap::new(),
                 next_foreground_handle: 1,
                 _upstream: upstream,
                 _served: served,
@@ -2237,16 +2481,32 @@ impl RelayWorker {
         Ok(handle)
     }
 
-    fn all_foreground_query(&mut self, client: u64, query: u64) -> Result<Vec<u8>, RelayError> {
-        let client = self.foreground_client(client)?;
-        let prepared = client.prepared_queries.get(&query).ok_or_else(|| {
-            RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
-        })?;
-        let mut rows =
-            block_on(client.db.all(prepared, ReadOpts::default())).map_err(RelayError::Db)?;
-        block_on(client.db.hydrate_rows_for_binding(&mut rows)).map_err(RelayError::Db)?;
-        jazz::binding_codec::encode_rows(&rows)
-            .map_err(|error| RelayError::ForegroundCommand(format!("encode row payload: {error}")))
+    fn start_foreground_read(
+        &mut self,
+        client: u64,
+        query: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let (db, prepared) = {
+            let client = self.foreground_client(client)?;
+            let prepared = client.prepared_queries.get(&query).ok_or_else(|| {
+                RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
+            })?;
+            (Rc::clone(&client.db), prepared.clone())
+        };
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let mut rows = db
+                .all(&prepared, ReadOpts::default())
+                .await
+                .map_err(RelayError::Db)?;
+            db.hydrate_rows_for_binding(&mut rows)
+                .await
+                .map_err(RelayError::Db)?;
+            let rows = jazz::binding_codec::encode_rows(&rows).map_err(|error| {
+                RelayError::ForegroundCommand(format!("encode row payload: {error}"))
+            })?;
+            Ok(ForegroundOperationResult::Rows(rows))
+        });
+        self.start_foreground_operation(client, None, future)
     }
 
     fn subscribe_foreground_query(&mut self, client: u64, query: u64) -> Result<u64, RelayError> {
@@ -2269,68 +2529,123 @@ impl RelayWorker {
         &mut self,
         client: u64,
         subscription: u64,
-    ) -> Result<Vec<ForegroundSubscriptionEvent>, RelayError> {
-        let client = self.foreground_client_mut(client)?;
-        let mut pending = Vec::new();
-        {
-            let stream = client.subscriptions.get_mut(&subscription).ok_or_else(|| {
-                RelayError::ForegroundCommand(format!(
-                    "unknown foreground subscription {subscription}"
-                ))
-            })?;
-            while let Some(event) = stream.try_next_event() {
-                pending.push(event);
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let existing = self
+            .foreground_client(client)?
+            .pending_operations
+            .iter()
+            .find_map(|(operation, pending)| {
+                (pending.subscription == Some(subscription)).then_some(*operation)
+            });
+        if let Some(operation) = existing {
+            return Ok(ForegroundOperationPoll::Pending { operation });
+        }
+        let (db, pending) = {
+            let client = self.foreground_client_mut(client)?;
+            let mut pending = Vec::new();
+            {
+                let stream = client.subscriptions.get_mut(&subscription).ok_or_else(|| {
+                    RelayError::ForegroundCommand(format!(
+                        "unknown foreground subscription {subscription}"
+                    ))
+                })?;
+                while pending.len() < NATIVE_RELAY_DRAIN_MAX_MESSAGES {
+                    let Some(event) = stream.try_next_event() else {
+                        break;
+                    };
+                    pending.push(event);
+                }
+            }
+            (Rc::clone(&client.db), pending)
+        };
+        if pending.is_empty() {
+            return Ok(ForegroundOperationPoll::Ready(
+                ForegroundOperationResult::SubscriptionEvents(Vec::new()),
+            ));
+        }
+        let future: ForegroundOperationFuture = Box::pin(async move {
+            let mut events = Vec::with_capacity(pending.len());
+            for mut event in pending {
+                // A missing chunk is intentionally allowed to suspend this
+                // retained future. The foreground owner can then tick peer
+                // I/O and poll again; never block the owner thread here.
+                db.hydrate_subscription_event_for_binding(&mut event)
+                    .await
+                    .map_err(RelayError::Db)?;
+                events.push(encode_foreground_subscription_event(event)?);
+            }
+            Ok(ForegroundOperationResult::SubscriptionEvents(events))
+        });
+        self.start_foreground_operation(client, Some(subscription), future)
+    }
+
+    fn start_foreground_operation(
+        &mut self,
+        client: u64,
+        subscription: Option<u64>,
+        future: ForegroundOperationFuture,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let operation = {
+            let client = self.foreground_client_mut(client)?;
+            if client.pending_operations.len() >= NATIVE_RELAY_FOREGROUND_PENDING_MAX {
+                return Err(RelayError::ForegroundCommand(format!(
+                    "foreground pending operation capacity {} exceeded",
+                    NATIVE_RELAY_FOREGROUND_PENDING_MAX
+                )));
+            }
+            let operation = Self::next_foreground_handle(client)?;
+            client.pending_operations.insert(
+                operation,
+                ForegroundPendingOperation {
+                    subscription,
+                    future,
+                },
+            );
+            operation
+        };
+        self.poll_foreground_operation(client, operation)
+    }
+
+    fn poll_foreground_operation(
+        &mut self,
+        client: u64,
+        operation: u64,
+    ) -> Result<ForegroundOperationPoll, RelayError> {
+        let Some(mut pending_operation) = self
+            .foreground_client_mut(client)?
+            .pending_operations
+            .remove(&operation)
+        else {
+            return Err(RelayError::ForegroundCommand(format!(
+                "unknown foreground operation {operation}"
+            )));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match pending_operation.future.as_mut().poll(&mut context) {
+            Poll::Ready(Ok(result)) => Ok(ForegroundOperationPoll::Ready(result)),
+            Poll::Ready(Err(error)) => Ok(ForegroundOperationPoll::Error {
+                reason: error.to_string(),
+            }),
+            Poll::Pending => {
+                self.foreground_client_mut(client)?
+                    .pending_operations
+                    .insert(operation, pending_operation);
+                Ok(ForegroundOperationPoll::Pending { operation })
             }
         }
-        let mut events = Vec::with_capacity(pending.len());
-        for mut event in pending {
-            // Hydration can suspend on storage. Do it before borrowing fields
-            // for the binding envelope, just like the NAPI/WASM adapters.
-            block_on(client.db.hydrate_subscription_event_for_binding(&mut event))
-                .map_err(RelayError::Db)?;
-            match &mut event {
-                SubscriptionEvent::Delta {
-                    reset,
-                    added,
-                    updated,
-                    removed,
-                    terminal_operations,
-                    settled,
-                    tier,
-                    ..
-                } => {
-                    // `binding_codec` intentionally carries only rows and occurrence
-                    // positions.  Terminal operations need their existing dedicated
-                    // shared codec before this capability can claim full structured
-                    // relation support, so fail closed rather than dropping them.
-                    if !terminal_operations.is_empty() {
-                        return Err(RelayError::ForegroundCommand(
-                            "foreground V1 does not yet encode terminal operations".to_owned(),
-                        ));
-                    }
-                    let delta =
-                        jazz::binding_codec::encode_subscription_delta(added, updated, removed)
-                            .map_err(|error| {
-                                RelayError::ForegroundCommand(format!(
-                                    "encode subscription delta: {error}"
-                                ))
-                            })?;
-                    events.push(ForegroundSubscriptionEvent::Delta {
-                        reset: *reset,
-                        settled: *settled,
-                        tier: format!("{tier:?}").to_ascii_lowercase(),
-                        delta,
-                    });
-                }
-                SubscriptionEvent::Rejected { reason } => {
-                    events.push(ForegroundSubscriptionEvent::Rejected {
-                        reason: format!("{reason:?}"),
-                    })
-                }
-                SubscriptionEvent::Closed => events.push(ForegroundSubscriptionEvent::Closed),
-            }
-        }
-        Ok(events)
+    }
+
+    fn cancel_foreground_operation(
+        &mut self,
+        client: u64,
+        operation: u64,
+    ) -> Result<bool, RelayError> {
+        Ok(self
+            .foreground_client_mut(client)?
+            .pending_operations
+            .remove(&operation)
+            .is_some())
     }
 
     fn close_foreground_subscription(
@@ -2339,6 +2654,9 @@ impl RelayWorker {
         subscription: u64,
     ) -> Result<bool, RelayError> {
         let client = self.foreground_client_mut(client)?;
+        client
+            .pending_operations
+            .retain(|_, pending| pending.subscription != Some(subscription));
         let Some(subscription) = client.subscriptions.remove(&subscription) else {
             return Ok(false);
         };
@@ -2350,6 +2668,275 @@ impl RelayWorker {
         // publish an old buffered event.
         drop(subscription);
         Ok(true)
+    }
+
+    fn begin_foreground_transaction(
+        &mut self,
+        client: u64,
+        kind: ForegroundTransactionKind,
+    ) -> Result<u64, RelayError> {
+        let (db, handle) = {
+            let client = self.foreground_client_mut(client)?;
+            if client.transactions.len() >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX {
+                return Err(RelayError::ForegroundCommand(format!(
+                    "foreground transaction capacity {} exceeded",
+                    NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX
+                )));
+            }
+            (Rc::clone(&client.db), Self::next_foreground_handle(client)?)
+        };
+        let open_tx_id = OpenTransactionId::new();
+        match kind {
+            ForegroundTransactionKind::Mergeable => block_on(db.begin_mergeable(open_tx_id)),
+            ForegroundTransactionKind::Exclusive => block_on(db.begin_exclusive(open_tx_id)),
+        }
+        .map_err(RelayError::Db)?;
+        self.foreground_client_mut(client)?
+            .transactions
+            .insert(handle, ForegroundTransaction { open_tx_id, kind });
+        Ok(handle)
+    }
+
+    fn foreground_transaction(
+        &self,
+        client: u64,
+        transaction: u64,
+    ) -> Result<(Rc<Db<MemoryStorage>>, ForegroundTransaction), RelayError> {
+        let client = self.foreground_client(client)?;
+        let transaction = client
+            .transactions
+            .get(&transaction)
+            .copied()
+            .ok_or_else(|| {
+                RelayError::ForegroundCommand(format!(
+                    "unknown foreground transaction {transaction}"
+                ))
+            })?;
+        Ok((Rc::clone(&client.db), transaction))
+    }
+
+    fn insert_foreground_transaction(
+        &mut self,
+        client: u64,
+        transaction: u64,
+        table: String,
+        cells: Vec<u8>,
+        row_id: Option<[u8; 16]>,
+    ) -> Result<RowUuid, RelayError> {
+        let cells = decode_foreground_cells(&cells)?;
+        let (db, transaction) = self.foreground_transaction(client, transaction)?;
+        let row_id = row_id.map(RowUuid::from_bytes);
+        match transaction.kind {
+            ForegroundTransactionKind::Mergeable => {
+                block_on(db.mergeable_tx_ref(transaction.open_tx_id).insert(
+                    &table,
+                    cells,
+                    jazz::db::InsertOptions {
+                        row_id,
+                        ..Default::default()
+                    },
+                ))
+            }
+            ForegroundTransactionKind::Exclusive => {
+                block_on(db.exclusive_tx_ref(transaction.open_tx_id).insert(
+                    &table,
+                    cells,
+                    jazz::db::InsertOptions {
+                        row_id,
+                        ..Default::default()
+                    },
+                ))
+            }
+        }
+        .map_err(RelayError::Db)
+    }
+
+    fn update_foreground_transaction(
+        &mut self,
+        client: u64,
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+        patch: Vec<u8>,
+    ) -> Result<(), RelayError> {
+        let patch = decode_foreground_cells(&patch)?;
+        let (db, transaction) = self.foreground_transaction(client, transaction)?;
+        let row_id = RowUuid::from_bytes(row_id);
+        match transaction.kind {
+            ForegroundTransactionKind::Mergeable => {
+                block_on(db.mergeable_tx_ref(transaction.open_tx_id).update(
+                    &table,
+                    row_id,
+                    patch,
+                    UpdateOptions::default(),
+                ))
+            }
+            ForegroundTransactionKind::Exclusive => {
+                block_on(db.exclusive_tx_ref(transaction.open_tx_id).update(
+                    &table,
+                    row_id,
+                    patch,
+                    UpdateOptions::default(),
+                ))
+            }
+        }
+        .map_err(RelayError::Db)
+    }
+
+    fn upsert_foreground_transaction(
+        &mut self,
+        client: u64,
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+        cells: Vec<u8>,
+    ) -> Result<(), RelayError> {
+        let cells = decode_foreground_cells(&cells)?;
+        let (db, transaction) = self.foreground_transaction(client, transaction)?;
+        let row_id = RowUuid::from_bytes(row_id);
+        match transaction.kind {
+            ForegroundTransactionKind::Mergeable => {
+                block_on(db.mergeable_tx_ref(transaction.open_tx_id).upsert(
+                    &table,
+                    row_id,
+                    cells,
+                    UpsertOptions::default(),
+                ))
+            }
+            ForegroundTransactionKind::Exclusive => {
+                block_on(db.exclusive_tx_ref(transaction.open_tx_id).upsert(
+                    &table,
+                    row_id,
+                    cells,
+                    UpsertOptions::default(),
+                ))
+            }
+        }
+        .map_err(RelayError::Db)
+    }
+
+    fn delete_foreground_transaction(
+        &mut self,
+        client: u64,
+        transaction: u64,
+        table: String,
+        row_id: [u8; 16],
+    ) -> Result<(), RelayError> {
+        let (db, transaction) = self.foreground_transaction(client, transaction)?;
+        let row_id = RowUuid::from_bytes(row_id);
+        match transaction.kind {
+            ForegroundTransactionKind::Mergeable => {
+                block_on(db.mergeable_tx_ref(transaction.open_tx_id).delete(
+                    &table,
+                    row_id,
+                    DeleteOptions::default(),
+                ))
+            }
+            ForegroundTransactionKind::Exclusive => {
+                block_on(db.exclusive_tx_ref(transaction.open_tx_id).delete(
+                    &table,
+                    row_id,
+                    DeleteOptions::default(),
+                ))
+            }
+        }
+        .map_err(RelayError::Db)
+    }
+
+    fn commit_foreground_transaction(
+        &mut self,
+        client: u64,
+        transaction: u64,
+    ) -> Result<TransactionId, RelayError> {
+        let (db, transaction_state) = self.foreground_transaction(client, transaction)?;
+        let tx_id = match transaction_state.kind {
+            ForegroundTransactionKind::Mergeable => {
+                block_on(db.commit_mergeable_handle(transaction_state.open_tx_id))
+            }
+            ForegroundTransactionKind::Exclusive => {
+                block_on(db.commit_exclusive_handle(transaction_state.open_tx_id))
+            }
+        }
+        .map_err(RelayError::Db)?;
+        self.foreground_client_mut(client)?
+            .transactions
+            .remove(&transaction);
+        Ok(TransactionId::from_committed_tx(tx_id))
+    }
+
+    fn rollback_foreground_transaction(
+        &mut self,
+        client: u64,
+        transaction: u64,
+    ) -> Result<bool, RelayError> {
+        let (db, transaction_state) = self.foreground_transaction(client, transaction)?;
+        db.abandon_transaction_handle(transaction_state.open_tx_id)
+            .map_err(RelayError::Db)?;
+        self.foreground_client_mut(client)?
+            .transactions
+            .remove(&transaction);
+        Ok(true)
+    }
+}
+
+/// Decode the established NAPI/WASM encoded-cell record envelope. The
+/// foreground ABI deliberately shares this compact descriptor-plus-bytes
+/// representation; it does not invent a React-Native row/value object shape.
+fn decode_foreground_cells(bytes: &[u8]) -> Result<jazz::db::RowCells, RelayError> {
+    let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
+        .map_err(|error| RelayError::ForegroundCommand(format!("decode cells: {error}")))?;
+    let record = BorrowedRecord::new(&raw, &descriptor);
+    let values = record
+        .to_values()
+        .map_err(|error| RelayError::ForegroundCommand(format!("decode cell record: {error}")))?;
+    let mut cells = jazz::db::RowCells::new();
+    for (field, value) in descriptor.fields().iter().zip(values) {
+        let name = field.name.clone().ok_or_else(|| {
+            RelayError::ForegroundCommand("encoded cells must use named fields".to_owned())
+        })?;
+        cells.insert(name, value);
+    }
+    Ok(cells)
+}
+
+fn encode_foreground_subscription_event(
+    mut event: SubscriptionEvent,
+) -> Result<ForegroundSubscriptionEvent, RelayError> {
+    match &mut event {
+        SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            removed,
+            terminal_operations,
+            settled,
+            tier,
+            ..
+        } => {
+            // `binding_codec` intentionally carries only rows and occurrence
+            // positions. Terminal operations need their existing dedicated
+            // shared codec before this capability can claim full structured
+            // relation support, so fail closed rather than dropping them.
+            if !terminal_operations.is_empty() {
+                return Err(RelayError::ForegroundCommand(
+                    "foreground V1 does not yet encode terminal operations".to_owned(),
+                ));
+            }
+            let delta = jazz::binding_codec::encode_subscription_delta(added, updated, removed)
+                .map_err(|error| {
+                    RelayError::ForegroundCommand(format!("encode subscription delta: {error}"))
+                })?;
+            Ok(ForegroundSubscriptionEvent::Delta {
+                reset: *reset,
+                settled: *settled,
+                tier: format!("{tier:?}").to_ascii_lowercase(),
+                delta,
+            })
+        }
+        SubscriptionEvent::Rejected { reason } => Ok(ForegroundSubscriptionEvent::Rejected {
+            reason: format!("{reason:?}"),
+        }),
+        SubscriptionEvent::Closed => Ok(ForegroundSubscriptionEvent::Closed),
     }
 }
 
@@ -2598,10 +3185,12 @@ mod tests {
     // store per UI runtime or share it across explicit auth scopes.
     use super::*;
     use jazz::db::InsertOptions;
+    use jazz::groove::records::ValueType;
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use jazz::tx::DurabilityTier;
+    use std::sync::atomic::AtomicBool;
 
     fn schema() -> JazzSchema {
         JazzSchema::new(
@@ -2610,6 +3199,14 @@ mod tests {
                 .build(),
         )
         .unwrap()
+    }
+
+    fn encoded_title_cells(title: &str) -> Vec<u8> {
+        let descriptor = RecordDescriptor::new([("title", ValueType::String)]);
+        let raw = descriptor
+            .create(&[Value::String(title.to_owned())])
+            .expect("fixture title record is valid");
+        postcard::to_allocvec(&(descriptor, raw)).expect("fixture cells encode")
     }
 
     fn config(path: PathBuf, auth_scope: Option<&str>) -> RelayOpenConfig {
@@ -2646,6 +3243,96 @@ mod tests {
             r#"["https://issuer.example","opaque-subject"]"#
         );
         assert_ne!(client.author, AuthorSubject::SYSTEM);
+    }
+
+    #[test]
+    fn pending_foreground_operation_never_blocks_the_owner_tick() {
+        // This is intentionally an internal host-boundary receipt: creating a
+        // missing chunk through the public API would require a full routed
+        // topology, while the invariant under test is narrower. A pending
+        // operation must be retained and polled around ordinary owner ticks,
+        // never driven by `block_on` on the owner thread.
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("pending.sqlite"),
+            Some("pending"),
+        ))
+        .expect("relay opens");
+        let client = relay
+            .attach_client(
+                client_identity(7, AuthorSubject::for_test_bytes([0x44; 16])),
+                BTreeMap::new(),
+            )
+            .expect("client attaches");
+        let ready = Arc::new(AtomicBool::new(false));
+        let pending_ready = Arc::clone(&ready);
+        let client_id = client.id;
+        relay
+            .run(move |worker| {
+                let future: ForegroundOperationFuture = Box::pin(std::future::poll_fn(move |_| {
+                    if pending_ready.load(Ordering::SeqCst) {
+                        Poll::Ready(Ok(ForegroundOperationResult::Rows(vec![0x2a])))
+                    } else {
+                        Poll::Pending
+                    }
+                }));
+                worker
+                    .clients
+                    .get_mut(&client_id)
+                    .expect("attached client remains owner-local")
+                    .pending_operations
+                    .insert(
+                        99,
+                        ForegroundPendingOperation {
+                            subscription: None,
+                            future,
+                        },
+                    );
+                Ok(())
+            })
+            .expect("plant operation on owner");
+
+        assert!(matches!(
+            client.poll_foreground_operation(99),
+            Ok(ForegroundOperationPoll::Pending { operation: 99 })
+        ));
+        relay
+            .pump()
+            .expect("a pending foreground operation cannot starve owner tick");
+        ready.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            client.poll_foreground_operation(99),
+            Ok(ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows))) if rows == vec![0x2a]
+        ));
+        assert!(matches!(
+            client.poll_foreground_operation(99),
+            Err(RelayError::ForegroundCommand(_))
+        ));
+
+        // Keep the receipt sensitive to the original regression: these two
+        // command paths may create/poll a retained future, but must not call
+        // the generic spinning helper while they own the relay thread.
+        let source = include_str!("lib.rs");
+        let relay_worker = source
+            .split_once("impl RelayWorker")
+            .expect("relay worker implementation remains present")
+            .1;
+        for function in [
+            "fn start_foreground_read(",
+            "fn drain_foreground_subscription(",
+        ] {
+            let body = relay_worker
+                .split_once(function)
+                .expect("foreground function remains present")
+                .1
+                .split("\n    fn ")
+                .next()
+                .expect("foreground function has a body");
+            assert!(
+                !body.contains("block_on("),
+                "{function} must return pending work rather than spin the owner thread"
+            );
+        }
     }
 
     #[test]
@@ -3841,183 +4528,6 @@ mod tests {
         unsafe { jazz_native_relay_host_free(host) };
     }
 
-    #[derive(Default)]
-    struct ForegroundWakeReceipt {
-        immediate: AtomicUsize,
-        deferred: AtomicUsize,
-        after: AtomicUsize,
-        cancelled: AtomicUsize,
-    }
-
-    unsafe extern "C" fn record_foreground_wake(
-        context: *mut c_void,
-        _foreground: u64,
-        kind: u8,
-        _delay_ms: u64,
-    ) {
-        // SAFETY: the test keeps both receipts alive until it synchronously
-        // clears/closes every foreground callback through the C ABI.
-        let receipt = unsafe { &*(context.cast::<ForegroundWakeReceipt>()) };
-        let counter = match kind {
-            FOREGROUND_WAKE_IMMEDIATE => &receipt.immediate,
-            FOREGROUND_WAKE_DEFERRED => &receipt.deferred,
-            FOREGROUND_WAKE_AFTER => &receipt.after,
-            FOREGROUND_WAKE_CANCELLED => &receipt.cancelled,
-            other => panic!("unexpected foreground wake kind {other}"),
-        };
-        counter.fetch_add(1, Ordering::SeqCst);
-    }
-
-    #[test]
-    fn foreground_wake_callbacks_are_runtime_scoped_and_revocation_cancels_only_affected_aliases() {
-        let directory = tempfile::tempdir().unwrap();
-        let host = jazz_native_relay_host_new();
-        let capability = unsafe {
-            (*host)
-                .inner
-                .lock()
-                .unwrap()
-                .admit_scope(RelayScopeAdmissionRequest {
-                    scope: RelayScopeRequest {
-                        app_namespace: "foreground-wakes".to_owned(),
-                        storage_namespace: "default".to_owned(),
-                        auth_scope: Some("opaque-validated-subject".to_owned()),
-                    },
-                    sqlite_path: directory
-                        .path()
-                        .join("foreground.sqlite")
-                        .display()
-                        .to_string(),
-                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
-                    identity: DbIdentity {
-                        node: NodeUuid::from_bytes([0xa1; 16]),
-                        author: AuthorSubject::for_test_bytes([0xa2; 16]),
-                    },
-                    claims: BTreeMap::new(),
-                })
-                .expect("trusted fixture admission succeeds")
-        };
-        let lease = unsafe { jazz_native_relay_host_retain(host) };
-        let open = || {
-            let mut foreground = 0;
-            assert_eq!(
-                unsafe {
-                    jazz_native_relay_host_lease_open_attached_foreground(
-                        lease,
-                        capability.0.as_ptr(),
-                        capability.0.len(),
-                        &mut foreground,
-                    )
-                },
-                JazzNativeRelayStatus::Ok
-            );
-            foreground
-        };
-        let first = open();
-        let second = open();
-        let first_receipt = ForegroundWakeReceipt::default();
-        let second_receipt = ForegroundWakeReceipt::default();
-        // This is an internal ABI test because a null raw callback context is
-        // not observable through the safe binding API. The C seam must reject
-        // it synchronously instead of allowing a later owner-thread crash.
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_lease_set_foreground_wake_callback(
-                    lease,
-                    first,
-                    Some(record_foreground_wake),
-                    std::ptr::null_mut(),
-                )
-            },
-            JazzNativeRelayStatus::InvalidArgument,
-        );
-        for (foreground, receipt) in [(first, &first_receipt), (second, &second_receipt)] {
-            assert_eq!(
-                unsafe {
-                    jazz_native_relay_host_lease_set_foreground_wake_callback(
-                        lease,
-                        foreground,
-                        Some(record_foreground_wake),
-                        (receipt as *const ForegroundWakeReceipt).cast_mut().cast(),
-                    )
-                },
-                JazzNativeRelayStatus::Ok
-            );
-        }
-        let schedule = |foreground, urgency| {
-            let client = unsafe {
-                (*lease)
-                    .inner
-                    .lock()
-                    .unwrap()
-                    .foreground_client(foreground)
-                    .unwrap()
-                    .clone()
-            };
-            client
-                .with_db(move |db| {
-                    db.schedule_tick(urgency);
-                    Ok(())
-                })
-                .unwrap();
-        };
-
-        schedule(first, TickUrgency::Immediate);
-        assert_eq!(first_receipt.immediate.load(Ordering::SeqCst), 1);
-        assert_eq!(second_receipt.immediate.load(Ordering::SeqCst), 0);
-
-        schedule(second, TickUrgency::Deferred);
-        assert_eq!(second_receipt.deferred.load(Ordering::SeqCst), 1);
-        ForegroundWakeScheduler {
-            callback: record_foreground_wake,
-            context: (&second_receipt as *const ForegroundWakeReceipt) as usize,
-            foreground: second,
-        }
-        .schedule_tick_after(17);
-        assert_eq!(second_receipt.after.load(Ordering::SeqCst), 1);
-
-        let mut first_closed = false;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_lease_close_attached_foreground(
-                    lease,
-                    first,
-                    &mut first_closed,
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        assert!(first_closed);
-        assert_eq!(first_receipt.cancelled.load(Ordering::SeqCst), 1);
-
-        schedule(second, TickUrgency::Immediate);
-        assert_eq!(
-            second_receipt.immediate.load(Ordering::SeqCst),
-            1,
-            "closing one runtime cannot suppress a sibling wake callback"
-        );
-
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_revoke_scope_capability(
-                    host,
-                    capability.0.as_ptr(),
-                    capability.0.len(),
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        assert_eq!(
-            second_receipt.cancelled.load(Ordering::SeqCst),
-            1,
-            "revocation cancels the outstanding runtime callback before its context can be torn down"
-        );
-        unsafe {
-            jazz_native_relay_host_lease_free(lease);
-            jazz_native_relay_host_free(host);
-        }
-    }
-
     #[test]
     fn foreground_command_c_abi_uses_one_binary_runtime_vocabulary() {
         let directory = tempfile::tempdir().unwrap();
@@ -4127,6 +4637,13 @@ mod tests {
             postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
             ForegroundDbCommandResponse::Unsubscribed { closed: true }
         );
+        let (status, response) = execute(ForegroundDbCommandRequest::Cancel { operation: 999 });
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::Cancelled { cancelled: false },
+            "an unknown operation cannot cancel a different foreground's work"
+        );
         let (status, response) = execute(ForegroundDbCommandRequest::Close);
         assert_eq!(status, JazzNativeRelayStatus::Ok);
         assert_eq!(
@@ -4161,6 +4678,311 @@ mod tests {
         assert!(stale_response.data.is_null() && stale_response.len == 0);
         unsafe { jazz_native_relay_host_lease_free(lease) };
         unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
+    fn foreground_transaction_commands_delegate_to_core_and_retire_with_their_owner() {
+        // This is intentionally an internal C-ABI receipt: it proves the
+        // byte command family reaches the ordinary foreground Db and its core
+        // transaction handles, while public row/query semantics stay covered
+        // by the Db integration suites.
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let capability = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "foreground-transaction-abi".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: Some("opaque-validated-subject".to_owned()),
+                    },
+                    sqlite_path: directory
+                        .path()
+                        .join("foreground.sqlite")
+                        .display()
+                        .to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0xb1; 16]),
+                        author: AuthorSubject::for_test_bytes([0xb2; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                })
+                .expect("trusted fixture admission succeeds")
+        };
+        let lease = unsafe { jazz_native_relay_host_retain(host) };
+        let mut foreground = 0;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_open_attached_foreground(
+                    lease,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                    &mut foreground,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        let execute = |foreground, command| {
+            let request = postcard::to_allocvec(&command).unwrap();
+            let mut response = JazzNativeRelayBytes::EMPTY;
+            let status = unsafe {
+                jazz_native_relay_host_lease_execute_foreground(
+                    lease,
+                    foreground,
+                    request.as_ptr(),
+                    request.len(),
+                    &mut response,
+                )
+            };
+            let bytes = if response.data.is_null() {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(response.data, response.len) }.to_vec()
+            };
+            unsafe { jazz_native_relay_bytes_free(&mut response) };
+            (status, bytes)
+        };
+        let response = |foreground, command| {
+            let (status, bytes) = execute(foreground, command);
+            assert_eq!(status, JazzNativeRelayStatus::Ok);
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap()
+        };
+
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
+            foreground,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            },
+        ) else {
+            panic!("begin must return an opaque transaction handle");
+        };
+        let row_id = [0x71; 16];
+        assert_eq!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::Insert {
+                    transaction,
+                    table: "todos".to_owned(),
+                    cells: encoded_title_cells("mergeable"),
+                    row_id: Some(row_id),
+                },
+            ),
+            ForegroundDbCommandResponse::Inserted { row_id }
+        );
+        assert_eq!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::Update {
+                    transaction,
+                    table: "todos".to_owned(),
+                    row_id,
+                    patch: encoded_title_cells("updated"),
+                },
+            ),
+            ForegroundDbCommandResponse::MutationStaged
+        );
+        assert_eq!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::Upsert {
+                    transaction,
+                    table: "todos".to_owned(),
+                    row_id,
+                    cells: encoded_title_cells("upserted"),
+                },
+            ),
+            ForegroundDbCommandResponse::MutationStaged
+        );
+        assert_eq!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::Delete {
+                    transaction,
+                    table: "todos".to_owned(),
+                    row_id,
+                },
+            ),
+            ForegroundDbCommandResponse::MutationStaged
+        );
+        let ForegroundDbCommandResponse::TransactionCommitted { tx_id } = response(
+            foreground,
+            ForegroundDbCommandRequest::CommitTransaction { transaction },
+        ) else {
+            panic!("commit must return the public committed txId");
+        };
+        assert_ne!(tx_id, [0; 16]);
+        assert!(matches!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::RollbackTransaction { transaction }
+            ),
+            ForegroundDbCommandResponse::OperationError { .. }
+        ));
+
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
+            foreground,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Exclusive,
+            },
+        ) else {
+            panic!("exclusive begin must return a handle");
+        };
+        assert_eq!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::Insert {
+                    transaction,
+                    table: "todos".to_owned(),
+                    cells: encoded_title_cells("rolled back"),
+                    row_id: Some([0x72; 16]),
+                },
+            ),
+            ForegroundDbCommandResponse::Inserted { row_id: [0x72; 16] }
+        );
+        assert_eq!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::RollbackTransaction { transaction },
+            ),
+            ForegroundDbCommandResponse::TransactionRolledBack { rolled_back: true }
+        );
+
+        let mut second_foreground = 0;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_open_attached_foreground(
+                    lease,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                    &mut second_foreground,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert!(matches!(
+            response(
+                second_foreground,
+                ForegroundDbCommandRequest::CommitTransaction { transaction }
+            ),
+            ForegroundDbCommandResponse::OperationError { .. }
+        ));
+
+        // Invalid schema/cell input is a logical operation error rather than
+        // a lifecycle failure, preserving the core error boundary for the
+        // shared adapter.
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
+            foreground,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            },
+        ) else {
+            panic!("begin must return a handle");
+        };
+        assert!(matches!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::Insert {
+                    transaction,
+                    table: "missing_table".to_owned(),
+                    cells: encoded_title_cells("nope"),
+                    row_id: Some([0x73; 16]),
+                }
+            ),
+            ForegroundDbCommandResponse::OperationError { .. }
+        ));
+        assert_eq!(
+            response(
+                foreground,
+                ForegroundDbCommandRequest::RollbackTransaction { transaction },
+            ),
+            ForegroundDbCommandResponse::TransactionRolledBack { rolled_back: true }
+        );
+
+        // Closing a foreground retires all of its mutable core transactions.
+        // A fresh alias is allowed later, but cannot retain or complete the
+        // closed alias's opaque handle.
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
+            second_foreground,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            },
+        ) else {
+            panic!("second foreground begin must return a handle");
+        };
+        assert_eq!(
+            response(second_foreground, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        let (status, stale_response) = execute(
+            second_foreground,
+            ForegroundDbCommandRequest::CommitTransaction { transaction },
+        );
+        assert_eq!(status, JazzNativeRelayStatus::InvalidHandle);
+        assert!(stale_response.is_empty());
+
+        unsafe { jazz_native_relay_host_lease_free(lease) };
+        unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
+    fn foreground_transaction_postcard_layout_matches_the_handwritten_ts_codec() {
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            })
+            .unwrap(),
+            vec![10, 0]
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Exclusive,
+            })
+            .unwrap(),
+            vec![10, 1]
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandRequest::Insert {
+                transaction: 3,
+                table: "todos".to_owned(),
+                cells: vec![1, 2],
+                row_id: None,
+            })
+            .unwrap(),
+            vec![11, 3, 5, b't', b'o', b'd', b'o', b's', 2, 1, 2, 0]
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandRequest::Update {
+                transaction: 3,
+                table: "todos".to_owned(),
+                row_id: [7; 16],
+                patch: vec![9],
+            })
+            .unwrap(),
+            [
+                vec![12, 3, 5, b't', b'o', b'd', b'o', b's'],
+                vec![7; 16],
+                vec![1, 9]
+            ]
+            .concat()
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandResponse::TransactionCommitted {
+                tx_id: [4; 16],
+            })
+            .unwrap(),
+            [vec![14], vec![4; 16]].concat()
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandResponse::TransactionRolledBack {
+                rolled_back: true,
+            })
+            .unwrap(),
+            vec![15, 1]
+        );
     }
 
     #[test]

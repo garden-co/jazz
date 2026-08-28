@@ -16,8 +16,8 @@ export interface NativeRelayAbiRange {
 }
 
 export const NATIVE_RELAY_ABI: NativeRelayAbiRange = {
-  minimum: 6,
-  maximum: 6,
+  minimum: 7,
+  maximum: 7,
 };
 
 function requireNativeRelay() {
@@ -51,12 +51,6 @@ export type NativeForegroundRuntimeFactory = {
  */
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
-  /** Register the runtime-local wake receiver used by the native adapter.
-   * Native work is coalesced before this callback runs; it must schedule an
-   * ordinary JS-side tick rather than calling back into native synchronously. */
-  setTickScheduler(
-    callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
-  ): void;
   tick(): void;
   close(): boolean;
 };
@@ -69,29 +63,73 @@ export type NativeForegroundRuntime = {
  * reinterpret remote tiers, views, or relation terminal operations.
  */
 export type NativeForegroundCommand =
-  | "probe"
-  | "tick"
-  | { type: "prepareQuery"; query: Uint8Array }
-  | { type: "all"; query: number }
-  | { type: "subscribe"; query: number }
-  | { type: "drainSubscription"; subscription: number }
-  | { type: "unsubscribe"; subscription: number }
-  | "close";
+  | 'probe'
+  | 'tick'
+  | { type: 'prepareQuery'; query: Uint8Array }
+  | { type: 'all'; query: number }
+  | { type: 'subscribe'; query: number }
+  | { type: 'drainSubscription'; subscription: number }
+  | { type: 'unsubscribe'; subscription: number }
+  | 'close'
+  | { type: 'poll'; operation: number }
+  | { type: 'cancel'; operation: number }
+  | { type: 'beginTransaction'; kind: NativeForegroundTransactionKind }
+  | {
+      type: 'insert';
+      transaction: number;
+      table: string;
+      cells: Uint8Array;
+      rowId?: Uint8Array;
+    }
+  | {
+      type: 'update';
+      transaction: number;
+      table: string;
+      rowId: Uint8Array;
+      patch: Uint8Array;
+    }
+  | {
+      type: 'upsert';
+      transaction: number;
+      table: string;
+      rowId: Uint8Array;
+      cells: Uint8Array;
+    }
+  | { type: 'delete'; transaction: number; table: string; rowId: Uint8Array }
+  | { type: 'commitTransaction'; transaction: number }
+  | { type: 'rollbackTransaction'; transaction: number };
+
+/** The existing core transaction semantics selected by the foreground codec. */
+export type NativeForegroundTransactionKind = 'mergeable' | 'exclusive';
 
 export type NativeForegroundResponse =
-  | { type: "probe"; abiVersion: number }
-  | { type: "ticked" }
-  | { type: "preparedQuery"; query: number }
-  | { type: "rows"; rows: Uint8Array }
-  | { type: "subscribed"; subscription: number }
-  | { type: "subscriptionEvents"; events: NativeForegroundSubscriptionEvent[] }
-  | { type: "unsubscribed"; closed: boolean }
-  | { type: "closed"; closed: boolean };
+  | { type: 'probe'; abiVersion: number }
+  | { type: 'ticked' }
+  | { type: 'preparedQuery'; query: number }
+  | { type: 'rows'; rows: Uint8Array }
+  | { type: 'subscribed'; subscription: number }
+  | { type: 'subscriptionEvents'; events: NativeForegroundSubscriptionEvent[] }
+  | { type: 'unsubscribed'; closed: boolean }
+  | { type: 'closed'; closed: boolean }
+  | { type: 'pending'; operation: number }
+  | { type: 'operationError'; reason: string }
+  | { type: 'cancelled'; cancelled: boolean }
+  | { type: 'transactionOpened'; transaction: number }
+  | { type: 'inserted'; rowId: Uint8Array }
+  | { type: 'mutationStaged' }
+  | { type: 'transactionCommitted'; txId: Uint8Array }
+  | { type: 'transactionRolledBack'; rolledBack: boolean };
 
 export type NativeForegroundSubscriptionEvent =
-  | { type: "delta"; reset: boolean; settled: boolean; tier: string; delta: Uint8Array }
-  | { type: "rejected"; reason: string }
-  | { type: "closed" };
+  | {
+      type: 'delta';
+      reset: boolean;
+      settled: boolean;
+      tier: string;
+      delta: Uint8Array;
+    }
+  | { type: 'rejected'; reason: string }
+  | { type: 'closed' };
 
 type NativeRelayWithForegroundInstaller = {
   installForegroundRuntime?: () => void;
@@ -176,34 +214,29 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
           'Jazz native foreground runtime requires a 32-byte admitted capability'
         );
       }
-      const foreground = installed.openAttached(capability) as Partial<NativeForegroundRuntime>;
+      const foreground = installed.openAttached(
+        capability
+      ) as Partial<NativeForegroundRuntime>;
       if (
         !foreground ||
-        typeof foreground.execute !== "function" ||
-        typeof foreground.setTickScheduler !== "function" ||
-        typeof foreground.tick !== "function" ||
-        typeof foreground.close !== "function"
+        typeof foreground.execute !== 'function' ||
+        typeof foreground.tick !== 'function' ||
+        typeof foreground.close !== 'function'
       ) {
         throw foregroundRuntimeInstallationError();
       }
       return {
         execute(command: Uint8Array): Uint8Array {
           if (!(command instanceof Uint8Array)) {
-            throw new Error("Jazz native foreground command requires a Uint8Array");
+            throw new Error(
+              'Jazz native foreground command requires a Uint8Array'
+            );
           }
           const response = foreground.execute!(command);
           if (!(response instanceof Uint8Array)) {
             throw foregroundRuntimeInstallationError();
           }
           return response;
-        },
-        setTickScheduler(
-          callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
-        ): void {
-          if (typeof callback !== "function") {
-            throw new Error("Jazz native foreground tick scheduler requires a function");
-          }
-          foreground.setTickScheduler!(callback);
         },
         tick(): void {
           foreground.tick!();
@@ -244,9 +277,77 @@ export function encodeNativeForegroundCommand(
       Uint8Array.of(5),
       encodeForegroundU64(command.subscription)
     );
+  if (command.type === 'unsubscribe')
+    return concatForegroundBytes(
+      Uint8Array.of(6),
+      encodeForegroundU64(command.subscription)
+    );
+  if (command.type === 'poll')
+    return concatForegroundBytes(
+      Uint8Array.of(8),
+      encodeForegroundU64(command.operation)
+    );
+  if (command.type === 'cancel')
+    return concatForegroundBytes(
+      Uint8Array.of(9),
+      encodeForegroundU64(command.operation)
+    );
+  if (command.type === 'beginTransaction') {
+    if (command.kind !== 'mergeable' && command.kind !== 'exclusive') {
+      throw new Error(
+        'Jazz native foreground transaction kind must be mergeable or exclusive'
+      );
+    }
+    return Uint8Array.of(10, command.kind === 'mergeable' ? 0 : 1);
+  }
+  if (command.type === 'insert') {
+    return concatForegroundBytes(
+      Uint8Array.of(11),
+      encodeForegroundU64(command.transaction),
+      encodeForegroundString(command.table),
+      encodeForegroundBytes(command.cells),
+      command.rowId === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(
+            Uint8Array.of(1),
+            encodeForegroundId(command.rowId, 'row id')
+          )
+    );
+  }
+  if (command.type === 'update') {
+    return concatForegroundBytes(
+      Uint8Array.of(12),
+      encodeForegroundU64(command.transaction),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, 'row id'),
+      encodeForegroundBytes(command.patch)
+    );
+  }
+  if (command.type === 'upsert') {
+    return concatForegroundBytes(
+      Uint8Array.of(13),
+      encodeForegroundU64(command.transaction),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, 'row id'),
+      encodeForegroundBytes(command.cells)
+    );
+  }
+  if (command.type === 'delete') {
+    return concatForegroundBytes(
+      Uint8Array.of(14),
+      encodeForegroundU64(command.transaction),
+      encodeForegroundString(command.table),
+      encodeForegroundId(command.rowId, 'row id')
+    );
+  }
+  if (command.type === 'commitTransaction')
+    return concatForegroundBytes(
+      Uint8Array.of(15),
+      encodeForegroundU64(command.transaction)
+    );
   return concatForegroundBytes(
-    Uint8Array.of(6),
-    encodeForegroundU64(command.subscription)
+    Uint8Array.of(16),
+    encodeForegroundU64(command.transaction)
   );
 }
 
@@ -296,6 +397,38 @@ export function decodeNativeForegroundResponse(
   if (tag === 7 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
     return { type: 'closed', closed: bytes[1] === 1 };
   }
+  if (tag === 8)
+    return {
+      type: 'pending',
+      operation: decodeForegroundU64(bytes.subarray(1), 'pending operation'),
+    };
+  if (tag === 9)
+    return {
+      type: 'operationError',
+      reason: decodeForegroundString(bytes.subarray(1), 'operation error'),
+    };
+  if (tag === 10 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
+    return { type: 'cancelled', cancelled: bytes[1] === 1 };
+  }
+  if (tag === 11)
+    return {
+      type: 'transactionOpened',
+      transaction: decodeForegroundU64(bytes.subarray(1), 'transaction'),
+    };
+  if (tag === 12)
+    return {
+      type: 'inserted',
+      rowId: decodeForegroundId(bytes.subarray(1), 'inserted row id'),
+    };
+  if (tag === 13 && bytes.length === 1) return { type: 'mutationStaged' };
+  if (tag === 14)
+    return {
+      type: 'transactionCommitted',
+      txId: decodeForegroundId(bytes.subarray(1), 'committed txId'),
+    };
+  if (tag === 15 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
+    return { type: 'transactionRolledBack', rolledBack: bytes[1] === 1 };
+  }
   throw new Error(
     'Jazz native foreground returned an unknown or malformed command response'
   );
@@ -320,8 +453,45 @@ function encodeForegroundU64(value: number): Uint8Array {
 
 function encodeForegroundBytes(value: Uint8Array): Uint8Array {
   if (!(value instanceof Uint8Array))
-    throw new Error('Jazz native foreground query requires Uint8Array bytes');
+    throw new Error('Jazz native foreground command requires Uint8Array bytes');
   return concatForegroundBytes(encodeForegroundU64(value.byteLength), value);
+}
+
+function encodeForegroundId(value: Uint8Array, label: string): Uint8Array {
+  if (!(value instanceof Uint8Array) || value.byteLength !== 16) {
+    throw new Error(
+      `Jazz native foreground ${label} must be a 16-byte Uint8Array`
+    );
+  }
+  return value;
+}
+
+function decodeForegroundId(bytes: Uint8Array, label: string): Uint8Array {
+  if (bytes.byteLength !== 16)
+    throw new Error(`Jazz native foreground returned malformed ${label}`);
+  return bytes.slice();
+}
+
+function encodeForegroundString(value: string): Uint8Array {
+  if (typeof value !== 'string')
+    throw new Error('Jazz native foreground table must be a string');
+  // React Native's configured TS lib does not promise TextEncoder. This is
+  // the inverse of the strict URI-based UTF-8 decoder below and keeps the
+  // command codec dependency-free in Hermes.
+  const encoded = encodeURIComponent(value);
+  const bytes: number[] = [];
+  for (let index = 0; index < encoded.length; index += 1) {
+    if (encoded[index] === '%') {
+      const hex = encoded.slice(index + 1, index + 3);
+      if (hex.length !== 2)
+        throw new Error('Jazz native foreground table is malformed UTF-8');
+      bytes.push(Number.parseInt(hex, 16));
+      index += 2;
+    } else {
+      bytes.push(encoded.charCodeAt(index));
+    }
+  }
+  return encodeForegroundBytes(Uint8Array.from(bytes));
 }
 
 function concatForegroundBytes(...parts: Uint8Array[]): Uint8Array {
@@ -367,6 +537,11 @@ function decodeForegroundBytes(bytes: Uint8Array, label: string): Uint8Array {
     multiplier *= 128;
   }
   throw new Error(`Jazz native foreground returned malformed ${label}`);
+}
+
+function decodeForegroundString(bytes: Uint8Array, label: string): string {
+  const encoded = decodeForegroundBytes(bytes, label);
+  return decodeForegroundUtf8(encoded, 0, encoded.byteLength, label);
 }
 
 function decodeForegroundSubscriptionEvents(

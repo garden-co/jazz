@@ -68,18 +68,19 @@ route through the obsolete UniFFI library. The remaining Android runner gate is
 a real Gradle/NDK AAR build and emulator installation against that linked
 artifact.
 
-The wrapper accepts ABI 6, which retains ABI 5's opaque host-generated
-admission capabilities, trusted revocation, and V1 foreground `NativeDb`
-postcard command vocabulary (canonical-query prepare/read/subscribe/drain/
-cancel). ABI 6 adds only the private per-runtime native-to-JS wake registration:
-the owner thread coalesces a wake through React Native's `CallInvoker`, and JS
-schedules the next ordinary tick on its own runtime thread. It is deliberately
-a byte-oriented native-host contract, not a new React Native row/query API:
-the query and row-delta codecs are the same ones used by NAPI/WASM. This
-capability-gated slice supports only ordinary local-first reads; remote tiers,
-structured relation terminal operations, and write/transaction commands remain
-unavailable, so `jazz-tools/react-native` must not select it as its general
-runtime yet.
+The wrapper accepts ABI 7, which uses opaque host-generated admission
+capabilities and trusted revocation. ABI 7 extends V1 of the shared foreground
+`NativeDb` postcard seam with canonical-query prepare/read/subscribe/drain,
+plus pending-operation poll/cancel commands for chunk-backed reads. It is
+deliberately a byte-oriented native-host contract, not
+a new React Native row/query API: the query and row-delta codecs are the same
+ones used by NAPI/WASM. This capability-gated slice supports only ordinary
+local-first reads; remote tiers, structured relation terminal operations, and
+write/transaction commands use the established native encoded-cell and core
+transaction semantics, including the public `txId` receipt identity. Branch
+targets, custom write attribution, large-value diffs, structured relation
+terminal operations, and remote read tiers remain unavailable, so
+`jazz-tools/react-native` must not select it as its general runtime yet.
 
 ## Expo development-build install path
 

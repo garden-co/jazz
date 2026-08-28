@@ -324,7 +324,7 @@ before opening a foreground. Unknown or malformed command/response bytes fail
 closed, with no partially returned buffer. Command outputs are copied into
 JS-owned memory before Rust frees its response allocation.
 
-**V1 vertical slice.** Native relay ABI 6 defines the first concrete
+**V1 vertical slice.** Native relay ABI 7 defines the concrete foreground
 foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
 local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,
 `DrainSubscription`, `Unsubscribe`. Query inputs are exactly the canonical
@@ -358,16 +358,38 @@ cleanup; the next bounded `Tick` performs its finalization, because awaiting
 that acknowledgement while already executing on the core owner thread would
 deadlock. Repeated close or unsubscribe reports `false`.
 
-This V1 subset deliberately supports only `ReadOpts::default()` local-first
-reads. It fails closed for remote tiers/read views, relation terminal
-operations, writes, transactions, permission advice, and async suspension;
-those remain required extension work rather than silently receiving a distinct
-RN meaning. The admitted native scope continues to own schema, canonical
-session/author identity, claims, and ordinary peer synchronization; JavaScript
-only provides canonical query bytes. `tick`/`close` convenience JSI methods may
-remain internal compatibility shorthands only while they invoke the same
-foreground lifecycle; `jazz-tools` must move to `execute` as each family is
-implemented.
+ABI 7 also adds a deliberately narrow write family: `BeginTransaction` with
+the ordinary `mergeable` or `exclusive` core semantics, full-cell
+`Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
+`RollbackTransaction`. Cell payloads are the established postcard
+`(RecordDescriptor, encoded-record)` envelope already used by NAPI/WASM; the
+foreground codec does not expose a React-Native row object representation.
+The host creates an opaque transaction handle, binds it to exactly one
+foreground, caps the number of open handles, and abandons all still-open
+handles when that foreground closes or its capability is revoked. A successful
+commit returns the normal public 16-byte `txId`, never the mutable handle.
+Schema, permission, and transaction errors remain ordinary
+`OperationError` responses so the eventual shared adapter keeps their existing
+error attribution; malformed bytes and lifecycle failures still fail closed at
+the C boundary.
+
+This slice intentionally delegates every mutation to the existing core
+transaction APIs with their default options. It therefore does not invent
+branch targets, custom timestamps or write attribution, row-version CAS,
+large-value diffs, restore, or write-state/wait APIs. Full-cell local writes
+do not need a new pending protocol: requests which would require asynchronous
+large-value hydration are not representable by this codec. Existing `Pending`
+and `Poll` remain the async path for query/subscription materialization.
+
+The V1 subset otherwise deliberately supports only `ReadOpts::default()`
+local-first reads. It fails closed for remote tiers/read views, relation
+terminal operations, permission advice, and any not-yet-shared mutation
+contract rather than silently receiving a distinct RN meaning. The admitted
+native scope continues to own schema, canonical session/author identity,
+claims, and ordinary peer synchronization; JavaScript only provides canonical
+query or encoded-cell bytes. `tick`/`close` convenience JSI methods may remain
+internal compatibility shorthands only while they invoke the same foreground
+lifecycle; `jazz-tools` must move to `execute` as each family is implemented.
 
 **Wake registration.** ABI 6 leaves that postcard command vocabulary unchanged
 and adds the private JSI `setTickScheduler(callback)` companion on each
