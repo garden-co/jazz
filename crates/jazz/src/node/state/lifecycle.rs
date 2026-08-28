@@ -303,14 +303,14 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, true).await
     }
 
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[allow(dead_code)] // Reached only by the lib-test predecessor-layout receipt.
     /// Open using the pre-v2 physical-current index identity.
     ///
     /// This exists solely to create an on-disk predecessor fixture for the
     /// branch-prefix index settlement test; production constructors always
     /// synchronize the v2 layout before serving reads.
-    pub(super) async fn new_history_complete_with_legacy_current_indexes_for_test(
+    pub(crate) async fn new_history_complete_with_legacy_current_indexes_for_test(
         node_uuid: NodeUuid,
         schema: JazzSchema,
         storage: S,
@@ -325,6 +325,7 @@ where
             true,
             CatalogueBootstrapState::Ready,
             PhysicalCurrentIndexLayout::LegacyV1,
+            #[cfg(feature = "testing")]
             None,
         )
         .await
