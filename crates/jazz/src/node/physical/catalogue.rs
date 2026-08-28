@@ -546,24 +546,7 @@ pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -
 }
 
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
-    PhysicalCurrentIndexLayout::BranchPrefixV2.name(column_id)
-}
-
-impl PhysicalCurrentIndexLayout {
-    pub(super) fn name(self, column_id: PhysicalColumnId) -> String {
-        match self {
-            Self::LegacyV1 => format!("by_physical_user_{}", column_id.0),
-            Self::BranchPrefixV2 => format!("by_physical_user_v2_{}", column_id.0),
-        }
-    }
-
-    pub(super) fn columns(self, column_id: PhysicalColumnId) -> Vec<String> {
-        let user = physical_user_column_field(column_id);
-        match self {
-            Self::LegacyV1 => vec![user],
-            Self::BranchPrefixV2 => vec!["branch_key".to_owned(), user],
-        }
-    }
+    format!("by_physical_user_v1_{}", column_id.0)
 }
 
 pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {

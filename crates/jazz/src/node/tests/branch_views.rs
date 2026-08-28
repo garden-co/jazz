@@ -813,26 +813,22 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = MemoryStorage::new(&refs).unwrap();
     let mut memory = NodeState::new_history_complete(node(0x70), schema.clone(), storage).unwrap();
-    // A fresh node must install the settled layout directly.  Installing V1
-    // first and then registering V2 doubles schema-index construction for a
-    // wide catalogue (and made large-schema NAPI opens time out), while there
-    // is no predecessor data to migrate.
+    // A fresh node installs the frozen V1 branch-prefixed layout directly.
     for (table, indexed_column) in [("users", "name"), ("todos", "title")] {
         let mapping =
             memory.catalogue.physical_mappings[&schema.version_id()].tables[table].clone();
-        let legacy_index =
-            PhysicalCurrentIndexLayout::LegacyV1.name(mapping.columns[indexed_column]);
-        let v2_index = physical_current_index_name(mapping.columns[indexed_column]);
+        let v1_index = physical_current_index_name(mapping.columns[indexed_column]);
+        assert_eq!(
+            v1_index,
+            format!("by_physical_user_v1_{}", mapping.columns[indexed_column].0),
+            "the branch-prefixed current-index identity is frozen at V1"
+        );
         for storage_table in [
             physical_ahead_current_table_name(mapping.table_id),
             physical_global_current_table_name(mapping.table_id),
         ] {
             let indices = &memory.database.table_schema(&storage_table).unwrap().indices;
-            assert!(indices.iter().any(|index| index.name == v2_index));
-            assert!(
-                !indices.iter().any(|index| index.name == legacy_index),
-                "fresh opens must not construct obsolete V1 current indexes"
-            );
+            assert!(indices.iter().any(|index| index.name == v1_index));
         }
     }
     memory
@@ -1073,183 +1069,6 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
         v("branch receipt"),
         "the sibling branch remains visible after rebuilding current/index state"
     );
-}
-
-// This is necessarily an internal persistent-layout receipt: public queries
-// cannot choose the predecessor physical index identity that an already-opened
-// database used before v2. The fixture writes through that real v1 layout,
-// then reopens through the ordinary v2 constructor and observes public query
-// results.
-#[test]
-fn branch_prefixed_current_index_backfills_legacy_rocks_layout_on_reopen() {
-    let schema = branch_view_schema();
-    let directory = tempfile::tempdir().unwrap();
-    let shared = row(0x74);
-    let draft = row(0x75);
-    let draft_selector = branch_selector(0x76);
-    let cells = |title: &str| {
-        BTreeMap::from([
-            ("title".to_owned(), v(title)),
-            ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
-        ])
-    };
-
-    {
-        let cfs = schema.column_families();
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = RocksDbStorage::open(directory.path(), &refs).unwrap();
-        let mut legacy = NodeState::new_history_complete_with_legacy_current_indexes_for_test(
-            node(0x73),
-            schema.clone(),
-            storage,
-        )
-        .unwrap();
-        legacy
-            .commit_mergeable_settled(
-                MergeableCommit::new("users", shared, 10)
-                    .cells(BTreeMap::from([("name".to_owned(), v("root"))])),
-            )
-            .unwrap();
-        let stale = legacy
-            .commit_mergeable_settled(
-                MergeableCommit::new("todos", draft, 20)
-                    .branch(draft_selector.clone())
-                    .cells(cells("stale")),
-            )
-            .unwrap();
-        legacy
-            .commit_mergeable_settled(
-                MergeableCommit::new("todos", draft, 30)
-                    .branch(draft_selector.clone())
-                    .parents(vec![stale])
-                    .cells(cells("draft")),
-            )
-            .unwrap();
-
-        for (table, indexed_column) in [("users", "name"), ("todos", "title")] {
-            let mapping = legacy.catalogue.physical_mappings[&schema.version_id()].tables[table].clone();
-            let legacy_index =
-                PhysicalCurrentIndexLayout::LegacyV1.name(mapping.columns[indexed_column]);
-            let v2_index = physical_current_index_name(mapping.columns[indexed_column]);
-            for storage_table in [
-                physical_ahead_current_table_name(mapping.table_id),
-                physical_global_current_table_name(mapping.table_id),
-            ] {
-                let indices = &legacy.database.table_schema(&storage_table).unwrap().indices;
-                assert!(indices.iter().any(|index| index.name == legacy_index));
-                assert!(
-                    !indices.iter().any(|index| index.name == v2_index),
-                    "predecessor fixture must not accidentally write the v2 index"
-                );
-            }
-        }
-    }
-
-    let mut reopened = reopen_history_complete_node_at(&directory, node(0x73), schema.clone());
-    let users_mapping = reopened.catalogue.physical_mappings[&schema.version_id()].tables["users"].clone();
-    let todos_mapping = reopened.catalogue.physical_mappings[&schema.version_id()].tables["todos"].clone();
-    let users_v2_index = physical_current_index_name(users_mapping.columns["name"]);
-    let todos_v2_index = physical_current_index_name(todos_mapping.columns["title"]);
-    let draft_key = schema
-        .project_branch_view_selector(&schema.tables[0], &draft_selector)
-        .unwrap()
-        .0;
-    for (table_id, index, branch_key, expected_candidates) in [
-        (
-            users_mapping.table_id,
-            users_v2_index.clone(),
-            BranchKey::default(),
-            1,
-        ),
-        (todos_mapping.table_id, todos_v2_index.clone(), draft_key, 2),
-    ] {
-        assert_eq!(
-            reopened
-                .database
-                .index_scan_raw(
-                    &physical_ahead_current_table_name(table_id),
-                    &index,
-                    &[Value::Bytes(branch_key.canonical_bytes())],
-                )
-                .unwrap()
-                .len(),
-            expected_candidates,
-            "v2 registration must backfill every persisted current candidate in its branch prefix"
-        );
-    }
-
-    let root_query = Query::from("users").filter(eq(col("name"), lit("root")));
-    let (root_rows, root_metrics) = query_rows_by_uuid(&mut reopened, root_query, DurabilityTier::Local);
-    assert_eq!(root_rows, vec![shared]);
-    assert_eq!(root_metrics.source_index_probes, 1);
-
-    let draft_read_view = crate::protocol::ReadViewSpec {
-        source: crate::protocol::ReadViewSourceSpec::BranchView {
-            head: draft_selector,
-            base: None,
-        },
-    };
-    for (title, expected) in [("draft", vec![draft]), ("stale", Vec::new())] {
-        let shape = Query::from("todos")
-            .filter(eq(col("title"), lit(title)))
-            .validate(&schema)
-            .unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
-        let rows = reopened
-            .query_relation_snapshot_for_serving_in_read_view(
-                &shape,
-                &binding,
-                DurabilityTier::Local,
-                AuthorSubject::SYSTEM,
-                &draft_read_view,
-            )
-            .unwrap()
-            .rows;
-        assert_eq!(
-            rows.into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
-            expected,
-            "reopen must use the backfilled branch-prefixed current relation without stale index entries"
-        );
-    }
-
-    // The first ordinary reopen registered V2 and durably marked that
-    // settlement only after the backfill completed. A second reopen must
-    // therefore declare V2 directly rather than temporarily reopening the
-    // predecessor V1 indexes again. This storage-boundary assertion is the
-    // observable distinction between the two bootstrap paths.
-    drop(reopened);
-    let mut reopened_again = reopen_history_complete_node_at(&directory, node(0x73), schema.clone());
-    for (table_id, v2_index, legacy_v1_index) in [
-        (
-            users_mapping.table_id,
-            users_v2_index,
-            PhysicalCurrentIndexLayout::LegacyV1.name(users_mapping.columns["name"]),
-        ),
-        (
-            todos_mapping.table_id,
-            todos_v2_index,
-            PhysicalCurrentIndexLayout::LegacyV1.name(todos_mapping.columns["title"]),
-        ),
-    ] {
-        for storage_table in [
-            physical_ahead_current_table_name(table_id),
-            physical_global_current_table_name(table_id),
-        ] {
-            let indices = &reopened_again.database.table_schema(&storage_table).unwrap().indices;
-            assert!(indices.iter().any(|index| index.name == v2_index));
-            assert!(
-                indices.iter().all(|index| index.name != legacy_v1_index),
-                "settled V2 marker must bypass the predecessor V1 bootstrap layout"
-            );
-        }
-    }
-    let (rows, metrics) = query_rows_by_uuid(
-        &mut reopened_again,
-        Query::from("users").filter(eq(col("name"), lit("root"))),
-        DurabilityTier::Local,
-    );
-    assert_eq!(rows, vec![shared]);
-    assert_eq!(metrics.source_index_probes, 1);
 }
 
 // This is necessarily an internal protocol-boundary regression test: public

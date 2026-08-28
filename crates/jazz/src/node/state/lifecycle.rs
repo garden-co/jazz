@@ -37,7 +37,6 @@ where
                 storage,
                 false,
                 CatalogueBootstrapState::Ready,
-                PhysicalCurrentIndexLayout::BranchPrefixV2,
                 #[cfg(feature = "testing")]
                 None,
             )
@@ -49,7 +48,6 @@ where
             storage,
             false,
             CatalogueBootstrapState::Uninitialized,
-            PhysicalCurrentIndexLayout::BranchPrefixV2,
             #[cfg(feature = "testing")]
             None,
         )
@@ -303,34 +301,6 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, true).await
     }
 
-    #[cfg(any(test, feature = "testing"))]
-    #[allow(dead_code)] // Reached only by the lib-test predecessor-layout receipt.
-    /// Open using the pre-v2 physical-current index identity.
-    ///
-    /// This exists solely to create an on-disk predecessor fixture for the
-    /// branch-prefix index settlement test; production constructors always
-    /// synchronize the v2 layout before serving reads.
-    pub(crate) async fn new_history_complete_with_legacy_current_indexes_for_test(
-        node_uuid: NodeUuid,
-        schema: JazzSchema,
-        storage: S,
-    ) -> Result<Self, Error>
-    where
-        S: ReopenableStorage + 'static,
-    {
-        Self::new_with_options_inner(
-            node_uuid,
-            schema,
-            storage,
-            true,
-            CatalogueBootstrapState::Ready,
-            PhysicalCurrentIndexLayout::LegacyV1,
-            #[cfg(feature = "testing")]
-            None,
-        )
-        .await
-    }
-
     /// Rebuild the groove layer over the same storage using the standard open path.
     pub async fn reopen_in_place(self) -> Result<NodeState<BoxedStorage>, Error>
     where
@@ -396,7 +366,6 @@ where
             storage,
             history_complete,
             CatalogueBootstrapState::Ready,
-            PhysicalCurrentIndexLayout::BranchPrefixV2,
             #[cfg(feature = "testing")]
             None,
         )
@@ -421,7 +390,6 @@ where
             storage,
             history_complete,
             CatalogueBootstrapState::Ready,
-            PhysicalCurrentIndexLayout::BranchPrefixV2,
             Some(&mut receipt),
         )
         .await?;
@@ -434,7 +402,6 @@ where
         storage: T,
         history_complete: bool,
         catalogue_bootstrap_state: CatalogueBootstrapState,
-        current_index_layout: PhysicalCurrentIndexLayout,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<Self, Error>
     where
@@ -459,23 +426,7 @@ where
             next_physical_column_id,
             current_write_schema,
             catalogue_bootstrap_marker,
-            has_catalogue_residue,
-            branch_prefixed_current_indexes,
         } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state).await?;
-        let bootstrap_current_index_layout = if current_index_layout
-            == PhysicalCurrentIndexLayout::LegacyV1
-        {
-            // The test-only predecessor constructor deliberately creates a
-            // genuine V1 fixture.
-            PhysicalCurrentIndexLayout::LegacyV1
-        } else if !has_catalogue_residue || branch_prefixed_current_indexes {
-            PhysicalCurrentIndexLayout::BranchPrefixV2
-        } else {
-            // A durable catalogue without the settled marker predates V2.
-            // Open its V1 layout only long enough for V2 registration to
-            // hydrate the derived branch-prefixed indexes from current rows.
-            PhysicalCurrentIndexLayout::LegacyV1
-        };
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.catalogue_open = started.elapsed();
@@ -498,7 +449,6 @@ where
             &registration_schemas,
             &registration_aliases,
             &registration_mappings,
-            bootstrap_current_index_layout,
             storage,
         )
         .await?;
@@ -671,28 +621,7 @@ where
             node.ensure_provisional_physical_mapping(schema_version)
                 .await?;
         }
-        node.synchronize_physical_version_tables_with_current_index_layout(current_index_layout)
-            .await?;
-        if current_index_layout == PhysicalCurrentIndexLayout::BranchPrefixV2
-            && catalogue_bootstrap_state == CatalogueBootstrapState::Ready
-            && !branch_prefixed_current_indexes
-        {
-            // Advance the marker only after V2 registration has completed and
-            // its derived index entries have been persisted. A crash before
-            // this batch conservatively repeats the V1-to-V2 backfill.
-            let mut batch = node.database.open_batch();
-            batch.update(
-                "jazz_catalogue",
-                vec![
-                    Value::U64(codec::CatalogueRecordKind::CurrentIndexLayout.key()),
-                    Value::Uuid(uuid::Uuid::nil()),
-                    Value::Bytes(codec::encode_catalogue_branch_prefixed_current_indexes()),
-                ],
-            );
-            let applied = node.database.apply_batch(batch).await?;
-            let persisted = applied.persist().await;
-            node.database.finish_persistence(persisted)?;
-        }
+        node.synchronize_physical_version_tables().await?;
         node.recover_pending_schema_lineages().await?;
         node.recover_pending_catalogue_pointers().await?;
         #[cfg(feature = "testing")]
@@ -747,30 +676,15 @@ where
         catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
         schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
         physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-        current_index_layout: PhysicalCurrentIndexLayout,
         storage: BoxedStorage,
     ) -> Result<Database, Error> {
         debug_assert_lowered_layouts(schema);
         let mut lowered = schema.lower_to_groove();
-        // Fresh and already-settled stores construct the V2 schema once.
-        // Predecessors intentionally construct V1 here so later V2 index
-        // registration hydrates from their durable current rows; an initial
-        // schema declaration alone has no hydration pass to perform that
-        // backfill.
-        let current_tables = match current_index_layout {
-            PhysicalCurrentIndexLayout::BranchPrefixV2 => physical_version_storage_tables(
-                catalogue_schemas,
-                schema_version_aliases,
-                physical_mappings,
-            )?,
-            // The test-only predecessor constructor and an unmarked persisted
-            // store both use V1 only until normal startup registers V2.
-            PhysicalCurrentIndexLayout::LegacyV1 => physical_version_storage_bootstrap_tables(
-                catalogue_schemas,
-                schema_version_aliases,
-                physical_mappings,
-            )?,
-        };
+        let current_tables = physical_version_storage_tables(
+            catalogue_schemas,
+            schema_version_aliases,
+            physical_mappings,
+        )?;
         lowered.tables.extend(current_tables);
         let layout = StorageLayout::jazz_class_v1();
         Database::new_with_storage_layout(lowered, storage, layout)
@@ -1493,7 +1407,6 @@ where
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
-            PhysicalCurrentIndexLayout::BranchPrefixV2,
             storage,
         )
         .await?;
@@ -1506,11 +1419,8 @@ where
         self.local_chunk_reader
             .refresh_from(&database.local_chunk_reader());
         self.database.replace(database);
-        // `open_full_database` deliberately starts from the previous current-index
-        // layout so persisted databases can be opened before their derived
-        // indexes are settled.  A catalogue rebuild must run the same settlement
-        // step as ordinary open; otherwise it would replace a just-synchronized
-        // V2 runtime catalogue with the bootstrap-only V1 catalogue.
+        // A catalogue rebuild must register the same frozen derived indexes as
+        // ordinary open before compiling live query graphs against them.
         self.synchronize_physical_version_tables().await?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.invalidate_runtime_handles_after_database_rebuild();
@@ -1641,13 +1551,10 @@ where
         let mut pending_write_pointers = BTreeMap::new();
         let mut genesis_schema = None;
         let mut catalogue_bootstrap_ready = None;
-        let mut branch_prefixed_current_indexes = false;
-        let mut has_catalogue_residue = false;
         for raw in meta_database
             .primary_key_scan_raw("jazz_catalogue", &[])
             .await?
         {
-            has_catalogue_residue = true;
             let record = raw.record();
             match codec::CatalogueRecordKind::from_key(
                 record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
@@ -1763,19 +1670,6 @@ where
                             "duplicate or malformed catalogue bootstrap marker",
                         ));
                     }
-                }
-                codec::CatalogueRecordKind::CurrentIndexLayout => {
-                    if record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)? != uuid::Uuid::nil()
-                        || branch_prefixed_current_indexes
-                    {
-                        return Err(Error::InvalidStoredValue(
-                            "duplicate or malformed catalogue current-index layout marker",
-                        ));
-                    }
-                    codec::decode_catalogue_branch_prefixed_current_indexes(
-                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
-                    )?;
-                    branch_prefixed_current_indexes = true;
                 }
             }
         }
@@ -2069,8 +1963,6 @@ where
             next_physical_column_id,
             current_write_schema,
             catalogue_bootstrap_marker: catalogue_bootstrap_ready.is_some(),
-            has_catalogue_residue,
-            branch_prefixed_current_indexes,
         })
     }
 

@@ -232,7 +232,10 @@ bytes)` sequence, with no duplicate or empty names and no trailing or alternate
 bytes accepted on decode. The typed value envelope and Groove payload must each
 round-trip canonically. This is the only settled branch-key representation used
 in history primary keys, shared deletion keys, current/index prefixes, reopen,
-and rebuild; legacy serde/postcard shapes are never guessed.
+and rebuild; legacy serde/postcard shapes are never guessed. The first frozen
+physical current-index identity is `by_physical_user_v1_<PhysicalColumnId>`;
+its key starts with the canonical `BranchKey` followed by its user key. There
+is no predecessor current-index layout decoder or migration path.
 
 Accepted transactions, immutable version rows, and their atomically persisted
 fate/durability are authority state. Current winners, visibility rows, global

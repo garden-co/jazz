@@ -447,7 +447,6 @@ pub(super) enum CatalogueRecordKind {
     SchemaLineageActive,
     WritePointerPending,
     BootstrapReady,
-    CurrentIndexLayout,
 }
 
 impl CatalogueRecordKind {
@@ -461,7 +460,6 @@ impl CatalogueRecordKind {
             Self::SchemaLineageActive => 5,
             Self::WritePointerPending => 6,
             Self::BootstrapReady => 7,
-            Self::CurrentIndexLayout => 8,
         }
     }
 
@@ -475,7 +473,6 @@ impl CatalogueRecordKind {
             5 => Ok(Self::SchemaLineageActive),
             6 => Ok(Self::WritePointerPending),
             7 => Ok(Self::BootstrapReady),
-            8 => Ok(Self::CurrentIndexLayout),
             _ => Err(records::Error::NonCanonicalRecord),
         }
     }
@@ -500,7 +497,6 @@ impl records::RecordField for CatalogueRecordKind {
 // version and consumes exactly its input.
 const CATALOGUE_SCHEMA_VERSION: u8 = 1;
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
-const CATALOGUE_CURRENT_INDEX_LAYOUT_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
 const CATALOGUE_PROTOCOL_PUBLICATION_VERSION: u8 = 1;
@@ -935,24 +931,6 @@ pub(super) fn decode_catalogue_bootstrap_ready(
         current_write_schema: CurrentWriteSchema { revision, schema },
         active_catalogue_seq,
     })
-}
-
-/// Records that V2 branch-prefixed current indexes have been installed and
-/// durably populated. The exact bytes make malformed or future markers fail
-/// closed before an opener chooses a bootstrap layout.
-pub(super) fn encode_catalogue_branch_prefixed_current_indexes() -> Vec<u8> {
-    vec![CATALOGUE_CURRENT_INDEX_LAYOUT_VERSION, 2]
-}
-
-pub(super) fn decode_catalogue_branch_prefixed_current_indexes(
-    payload: &[u8],
-) -> Result<(), Error> {
-    if payload != [CATALOGUE_CURRENT_INDEX_LAYOUT_VERSION, 2] {
-        return Err(Error::InvalidStoredValue(
-            "invalid catalogue current-index layout payload",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn encode_catalogue_write_pointer(pointer: CurrentWriteSchema) -> Vec<u8> {
@@ -1552,15 +1530,6 @@ mod catalogue_payload_tests {
                 .unwrap(),
             activation
         );
-
-        assert_eq!(
-            encode_catalogue_branch_prefixed_current_indexes(),
-            vec![1, 2]
-        );
-        decode_catalogue_branch_prefixed_current_indexes(
-            &encode_catalogue_branch_prefixed_current_indexes(),
-        )
-        .unwrap();
     }
 
     #[test]
@@ -1602,13 +1571,6 @@ mod catalogue_payload_tests {
         ] {
             assert!(
                 decode_catalogue_write_pointer(&malformed).is_err(),
-                "{malformed:?}"
-            );
-        }
-
-        for malformed in [vec![], vec![2, 2], vec![1], vec![1, 1], vec![1, 2, 0]] {
-            assert!(
-                decode_catalogue_branch_prefixed_current_indexes(&malformed).is_err(),
                 "{malformed:?}"
             );
         }

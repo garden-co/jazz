@@ -351,46 +351,10 @@ fn widen_projection_value_type(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PhysicalCurrentIndexLayout {
-    LegacyV1,
-    BranchPrefixV2,
-}
-
 pub(super) fn physical_version_storage_tables(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-) -> Result<Vec<GrooveTableSchema>, Error> {
-    physical_version_storage_tables_with_current_index_layout(
-        catalogue_schemas,
-        schema_version_aliases,
-        physical_mappings,
-        PhysicalCurrentIndexLayout::BranchPrefixV2,
-    )
-}
-
-/// The initial runtime schema deliberately retains the previous current-index
-/// identity. Startup synchronization appends the v2 branch-prefixed index and
-/// backfills it from the derived current rows before any node can query it.
-pub(super) fn physical_version_storage_bootstrap_tables(
-    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
-    schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
-    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-) -> Result<Vec<GrooveTableSchema>, Error> {
-    physical_version_storage_tables_with_current_index_layout(
-        catalogue_schemas,
-        schema_version_aliases,
-        physical_mappings,
-        PhysicalCurrentIndexLayout::LegacyV1,
-    )
-}
-
-fn physical_version_storage_tables_with_current_index_layout(
-    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
-    schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
-    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-    current_index_layout: PhysicalCurrentIndexLayout,
 ) -> Result<Vec<GrooveTableSchema>, Error> {
     let mut lineages = BTreeMap::<
         PhysicalTableId,
@@ -895,8 +859,8 @@ fn physical_version_storage_tables_with_current_index_layout(
             .collect::<BTreeSet<_>>();
         for &column_id in &indexed_columns {
             physical_global = physical_global.with_index(GrooveIndexSchema::new(
-                current_index_layout.name(column_id),
-                current_index_layout.columns(column_id),
+                physical_current_index_name(column_id),
+                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
             ));
         }
         let mut register_global = logical_global_tables[1].clone();
@@ -911,8 +875,8 @@ fn physical_version_storage_tables_with_current_index_layout(
         physical_ahead.indices = logical_ahead_tables[0].indices.clone();
         for column_id in indexed_columns {
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
-                current_index_layout.name(column_id),
-                current_index_layout.columns(column_id),
+                physical_current_index_name(column_id),
+                vec!["branch_key".to_owned(), physical_user_column_field(column_id)],
             ));
         }
         let mut register_ahead = logical_ahead_tables[1].clone();

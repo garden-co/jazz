@@ -230,12 +230,13 @@ example, a `title="open"` probe in branch `Draft` uses
 `RowUuid`. Rebuilding a current/index table derives exactly those prefixes
 from immutable history coordinates.
 
-An index-coordinate layout change uses a new physical index identity; it does
-not reinterpret or replace an existing index name. On open, Jazz registers and
-backfills the new derived index from persisted current candidates before serving
-queries, while the older derived index may remain unused. Candidate rows still
-reduce to the canonical layer winner before predicates or publication, so an
-older indexed candidate cannot reappear after rebuild.
+The frozen V1 physical secondary-index identity is
+`by_physical_user_v1_<PhysicalColumnId>`, with `(BranchKey, UserIndexKey...)`
+as its key fields. Fresh derived-index registration and population use that
+identity directly; Jazz does not retain an alternate descriptor, decoder,
+bootstrap path, or backfill compatibility path for a predecessor layout.
+Candidate rows still reduce to the canonical layer winner before predicates or
+publication, so a stale indexed candidate cannot reappear after rebuild.
 
 The application declares only its user columns. Composing a head over a base
 does not create a new physical index domain: winner masking precedes predicate
