@@ -321,28 +321,32 @@ function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
   if (min > WIRE_PROTOCOL_VERSION || max < WIRE_PROTOCOL_VERSION) {
     throw new Error(`server does not support wire protocol ${WIRE_PROTOCOL_VERSION}`);
   }
-  if (features & ~CLIENT_WIRE_FEATURES) {
+  const unsupportedFeatures = features & ~BigInt(CLIENT_WIRE_FEATURES);
+  if (unsupportedFeatures !== 0n) {
     throw new Error(`server accepted unsupported wire features 0x${features.toString(16)}`);
   }
   if (role !== 1) throw new Error("expected WirePeerRole::Core server hello");
-  return { protocolVersion: WIRE_PROTOCOL_VERSION, features, authority };
+  return { protocolVersion: WIRE_PROTOCOL_VERSION, features: Number(features), authority };
 }
 
 function readWireHelloBodyExact(reader: PostcardReader): {
   min: number;
   max: number;
-  features: number;
+  features: bigint;
   role: number;
   authority?: { node: Uint8Array; epoch: bigint };
 } {
   const min = reader.u64();
   const max = reader.u64();
-  const features = reader.u64();
+  const features = reader.u64BigInt();
   const role = reader.u64();
-  const authority = reader.option((value) => ({
-    node: value.bytes(),
-    epoch: value.u64BigInt(),
-  }));
+  const authority = reader.option((value) => {
+    const node = value.bytes();
+    if (node.byteLength !== 16) {
+      throw new Error(`WireHello.authority.node must be exactly 16 bytes, got ${node.byteLength}`);
+    }
+    return { node, epoch: value.u64BigInt() };
+  });
   assertReaderDone(reader, "WireFrame::Hello");
   return { min, max, features, role, authority };
 }
