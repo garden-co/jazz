@@ -24,7 +24,7 @@ use crate::tools::{
 };
 use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
-use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
+use groove::records::{BorrowedRecord, Value};
 use jazz_storage_rocksdb::RocksDbStorage;
 
 fn node(byte: u8) -> NodeUuid {
@@ -1327,13 +1327,8 @@ fn aggregate_payload_count(fact: &ProgramFactEntry) -> Value {
     let ProgramFactEntry::ResultPayload(payload) = fact else {
         panic!("expected result payload fact");
     };
-    let fields: Vec<(Option<String>, ValueType)> =
-        postcard::from_bytes(&payload.descriptor).unwrap();
-    let descriptor = RecordDescriptor::new(
-        fields
-            .into_iter()
-            .map(|(name, value_type)| (name.unwrap(), value_type)),
-    );
+    let descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
+        .expect("maintained aggregate payload descriptor uses the canonical Groove codec");
     let record = BorrowedRecord::new(&payload.record, &descriptor);
     // Aggregate aliases are logical app names, but maintained-program
     // payload descriptors use the dedicated physical aggregate namespace
