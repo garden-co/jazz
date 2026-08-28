@@ -11,24 +11,20 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Return the global winner's transaction for one physical history
-    /// register. Unlike visible content, a deletion-register winner remains
-    /// observable even when its event hides the row.
-    pub(super) async fn visible_global_layer_tx_id_now(
+    /// Return the global winner for a physical history register. Callers which
+    /// validate an authored version must resolve its physical table through the
+    /// version's schema, rather than interpreting its logical table name in the
+    /// current write schema: a migration lens may have renamed that table.
+    pub(super) async fn visible_global_layer_tx_id_for_physical_table_now(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Option<TxId> {
-        let schema_version = self.catalogue.current_write_schema.schema;
-        let current_table = self
-            .physical_current_table_for_schema(
-                schema_version,
-                table,
-                layer,
-                PhysicalCurrentClass::Global,
-            )
-            .ok()?;
+        let current_table = match layer {
+            VersionLayer::Content => physical_global_current_table_name(table_id),
+            VersionLayer::Deletion => physical_register_global_current_table_name(table_id),
+        };
         let raw = self
             .database
             .primary_key_get_raw(

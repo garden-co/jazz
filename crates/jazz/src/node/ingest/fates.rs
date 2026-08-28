@@ -247,7 +247,7 @@ where
         // content); write CAS validates only the register being written.
         let mut visible_row_memo = BTreeMap::<(String, RowUuid), Option<TxId>>::new();
         let mut visible_layer_memo =
-            BTreeMap::<(String, RowUuid, VersionLayer), Option<TxId>>::new();
+            BTreeMap::<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>::new();
         for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
             let current = self.visible_global_row_tx_id_now_memoized(
                 &read.table,
@@ -285,8 +285,10 @@ where
         }
         for version in versions {
             self.table_in_schema(version.table(), version.schema_version())?;
+            let table_id =
+                self.physical_table_id_for_schema(version.schema_version(), version.table())?;
             let current = self.visible_global_layer_tx_id_now_memoized(
-                version.table(),
+                table_id,
                 version.row_uuid(),
                 VersionLayer::for_record(version),
                 &mut visible_layer_memo,
@@ -320,18 +322,18 @@ where
 
     async fn visible_global_layer_tx_id_now_memoized(
         &mut self,
-        table: &str,
+        table_id: PhysicalTableId,
         row_uuid: RowUuid,
         layer: VersionLayer,
-        memo: &mut BTreeMap<(String, RowUuid, VersionLayer), Option<TxId>>,
+        memo: &mut BTreeMap<(PhysicalTableId, RowUuid, VersionLayer), Option<TxId>>,
     ) -> Option<TxId> {
-        if let Some(current) = memo.get(&(table.to_owned(), row_uuid, layer)) {
+        if let Some(current) = memo.get(&(table_id, row_uuid, layer)) {
             return *current;
         }
         let current = self
-            .visible_global_layer_tx_id_now(table, row_uuid, layer)
+            .visible_global_layer_tx_id_for_physical_table_now(table_id, row_uuid, layer)
             .await;
-        memo.insert((table.to_owned(), row_uuid, layer), current);
+        memo.insert((table_id, row_uuid, layer), current);
         current
     }
 
