@@ -3975,7 +3975,7 @@ pub struct MigrationLens {
     pub(crate) table_lenses: Vec<TableLens>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct MigrationLensWire {
     id: MigrationLensId,
     source: SchemaVersionId,
@@ -4800,6 +4800,48 @@ mod tests {
         );
         // Planted sensitivity: if Deserialize stopped routing through `new`,
         // this duplicate-source wire would decode and later reach content_id.
+    }
+
+    #[test]
+    fn postcard_rejects_descriptor_less_default_values_before_lens_exists() {
+        let descriptor = RecordDescriptor::new(std::iter::empty::<(String, ValueType)>());
+        let record = OwnedRecord::new(descriptor.create(&[]).unwrap(), descriptor.clone());
+        let enum_value = groove::records::EnumValue::create(0, descriptor, &[]).unwrap();
+        let large = groove::large_values::LargeValueRef {
+            kind: groove::large_values::LargeValueKind::Bytes,
+            format_version: 1,
+            logical_hash: groove::large_values::ContentHash([1; 32]),
+            root: groove::large_values::NodeRef {
+                object_hash: groove::large_values::ContentHash([2; 32]),
+                locator: groove::large_values::Locator::random(),
+            },
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        };
+        for value in [
+            Value::Record(record),
+            Value::Enum(enum_value),
+            Value::Large(large),
+        ] {
+            let wire = MigrationLensWire {
+                id: MigrationLensId(uuid::Uuid::nil()),
+                source: schema_id(1),
+                target: schema_id(2),
+                table_lenses: vec![TableLens {
+                    source_table: "a".into(),
+                    target_table: "b".into(),
+                    ops: vec![LensOp::AddColumn {
+                        column: "x".into(),
+                        default: value,
+                    }],
+                }],
+            };
+            assert!(
+                postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&wire).unwrap())
+                    .is_err()
+            );
+        }
     }
 
     // This is intentionally an internal byte-level test: the durable physical
