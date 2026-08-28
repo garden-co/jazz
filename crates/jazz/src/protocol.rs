@@ -633,7 +633,9 @@ fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBund
     Ok(())
 }
 
-fn validate_version_records(versions: &[VersionRecord]) -> Result<(), VersionBundleRunError> {
+pub(crate) fn validate_version_records(
+    versions: &[VersionRecord],
+) -> Result<(), VersionBundleRunError> {
     for version in versions {
         version.validate_receipt()?;
     }

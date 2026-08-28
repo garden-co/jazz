@@ -358,6 +358,10 @@ where
         requests: &[RowVersionRef],
         version_bundles: Vec<VersionBundle>,
     ) -> Result<(), Error> {
+        for bundle in &version_bundles {
+            crate::protocol::validate_version_records(&bundle.versions)
+                .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
+        }
         let requested_physical = requests
             .iter()
             .map(|request| {

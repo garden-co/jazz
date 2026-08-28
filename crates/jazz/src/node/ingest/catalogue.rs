@@ -79,6 +79,23 @@ where
             let message = message
                 .expand_version_carriers_for_receive()
                 .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
+            if message.validate_version_carriers().is_err() {
+                return match &message {
+                    SyncMessage::CommitUnit { tx, .. } => self
+                        .reject_malformed_commit(
+                            tx.clone(),
+                            "malformed version receipt".to_owned(),
+                        )
+                        .await
+                        .map(PublicationOutcome::settled),
+                    SyncMessage::ViewUpdate(_)
+                    | SyncMessage::AuthorizationScopeView { .. }
+                    | SyncMessage::RowVersionPayloads { .. } => Err(Error::MalformedViewUpdate(
+                        "malformed version receipt",
+                    )),
+                    _ => Err(Error::UnsupportedSyncMessage("malformed version receipt")),
+                };
+            }
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(

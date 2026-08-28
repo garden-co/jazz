@@ -30,6 +30,12 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        if crate::protocol::validate_version_records(&versions).is_err() {
+            return self
+                .reject_malformed_commit(tx, "malformed version receipt".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
@@ -110,6 +116,12 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        if crate::protocol::validate_version_records(&versions).is_err() {
+            return self
+                .reject_malformed_commit(tx, "malformed version receipt".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
             && let Some(reason) = self.malformed_authored_version_reason(&versions)
@@ -138,6 +150,12 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
+        if crate::protocol::validate_version_records(&versions).is_err() {
+            return self
+                .reject_malformed_commit(tx, "malformed version receipt".to_owned())
+                .await
+                .map(PublicationOutcome::settled);
+        }
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
             && let Some(reason) = self.malformed_authored_version_reason(&versions)
@@ -244,6 +262,13 @@ where
         versions: Vec<VersionRecord>,
     ) -> Result<PublicationOutcome<Fate>, Error> {
         self.require_catalogue_ready()?;
+        if crate::protocol::validate_version_records(&versions).is_err() {
+            let fate = Fate::Rejected(RejectionReason::MalformedCommit(
+                "malformed version receipt".to_owned(),
+            ));
+            self.ingest_rejected_transaction(tx, fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(fate));
+        }
         let tx_id = tx.tx_id;
         if tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit(
@@ -461,7 +486,8 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
-        if commit_unit_limit_violation(&versions).is_some()
+        if crate::protocol::validate_version_records(&versions).is_err()
+            || commit_unit_limit_violation(&versions).is_some()
             || !commit_unit_write_count_matches(&tx, versions.len())
         {
             return Err(Error::UnsupportedCommitUnit("malformed relay commit unit"));

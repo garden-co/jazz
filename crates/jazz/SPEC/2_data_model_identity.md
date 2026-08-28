@@ -332,6 +332,13 @@ merely parse to the same JSON value. Outbound immutable records are rejected,
 not repaired; sorting/deduplication is permitted only at birth in
 `VersionRecord::encode`. A decoder then re-encodes the semantic carrier to
 require byte-for-byte postcard equality.
+`VersionRecord::new` remains a public untrusted constructor, so every node
+semantic ingress repeats whole-carrier validation before accessor-based
+filtering, parking, staging, policy evaluation, or mutation. This includes
+commit authority and edge/relay paths, local exclusive finalization, view and
+authorization-view application, and row-version repair. Multi-bundle view and
+repair frames are preflighted in full: one bad later receipt leaves no partial
+transaction, history, clock, or view mutation.
 Consequently it rejects trailing bytes, overlong/alternate varints, invalid
 discriminants, malformed UUID/deletion/parent shapes, non-canonical authors,
 unsorted or duplicate parents, and malformed carrier runs before storage/replay,
