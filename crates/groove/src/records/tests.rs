@@ -1281,6 +1281,34 @@ fn epoch_1_variable_scalar_array_and_payload_enum_goldens_are_exact_and_fail_clo
 }
 
 #[test]
+fn epoch_1_payload_enum_tag_128_uses_the_exact_two_byte_envelope() {
+    let payload = RecordDescriptor::new([("code", ValueType::U8)]);
+    let schema = EnumSchema::new(
+        "many_events",
+        (0..=128).map(|tag| {
+            EnumCase::new(
+                format!("case_{tag}"),
+                if tag == 128 {
+                    payload
+                } else {
+                    RecordDescriptor::default()
+                },
+            )
+        }),
+    )
+    .unwrap();
+    let descriptor = RecordDescriptor::new([("event", ValueType::Enum(Box::new(schema)))]);
+    let value = Value::Enum(EnumValue::create(128, payload, &[Value::U8(0x7e)]).unwrap());
+    // 128 is the first two-byte payload-enum tag: minimal u32 LEB128 `80 01`.
+    let frozen = [0x80, 0x01, 0x7e];
+    assert_eq!(
+        descriptor.create(std::slice::from_ref(&value)).unwrap(),
+        frozen
+    );
+    assert_eq!(descriptor.bind(&frozen).to_values().unwrap(), vec![value]);
+}
+
+#[test]
 fn epoch_1_record_fixture_encodes_to_frozen_bytes() {
     let values = vec![
         Value::String("hi".to_owned()),
