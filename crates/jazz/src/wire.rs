@@ -15,10 +15,11 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 15 removes the transitional duplicate `ViewUpdate.version_bundles`
-/// field. Version payloads now have one canonical representation through
-/// `version_carriers`; negotiation rejects v14 before payload decoding.
-pub const WIRE_PROTOCOL_VERSION: u16 = 15;
+///
+/// This is the sole supported wire version. It is independent of the v1
+/// storage, catalogue, and binding formats: those labels name their own
+/// formats and are not wire-protocol compatibility aliases.
+pub const WIRE_PROTOCOL_VERSION: u16 = 1;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -696,31 +697,29 @@ pub enum TransportError {
     Failed(String),
 }
 
-/// Negotiate a common wire version and optional feature intersection.
+/// Negotiate the sole wire version and optional feature intersection.
 pub fn negotiate_wire(
     remote: &WireHello,
-    local_min_protocol_version: u16,
-    local_max_protocol_version: u16,
     local_features: WireFeatures,
 ) -> Result<WireNegotiated, WireError> {
-    let min = remote.min_protocol_version.max(local_min_protocol_version);
-    let max = remote.max_protocol_version.min(local_max_protocol_version);
-    if min > max {
+    if remote.min_protocol_version != WIRE_PROTOCOL_VERSION
+        || remote.max_protocol_version != WIRE_PROTOCOL_VERSION
+    {
         return Err(WireError::new(
             WireErrorCode::UnsupportedProtocolVersion,
             WireRetry::Never,
             format!(
-                "no common wire protocol version: remote {}..={}, local {}..={}",
+                "unsupported wire protocol advertisement: remote {}..={}, expected {}..={}",
                 remote.min_protocol_version,
                 remote.max_protocol_version,
-                local_min_protocol_version,
-                local_max_protocol_version
+                WIRE_PROTOCOL_VERSION,
+                WIRE_PROTOCOL_VERSION
             ),
         ));
     }
     let features = remote.features & local_features;
     Ok(WireNegotiated {
-        protocol_version: max,
+        protocol_version: WIRE_PROTOCOL_VERSION,
         features,
     })
 }
@@ -1446,9 +1445,8 @@ mod tests {
     fn dual_compression_negotiation_gives_outbound_lz4_precedence() {
         let both = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
         let remote = WireHello::current(WirePeerRole::Core, both);
-        let negotiated =
-            negotiate_wire(&remote, WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION, both)
-                .expect("peers offering both codecs negotiate both capability bits");
+        let negotiated = negotiate_wire(&remote, both)
+            .expect("peers offering both codecs negotiate both capability bits");
         assert_eq!(negotiated.features, both);
 
         let mut encoder = WireStreamEncoder::new(negotiated.features)
@@ -1487,13 +1485,8 @@ mod tests {
         // Planted sensitivity controls: union negotiation or swapped codec-bit
         // mapping would turn this Zstd-only peer into LZ4 and fail these checks.
         let zstd_only = WireHello::current(WirePeerRole::Core, FEATURE_PAYLOAD_ZSTD);
-        let zstd_negotiated = negotiate_wire(
-            &zstd_only,
-            WIRE_PROTOCOL_VERSION,
-            WIRE_PROTOCOL_VERSION,
-            both,
-        )
-        .expect("Zstd-only remote still has one common codec");
+        let zstd_negotiated =
+            negotiate_wire(&zstd_only, both).expect("Zstd-only remote still has one common codec");
         assert_eq!(zstd_negotiated.features, FEATURE_PAYLOAD_ZSTD);
         assert_eq!(
             WireStreamEncoder::new(zstd_negotiated.features)
@@ -1779,51 +1772,48 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_chooses_highest_common_version_and_feature_intersection() {
+    fn negotiation_requires_an_exact_v1_advertisement_and_intersects_features() {
         let remote = WireHello {
             min_protocol_version: 1,
-            max_protocol_version: 3,
+            max_protocol_version: 1,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
             authority: None,
         };
 
-        let negotiated = negotiate_wire(
-            &remote,
-            2,
-            4,
-            FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS,
-        )
-        .unwrap();
+        let negotiated =
+            negotiate_wire(&remote, FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS).unwrap();
 
         assert_eq!(
             negotiated,
             WireNegotiated {
-                protocol_version: 3,
+                protocol_version: WIRE_PROTOCOL_VERSION,
                 features: FEATURE_SESSION_FRAME
             }
         );
     }
 
     #[test]
-    fn negotiation_rejects_disjoint_versions() {
-        let remote = WireHello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
-            features: FEATURE_NONE,
-            role: WirePeerRole::Core,
-            authority: None,
-        };
+    fn negotiation_rejects_version_ranges_even_when_they_include_v1() {
+        for (min_protocol_version, max_protocol_version) in [(0, 1), (1, 2), (1, 15)] {
+            let remote = WireHello {
+                min_protocol_version,
+                max_protocol_version,
+                features: FEATURE_NONE,
+                role: WirePeerRole::Core,
+                authority: None,
+            };
 
-        let err = negotiate_wire(&remote, 2, 2, FEATURE_NONE).unwrap_err();
+            let err = negotiate_wire(&remote, FEATURE_NONE).unwrap_err();
 
-        assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
-        assert_eq!(err.retry, WireRetry::Never);
+            assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
+            assert_eq!(err.retry, WireRetry::Never);
+        }
     }
 
     #[test]
-    fn wire_v15_rejects_v14_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 15);
+    fn wire_v1_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 1);
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
@@ -1832,37 +1822,27 @@ mod tests {
             authority: None,
         };
 
-        let error = negotiate_wire(
-            &remote,
-            WIRE_PROTOCOL_VERSION,
-            WIRE_PROTOCOL_VERSION,
-            FEATURE_SYNC_MESSAGE_PAYLOAD,
-        )
-        .expect_err("current wire protocol must not negotiate with an old peer");
+        let error = negotiate_wire(&remote, FEATURE_SYNC_MESSAGE_PAYLOAD)
+            .expect_err("current wire protocol must not negotiate with an old peer");
 
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }
 
     #[test]
-    fn wire_v15_rejects_v14_peer_before_payload_decode() {
-        let v14_peer = WireHello {
-            min_protocol_version: 14,
-            max_protocol_version: 14,
+    fn wire_v1_rejects_v15_peer_before_payload_decode() {
+        let v15_peer = WireHello {
+            min_protocol_version: 15,
+            max_protocol_version: 15,
             features: current_wire_features(),
             role: WirePeerRole::Core,
             authority: None,
         };
 
-        let error = negotiate_wire(
-            &v14_peer,
-            WIRE_PROTOCOL_VERSION,
-            WIRE_PROTOCOL_VERSION,
-            current_wire_features(),
-        )
-        .expect_err("v14 encoding must fail during the v15 handshake");
+        let error = negotiate_wire(&v15_peer, current_wire_features())
+            .expect_err("v15 encoding must fail during the v1 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 15);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 1);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }
@@ -1872,29 +1852,13 @@ mod tests {
         let feature = FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
         let unbound = WireHello::current(WirePeerRole::Core, feature);
         assert_eq!(
-            negotiate_wire(
-                &unbound,
-                WIRE_PROTOCOL_VERSION,
-                WIRE_PROTOCOL_VERSION,
-                feature
-            )
-            .unwrap()
-            .features
-                & feature,
+            negotiate_wire(&unbound, feature).unwrap().features & feature,
             feature
         );
         let accepted = WireHello::current(WirePeerRole::Core, feature)
             .with_authority(NodeUuid::from_bytes([0x71; 16]), 9);
         assert_ne!(
-            negotiate_wire(
-                &accepted,
-                WIRE_PROTOCOL_VERSION,
-                WIRE_PROTOCOL_VERSION,
-                feature,
-            )
-            .unwrap()
-            .features
-                & feature,
+            negotiate_wire(&accepted, feature).unwrap().features & feature,
             0
         );
     }

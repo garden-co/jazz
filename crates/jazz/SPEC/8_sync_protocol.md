@@ -76,33 +76,29 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
-**Decision, 2026-08-28 — wire v15 removes the transitional duplicate view
-payload field.** `ViewUpdate` carries settled version payloads only through
-`version_carriers`. Wire v14 encoded both `version_carriers` and the older
-`version_bundles` field even though current senders populated only the former;
-receivers normalized both into the same semantic bundle stream. Because
-postcard encodes fields positionally, removing that redundant field changes the
-message layout. Every endpoint therefore advertises exactly v15 and rejects
-v14 before payload decoding rather than ambiguously decoding one layout as the
-other. `VersionBundle` itself remains the semantic unit produced when a carrier
-is expanded and remains the direct payload of `RowVersionPayloads` repair
-responses; only the duplicate field on `ViewUpdate` is removed.
+**Decision, 2026-08-28 — the sole wire protocol is v1.** `ViewUpdate` carries
+settled version payloads only through `version_carriers`; the transitional
+duplicate `version_bundles` field is absent. Every endpoint advertises exactly
+wire-protocol v1 and requires every peer Hello to advertise exactly
+`min_protocol_version=1, max_protocol_version=1`; ranges such as `0..=1`,
+`1..=2`, and `1..=15` reject before payload decoding. There are no compatibility
+aliases, migration paths, or old wire decoders. `VersionBundle` remains the semantic unit produced when a
+carrier is expanded and remains the direct payload of `RowVersionPayloads`
+repair responses.
 
-**Decision, 2026-08-24 — wire v14 was a breaking storage/provenance cut.**
 Transaction, row-version, session, and claim authors use the exact canonical
 `[iss,sub]` JSON string. Large scalar descriptors use Groove's canonical
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. Wire v13's otherwise-current storage layout still carries packed-HLC
-provenance, so v14 rejected it and every earlier version rather than decoding or
-migrating them. Wire v15 retains that storage/provenance representation. The
-v15 golden fixture set is the only supported message layout. `MigrationLens`
-payloads in that fixture set are
+data. The wire-v1 golden fixture set is the only supported message layout.
+Wire-protocol v1 is independent of other formats that are also labelled v1,
+including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
+`MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
 derived on decode), replacing postcard's former field-by-field representation.
 
-### 8.1.1 Frozen v15 byte contract
+### 8.1.1 Frozen wire-protocol v1 byte contract
 
 `WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
 value**. A conformant decoder MUST reject a valid prefix followed by any
@@ -132,7 +128,7 @@ endpoint byte as a suffix is malformed framing, not version compatibility. A
 length other than exactly `16` MUST be rejected even when the declared byte
 sequence and the remaining Hello fields are otherwise well formed.
 
-Postcard enum ordinals are wire data. The v15 baseline freezes these permanent
+Postcard enum ordinals are wire data. The wire-protocol v1 baseline freezes these permanent
 discriminants (decimal):
 
 | enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -146,8 +142,8 @@ discriminants (decimal):
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. v15 intentionally provides neither old-version
-decoding nor migration.
+new negotiated feature bit. Wire-protocol v1 intentionally provides neither
+old-version decoding nor migration.
 
 Feature bits are also permanent: `SyncMessagePayload=1<<0`,
 `SessionFrame=1<<1`, `StructuredErrors=1<<2`, `PayloadLz4=1<<3`,
@@ -162,7 +158,7 @@ its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
 one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound v15 sender selects LZ4 and emits only its bit. A
+negotiated, an outbound wire-protocol v1 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one
 connection, corrupt compressed bytes, or a decompressed payload exceeding the
 logical-message budget. Compression is applied before fragmentation and removed
@@ -177,7 +173,7 @@ then verifies that digest before decompression or semantic decode. The resource
 limits and expiry/deduplication rules are normative in
 `SPEC/13_transport_message_fragmentation.md`.
 
-The v15 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
+The wire-protocol v1 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
 `crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently

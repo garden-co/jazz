@@ -23,9 +23,8 @@ use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::tools::Session;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint, WireError,
-    WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, current_wire_features,
-    encode_frame, negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
+    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
@@ -555,12 +554,7 @@ async fn handle_ws_connection(
         return;
     };
 
-    let negotiated = match negotiate_wire(
-        &remote_hello,
-        WIRE_PROTOCOL_VERSION,
-        WIRE_PROTOCOL_VERSION,
-        current_wire_features(),
-    ) {
+    let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
         Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
         Ok(_) => {
             send_ws_error(

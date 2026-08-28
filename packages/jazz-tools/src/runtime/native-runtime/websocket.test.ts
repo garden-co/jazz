@@ -372,27 +372,28 @@ describe("websocket frame carrier", () => {
     }
   });
 
-  it("rejects a v12 server without compatibility negotiation", async () => {
-    let socket: MessageWebSocket | undefined;
-    const carrier = new WebSocketCarrier({
-      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
-      onFrame: () => {},
-      WebSocket: class extends MessageWebSocket {
-        constructor(url: string) {
-          super(url, (created) => {
-            socket = created;
-          });
-        }
-      },
-    });
+  it("rejects non-exact server wire-version advertisements before payload decode", async () => {
+    for (const [minProtocolVersion, maxProtocolVersion] of [
+      [0, 1],
+      [1, 2],
+      [1, 15],
+      [12, 12],
+    ]) {
+      const { carrier, socket } = carrierForTest();
+      socket.emitMessage(
+        encodeWebSocketFrameBatch([
+          encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+            minProtocolVersion,
+            maxProtocolVersion,
+          }),
+        ]),
+      );
 
-    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 12)]));
-
-    await expect(carrier.ready()).rejects.toThrow(
-      `does not support wire protocol ${WIRE_PROTOCOL_VERSION}`,
-    );
-    expect(socket!.closed).toBe(true);
+      await expect(carrier.ready()).rejects.toThrow(
+        `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${minProtocolVersion}..=${maxProtocolVersion}`,
+      );
+      expect(socket.closed).toBe(true);
+    }
   });
 
   it("sends an authority-unbound hello first on every reconnect", async () => {
@@ -721,12 +722,17 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
 function encodeServerHello(
   epoch: bigint,
   protocolVersion = WIRE_PROTOCOL_VERSION,
-  options: { features?: number | bigint; authorityNode?: Uint8Array | null } = {},
+  options: {
+    features?: number | bigint;
+    authorityNode?: Uint8Array | null;
+    minProtocolVersion?: number;
+    maxProtocolVersion?: number;
+  } = {},
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
-  writer.u64(protocolVersion);
-  writer.u64(protocolVersion);
+  writer.u64(options.minProtocolVersion ?? protocolVersion);
+  writer.u64(options.maxProtocolVersion ?? protocolVersion);
   writer.u64(options.features ?? CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   const authorityNode =

@@ -47,7 +47,11 @@ export type BrowserWebSocket = {
   ): void;
 };
 
-export const WIRE_PROTOCOL_VERSION = 15;
+/**
+ * The sole Jazz wire-protocol version. This is distinct from independently
+ * versioned v1 storage, catalogue, and binding formats.
+ */
+export const WIRE_PROTOCOL_VERSION = 1;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
@@ -318,8 +322,10 @@ function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
   if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
   const hello = readWireHelloBodyExact(reader);
   const { min, max, features, role, authority } = hello;
-  if (min > WIRE_PROTOCOL_VERSION || max < WIRE_PROTOCOL_VERSION) {
-    throw new Error(`server does not support wire protocol ${WIRE_PROTOCOL_VERSION}`);
+  if (min !== WIRE_PROTOCOL_VERSION || max !== WIRE_PROTOCOL_VERSION) {
+    throw new Error(
+      `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${min}..=${max}`,
+    );
   }
   const unsupportedFeatures = features & ~BigInt(CLIENT_WIRE_FEATURES);
   if (unsupportedFeatures !== 0n) {

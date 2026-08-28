@@ -7,9 +7,9 @@ use jazz::db::{ConnectionSessionContext, WireTransportAdapter};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
-    WireError, WireFrame, WireHello, WirePeerRole, WireTransport, current_wire_features,
-    decode_frame, encode_frame, negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WireAuthorityEndpoint, WireError, WireFrame,
+    WireHello, WirePeerRole, WireTransport, current_wire_features, decode_frame, encode_frame,
+    negotiate_wire,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
@@ -405,13 +405,8 @@ impl WebSocketTransport {
             .map_err(WebSocketClientError::Send)?;
 
         let server_hello = receive_server_hello(&mut ws).await?;
-        let mut negotiated = negotiate_wire(
-            &server_hello,
-            WIRE_PROTOCOL_VERSION,
-            WIRE_PROTOCOL_VERSION,
-            current_wire_features(),
-        )
-        .map_err(WebSocketClientError::Negotiation)?;
+        let mut negotiated = negotiate_wire(&server_hello, current_wire_features())
+            .map_err(WebSocketClientError::Negotiation)?;
         // Receipt semantics require an admitted authority endpoint, not merely
         // a feature bit from a legacy hello.
         if server_hello.authority.is_none() {

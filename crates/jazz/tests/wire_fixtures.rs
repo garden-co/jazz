@@ -648,7 +648,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v15",
+        fixture_set: "jazz-wire-message-frames-v1",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -750,7 +750,7 @@ fn hello_fixture_manifest() -> HelloManifest {
         .collect();
 
     HelloManifest {
-        fixture_set: "jazz-wire-hello-frames-v15",
+        fixture_set: "jazz-wire-hello-frames-v1",
         codec: "postcard WireFrame::Hello(WireHello)",
         fixtures,
     }
