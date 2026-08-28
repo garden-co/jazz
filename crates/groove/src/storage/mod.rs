@@ -2007,6 +2007,15 @@ pub mod conformance {
             .set("records".into(), vec![0xff, 0x01], b"ff-one".to_vec())
             .await
             .unwrap();
+        for (key, value) in [
+            (vec![0x12, 0xfe], b"interior-before".to_vec()),
+            (vec![0x12, 0xff], b"interior-root".to_vec()),
+            (vec![0x12, 0xff, 0x00], b"interior-zero".to_vec()),
+            (vec![0x12, 0xff, 0xff], b"interior-ff".to_vec()),
+            (vec![0x13, 0x00], b"interior-after".to_vec()),
+        ] {
+            storage.set("records".into(), key, value).await.unwrap();
+        }
 
         assert_eq!(
             storage
@@ -2024,6 +2033,65 @@ pub mod conformance {
             vec![
                 (vec![0xff, 0x00], b"ff-zero".to_vec()),
                 (vec![0xff, 0x01], b"ff-one".to_vec()),
+            ]
+        );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(ScanRequest::prefix("records".into(), Vec::new()))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![
+                (vec![0x12, 0xfe], b"interior-before".to_vec()),
+                (vec![0x12, 0xff], b"interior-root".to_vec()),
+                (vec![0x12, 0xff, 0x00], b"interior-zero".to_vec()),
+                (vec![0x12, 0xff, 0xff], b"interior-ff".to_vec()),
+                (vec![0x13, 0x00], b"interior-after".to_vec()),
+                (b"user:1".to_vec(), b"one".to_vec()),
+                (b"user:10".to_vec(), b"ten".to_vec()),
+                (b"user:2".to_vec(), b"two".to_vec()),
+                (vec![0xff, 0x00], b"ff-zero".to_vec()),
+                (vec![0xff, 0x01], b"ff-one".to_vec()),
+            ]
+        );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix("records".into(), vec![0x12, 0xff])
+                            .reversed()
+                            .with_max_items(2),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![
+                (vec![0x12, 0xff, 0xff], b"interior-ff".to_vec()),
+                (vec![0x12, 0xff, 0x00], b"interior-zero".to_vec()),
+            ]
+        );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix("records".into(), Vec::new())
+                            .reversed()
+                            .with_max_items(3),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![
+                (vec![0xff, 0x01], b"ff-one".to_vec()),
+                (vec![0xff, 0x00], b"ff-zero".to_vec()),
+                (b"user:2".to_vec(), b"two".to_vec()),
             ]
         );
 

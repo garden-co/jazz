@@ -711,7 +711,8 @@ mod tests {
 
     // Storage-level conformance is intentionally tested here because ordering,
     // atomic encoded batches, and reopen are backend contracts below Jazz's
-    // public schema/query surface.
+    // public schema/query surface. MemoryPageStore exercises the IDB adapter
+    // protocol, not a browser IndexedDB/OPFS physical-store receipt (#2160).
     #[test]
     fn conforms_to_order_atomicity_and_reopen_contracts() {
         futures::executor::block_on(async {

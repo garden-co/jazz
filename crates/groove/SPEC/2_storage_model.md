@@ -160,6 +160,9 @@ shared `JSM1` manifest. IndexedDB currently validates its adapter-private
 `jazz-idb-tree` page metadata but does not yet persist the shared epoch
 manifest; therefore it is not covered by the epoch-1 physical-open receipt.
 That remaining acceptance item stays explicitly tracked by #2160.
+The ordered-KV conformance receipt currently exercises `IdbStorage` with
+`MemoryPageStore`; it does not claim a browser IndexedDB/OPFS receipt. Browser
+physical-open and persistence coverage remains part of #2160.
 
 The only ordering property groove requires from the backing store is unsigned
 lexicographic byte order: bytes compare as `0x00 < ... < 0xff`, never as signed
