@@ -35,7 +35,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter rn-device-acceptance verify
-      # TODO(#1974): a separate `react-native`-label-gated device workflow
+      # TODO(#1974): the `react-native/rn-preview-release` label gates device work
       # will stage relay libraries, use Gradle/Cargo caches, assemble/install,
       # launch, and run the receipt driver. Do not call that job acceptance
       # until all of those steps exist.
@@ -62,7 +62,7 @@ jobs:
       ${{
         github.event_name == 'workflow_dispatch'
         || (
-          contains(github.event.pull_request.labels.*.name, 'react-native')
+          contains(github.event.pull_request.labels.*.name, 'react-native/rn-preview-release')
           && github.event.pull_request.head.repo.full_name == github.repository
         )
       }}
