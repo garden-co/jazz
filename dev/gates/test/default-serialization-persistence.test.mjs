@@ -226,6 +226,71 @@ test("does not leak cfg(test) through every semicolon item kind into production 
   }
 });
 
+test("cfg-bound exact endpoints survive every declaration form and reject a same-span cfg removal", () => {
+  const root = fixture();
+  try {
+    // These are deliberately real Rust declarations, not token-only snippets.
+    // In particular, the semicolon declarations used to have no enclosing
+    // structural identity, so replacing their cfg while preserving the
+    // serializer path's location transferred a reviewed test allowance to
+    // production.
+    const source =
+      'pub struct Holder;\n' +
+      '#[cfg(test)] type Alias = serde_json::Value;\n' +
+      '#[cfg(test)] const VALUE: Option<serde_json::Value> = None;\n' +
+      '#[cfg(test)] static STATIC_VALUE: Option<serde_json::Value> = None;\n' +
+      '#[cfg(test)] struct Tuple(serde_json::Value);\n' +
+      '#[cfg(test)] struct Unit;\n' +
+      '#[cfg(test)] struct Named { #[cfg(test)] field: serde_json::Value }\n' +
+      '#[cfg(test)] extern "Rust" { fn imported(_: serde_json::Value); }\n' +
+      'pub trait Associated { #[cfg(test)] type Value; #[cfg(test)] const VALUE: Option<serde_json::Value>; }\n' +
+      'impl Associated for Holder { #[cfg(test)] type Value = serde_json::Value; #[cfg(test)] const VALUE: Option<serde_json::Value> = None; }\n' +
+      '#[cfg(test)] mod nested { pub type Alias = serde_json::Value; }\n';
+    const reviewed = endpoints(source);
+    assert.ok(reviewed.length >= 10);
+    assert.ok(reviewed.every((endpoint) => endpoint.boundary === "test"));
+    assert.ok(reviewed.some((endpoint) => endpoint.enclosing.item === "type Alias"));
+    assert.ok(reviewed.some((endpoint) => endpoint.enclosing.item === "const VALUE"));
+    assert.ok(reviewed.some((endpoint) => endpoint.enclosing.item === "static STATIC_VALUE"));
+    assert.ok(reviewed.some((endpoint) => endpoint.enclosing.item === "struct Tuple"));
+    assert.ok(reviewed.some((endpoint) => endpoint.enclosing.item === "field field"));
+    assert.ok(
+      reviewed.some(
+        (endpoint) =>
+          endpoint.enclosing.items.includes("impl Associated for Holder") &&
+          endpoint.enclosing.items.includes("type Value"),
+      ),
+    );
+    assert.ok(
+      reviewed.some(
+        (endpoint) =>
+          endpoint.enclosing.modules.includes("nested") && endpoint.enclosing.item === "type Alias",
+      ),
+    );
+    writeSource(root, source, reviewed);
+    let result = run(root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
+    // Spaces preserve every serializer token's byte/line/column/span.  Only
+    // the declaration boundary changes; the old allowance must therefore be
+    // rejected rather than silently becoming a production endpoint.
+    fs.writeFileSync(
+      path.join(root, "crates/jazz/src/node/codec.rs"),
+      source.replaceAll("#[cfg(test)]", "            "),
+    );
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /unregistered default serialization reference|registered serializer endpoint is absent/,
+    );
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("retains cfg(test) across ordinary nested blocks without leaking it afterward", () => {
   const root = fixture();
   try {

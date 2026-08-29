@@ -185,12 +185,15 @@ an `extern crate` for a general-purpose serializer. A reviewed exception must
 instead use a fully qualified canonical path recorded in
 `dev/storage/default-serialization-registry.json`. The registry records each
 token endpoint's canonical path, exact line/column, full enclosing structural
-stack (modules, implementation target/trait, and nested lexical items), and
-the source-derived `cfg(test)` versus production boundary. Moving an otherwise
-verbatim call, changing its enclosing item, or removing its test boundary
-therefore requires renewed review rather than silently transferring an
-allowance to a new endpoint. Type-only serializer paths are explicit endpoint
-entries too.
+stack (modules, implementation target/trait, nested lexical items, and a
+declaration or field identity), and the source-derived `cfg(test)` versus
+production boundary. Semicolon declarations—including type aliases,
+constants/statics, imports, tuple/unit structs, and associated items—have that
+same explicit identity and boundary; they are not treated as unowned text
+between brace scopes. Moving an otherwise verbatim call, changing its enclosing
+item or field, or removing its test boundary therefore requires renewed review
+rather than silently transferring an allowance to a new endpoint. Type-only
+serializer paths are explicit endpoint entries too.
 
 The gate lexes Rust tokens before applying that rule: comments and literals do
 not count, while raw identifiers, comment-separated paths, macro token trees,
