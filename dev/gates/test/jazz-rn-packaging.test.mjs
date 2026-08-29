@@ -1088,7 +1088,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
 });
 
 test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
-  const [podspec, androidPackage, androidBuild, iosRelay, packageRoot, rootCargo, legacyConfig] =
+  const [podspec, androidPackage, androidBuild, androidCmake, iosRelay, packageRoot, rootCargo, legacyConfig] =
     await Promise.all([
       readFile(new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url), "utf8"),
       readFile(
@@ -1099,6 +1099,7 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
         "utf8",
       ),
       readFile(new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/android/CMakeLists.txt", import.meta.url), "utf8"),
       readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
       readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
       readFile(new URL("../../../Cargo.toml", import.meta.url), "utf8"),
@@ -1130,6 +1131,13 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(podspec, /requires the React Native New Architecture/);
   assert.match(androidBuild, /relayNativeArtifactsPresent/);
   assert.match(androidBuild, /externalNativeBuild/);
+  assert.match(androidBuild, /prefab true/);
+  assert.match(androidBuild, /require\.resolve\('react-native\/package\.json'\)/);
+  assert.match(androidBuild, /-DREACT_NATIVE_DIR=\$\{reactNativeDir\}/);
+  assert.match(androidCmake, /find_package\(ReactAndroid REQUIRED CONFIG\)/);
+  assert.match(androidCmake, /find_package\(fbjni REQUIRED CONFIG\)/);
+  assert.match(androidCmake, /\$\{REACT_NATIVE_DIR\}\/ReactAndroid\/src\/main\/jni\/react\/turbomodule/);
+  assert.doesNotMatch(androidCmake, /REACT_ANDROID_DIR/);
   assert.doesNotMatch(androidBuild, /generated\/source\/codegen\/java/);
   assert.doesNotMatch(androidBuild, /KotlinCompile/);
   assert.doesNotMatch(androidBuild, /AndroidManifestNew/);
@@ -1514,8 +1522,18 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   assert.match(iosRelay, /uint64_t foregroundRuntimeToken/);
   assert.match(
     iosRelay,
-    /unordered_map<JazzRelay \*, ForegroundRuntimeInstallation>/,
-    "iOS must keep separate foreground leases for separately invalidated runtimes",
+    /unordered_map<uint64_t, ForegroundRuntimeInstallation>/,
+    "iOS must key foreground leases by the explicit runtime token rather than an Objective-C pointer",
+  );
+  assert.doesNotMatch(
+    iosRelay,
+    /unordered_map<JazzRelay \*/,
+    "iOS source must not rely on libc++ hashing Objective-C object pointers",
+  );
+  assert.match(
+    iosRelay,
+    /foregroundRuntimeLeases\.find\(runtimeToken\)/,
+    "iOS install and teardown must locate the exact runtime-token lease",
   );
   assert.match(
     iosRelay,

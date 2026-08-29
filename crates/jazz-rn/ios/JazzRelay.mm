@@ -46,7 +46,11 @@ struct ForegroundRuntimeInstallation {
   facebook::jsi::Runtime *runtime;
   std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
 };
-static std::unordered_map<JazzRelay *, ForegroundRuntimeInstallation>
+// Objective-C object pointers are not a portable C++ hash key under libc++.
+// More importantly, a runtime token is the lifetime capability we actually
+// mean to isolate: it is assigned once, never reused after teardown, and the
+// Rust lease validates the same token at every command boundary.
+static std::unordered_map<uint64_t, ForegroundRuntimeInstallation>
     foregroundRuntimeLeases;
 
 static jazz_native_relay_host *EnsureRelayHost(void) {
@@ -115,7 +119,8 @@ static NSError *RelayLifecycleError(NSString *message) {
 - (void)installForegroundRuntime {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
-    const auto found = foregroundRuntimeLeases.find(self);
+    const uint64_t runtimeToken = self.foregroundRuntimeToken;
+    const auto found = foregroundRuntimeLeases.find(runtimeToken);
     if (found == foregroundRuntimeLeases.end() || found->second.runtime == nullptr ||
         !found->second.lease->active()) {
       // The JS wrapper validates that native code installed a fresh factory
@@ -136,15 +141,17 @@ static NSError *RelayLifecycleError(NSString *message) {
                           callInvoker:(const std::shared_ptr<facebook::react::CallInvoker> &)callInvoker {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
-    if (const auto previous = foregroundRuntimeLeases.find(self);
+    const uint64_t runtimeToken = self.foregroundRuntimeToken;
+    if (runtimeToken == 0) return;
+    if (const auto previous = foregroundRuntimeLeases.find(runtimeToken);
         previous != foregroundRuntimeLeases.end()) {
       previous->second.lease->invalidate();
       foregroundRuntimeLeases.erase(previous);
     }
     auto lease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
-        EnsureRelayHost(), self.foregroundRuntimeToken, callInvoker);
+        EnsureRelayHost(), runtimeToken, callInvoker);
     foregroundRuntimeLeases.emplace(
-        self, ForegroundRuntimeInstallation{self.foregroundRuntimeToken, &runtime, lease});
+        runtimeToken, ForegroundRuntimeInstallation{runtimeToken, &runtime, lease});
     jazz::rn::installForegroundRuntime(runtime, lease);
   }
 #else
@@ -156,7 +163,8 @@ static NSError *RelayLifecycleError(NSString *message) {
 - (void)invalidate {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
-    if (const auto found = foregroundRuntimeLeases.find(self);
+    const uint64_t runtimeToken = self.foregroundRuntimeToken;
+    if (const auto found = foregroundRuntimeLeases.find(runtimeToken);
       found != foregroundRuntimeLeases.end()) {
       found->second.lease->invalidate();
       foregroundRuntimeLeases.erase(found);

@@ -8,7 +8,7 @@ add_library(jazzrelay SHARED cpp-relay.cpp ../native/foreground-runtime.cpp)
 target_include_directories(jazzrelay PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../native"
   "${CMAKE_CURRENT_SOURCE_DIR}/../native/include"
-  "${REACT_ANDROID_DIR}/ReactAndroid/src/main/jni/react/turbomodule"
+  "${REACT_NATIVE_DIR}/ReactAndroid/src/main/jni/react/turbomodule"
 )
 find_library(log-lib log)
 add_library(jazz_native_relay STATIC IMPORTED)
