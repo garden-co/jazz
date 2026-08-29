@@ -86,6 +86,14 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
           __jazzInspectorHost?: {
             getConnectionConfig(): {
               driver?: { type?: string };
+              jwtToken?: string;
+              runtimeSources?: {
+                browserWorkerSession?: {
+                  issuer?: string;
+                  user_id?: string;
+                  authMode?: string;
+                };
+              };
             };
             openControlPort?: unknown;
           };
@@ -94,10 +102,17 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
       return {
         driverType: host?.getConnectionConfig().driver?.type,
         hasControlPort: typeof host?.openControlPort === "function",
+        hasJwtToken: Boolean(host?.getConnectionConfig().jwtToken),
+        browserWorkerSession: host?.getConnectionConfig().runtimeSources?.browserWorkerSession,
       };
     });
     expect(overlayConfig.driverType).toBe("persistent");
     expect(overlayConfig.hasControlPort).toBe(true);
+    expect(overlayConfig.hasJwtToken).toBe(true);
+    expect(overlayConfig.browserWorkerSession).toMatchObject({
+      issuer: "urn:jazz:local-first",
+      authMode: "local-first",
+    });
 
     // The overlay reads the handle, opens its connection joining that store, and
     // leaves the connecting state.

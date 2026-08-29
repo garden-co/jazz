@@ -1,5 +1,11 @@
 import type { Db, DbConfig } from "../../runtime/db.js";
 import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
+import {
+  ANONYMOUS_JWT_ISSUER,
+  internalSessionFromVerifiedReservedJwtPayload,
+  LOCAL_FIRST_JWT_ISSUER,
+  parseJwtPayload,
+} from "../../runtime/client-session.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
 import {
   INSPECTOR_HOST_GLOBAL,
@@ -10,6 +16,27 @@ import {
 import { openAggregatedBrowserInspectorControlPort } from "./browser-control-registry.js";
 import { getDbInternalSession } from "../../runtime/db-internal-session.js";
 
+function overlayBrowserWorkerSession(
+  config: DbConfig,
+  fallback: ReturnType<typeof getDbInternalSession>,
+) {
+  const payload = parseJwtPayload(config.jwtToken ?? "");
+  const authMode =
+    payload?.iss === LOCAL_FIRST_JWT_ISSUER
+      ? "local-first"
+      : payload?.iss === ANONYMOUS_JWT_ISSUER
+        ? "anonymous"
+        : null;
+
+  // The host's resolved reserved-issuer token is the durable source of truth
+  // for an attached peer's session. Do not make the inspector handoff depend
+  // on the Db's private WeakMap bookkeeping: the receiving native runtime
+  // verifies the same token before admitting the peer.
+  return payload && authMode
+    ? internalSessionFromVerifiedReservedJwtPayload(payload, authMode)
+    : fallback;
+}
+
 /**
  * Build the ready-to-use browser config in the host bundle, where the host's
  * resolved storage coordinates and worker URL are known. The overlay passes it
@@ -19,6 +46,7 @@ function buildOverlayDbConfig(
   config: DbConfig,
   session: ReturnType<typeof getDbInternalSession>,
 ): DbConfig {
+  const browserWorkerSession = overlayBrowserWorkerSession(config, session);
   const identityCredential = config.jwtToken
     ? { jwtToken: config.jwtToken }
     : config.secret
@@ -36,7 +64,9 @@ function buildOverlayDbConfig(
     // `persistent` selects the SharedWorker connection so this client joins
     // the host's IndexedDB-backed runtime. Its main-thread Db remains in-memory.
     driver: { type: "persistent", dbName: resolveDefaultPersistentDbName(config) },
-    ...(session ? { runtimeSources: { browserWorkerSession: structuredClone(session) } } : {}),
+    ...(browserWorkerSession
+      ? { runtimeSources: { browserWorkerSession: structuredClone(browserWorkerSession) } }
+      : {}),
   };
 }
 

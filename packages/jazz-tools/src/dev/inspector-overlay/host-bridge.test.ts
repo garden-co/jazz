@@ -161,4 +161,31 @@ describe("installInspectorHost", () => {
     await (window as any)[INSPECTOR_HOST_GLOBAL].openControlPort();
     expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });
+
+  it("forwards a resolved local-first session from the host JWT when private session state is unavailable", () => {
+    const iframeWindow = { postMessage: () => {} } as unknown as Window;
+    const fake = makeFakeDb({
+      getConfig: () => ({
+        appId: "a",
+        serverUrl: "http://server",
+        jwtToken:
+          "header.eyJzdWIiOiJpbnNwZWN0b3ItdGVzdC11c2VyIiwiaXNzIjoidXJuOmpheno6bG9jYWwtZmlyc3QiLCJjbGFpbXMiOnsicm9sZSI6Imluc3BlY3Rvci10ZXN0In19.signature",
+      }),
+    });
+
+    installInspectorHost(fake.db, iframeWindow, "http://localhost");
+
+    expect((window as any)[INSPECTOR_HOST_GLOBAL].getConnectionConfig()).toMatchObject({
+      jwtToken:
+        "header.eyJzdWIiOiJpbnNwZWN0b3ItdGVzdC11c2VyIiwiaXNzIjoidXJuOmpheno6bG9jYWwtZmlyc3QiLCJjbGFpbXMiOnsicm9sZSI6Imluc3BlY3Rvci10ZXN0In19.signature",
+      runtimeSources: {
+        browserWorkerSession: {
+          issuer: "urn:jazz:local-first",
+          user_id: "inspector-test-user",
+          authMode: "local-first",
+          claims: { role: "inspector-test" },
+        },
+      },
+    });
+  });
 });

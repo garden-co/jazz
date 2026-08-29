@@ -1439,6 +1439,22 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
 });
 
+test("TypeScript CI runs the inspector's freshly built embedded browser receipt", () => {
+  const inspectorPackage = JSON.parse(
+    fs.readFileSync(path.join(root, "packages/inspector/package.json"), "utf8"),
+  );
+  const browserCommand = inspectorPackage.scripts["test:browser"];
+
+  assert.equal(
+    browserCommand,
+    "pnpm run build:embedded && playwright test --config playwright.config.ts",
+  );
+  assert.throws(
+    () => assert.match(browserCommand.replace("pnpm run build:embedded && ", ""), /build:embedded/),
+    /build:embedded/,
+  );
+});
+
 test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-sealed-tools-dist-"));
   const marker = path.join(fixture, "testing", "index.js");
