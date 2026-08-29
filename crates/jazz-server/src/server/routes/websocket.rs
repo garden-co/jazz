@@ -1016,7 +1016,7 @@ mod tests {
     use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
-        WireMessageFragment, WireTransport,
+        WIRE_PROTOCOL_VERSION, WireMessageFragment, WireTransport,
     };
     use jazz::wire::{WireStreamDecoder, decode_frame, decode_sync_message};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -1776,12 +1776,6 @@ mod tests {
         .to_string()
         .into_bytes();
         (identity, prelude)
-    }
-
-    fn ws_client_hello_batch() -> Vec<u8> {
-        ws_client_hello_batch_with_features(
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        )
     }
 
     fn ws_client_hello_batch_with_features(features: u64) -> Vec<u8> {

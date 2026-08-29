@@ -1613,7 +1613,7 @@ mod tests {
         let permissions = |policy| {
             let mut table_policies = TablePolicies::default();
             table_policies.select.using = Some(policy);
-            std::collections::HashMap::from([(users.clone(), table_policies)])
+            std::collections::HashMap::from([(users, table_policies)])
         };
 
         state

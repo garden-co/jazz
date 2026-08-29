@@ -835,6 +835,7 @@ fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<V
 mod tests {
     use super::*;
     use jazz::db::Transport;
+    use jazz::wire::WIRE_PROTOCOL_VERSION;
     use std::collections::{BTreeMap, VecDeque};
 
     #[derive(Clone)]
