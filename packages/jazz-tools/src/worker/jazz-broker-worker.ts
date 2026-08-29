@@ -173,9 +173,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
       appId: options.appId,
       runtimeThread: "worker",
     });
-    context.pageStore = await IndexedDbPageStore.open(options.dbName, () =>
-      handleStorageInvalidation(context),
-    );
+    context.pageStore = await IndexedDbPageStore.open(options.dbName, {
+      owner: options.storageOwner,
+      onInvalidated: () => handleStorageInvalidation(context),
+    });
     const schema = encodeSchema(options.schema);
     const proof = options.selfSignedClientProof;
     const config = openConfig(
@@ -875,7 +876,9 @@ function completeLocalFlush(peer: TabPeer): void {
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {
-  return JSON.stringify([options.appId, options.dbName]);
+  // One runtime/page-store owner per physical IndexedDB root. The persistent
+  // owner marker covers distinct worker assets that cannot share this realm.
+  return options.dbName;
 }
 
 function post(

@@ -218,6 +218,7 @@ function options(dbName: string): BrowserWorkerInitOptions {
     author: new Uint8Array([2]),
     initialSyncFlushEvery: 1,
     appId: "worker-initialization-test",
+    storageOwner: "worker-initialization-test-owner",
     authSessionKey: "session",
     authJson: "{}",
     sessionClaims: {},
@@ -472,6 +473,10 @@ describe("broker worker context initialization", () => {
     expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
     expect(mocks.installWasmTelemetry).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledWith("concurrent-success", {
+      owner: "worker-initialization-test-owner",
+      onInvalidated: expect.any(Function),
+    });
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
