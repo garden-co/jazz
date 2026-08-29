@@ -8,47 +8,55 @@ import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime
 type FrameFixture = { name: string; frame_hex: string };
 type ArtifactCorpus = {
   format: string;
-  hello_cases: string[];
-  message_cases: string[];
   error_frame_hex: string;
-  rejections: Array<{ name: string; frame_hex: string }>;
+  rejections: Array<{ name: string; frame_hex: string; negotiated_features: string }>;
 };
 
 type ArtifactFrameValidator = {
-  __testValidateWireFrameCorpus(frame: Uint8Array): void;
+  __testValidateWireFrameCorpus(frame: Uint8Array, negotiatedFeatures: string): void;
+  __testWireFrameCorpusFeatures(): string;
 };
 
 // The source fixtures freeze the exact Rust-produced v1 bytes. This test then
-// sends the selected complete frames through both freshly generated artifacts,
+// sends every complete Hello/message frame through both freshly generated artifacts,
 // not a JavaScript mirror of the Rust frame/payload/compression decoder.
 describe("wire frame artifact corpus", () => {
   it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
-    "accepts complete v1 frames and rejects malformed frame input through NAPI and WASM",
+    "executes every complete v1 frame and rejects malformed input through NAPI and WASM",
     async () => {
       const corpus = artifactCorpus();
       expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v1");
-      const hello = namedFrames(rustHelloFixtures(), corpus.hello_cases);
-      const messages = namedFrames(rustMessageFixtures(), corpus.message_cases);
       const accepted = [
-        ...hello,
-        ...messages,
+        ...rustHelloFixtures(),
+        ...rustMessageFixtures(),
         { name: "structured error", frame_hex: corpus.error_frame_hex },
       ];
       const [napi, wasm] = await Promise.all([
-        loadNapiModule() as Promise<ArtifactFrameValidator>,
+        // This is a deliberately test-only export (`skip_typescript` in
+        // napi-rs), so production declarations must not advertise it.
+        loadNapiModule() as Promise<unknown> as Promise<ArtifactFrameValidator>,
         loadWasmModuleForTest() as Promise<ArtifactFrameValidator>,
       ]);
 
       for (const artifact of [napi, wasm]) {
+        const negotiatedFeatures = artifact.__testWireFrameCorpusFeatures();
         for (const frame of accepted) {
           expect(
-            () => artifact.__testValidateWireFrameCorpus(hexToBytes(frame.frame_hex)),
+            () =>
+              artifact.__testValidateWireFrameCorpus(
+                hexToBytes(frame.frame_hex),
+                negotiatedFeatures,
+              ),
             frame.name,
           ).not.toThrow();
         }
         for (const rejection of corpus.rejections) {
           expect(
-            () => artifact.__testValidateWireFrameCorpus(hexToBytes(rejection.frame_hex)),
+            () =>
+              artifact.__testValidateWireFrameCorpus(
+                hexToBytes(rejection.frame_hex),
+                rejection.negotiated_features,
+              ),
             rejection.name,
           ).toThrow();
         }
@@ -67,14 +75,6 @@ function rustHelloFixtures(): FrameFixture[] {
 
 function rustMessageFixtures(): FrameFixture[] {
   return (readJson("wire_message_frames.json") as { fixtures: FrameFixture[] }).fixtures;
-}
-
-function namedFrames(fixtures: FrameFixture[], names: string[]): FrameFixture[] {
-  return names.map((name) => {
-    const fixture = fixtures.find((candidate) => candidate.name === name);
-    if (!fixture) throw new Error(`wire artifact corpus names missing fixture ${name}`);
-    return fixture;
-  });
 }
 
 function readJson(name: string): unknown {

@@ -21,10 +21,10 @@ use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_l
 /// formats and are not wire-protocol compatibility aliases.
 pub const WIRE_PROTOCOL_VERSION: u16 = 1;
 
-/// Frozen v1 full-frame artifact corpus.  It complements the complete Rust
-/// message/Hello fixtures with the small cross-host selection and rejection
-/// cases which NAPI and WASM execute through this module's production
-/// decoders.  This is test-only input, not a second wire format.
+/// Frozen v1 full-frame artifact rejection corpus. NAPI and WASM execute every
+/// frame in the complete Rust message/Hello fixtures, plus these explicit
+/// rejection cases, through this module's production decoders. This is
+/// test-only input, not a second wire format.
 pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
     include_str!("../fixtures/wire_frame_artifact_corpus.json");
 
@@ -356,11 +356,13 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
 /// version-negotiation, feature, and compression seams as a real peer.  It is
 /// not a public host API.
 #[doc(hidden)]
-pub fn validate_frame_for_artifact_corpus(bytes: &[u8]) -> Result<(), String> {
+pub fn validate_frame_for_artifact_corpus(
+    bytes: &[u8],
+    negotiated_features: WireFeatures,
+) -> Result<(), String> {
     let frame = decode_frame(bytes).map_err(|error| format!("malformed wire frame: {error}"))?;
-    let local_features = current_wire_features();
     match frame {
-        WireFrame::Hello(hello) => negotiate_wire(&hello, local_features)
+        WireFrame::Hello(hello) => negotiate_wire(&hello, negotiated_features)
             .map(|_| ())
             .map_err(|error| format!("hello negotiation rejected: {}", error.message)),
         WireFrame::Message(envelope) => {
@@ -370,15 +372,15 @@ pub fn validate_frame_for_artifact_corpus(bytes: &[u8]) -> Result<(), String> {
                     envelope.protocol_version, WIRE_PROTOCOL_VERSION
                 ));
             }
-            let unnegotiated = envelope.features & !local_features;
+            let unnegotiated = envelope.features & !negotiated_features;
             if unnegotiated != 0 {
                 return Err(format!(
                     "message declares unnegotiated features {unnegotiated:#x}"
                 ));
             }
-            let mut decoder = WireStreamDecoder::new(local_features)?;
+            let mut decoder = WireStreamDecoder::new(negotiated_features)?;
             let payload = decoder.decode_message(&envelope.payload, envelope.features)?;
-            decode_sync_message_for_features(&payload, local_features)
+            decode_sync_message_for_features(&payload, negotiated_features)
                 .map(|_| ())
                 .map_err(|error| format!("semantic payload rejected: {}", error.message))
         }

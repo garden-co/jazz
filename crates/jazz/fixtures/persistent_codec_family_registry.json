@@ -510,8 +510,8 @@
         "anchor": "### 8.1 One protocol, roles not code"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/fixtures/wire_frame_artifact_corpus.json",
-        "anchor": "jazz-wire-frame-artifact-corpus-v1"
+        "path": "crates/jazz/fixtures/wire_message_frames.json",
+        "anchor": "fixture_set"
       },
       "rejection_receipt": {
         "path": "crates/jazz/tests/wire_fixtures.rs",
@@ -521,6 +521,10 @@
         {
           "path": "crates/jazz/tests/wire_fixtures.rs",
           "anchor": "fn wire_message_frame_fixtures_are_current()"
+        },
+        {
+          "path": "crates/jazz/tests/wire_fixtures.rs",
+          "anchor": "fn wire_hello_frame_fixtures_are_current()"
         },
         {
           "path": "packages/jazz-tools/src/runtime/native-runtime/wire-frame-artifact-corpus.test.ts",

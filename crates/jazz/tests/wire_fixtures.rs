@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
@@ -64,8 +64,6 @@ const BINDING_CODEC_GOLDEN_FIXTURE_PATH: &str = concat!(
 #[derive(Deserialize)]
 struct WireFrameArtifactCorpus {
     format: String,
-    hello_cases: Vec<String>,
-    message_cases: Vec<String>,
     error_frame_hex: String,
     rejections: Vec<WireFrameArtifactRejection>,
 }
@@ -74,6 +72,7 @@ struct WireFrameArtifactCorpus {
 struct WireFrameArtifactRejection {
     name: String,
     frame_hex: String,
+    negotiated_features: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -918,31 +917,33 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
     let hello: HelloManifest =
         serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
             .expect("Hello fixture manifest parses");
-    for name in &corpus.hello_cases {
-        let fixture = hello
-            .fixtures
-            .iter()
-            .find(|fixture| fixture.name == name)
-            .unwrap_or_else(|| panic!("artifact corpus names an absent Hello fixture {name}"));
-        jazz::wire::validate_frame_for_artifact_corpus(&parse_hex(&fixture.frame_hex))
-            .unwrap_or_else(|error| panic!("{name}: frozen complete Hello rejects: {error}"));
-    }
-
     let messages: Manifest =
         serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
             .expect("message fixture manifest parses");
-    for name in &corpus.message_cases {
-        let fixture = messages
-            .fixtures
-            .iter()
-            .find(|fixture| fixture.name == name)
-            .unwrap_or_else(|| panic!("artifact corpus names an absent message fixture {name}"));
-        jazz::wire::validate_frame_for_artifact_corpus(&parse_hex(&fixture.frame_hex))
-            .unwrap_or_else(|error| panic!("{name}: frozen complete message rejects: {error}"));
-    }
+    let negotiated_features = jazz::wire::current_wire_features();
+    let executed = execute_complete_artifact_frames(&hello, &messages, negotiated_features)
+        .expect("every frozen v1 complete frame executes through its owning decoder");
+    let expected = complete_artifact_frame_names(&hello, &messages);
+    assert_artifact_execution_is_exhaustive(&expected, &executed)
+        .expect("artifact execution covers every frozen v1 Hello and message frame");
+
+    // Planted sensitivity: a future execution loop which samples the manifest
+    // rather than consuming every entry will fail this exact set comparison.
+    let mut omitted = executed.clone();
+    omitted.pop_last();
+    assert!(
+        assert_artifact_execution_is_exhaustive(&expected, &omitted).is_err(),
+        "the exhaustiveness receipt detects a planted omitted complete frame"
+    );
+    let mut unknown = executed.clone();
+    unknown.insert("message:future-v1-family".to_owned());
+    assert!(
+        assert_artifact_execution_is_exhaustive(&expected, &unknown).is_err(),
+        "the exhaustiveness receipt detects a planted new/unaccounted family"
+    );
 
     let error_bytes = parse_hex(&corpus.error_frame_hex);
-    jazz::wire::validate_frame_for_artifact_corpus(&error_bytes)
+    jazz::wire::validate_frame_for_artifact_corpus(&error_bytes, negotiated_features)
         .expect("the representative WireFrame::Error is a complete canonical frame");
     assert_eq!(
         jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"),
@@ -960,9 +961,16 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
         "the representative error has one canonical v1 spelling"
     );
     for rejection in &corpus.rejections {
+        let rejection_features = rejection
+            .negotiated_features
+            .parse()
+            .unwrap_or_else(|_| panic!("{} has an invalid negotiated feature set", rejection.name));
         assert!(
-            jazz::wire::validate_frame_for_artifact_corpus(&parse_hex(&rejection.frame_hex))
-                .is_err(),
+            jazz::wire::validate_frame_for_artifact_corpus(
+                &parse_hex(&rejection.frame_hex),
+                rejection_features,
+            )
+            .is_err(),
             "{} must remain rejected by its owning frame boundary",
             rejection.name
         );
@@ -977,6 +985,91 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
         "postcard's permissive prefix parser is the planted bypass"
     );
     assert!(jazz::wire::decode_frame(&trailing).is_err());
+
+    // A complete outer envelope cannot launder a trailing semantic payload.
+    // `postcard::from_bytes` is the planted semantic-decoder bypass: it accepts
+    // the canonical prefix, while Jazz's exact semantic decoder and the
+    // generated-host bridge must reject the whole payload.
+    let trailing_payload = corpus
+        .rejections
+        .iter()
+        .find(|rejection| {
+            rejection.name == "trailing semantic payload inside a complete message envelope"
+        })
+        .expect("semantic trailing rejection is frozen");
+    let WireFrame::Message(envelope) =
+        jazz::wire::decode_frame(&parse_hex(&trailing_payload.frame_hex))
+            .expect("outer semantic-trailing envelope is canonical")
+    else {
+        panic!("semantic trailing corpus case is a message frame");
+    };
+    assert!(
+        postcard::from_bytes::<SyncMessage>(&envelope.payload).is_ok(),
+        "postcard's prefix parser is the planted semantic bypass"
+    );
+    assert!(decode_sync_message(&envelope.payload).is_err());
+    assert!(
+        jazz::wire::validate_frame_for_artifact_corpus(
+            &parse_hex(&trailing_payload.frame_hex),
+            trailing_payload
+                .negotiated_features
+                .parse()
+                .expect("feature bits parse"),
+        )
+        .is_err()
+    );
+}
+
+fn execute_complete_artifact_frames(
+    hello: &HelloManifest,
+    messages: &Manifest,
+    negotiated_features: u64,
+) -> Result<BTreeSet<String>, String> {
+    let mut executed = BTreeSet::new();
+    for fixture in &hello.fixtures {
+        jazz::wire::validate_frame_for_artifact_corpus(
+            &parse_hex(&fixture.frame_hex),
+            negotiated_features,
+        )
+        .map_err(|error| format!("hello:{} rejects: {error}", fixture.name))?;
+        executed.insert(format!("hello:{}", fixture.name));
+    }
+    for fixture in &messages.fixtures {
+        jazz::wire::validate_frame_for_artifact_corpus(
+            &parse_hex(&fixture.frame_hex),
+            negotiated_features,
+        )
+        .map_err(|error| format!("message:{} rejects: {error}", fixture.name))?;
+        executed.insert(format!("message:{}", fixture.name));
+    }
+    Ok(executed)
+}
+
+fn complete_artifact_frame_names(hello: &HelloManifest, messages: &Manifest) -> BTreeSet<String> {
+    hello
+        .fixtures
+        .iter()
+        .map(|fixture| format!("hello:{}", fixture.name))
+        .chain(
+            messages
+                .fixtures
+                .iter()
+                .map(|fixture| format!("message:{}", fixture.name)),
+        )
+        .collect()
+}
+
+fn assert_artifact_execution_is_exhaustive(
+    expected: &BTreeSet<String>,
+    executed: &BTreeSet<String>,
+) -> Result<(), String> {
+    if expected == executed {
+        Ok(())
+    } else {
+        Err(format!(
+            "artifact corpus execution drifted: expected {expected:?}, executed {executed:?}"
+        ))
+    }
 }
 
 // This is intentionally a codec-level integration fixture: TypeScript creates
