@@ -155,6 +155,21 @@ const readOnlyPermissions = s.definePermissions(app, ({ policy }) => [
   policy.todos.allowDelete.never(),
 ]);
 
+// A single recovered worker restart must be able to settle two former
+// foreground transactions independently: the ordinary todo is admitted,
+// while the marked todo is rejected.  Keeping both outcomes in one authority
+// policy makes the receipt independent of a mid-test policy redeploy.
+const recoveryTerminalPermissions = s.definePermissions(app, ({ policy }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+  policy.projects.allowUpdate.always(),
+  policy.projects.allowDelete.always(),
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.where({ done: false }),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
 const noUpdatePermissions = s.definePermissions(app, ({ policy }) => [
   policy.projects.allowRead.always(),
   policy.projects.allowInsert.always(),
@@ -1726,6 +1741,101 @@ describe("SharedWorker bridge with IndexedDB", () => {
       type: "close",
     } satisfies BrowserInspectorControlRequest);
   });
+
+  /**
+   * Physical browser receipt for the complete identity/recovery path. The
+   * first `createDb` acquires a foreground lease; after its SharedWorker ends,
+   * a successor lease attaches to the reopened durable replica. The recovered
+   * relay must route each former foreground terminal exactly once: rejection
+   * is one live callback, acceptance is one normal Global row.
+   */
+  it("settles recovered accepted and rejected foreground writes exactly once", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-recovery-terminal-pair",
+      recoveryTerminalPermissions,
+    );
+    const secret = generateAuthSecret();
+    const dbName = uniqueDbName("sync-recovery-terminal-pair");
+    const createPersistentDb = (serverUrl?: string) =>
+      createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent" as const, dbName },
+        serverUrl,
+        secret,
+      });
+
+    const first = track(await createPersistentDb(undefined));
+    const accepted = first.insert(todos, {
+      title: "accepted after worker restart",
+      done: false,
+    });
+    const rejected = first.insert(todos, {
+      title: "rejected after worker restart",
+      done: true,
+    });
+    const rejectedTxId = await rejected.txId;
+    await withTimeout(
+      Promise.all([accepted.wait({ tier: "local" }), rejected.wait({ tier: "local" })]),
+      5000,
+      "foreground writes should be durable in the worker before restart",
+    );
+
+    const firstInspector = await first.openInspectorControlPort();
+    firstInspector.start();
+    await first.shutdown();
+    untrack(first);
+    await waitForWorkerContextRelease(firstInspector, dbName);
+    await terminateWorker(firstInspector);
+
+    const successor = track(await createPersistentDb(syncServer.serverUrl));
+    const mutationErrors = vi.fn();
+    successor.onMutationError(mutationErrors);
+    const successorInspector = await successor.openInspectorControlPort();
+    successorInspector.start();
+
+    await waitForCondition(
+      async () => {
+        const rows = await successor.all(allTodos, { tier: "local" });
+        return rows.length === 1 && rows[0]?.id === accepted.value.id;
+      },
+      10_000,
+      "recovered accepted write should settle once into the successor local view",
+    );
+    await waitForCondition(
+      () => mutationErrors.mock.calls.length === 1,
+      10_000,
+      "recovered rejection should produce exactly one live successor callback",
+    );
+    expect(mutationErrors).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "permission_denied",
+        transaction: expect.objectContaining({ transactionId: rejectedTxId }),
+      }),
+    );
+
+    await successor.all(allTodos, { tier: "edge" });
+    await sleep(250);
+    expect(mutationErrors).toHaveBeenCalledTimes(1);
+    await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([
+      expect.objectContaining({ id: accepted.value.id, title: "accepted after worker restart" }),
+    ]);
+
+    await successor.shutdown();
+    untrack(successor);
+    await waitForWorkerContextRelease(successorInspector, dbName);
+    await terminateWorker(successorInspector);
+
+    const later = track(await createPersistentDb(undefined));
+    const laterErrors = vi.fn();
+    later.onMutationError(laterErrors);
+    await expect(later.all(allTodos, { tier: "local" })).resolves.toEqual([
+      expect.objectContaining({ id: accepted.value.id }),
+    ]);
+    await sleep(250);
+    expect(laterErrors).not.toHaveBeenCalled();
+    await later.shutdown();
+    untrack(later);
+  }, 60_000);
 
   describe("optimistic writes are reverted on server rejection", () => {
     it("insert", async () => {
