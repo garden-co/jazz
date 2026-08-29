@@ -96,6 +96,8 @@ function inheritedCapability(rootDir, env) {
       capability.root === resolve(rootDir) &&
       Number.isInteger(capability.ownerPid) &&
       capability.ownerPid > 0 &&
+      typeof capability.ownerStart === "string" &&
+      capability.ownerStart.length > 0 &&
       capability.ownerStart === processStartIdentity(capability.ownerPid) &&
       isDescendantOf(capability.ownerPid)
     );
@@ -154,7 +156,14 @@ export function runCorrectnessConsumer(
   const admission = prepareCorrectnessConsumerEnvironment(rootDir);
   const { env } = admission;
   return new Promise((resolvePromise, reject) => {
-    const child = spawnImpl(executable, args, { cwd, env, stdio: "inherit" });
+    let child;
+    try {
+      child = spawnImpl(executable, args, { cwd, env, stdio: "inherit" });
+    } catch (error) {
+      admission.release();
+      reject(error);
+      return;
+    }
     child.once("error", (error) => {
       admission.release();
       reject(error);

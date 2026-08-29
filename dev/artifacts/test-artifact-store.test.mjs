@@ -340,6 +340,36 @@ test("the consumer wrapper rejects snapshot mutation after preflight", async () 
   }
 });
 
+test("a synchronous spawn failure removes its minted consumer capability", async () => {
+  const root = fixture("spawn-failure", "3".repeat(64), "4".repeat(64));
+  try {
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
+      { cwd: root },
+    );
+    const snapshot = snapshotCorrectnessArtifacts(root);
+    writeCorrectnessArtifactProducerManifest(root, snapshot);
+    let capabilityPath;
+    await assert.rejects(
+      runCorrectnessConsumer(process.execPath, ["-e", ""], {
+        cwd: root,
+        rootDir: root,
+        spawnImpl(_executable, _args, options) {
+          capabilityPath = options.env.JAZZ_CORRECTNESS_CONSUMER_CAPABILITY;
+          throw new Error("planted synchronous spawn failure");
+        },
+      }),
+      /planted synchronous spawn failure/,
+    );
+    assert.equal(typeof capabilityPath, "string");
+    assert.equal(existsSync(capabilityPath), false);
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test("one source admission covers nested consumers while snapshot checks continue", async () => {
   const root = fixture("nested-admission", "1".repeat(64), "2".repeat(64));
   try {
@@ -389,6 +419,46 @@ test("one source admission covers nested consumers while snapshot checks continu
         else process.env[name] = value;
       }
     }
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test("a capability without a process-start identity cannot bypass fresh source admission", async () => {
+  const root = fixture("missing-owner-start", "5".repeat(64), "6".repeat(64));
+  try {
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
+      { cwd: root },
+    );
+    const snapshot = snapshotCorrectnessArtifacts(root);
+    writeCorrectnessArtifactProducerManifest(root, snapshot);
+    const runner = new URL("../gates/run-correctness-consumer.mjs", import.meta.url).href;
+    await assert.rejects(
+      runCorrectnessConsumer(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          [
+            "import fs from 'node:fs'",
+            `import { runCorrectnessConsumer } from ${JSON.stringify(runner)}`,
+            "fs.writeFileSync(process.argv[1], 'source drift')",
+            "const path=process.env.JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
+            "const capability=JSON.parse(fs.readFileSync(path,'utf8'))",
+            "delete capability.ownerStart",
+            "fs.writeFileSync(path,JSON.stringify(capability))",
+            "await runCorrectnessConsumer(process.execPath, ['-e', ''], { rootDir: process.argv[2] })",
+          ].join(";"),
+          join(root, "test-output"),
+          root,
+        ],
+        { cwd: root, rootDir: root },
+      ),
+      /correctness consumer failed/,
+    );
   } finally {
     removeFixture(root);
   }
