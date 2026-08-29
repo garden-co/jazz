@@ -415,11 +415,13 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // Maintained index scans retain their established full source because
-        // an index can settle against a different persisted frontier. A
-        // physical primary-key source has no independent index frontier and
-        // remains incrementally complete for that one immutable row identity.
-        let access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        // A maintained source may use the same conservative equality access
+        // path as a one-shot source.  The source remains an ordinary IVM
+        // source: its hydration is selected from the durable index while
+        // subsequent table deltas pass through the very same predicate graph.
+        // In particular, this is not a separate snapshot/RPC path, so its
+        // initial frontier and live continuation share one membership proof.
+        let access_paths = self.query_program_access_paths(&request)?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }

@@ -18,6 +18,142 @@ fn indexed_documents_schema() -> JazzSchema {
     )
 }
 
+fn multi_index_documents_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("team", PublicColumnType::Uuid)
+                .column("active", PublicColumnType::Boolean)
+                .column("title", PublicColumnType::Text)
+                .index_only(["team", "active"]),
+        ),
+    )
+}
+
+/// A maintained equality source is both an indexed hydration source and a
+/// live IVM source. In particular, a row changing either indexed equality must
+/// enter/leave exactly once rather than remaining filtered by the prefix that
+/// selected the initial snapshot.
+#[test]
+fn maintained_multi_index_query_tracks_either_index_transition() {
+    let schema = multi_index_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let db = open_db(0xd1, author, &schema);
+    let team = row(0xa0);
+    let matching = row(1);
+    let inactive = row(2);
+    let other_team = row(3);
+    let cells = |team: RowUuid, active: bool, title: &str| {
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(active)),
+            ("title".to_owned(), Value::String(title.to_owned())),
+        ])
+    };
+    for (id, values) in [
+        (matching, cells(team, true, "matching")),
+        (inactive, cells(team, false, "inactive")),
+        (other_team, cells(row(0xb0), true, "other team")),
+    ] {
+        db.insert(
+            "documents",
+            values,
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("documents")
+        .filter(eq(col("team"), lit(Value::Uuid(team.0))))
+        .filter(eq(col("active"), lit(true)));
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![matching]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 2,
+        "the maintained Local source must probe both equality indices"
+    );
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("active".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![inactive]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(row(0xb0).0))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![inactive]
+    );
+}
+
+/// Empty durable index prefixes remain live sources. The first matching row
+/// must not be lost merely because indexed hydration had no row to materialize.
+#[test]
+fn maintained_empty_index_prefix_delivers_first_matching_insert_once() {
+    let schema = indexed_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd2; 16]);
+    let db = open_db(0xd2, author, &schema);
+    let team = row(0xa2);
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert!(
+        initial.rows.is_empty(),
+        "empty prefix must still open a subscription"
+    );
+
+    let first = row(4);
+    db.insert(
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("first".to_owned())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(first),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![first]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "first insert must deliver exactly once"
+    );
+}
+
 #[test]
 fn negated_membership_uses_two_valued_null_semantics() {
     let schema = build_public_db_test_schema(

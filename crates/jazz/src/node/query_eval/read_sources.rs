@@ -37,6 +37,11 @@ pub(super) enum CurrentAccessPath {
         column: String,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
+        /// A maintained source keeps every equality probe as an ordinary IVM
+        /// source and intersects them in the graph. The fused storage request
+        /// is snapshot-only and cannot observe later transitions through a
+        /// secondary equality index.
+        maintained: bool,
         /// A proved physical source cap for an ordinary one-shot read. This is
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
@@ -1806,6 +1811,7 @@ where
                 prefix,
                 intersections,
                 source_limit,
+                ..
             } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
@@ -1822,6 +1828,7 @@ where
                         &column,
                         &prefix,
                         &intersections,
+                        false,
                         source_limit,
                         &projection_target,
                     )
@@ -2115,6 +2122,7 @@ where
                     prefix,
                     intersections,
                     source_limit,
+                    maintained,
                 }) => {
                     let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
                     self.node.query_engine_read_metrics.source_index_probes +=
@@ -2126,6 +2134,7 @@ where
                             &column,
                             &prefix,
                             &intersections,
+                            maintained,
                             source_limit,
                             &projection_target,
                         )
@@ -2208,6 +2217,7 @@ where
                 prefix,
                 intersections,
                 source_limit,
+                maintained,
             }) => {
                 // Select settled candidates before combining them with the
                 // corresponding Local ahead candidates below.
@@ -2221,6 +2231,7 @@ where
                         column,
                         prefix,
                         intersections,
+                        *maintained,
                         source_limit,
                         &projection_target,
                         raw_global_output.clone(),
@@ -3327,17 +3338,17 @@ where
             let Some(mut path) = select_current_access_path(&table, &equalities) else {
                 continue;
             };
-            // Multi-index intersection is an ephemeral one-shot source. Keep
-            // maintained programs and reusable policy graphs on their existing
-            // single-index path until the fused source has incremental-update
-            // semantics of its own.
-            if !allow_local && let CurrentAccessPath::Index { intersections, .. } = &mut path {
-                intersections.clear();
+            if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
+                *maintained = true;
             }
-            // Generic maintained programs remain Global-only. A one-shot Local
-            // caller opts in only after arranging equivalent index scans over
-            // both the settled and ahead physical sources.
-            if tier == DurabilityTier::Global || (allow_local && tier == DurabilityTier::Local) {
+            // Local/Edge sources still combine the selected settled candidates
+            // with the complete ahead overlay before choosing a winner, so a
+            // newer row which leaves an equality prefix cannot leave behind a
+            // stale settled match.
+            if matches!(
+                tier,
+                DurabilityTier::Global | DurabilityTier::Local | DurabilityTier::Edge
+            ) {
                 paths.insert(source, path);
             }
         }
@@ -3515,6 +3526,7 @@ where
         column: &str,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
+        maintained: bool,
         source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
@@ -3524,6 +3536,7 @@ where
             column,
             prefix,
             intersections,
+            maintained,
             source_limit,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
@@ -3537,6 +3550,7 @@ where
         column: &str,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
+        maintained: bool,
         source_limit: Option<usize>,
         projection_target: &str,
         _output: RecordDescriptor,
@@ -3605,13 +3619,37 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(GraphBuilder::variant_index_intersection_scan(
-            storage_table,
-            physical_current_index_name(column_id),
-            scan,
-            intersections,
-            projection_target,
-        ))
+        let primary_index = physical_current_index_name(column_id);
+        if maintained {
+            // `IndexedRowsIntersection` is a hydration request, not a live
+            // source.  Model each equality as an index source and express the
+            // intersection in IVM so table deltas which enter or leave either
+            // prefix drive ordinary semi-join updates.
+            let mut graph = GraphBuilder::variant_index_scan(
+                storage_table.clone(),
+                primary_index,
+                projection_target,
+                scan,
+            );
+            for (index, scan) in intersections {
+                let right = GraphBuilder::variant_index_scan(
+                    storage_table.clone(),
+                    index,
+                    projection_target,
+                    scan,
+                );
+                graph = GraphBuilder::semi_join(graph, right, ["row_uuid"], ["row_uuid"]);
+            }
+            Ok(graph)
+        } else {
+            Ok(GraphBuilder::variant_index_intersection_scan(
+                storage_table,
+                primary_index,
+                scan,
+                intersections,
+                projection_target,
+            ))
+        }
     }
 }
 
