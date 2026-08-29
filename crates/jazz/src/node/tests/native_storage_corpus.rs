@@ -226,11 +226,140 @@ fn assert_native_corpus_candidate_is_staged(
     candidate: &std::path::Path,
     kind: &str,
 ) {
-    assert_ne!(
-        live, candidate,
-        "{kind} candidate must be staged outside the live producer root"
-    );
     assert!(candidate.exists(), "{kind} staged candidate must exist");
+    assert_staged_path_is_distinct(live, candidate, kind)
+        .unwrap_or_else(|error| panic!("{kind} candidate must be staged outside the live producer root: {error}"));
+}
+
+/// Resolve a corpus file through its existing parent.  Candidates are required
+/// to be direct children of an existing staging directory: that makes a path
+/// which has not been created yet just as checkable as one which has, while
+/// still resolving `.` and symlink aliases in the parent before any bytes are
+/// written.
+fn canonical_corpus_child(path: &std::path::Path, role: &str) -> Result<std::path::PathBuf, String> {
+    let name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("{role} must name a file directly below an existing directory"))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| format!("{role} must have an existing parent directory"))?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .map_err(|error| format!("cannot resolve {role} parent {parent:?}: {error}"))?;
+    if !canonical_parent.is_dir() {
+        return Err(format!("{role} parent {canonical_parent:?} is not a directory"));
+    }
+    Ok(canonical_parent.join(name))
+}
+
+fn same_existing_file_identity(
+    left: &std::path::Path,
+    right: &std::path::Path,
+) -> Result<bool, String> {
+    let left_metadata = std::fs::metadata(left)
+        .map_err(|error| format!("cannot stat left corpus path {left:?}: {error}"))?;
+    let right_metadata = std::fs::metadata(right)
+        .map_err(|error| format!("cannot stat right corpus path {right:?}: {error}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        return Ok(left_metadata.dev() == right_metadata.dev() && left_metadata.ino() == right_metadata.ino());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        return Ok(
+            left_metadata.volume_serial_number() == right_metadata.volume_serial_number()
+                && left_metadata.file_index_high() == right_metadata.file_index_high()
+                && left_metadata.file_index_low() == right_metadata.file_index_low(),
+        );
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // A platform without a stable file identity cannot prove hard-link
+        // separation.  Canonical paths still reject dot and symlink aliases;
+        // callers additionally reject the same canonical path below.
+        let _ = (left_metadata, right_metadata);
+        Ok(false)
+    }
+}
+
+/// Prove a staged candidate cannot be the live producer through spelling,
+/// symlink, or (on platforms that expose one) physical-file aliasing.  `live`
+/// is a SQLite file or a RocksDB root/archive source; candidates may be absent
+/// when this is used to vet a not-yet-created temporary publication path.
+fn assert_staged_path_is_distinct(
+    live: &std::path::Path,
+    candidate: &std::path::Path,
+    kind: &str,
+) -> Result<(), String> {
+    let live_canonical = std::fs::canonicalize(live)
+        .map_err(|error| format!("cannot resolve live {kind} producer {live:?}: {error}"))?;
+    let live_root = if live_canonical.is_dir() {
+        live_canonical.clone()
+    } else {
+        live_canonical
+            .parent()
+            .ok_or_else(|| format!("live {kind} producer has no parent"))?
+            .to_path_buf()
+    };
+    let candidate_canonical = canonical_corpus_child(candidate, &format!("{kind} candidate"))?;
+
+    if candidate_canonical == live_canonical
+        || candidate_canonical.starts_with(&live_root)
+    {
+        return Err(format!(
+            "candidate {candidate:?} resolves inside live producer root {live_root:?}"
+        ));
+    }
+    if candidate.exists() {
+        let candidate_target = std::fs::canonicalize(candidate)
+            .map_err(|error| format!("cannot resolve existing {kind} candidate {candidate:?}: {error}"))?;
+        if candidate_target == live_canonical || candidate_target.starts_with(&live_root) {
+            return Err(format!(
+                "candidate {candidate:?} resolves through an alias inside live producer root {live_root:?}"
+            ));
+        }
+    }
+    if candidate.exists()
+        && live.exists()
+        && same_existing_file_identity(live, candidate)?
+    {
+        return Err(format!(
+            "candidate {candidate:?} is the same physical file as live producer {live:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// A candidate and publication destination must not alias, even where their
+/// textual paths differ.  This protects an existing destination from being
+/// silently used as the source and makes a future temporary name checkable
+/// before it exists.
+fn assert_publication_paths_are_distinct(
+    candidate: &std::path::Path,
+    requested: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let candidate_canonical = canonical_corpus_child(candidate, "corpus candidate")?;
+    let requested_canonical = canonical_corpus_child(requested, "requested corpus output")?;
+    if candidate_canonical == requested_canonical {
+        return Err("requested corpus output aliases its staged candidate".to_owned());
+    }
+    if requested.exists() {
+        let candidate_target = std::fs::canonicalize(candidate)
+            .map_err(|error| format!("cannot resolve corpus candidate {candidate:?}: {error}"))?;
+        let requested_target = std::fs::canonicalize(requested)
+            .map_err(|error| format!("cannot resolve requested corpus output {requested:?}: {error}"))?;
+        if candidate_target == requested_target {
+            return Err("requested corpus output resolves to its staged candidate".to_owned());
+        }
+        if same_existing_file_identity(candidate, requested)? {
+            return Err("requested corpus output is the same physical file as its staged candidate".to_owned());
+        }
+    }
+    Ok((candidate_canonical, requested_canonical))
 }
 
 /// Publish a *previously verified* candidate without exposing a partially
@@ -241,19 +370,34 @@ fn publish_verified_native_corpus_candidate(
     candidate: &std::path::Path,
     requested: &std::path::Path,
 ) -> Result<(), String> {
-    let parent = requested
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = requested
-        .file_name()
-        .ok_or_else(|| "requested corpus output must name a file".to_owned())?;
+    publish_verified_native_corpus_candidate_with_copy(candidate, requested, |candidate, temporary| {
+        std::fs::copy(candidate, temporary)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// The copy operation is an explicit seam so this receipt can prove that an
+/// interrupted staged copy never touches a pre-existing destination.  The
+/// normal publisher above supplies `std::fs::copy`; no production path may
+/// write directly to `requested` before the staged copy has completed.
+fn publish_verified_native_corpus_candidate_with_copy(
+    candidate: &std::path::Path,
+    requested: &std::path::Path,
+    copy: impl FnOnce(&std::path::Path, &std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let (candidate, requested) = assert_publication_paths_are_distinct(candidate, requested)?;
+    let parent = requested.parent().expect("canonical child has a parent");
+    let file_name = requested.file_name().expect("canonical child has a name");
     let temporary = parent.join(format!(
         ".{}.native-corpus-staging-{}",
         file_name.to_string_lossy(),
         uuid::Uuid::new_v4()
     ));
-    std::fs::copy(candidate, &temporary).map_err(|error| error.to_string())?;
+    if let Err(error) = copy(&candidate, &temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     std::fs::rename(&temporary, requested).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
         error.to_string()
@@ -1477,6 +1621,137 @@ fn native_jazz_corpus_candidate_roundtrip_rejects_broken_exports() {
         b"verified bytes",
         "the requested output is populated only by a staged verified candidate"
     );
+}
+
+/// Staging is a physical boundary, not just a different spelling of the live
+/// path.  In particular, a future candidate may not be placed below a live
+/// root before it exists, and existing dot, symlink, and hard-link aliases all
+/// fail before a verifier could accidentally reopen the producer.
+#[test]
+fn native_jazz_corpus_staging_rejects_normalized_and_physical_aliases() {
+    let root = tempfile::tempdir().expect("create corpus alias root");
+    let live_root = root.path().join("live-root");
+    let staging_root = root.path().join("staging-root");
+    std::fs::create_dir_all(&live_root).expect("create live root");
+    std::fs::create_dir(&staging_root).expect("create staging root");
+    let live = live_root.join("live.sqlite");
+    std::fs::write(&live, b"live corpus bytes").expect("create live SQLite image");
+
+    assert_staged_path_is_distinct(&live, &staging_root.join("not-yet-created.sqlite"), "SQLite")
+        .expect("a nonexistent direct child of an independent staging root is safe");
+    assert!(
+        assert_staged_path_is_distinct(&live, &live_root.join("not-yet-created.sqlite"), "SQLite")
+            .is_err(),
+        "a not-yet-created candidate below the live root is rejected"
+    );
+    assert!(
+        assert_staged_path_is_distinct(
+            &live,
+            &live_root.join(".").join("live.sqlite"),
+            "SQLite",
+        )
+        .is_err(),
+        "a dot-path spelling of the live image is rejected"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let symlink_alias = staging_root.join("symlink.sqlite");
+        symlink(&live, &symlink_alias).expect("create SQLite symlink alias");
+        assert!(
+            assert_staged_path_is_distinct(&live, &symlink_alias, "SQLite").is_err(),
+            "a SQLite symlink alias is rejected"
+        );
+
+        let hardlink_alias = staging_root.join("hardlink.sqlite");
+        std::fs::hard_link(&live, &hardlink_alias).expect("create SQLite hard-link alias");
+        assert!(
+            assert_staged_path_is_distinct(&live, &hardlink_alias, "SQLite").is_err(),
+            "a SQLite hard-link alias is rejected by file identity"
+        );
+
+        let rocks_live = live_root.join("rocksdb-live");
+        std::fs::create_dir(&rocks_live).expect("create live RocksDB root");
+        let rocks_alias_root = root.path().join("rocksdb-alias-root");
+        symlink(&rocks_live, &rocks_alias_root).expect("create RocksDB root symlink alias");
+        assert!(
+            assert_staged_path_is_distinct(
+                &rocks_live,
+                &rocks_alias_root.join("candidate.tar.gz"),
+                "RocksDB",
+            )
+            .is_err(),
+            "a candidate below a symlink alias of the live RocksDB root is rejected"
+        );
+    }
+}
+
+/// A failed copy is allowed to leave a private temporary file briefly, but it
+/// must never truncate or replace an already-published destination, nor leave
+/// the partial private file behind after cleanup.
+#[test]
+fn native_jazz_corpus_publication_copy_failure_preserves_existing_destination() {
+    let root = tempfile::tempdir().expect("create publication failure root");
+    let candidate = root.path().join("candidate.sqlite");
+    let requested = root.path().join("published.sqlite");
+    std::fs::write(&candidate, b"complete verified candidate").expect("write candidate");
+    std::fs::write(&requested, b"previous published corpus").expect("write old destination");
+
+    let error = publish_verified_native_corpus_candidate_with_copy(
+        &candidate,
+        &requested,
+        |_candidate, temporary| {
+            std::fs::write(temporary, b"partial prefix")
+                .map_err(|error| error.to_string())?;
+            Err("injected partial copy failure".to_owned())
+        },
+    )
+    .expect_err("an injected staged-copy failure must abort publication");
+    assert_eq!(error, "injected partial copy failure");
+    assert_eq!(
+        std::fs::read(&requested).expect("read existing destination after failed publication"),
+        b"previous published corpus",
+        "a failed staged copy leaves the pre-existing destination byte-for-byte intact"
+    );
+    let temporary_prefix = ".published.sqlite.native-corpus-staging-";
+    assert!(
+        std::fs::read_dir(root.path())
+            .expect("list publication root")
+            .all(|entry| {
+                !entry
+                    .expect("read publication-root entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(temporary_prefix)
+            }),
+        "failed staged publication cleans up its partial private file"
+    );
+
+    assert!(
+        publish_verified_native_corpus_candidate(&candidate, &candidate).is_err(),
+        "a requested output cannot be the staged candidate itself"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let symlink_destination = root.path().join("candidate-symlink.sqlite");
+        symlink(&candidate, &symlink_destination)
+            .expect("create publication destination symlink alias");
+        assert!(
+            publish_verified_native_corpus_candidate(&candidate, &symlink_destination).is_err(),
+            "a symlink alias cannot be used as the publication destination"
+        );
+
+        let alias_destination = root.path().join("candidate-hardlink.sqlite");
+        std::fs::hard_link(&candidate, &alias_destination)
+            .expect("create publication destination hard-link alias");
+        assert!(
+            publish_verified_native_corpus_candidate(&candidate, &alias_destination).is_err(),
+            "a physical hard-link alias cannot be used as the publication destination"
+        );
+    }
 }
 
 /// The regeneration verifier must not be able to fall back to the still-live
