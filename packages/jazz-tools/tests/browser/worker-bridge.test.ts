@@ -12,6 +12,11 @@ import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
+  INDEXEDDB_STORAGE_MANIFEST,
+  INDEXEDDB_STORAGE_MANIFEST_KEY,
+  INDEXEDDB_STORAGE_MANIFEST_STORE,
+} from "../../src/runtime/indexeddb-page-store.js";
+import {
   TestCleanup,
   createSyncedDb,
   sleep,
@@ -292,6 +297,44 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     expect(db).toBeDefined();
     expect(db).toBeInstanceOf(Db);
+  });
+
+  it("keeps createDb schema-lazy but rejects the first local read when durable storage cannot open", async () => {
+    const dbName = uniqueDbName("corrupt-storage-open");
+    const initial = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    await initial.insert(todos, { title: "durable sentinel", done: false }).wait({ tier: "local" });
+    await initial.shutdown();
+    untrack(initial);
+    // The last follower releases its worker context after the short idle
+    // window. Without this, a cached worker runtime never reopens the raw
+    // IndexedDB namespace and cannot observe the corruption below.
+    await sleep(100);
+
+    await replaceStorageManifest(dbName, {
+      ...INDEXEDDB_STORAGE_MANIFEST,
+      storageEpoch: 2,
+    });
+
+    const reopened = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    // `createDb` intentionally does not select a schema or open durable
+    // storage. The first schema-backed public operation owns the failure.
+    await expect(
+      withTimeout(
+        reopened.all(todos, { tier: "local" }),
+        5_000,
+        "corrupt storage read did not settle",
+      ),
+    ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
   });
 
   // -------------------------------------------------------------------------
@@ -2764,5 +2807,32 @@ async function publishPermissionsForServer(
     adminSecret,
     schema: schema ?? app.wasmSchema,
     permissions,
+  });
+}
+
+async function replaceStorageManifest(name: string, manifest: unknown): Promise<void> {
+  const database = await requestResult(indexedDB.open(name));
+  const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+  transaction
+    .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
+    .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
+  await transactionDone(transaction);
+  database.close();
+}
+
+function requestResult<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
   });
 }
