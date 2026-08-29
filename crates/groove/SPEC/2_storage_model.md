@@ -180,12 +180,21 @@ without changing pages.
 Authoritative storage code must not acquire a private Rust serialization
 spelling by accident. `dev/gates/default-serialization-persistence.mjs` scans
 every production source tree that owns an authoritative storage ingress, egress,
-or value carried across one. Raw `postcard`, `serde_json`, bincode, and
-MessagePack convenience byte calls fail unless their exact source count and
-boundary classification are recorded in
-`dev/storage/default-serialization-registry.json`. Thus adding a default
-serializer in a persistence-owning module is a reviewable storage-format change,
-not an invisible implementation detail.
+or value carried across one. Such a source cannot import, re-export, or declare
+an `extern crate` for a general-purpose serializer. A reviewed exception must
+instead use a fully qualified call whose API, occurrence count, and exact local
+source anchor are recorded in
+`dev/storage/default-serialization-registry.json`; moving the call therefore
+requires renewed review rather than silently transferring an allowance to a new
+endpoint.
+
+The gate inventories serializer dependencies from `Cargo.lock` as well as
+scanning calls. Its current inventory is `postcard`, `serde_json`, and
+`ciborium`; known default-codec families such as bincode and MessagePack are
+also denied if introduced. Adding another serializer dependency requires an
+explicit registry decision before persistence-owning code can use it. Thus
+adding a default serializer at the persistence boundary is a reviewable
+storage-format change, not an invisible implementation detail.
 
 The registry does not bless a serializer as an engine-owned durable codec. Its
 current exceptions are semantic JSON parsing for already-authenticated large

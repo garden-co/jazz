@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,10 +14,17 @@ function fixture() {
   fs.mkdirSync(path.join(root, "dev/storage"), { recursive: true });
   fs.mkdirSync(path.join(root, "crates/jazz/src/node"), { recursive: true });
   fs.writeFileSync(
+    path.join(root, "Cargo.lock"),
+    ['name = "ciborium"', 'name = "postcard"', 'name = "serde_json"'].join("\n"),
+  );
+  fs.writeFileSync(
     path.join(root, "dev/storage/default-serialization-registry.json"),
     JSON.stringify({
       schemaVersion: 2,
-      scope: { paths: ["crates/jazz/src/node"] },
+      scope: {
+        paths: ["crates/jazz/src/node"],
+        serializerCrates: ["ciborium", "postcard", "serde_json"],
+      },
       allowances: [],
     }),
   );
@@ -26,6 +34,17 @@ function fixture() {
 
 function run(root) {
   return spawnSync("node", [gate, "--root", root], { encoding: "utf8" });
+}
+
+function anchor(source, needle) {
+  const index = source.indexOf(needle);
+  const lines = source.split("\n");
+  const line = source.slice(0, index).split("\n").length - 1;
+  const context = lines
+    .slice(Math.max(0, line - 1), line + 2)
+    .join("\n")
+    .trim();
+  return crypto.createHash("sha256").update(context).digest("hex");
 }
 
 test("rejects an unregistered raw serializer in a persistence-owning module", () => {
@@ -55,13 +74,17 @@ test("requires an exact registry receipt for a deliberate non-durable use", () =
       registryPath,
       JSON.stringify({
         schemaVersion: 2,
-        scope: { paths: ["crates/jazz/src/node"] },
+        scope: {
+          paths: ["crates/jazz/src/node"],
+          serializerCrates: ["ciborium", "postcard", "serde_json"],
+        },
         allowances: [
           {
             id: "test-only",
             path: "crates/jazz/src/node/codec.rs",
             api: "postcard::to_allocvec",
             expectedOccurrences: 1,
+            anchors: [anchor("let bytes = postcard::to_allocvec(&value);\n", "postcard")],
             classification: "test-only temporary bytes",
           },
         ],
@@ -182,6 +205,55 @@ test("rejects fully-qualified raw serializer crate identifiers", () => {
   }
 });
 
+test("rejects extern crate serializer aliases including raw roots", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    for (const source of [
+      "extern crate postcard as serializer_audit_alias; fn f() { serializer_audit_alias::to_allocvec(&value); }",
+      "extern crate r#postcard as r#serializer_audit_alias; fn f() { r#serializer_audit_alias::to_allocvec(&value); }",
+      "pub extern crate serde_json as json; fn f() { json::to_vec(&value); }",
+      "pub(crate) extern crate serde_json as json; fn f() { json::to_vec(&value); }",
+      "extern crate ciborium as binary; fn f() { binary::ser::into_writer(&value, output); }",
+    ]) {
+      fs.writeFileSync(file, `${source}\n`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, source);
+      assert.match(result.stderr, /serializer extern crates are prohibited/);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects alternate serializer families and dependency-inventory drift", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    for (const source of [
+      "use ciborium::ser::into_writer; fn f() { into_writer(&value, output); }",
+      "use bincode as binary; fn f() { binary::serialize(&value); }",
+      "use rmp_serde::*; fn f() { to_vec(&value); }",
+      "fn f() { ciborium::de::from_reader(input); }",
+    ]) {
+      fs.writeFileSync(file, `${source}\n`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, source);
+    }
+    fs.writeFileSync(
+      path.join(root, "Cargo.lock"),
+      ['name = "bincode"', 'name = "ciborium"', 'name = "postcard"', 'name = "serde_json"'].join(
+        "\n",
+      ),
+    );
+    const drift = run(root);
+    assert.notEqual(drift.status, 0);
+    assert.match(drift.stderr, /scope\.serializerCrates must exactly inventory/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("does not mistake locally named values for serializer imports", () => {
   const root = fixture();
   try {
@@ -230,19 +302,52 @@ test("permits an explicitly registered fully-qualified canonical endpoint", () =
       registryPath,
       JSON.stringify({
         schemaVersion: 2,
-        scope: { paths: ["crates/jazz/src/node"] },
+        scope: {
+          paths: ["crates/jazz/src/node"],
+          serializerCrates: ["ciborium", "postcard", "serde_json"],
+        },
         allowances: [
           {
             id: "semantic-json-endpoint",
             path: "crates/jazz/src/node/codec.rs",
             api: "serde_json::from_str",
             expectedOccurrences: 1,
+            anchors: [anchor("fn f() { serde_json::from_str(&value); }\n", "serde_json")],
             classification: "explicit test endpoint",
           },
         ],
       }),
     );
     assert.equal(run(root).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects moving a registered call elsewhere in the same source file", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    const reviewed = "fn reviewed_endpoint() {\n  serde_json::from_str(&value);\n}\n";
+    fs.writeFileSync(file, reviewed);
+    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
+    const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+    registry.allowances = [
+      {
+        id: "reviewed-endpoint",
+        path: "crates/jazz/src/node/codec.rs",
+        api: "serde_json::from_str",
+        expectedOccurrences: 1,
+        anchors: [anchor(reviewed, "serde_json")],
+        classification: "reviewed fixture endpoint",
+      },
+    ];
+    fs.writeFileSync(registryPath, JSON.stringify(registry));
+    assert.equal(run(root).status, 0);
+    fs.writeFileSync(file, "fn production_write() {\n  serde_json::from_str(&value);\n}\n");
+    const moved = run(root);
+    assert.notEqual(moved.status, 0);
+    assert.match(moved.stderr, /endpoint anchor changed or call moved/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
