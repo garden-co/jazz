@@ -652,6 +652,31 @@ impl Clock {
     }
 }
 
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Reserve local transaction-clock positions through `high_water`.
+    ///
+    /// A host that intentionally reuses a transaction node calls this before
+    /// exposing the new runtime. The next local mint is therefore strictly
+    /// newer than every value confirmed by the preceding runtime.
+    pub(crate) fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
+        self.clock.tx_time = self.clock.tx_time.max(high_water.tick_after()?);
+        Ok(())
+    }
+
+    /// The greatest HLC this runtime has minted or observed.
+    ///
+    /// A foreground-node lease host reads this during an explicit clean
+    /// handoff. The value is runtime-owned rather than inferred from durable
+    /// relay state: a foreground can mint a transaction which is subsequently
+    /// rolled back or never submitted.
+    pub(crate) fn tx_time_high_water(&self) -> TxTime {
+        self.clock.tx_time
+    }
+}
+
 #[cfg(test)]
 impl<S> NodeState<S>
 where

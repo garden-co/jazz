@@ -26,13 +26,15 @@ use jazz::db::{
     PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream, TickScheduler, TickUrgency,
     Transport, UpdateOptions, UpsertOptions, block_on,
 };
+use jazz::foreground_node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::RowUuid;
+use jazz::ids::{NodeUuid, RowUuid};
 use jazz::protocol::SyncMessage;
 use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_len};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
+use jazz::time::TxTime;
 use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
 use jazz_storage_sqlite::SqliteStorage;
@@ -486,6 +488,9 @@ pub struct NativeRelayHost {
     /// this separate from the general command handles makes it impossible for
     /// JSI to turn a guessed number into a relay/client pairing.
     foregrounds: BTreeMap<u64, OpenedForeground>,
+    /// Native-relay-owned foreground node leases, partitioned by durable
+    /// relay scope. A foreground never chooses or retains this state itself.
+    foreground_node_leases: BTreeMap<RelayScope, ForegroundNodeLeasePool>,
     next_handle: u64,
     #[cfg(test)]
     thread_start_counter: Option<Arc<AtomicUsize>>,
@@ -504,9 +509,11 @@ struct OpenedRelay {
 }
 
 struct OpenedForeground {
+    scope: RelayScope,
     relay: u64,
     client: u64,
     wake: Option<ForegroundWakeRegistration>,
+    lease: ForegroundNodeLease,
 }
 
 #[derive(Clone, Copy)]
@@ -535,6 +542,7 @@ impl Default for NativeRelayHost {
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             foregrounds: BTreeMap::new(),
+            foreground_node_leases: BTreeMap::new(),
             next_handle: 1,
             #[cfg(test)]
             thread_start_counter: None,
@@ -561,6 +569,61 @@ impl NativeRelayHost {
                 return Ok(capability);
             }
         }
+    }
+
+    fn acquire_foreground_lease(
+        &mut self,
+        scope: &RelayScope,
+    ) -> Result<ForegroundNodeLease, JazzNativeRelayStatus> {
+        let pool = self
+            .foreground_node_leases
+            .entry(scope.clone())
+            .or_default();
+        if let Some(lease) = pool.acquire_reusable() {
+            return Ok(lease);
+        }
+        loop {
+            let mut bytes = [0_u8; 16];
+            getrandom::fill(&mut bytes)
+                .map_err(|error| relay_status(RelayError::Entropy(error.to_string())))?;
+            match pool.acquire_fresh(NodeUuid::from_bytes(bytes)) {
+                Ok(lease) => return Ok(lease),
+                // CSPRNG collision against a live, reusable, or retired node
+                // is vanishingly unlikely, but never turn one into a lease
+                // alias or a spurious lifecycle failure.
+                Err(jazz::foreground_node_lease::ForegroundNodeLeaseError::DuplicateNode) => {}
+                Err(jazz::foreground_node_lease::ForegroundNodeLeaseError::InactiveLease) => {
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                }
+            }
+        }
+    }
+
+    fn clean_foreground_lease(
+        &mut self,
+        scope: &RelayScope,
+        lease: ForegroundNodeLease,
+        high_water: TxTime,
+    ) -> Result<(), JazzNativeRelayStatus> {
+        // This host is the relay's single serialized lifecycle owner. Updating
+        // the pool immediately after native-core readout is its atomic durable
+        // handoff boundary; a future durable pool backend must perform the
+        // exact same transition transactionally before exposing the reuse.
+        self.foreground_node_leases
+            .get_mut(scope)
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure)?
+            .clean_handoff(ForegroundNodeLease {
+                confirmed_tx_time: high_water,
+                ..lease
+            })
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)
+    }
+
+    fn retire_foreground_lease(&mut self, scope: &RelayScope, lease: ForegroundNodeLease) {
+        let Some(pool) = self.foreground_node_leases.get_mut(scope) else {
+            return;
+        };
+        let _ = pool.retire(lease);
     }
 
     fn execute(
@@ -778,9 +841,15 @@ impl NativeRelayHost {
         let client_handle = self
             .allocate()
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let client = match relay
-            .attach_client(fresh_client_identity(author).map_err(relay_status)?, claims)
-        {
+        let lease = self.acquire_foreground_lease(&scope)?;
+        let client = match relay.attach_foreground_client(
+            DbIdentity {
+                node: lease.node,
+                author,
+            },
+            claims,
+            lease,
+        ) {
             Ok(client) => client,
             Err(error) => {
                 // The relay alias was not yet observable to the caller. Undo
@@ -789,6 +858,14 @@ impl NativeRelayHost {
                 let final_alias = !self.relays.values().any(|opened| opened.scope == scope);
                 if final_alias {
                     let _ = self.registry.close(&scope);
+                }
+                // No foreground runtime observed this lease, so it is a known
+                // zero-high-water failure rather than an uncertain handoff.
+                if self
+                    .clean_foreground_lease(&scope, lease, TxTime::default())
+                    .is_err()
+                {
+                    self.retire_foreground_lease(&scope, lease);
                 }
                 return Err(relay_status(error));
             }
@@ -805,15 +882,21 @@ impl NativeRelayHost {
                 if final_alias {
                     let _ = self.registry.close(&scope);
                 }
+                // A client existed briefly. Its close failure means the
+                // runtime may have minted after attachment, so conservatively
+                // retire rather than returning the zero-water lease.
+                self.retire_foreground_lease(&scope, lease);
                 return Err(JazzNativeRelayStatus::LifecycleFailure);
             }
         };
         self.foregrounds.insert(
             foreground,
             OpenedForeground {
+                scope,
                 relay: relay_handle,
                 client: client_handle,
                 wake: None,
+                lease,
             },
         );
         Ok(foreground)
@@ -855,20 +938,49 @@ impl NativeRelayHost {
         if let Some(wake) = foreground.wake {
             wake.cancelled(foreground_handle);
         }
-        let Some(opened) = self.relays.remove(&foreground.relay) else {
-            return Ok(false);
-        };
-        if let Some((_, client)) = self.clients.remove(&foreground.client) {
-            client.close().map_err(relay_status)?;
-        }
+        // Read out the runtime-owned HLC before dropping the client, then
+        // close every owner edge before placing the lease back in the pool.
+        // Any failed or missing step is an uncertain shutdown: retire rather
+        // than let a later foreground repeat this node identity.
+        let high_water = self
+            .clients
+            .get(&foreground.client)
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure)
+            .and_then(|(_, client)| client.minted_tx_time_high_water().map_err(relay_status));
+        let client_closed = self
+            .clients
+            .remove(&foreground.client)
+            .map(|(_, client)| client.close())
+            .transpose()
+            .map_err(relay_status);
+        let opened = self.relays.remove(&foreground.relay);
         let final_alias = !self
             .relays
             .values()
-            .any(|remaining| remaining.scope == opened.scope);
-        if final_alias {
-            self.registry
+            .any(|remaining| remaining.scope == foreground.scope);
+        let relay_closed = match opened {
+            Some(opened) if final_alias => self
+                .registry
                 .close(&opened.scope)
-                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                .map(|_| ())
+                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure),
+            Some(_) => Ok(()),
+            None => Err(JazzNativeRelayStatus::LifecycleFailure),
+        };
+        match (high_water, client_closed, relay_closed) {
+            (Ok(high_water), Ok(Some(())), Ok(())) => {
+                if self
+                    .clean_foreground_lease(&foreground.scope, foreground.lease, high_water)
+                    .is_err()
+                {
+                    self.retire_foreground_lease(&foreground.scope, foreground.lease);
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                }
+            }
+            _ => {
+                self.retire_foreground_lease(&foreground.scope, foreground.lease);
+                return Err(JazzNativeRelayStatus::LifecycleFailure);
+            }
         }
         Ok(true)
     }
@@ -1955,6 +2067,17 @@ impl NativeRelayClient {
         })
     }
 
+    fn minted_tx_time_high_water(&self) -> Result<TxTime, RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            let client = worker
+                .clients
+                .get(&id)
+                .ok_or(RelayError::UnknownClient(id))?;
+            Ok(block_on(client.db.minted_tx_time_high_water()))
+        })
+    }
+
     pub fn close(self) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
@@ -2615,6 +2738,7 @@ impl RelayWorker {
         &mut self,
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
+        tx_time_floor: Option<TxTime>,
     ) -> Result<u64, RelayError> {
         let column_families = self.schema.column_families();
         let refs = column_families
@@ -2630,6 +2754,9 @@ impl RelayWorker {
             }))
             .map_err(RelayError::Db)?,
         );
+        if let Some(high_water) = tx_time_floor {
+            block_on(db.reserve_minted_tx_time_after(high_water)).map_err(RelayError::Db)?;
+        }
         let (client_transport, relay_transport, wire) = duplex(Arc::clone(&self.liveness));
         let upstream = block_on(db.connect_upstream(client_transport));
         let served =
@@ -3303,7 +3430,29 @@ impl NativeRelay {
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
     ) -> Result<NativeRelayClient, RelayError> {
-        let id = self.run(move |worker| worker.attach_client(identity, claims))?;
+        let id = self.run(move |worker| worker.attach_client(identity, claims, None))?;
+        Ok(NativeRelayClient {
+            relay: self.clone(),
+            id,
+            wire: self.run(move |worker| {
+                worker
+                    .clients
+                    .get(&id)
+                    .map(|client| client.wire.clone())
+                    .ok_or(RelayError::UnknownClient(id))
+            })?,
+        })
+    }
+
+    fn attach_foreground_client(
+        &self,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+        lease: ForegroundNodeLease,
+    ) -> Result<NativeRelayClient, RelayError> {
+        let id = self.run(move |worker| {
+            worker.attach_client(identity, claims, Some(lease.confirmed_tx_time))
+        })?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
@@ -4814,6 +4963,113 @@ mod tests {
 
         relay.scope.auth_scope = None;
         assert!(matches!(relay.validate(), Err(RelayError::InvalidScope(_))));
+    }
+
+    #[test]
+    fn clean_foreground_handoff_reuses_one_node_only_after_advancing_its_hlc() {
+        // This is intentionally an internal host-lifecycle receipt. The
+        // user-visible write protocol is exercised by the Db integration
+        // suites; here we need to observe the adapter-owned lease and the
+        // runtime-owned HLC exactly at their handoff boundary.
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = NativeRelayHost::default();
+        let capability = host
+            .admit_scope(RelayScopeAdmissionRequest {
+                scope: RelayScopeRequest {
+                    app_namespace: "foreground-clean-handoff".to_owned(),
+                    storage_namespace: "default".to_owned(),
+                    auth_scope: Some("opaque-validated-subject".to_owned()),
+                },
+                sqlite_path: directory
+                    .path()
+                    .join("foreground.sqlite")
+                    .display()
+                    .to_string(),
+                schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                identity: DbIdentity {
+                    node: NodeUuid::from_bytes([0xc1; 16]),
+                    author: AuthorSubject::for_test_bytes([0xc2; 16]),
+                },
+                claims: BTreeMap::new(),
+            })
+            .expect("trusted fixture admission succeeds");
+
+        let first = host.open_foreground(capability).unwrap();
+        let first_lease = host.foregrounds[&first].lease;
+        let first_client = host.foreground_client(first).unwrap().clone();
+        let transaction = first_client
+            .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
+            .unwrap();
+        first_client
+            .insert_foreground_transaction(
+                transaction,
+                "todos".to_owned(),
+                encoded_title_cells("first lease holder"),
+                Some([0xc3; 16]),
+            )
+            .unwrap();
+        first_client
+            .commit_foreground_transaction(transaction)
+            .unwrap();
+        let first_high_water = first_client.minted_tx_time_high_water().unwrap();
+        assert!(first_high_water > TxTime::default());
+
+        assert!(host.close_foreground(first).unwrap());
+        let second = host.open_foreground(capability).unwrap();
+        let second_lease = host.foregrounds[&second].lease;
+        assert_eq!(second_lease.node, first_lease.node);
+        assert_eq!(second_lease.confirmed_tx_time, first_high_water);
+        assert!(
+            host.foreground_client(second)
+                .unwrap()
+                .minted_tx_time_high_water()
+                .unwrap()
+                > first_high_water,
+            "the reused runtime reserves an HLC strictly past its predecessor before exposure"
+        );
+        assert!(host.close_foreground(second).unwrap());
+    }
+
+    #[test]
+    fn uncertain_foreground_readout_retires_instead_of_reissuing_its_node() {
+        // Internal failure-path receipt: removing the owner-local client
+        // models a runtime that disappeared before native close could read its
+        // HLC. There is deliberately no best-effort reuse in that case.
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = NativeRelayHost::default();
+        let capability = host
+            .admit_scope(RelayScopeAdmissionRequest {
+                scope: RelayScopeRequest {
+                    app_namespace: "foreground-uncertain-handoff".to_owned(),
+                    storage_namespace: "default".to_owned(),
+                    auth_scope: Some("opaque-validated-subject".to_owned()),
+                },
+                sqlite_path: directory
+                    .path()
+                    .join("foreground.sqlite")
+                    .display()
+                    .to_string(),
+                schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                identity: DbIdentity {
+                    node: NodeUuid::from_bytes([0xd1; 16]),
+                    author: AuthorSubject::for_test_bytes([0xd2; 16]),
+                },
+                claims: BTreeMap::new(),
+            })
+            .expect("trusted fixture admission succeeds");
+
+        let first = host.open_foreground(capability).unwrap();
+        let first_lease = host.foregrounds[&first].lease;
+        let first_client = host.foregrounds[&first].client;
+        drop(host.clients.remove(&first_client));
+        assert_eq!(
+            host.close_foreground(first),
+            Err(JazzNativeRelayStatus::LifecycleFailure)
+        );
+
+        let second = host.open_foreground(capability).unwrap();
+        assert_ne!(host.foregrounds[&second].lease.node, first_lease.node);
+        assert!(host.close_foreground(second).unwrap());
     }
 
     #[test]
