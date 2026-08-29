@@ -142,11 +142,11 @@ jobs:
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --version 5.0.1 --locked
 
-      - name: Build maintained selective-hydration receipt
-        run: cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench selective_global_hydration
+      - name: Build maintained selective-hydration benchmark
+        run: cargo codspeed build -m walltime --package jazz --features testing --bench selective_global_hydration
 
-      - name: Run maintained selective-hydration receipt
+      - name: Run maintained selective-hydration benchmark
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: walltime
-          run: env JAZZ_SELECTIVE_HYDRATION_ROWS=10000,100000 JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS=100 JAZZ_SELECTIVE_HYDRATION_RESULT_ROWS=50 cargo codspeed run --package jazz --bench selective_global_hydration
+          run: cargo codspeed run -m walltime --package jazz --bench selective_global_hydration

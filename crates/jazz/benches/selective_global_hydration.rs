@@ -8,11 +8,13 @@
 //! cargo bench -p jazz --features testing --bench selective_global_hydration --quiet
 //! ```
 //!
-//! `JAZZ_SELECTIVE_HYDRATION_ROWS` controls the comma-separated table-size
-//! ladder. `JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS`,
+//! The default run exposes fixed 10k and 100k wall-time benchmarks to Divan
+//! and CodSpeed. Set `JAZZ_SELECTIVE_HYDRATION_RECEIPT=1` to run the JSONL
+//! scale receipt instead; in that mode `JAZZ_SELECTIVE_HYDRATION_ROWS`
+//! controls the comma-separated table-size ladder and
+//! `JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS`,
 //! `JAZZ_SELECTIVE_HYDRATION_RESULT_ROWS`, and
-//! `JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS` control the fixed selection and seed
-//! batching.
+//! `JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS` control selection and seed batching.
 
 mod schema_fixture;
 mod support;
@@ -22,7 +24,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, PreparedQuery, Propagation, ReadOpts,
     SeededRowIdSource, SubscriptionEvent, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
@@ -40,6 +42,23 @@ const TABLE: &str = "documents";
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
+
+    // CodSpeed recognizes Divan's benchmark protocol, not the JSONL receipt
+    // protocol below. Keep the latter for the 1M-row diagnostic rung, but make
+    // the normal bench target real wall-time benchmarks.
+    if std::env::var_os("JAZZ_SELECTIVE_HYDRATION_RECEIPT").is_some() {
+        run_receipt();
+        return;
+    }
+
+    divan::main();
+}
+
+/// Run the full read-count receipt, including the 1M diagnostic rung.
+///
+/// This is intentionally opt-in: it proves the selectivity invariant and is
+/// much too expensive to be a repeated CodSpeed sample.
+fn run_receipt() {
     let config = Config::from_env();
     config.validate();
 
@@ -94,6 +113,32 @@ fn main() {
         json!("A reusable settled fixture would avoid reseeding each scale rung while preserving the fixed-selection read boundary."),
     );
     support::emit_json_line("selective_global_hydration", fields);
+}
+
+/// CodSpeed wall-time receipt for the maintained initial hydration path at a
+/// fixed 10k-row table size. Seeding, reopening, query preparation, and one
+/// fully-asserted validation pass are deliberately outside the timed closure.
+#[divan::bench(sample_count = 10)]
+fn maintained_subscription_hydration_10k(bencher: divan::Bencher<'_, '_>) {
+    benchmark_maintained_subscription_hydration(bencher, 10_000);
+}
+
+/// The same fixed-selectivity workload at 100k rows. Fewer samples retain a
+/// useful hosted receipt without turning fixture setup into the dominant CI
+/// cost. The 1M rung remains available through `run_receipt` above.
+#[divan::bench(sample_count = 3)]
+fn maintained_subscription_hydration_100k(bencher: divan::Bencher<'_, '_>) {
+    benchmark_maintained_subscription_hydration(bencher, 100_000);
+}
+
+fn benchmark_maintained_subscription_hydration(bencher: divan::Bencher<'_, '_>, table_rows: usize) {
+    let fixture = HydrationFixture::new(table_rows);
+
+    // Keep the correctness/read-bound proof out of the measurement. The timed
+    // operation below is exactly the same initial maintained hydration.
+    fixture.assert_selective_hydration();
+
+    bencher.bench_local(|| divan::black_box(fixture.hydrate_maintained()));
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +215,130 @@ struct RungReceipt {
     prepare_metrics: StorageReadMetrics,
     query_metrics: StorageReadMetrics,
     maintained_metrics: StorageReadMetrics,
+}
+
+/// A settled RocksDB database plus its prepared fixed-selectivity query.
+///
+/// The tempdir is retained for the lifetime of the database so every timed
+/// sample reads the same reopened persisted fixture. Each benchmark invocation
+/// constructs this once, outside Divan's timed closure.
+struct HydrationFixture {
+    _temp: tempfile::TempDir,
+    db: Db<RocksDbStorage>,
+    prepared: PreparedQuery,
+    expected: Vec<RowUuid>,
+    target_rows: usize,
+}
+
+struct HydrationMeasurement {
+    row_count: usize,
+    result_digest: String,
+    metrics: StorageReadMetrics,
+}
+
+impl HydrationFixture {
+    fn new(table_rows: usize) -> Self {
+        let config = ConfigRef {
+            target_rows: 100,
+            result_rows: 50,
+            batch_rows: 1_000,
+        };
+        let temp = tempfile::tempdir().expect("create selective-hydration RocksDB directory");
+        let schema = schema();
+        let (seed_db, _, _) = open_db(temp.path(), schema.clone());
+        seed_rows(&seed_db, config, table_rows);
+        block_on(seed_db.close()).expect("close seeded selective-hydration database");
+        drop(seed_db);
+
+        let (db, _, _) = open_db(temp.path(), schema);
+        let query = selective_query(config.result_rows);
+        let prepared = db
+            .prepare_query_bound(
+                &query,
+                BTreeMap::from([("team".to_owned(), Value::Uuid(target_team().0))]),
+            )
+            .expect("prepare selective Global query");
+        let expected = (config.target_rows - config.result_rows..config.target_rows)
+            .rev()
+            .map(target_row)
+            .collect();
+
+        Self {
+            _temp: temp,
+            db,
+            prepared,
+            expected,
+            target_rows: config.target_rows,
+        }
+    }
+
+    fn assert_selective_hydration(&self) {
+        self.db.reset_storage_read_metrics_for_test();
+        let rows = block_on(self.db.all_for_identity(
+            &self.prepared,
+            global_read_opts(),
+            AuthorSubject::SYSTEM,
+        ))
+        .expect("run selective Global query");
+        let observed = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+        assert_eq!(observed, self.expected, "selective Global result changed");
+        let query_metrics = self.db.take_storage_read_metrics_for_test();
+        assert_selective_metrics(&query_metrics, self.target_rows, "query");
+
+        let measured = self.hydrate_maintained();
+        assert_eq!(measured.row_count, self.expected.len());
+        assert_eq!(measured.result_digest, digest_rows(&self.expected));
+        assert_selective_metrics(&measured.metrics, self.target_rows, "maintained");
+    }
+
+    /// The timed operation: create one maintained subscription and consume its
+    /// initial reset. It returns the same result digest and logical read
+    /// counters asserted by `assert_selective_hydration`, but performs no
+    /// assertion inside the wall-time sample.
+    fn hydrate_maintained(&self) -> HydrationMeasurement {
+        self.db.reset_storage_read_metrics_for_test();
+        let mut subscription = block_on(self.db.subscribe(&self.prepared, local_read_opts()))
+            .expect("open selective maintained subscription");
+        let SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } = subscription
+            .try_next_event()
+            .expect("maintained subscription must emit its initial reset")
+        else {
+            panic!("maintained subscription must emit an initial reset");
+        };
+        let rows = added
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        let metrics = self.db.take_storage_read_metrics_for_test();
+        HydrationMeasurement {
+            row_count: rows.len(),
+            result_digest: digest_rows(&rows),
+            metrics,
+        }
+    }
+}
+
+fn selective_query(result_rows: usize) -> Query {
+    Query::from(TABLE)
+        .filter(eq(col("team"), param("team")))
+        .filter(eq(col("active"), lit(true)))
+        .order_by("updated_at", OrderDirection::Desc)
+        .order_by("id", OrderDirection::Desc)
+        .limit(result_rows)
+}
+
+fn assert_selective_metrics(metrics: &StorageReadMetrics, target_rows: usize, phase: &str) {
+    assert!(
+        metrics.global_current_rows.reads <= target_rows,
+        "{phase} selective Global hydration read {} current rows for {target_rows} indexed candidates",
+        metrics.global_current_rows.reads,
+    );
+    assert!(
+        (1..=target_rows).contains(&metrics.global_current_indexes.reads),
+        "{phase} selective Global hydration must use the declared index without reading more than the fixed candidate set",
+    );
 }
 
 impl RungReceipt {

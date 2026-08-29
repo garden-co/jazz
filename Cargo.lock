@@ -2015,6 +2015,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bytes",
+ "codspeed-divan-compat",
  "criterion",
  "ed25519-dalek",
  "flate2",

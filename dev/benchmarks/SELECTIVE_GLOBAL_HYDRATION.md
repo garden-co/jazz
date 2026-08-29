@@ -28,10 +28,11 @@ alongside query wall time. Logical reads are the primary mechanism evidence;
 wall time is directional because the same-process seed leaves operating-system
 cache state uncontrolled.
 
-The default ladder is 1,000 / 10,000 / 100,000 total rows. Override it for a
+The default ladder is 10,000 / 100,000 / 1,000,000 total rows. Override it for a
 bounded smoke run:
 
 ```sh
+JAZZ_SELECTIVE_HYDRATION_RECEIPT=1 \
 JAZZ_SELECTIVE_HYDRATION_ROWS=1000,10000 \
   cargo bench -p jazz --features testing \
   --bench selective_global_hydration --quiet

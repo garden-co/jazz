@@ -57,12 +57,13 @@ than old helper behavior:
   tests cover recursive write-policy settlement with global/settled support
   rows; local-only support rows correctly do not authorize writes.
 
-`selective_global_hydration` is a custom JSONL receipt over the persisted
-Global query path. It holds one selected team and its result page fixed while
-total table rows increase, then records exact result digests and logical
-Global-current row/index reads. It is intentionally not a timing gate: the
-deterministic read counts establish whether hydration is selective before an
-engine optimization is attempted.
+`selective_global_hydration` is a Divan/CodSpeed wall-time benchmark over the
+persisted Global maintained-subscription hydration path. It measures fixed
+10k- and 100k-row tables while keeping the selected team and result page
+constant. Fixture seeding, reopening, preparation, and an exact result/read-
+bound validation pass are outside the timed closure. The full JSONL read-count
+receipt, including its 1M-row diagnostic rung, remains available by setting
+`JAZZ_SELECTIVE_HYDRATION_RECEIPT=1`.
 
 ## Intended next ports
 
