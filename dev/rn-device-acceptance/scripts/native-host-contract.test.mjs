@@ -233,6 +233,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   const androidDriver = read("scripts/run-android.mjs");
   const iosDriver = read("scripts/run-ios.mjs");
   const app = read("App.tsx");
+  const highLevelForeground = read("src/high-level-foreground.ts");
   const scenarios = read("src/scenarios.ts");
   const androidFixture = read("native/android/JazzDeviceFixtureModule.kt");
   const iosFixture = read("native/ios/JazzDeviceFixture.mm");
@@ -245,6 +246,14 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   assert.match(androidDriver, /am", "force-stop", "dev\.jazz\.rndeviceacceptance/);
   assert.match(iosDriver, /simctl\(\["terminate", udid, "dev\.jazz\.rndeviceacceptance"\]\)/);
   assert.match(scenarios, /phase === "verify"\s*\?\s*scenario\.scenario === "reopen"/);
+  // The restart assertion must cross the public RN API. A byte-level `all`
+  // after re-admission only proves the host transport; it does not prove a
+  // fresh application can start, select its foreground runtime, and decode a
+  // persisted row through `createJazzClient`.
+  assert.match(app, /await proveHighLevelForegroundRestart\(reopened\.capability\)/);
+  assert.match(highLevelForeground, /createJazzClient\(clientConfig\(capability\)\)/);
+  assert.match(highLevelForeground, /client\.db\.all\(app\.todos\)/);
+  assert.match(highLevelForeground, /prior process's persisted row/);
   assert.match(app, /\{\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
   assert.match(app, /\{\s*contains: \["b"\],\s*excludes: \["a"\],?\s*\}/);
   assert.match(app, /\{\s*write: "a",\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
