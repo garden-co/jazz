@@ -1142,6 +1142,21 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
   }, /strictly equal/);
 });
 
+test("CodSpeed retains the route subscription binding-scale wall-time receipt", () => {
+  const document = parse(codspeedWorkflow);
+  const job = document.jobs["route-subscription-walltime"];
+  assert.ok(job, "route subscription wall-time job must remain present");
+  assert.equal(
+    job.if,
+    "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
+  );
+  assert.equal(job["runs-on"], "codspeed-macro");
+  const commands = job.steps.map((step) => step.run).filter(Boolean).join("\n");
+  assert.match(commands, /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/);
+  const run = job.steps.find((step) => step.with?.run)?.with?.run;
+  assert.match(run, /JAZZ_ROUTE_CURVE_ROUTES=100 cargo codspeed run --package jazz --features testing --bench route_subscription_curve/);
+});
+
 test("React Native artifact builds are explicit same-repository label opt-ins", () => {
   const document = parse(rnNativeArtifactsWorkflow);
   assert.deepEqual(document.on.pull_request, {

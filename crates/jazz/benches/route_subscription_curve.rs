@@ -55,6 +55,7 @@ struct Receipt {
     matching_write_us: u64,
     unrelated_write_us: u64,
     below_boundary_write_us: u64,
+    storage_backed_witness_free: bool,
     exact_initial: bool,
     exact_matching_delta: bool,
     unrelated_quiet: bool,
@@ -196,11 +197,16 @@ fn run(routes: usize) -> Receipt {
     insert_document(&db, document_row(0, HOT_TEAM_DOCUMENTS + 2), 0, 0);
     let below_boundary_write_us = micros(below_boundary_started.elapsed());
     let below_boundary_quiet = drain_events(&mut streams).iter().all(Delta::is_quiet);
+    let storage_backed_witness_free = retained.version_identities == 0
+        && retained.replacement_entries == 0
+        && retained.versions_bytes == 0
+        && retained.replacements_bytes == 0;
 
     let ok = exact_initial
         && exact_matching_delta
         && unrelated_quiet
         && below_boundary_quiet
+        && storage_backed_witness_free
         && runtime.active_subscriptions == routes
         && retained.subscriptions == routes;
 
@@ -223,6 +229,7 @@ fn run(routes: usize) -> Receipt {
         matching_write_us,
         unrelated_write_us,
         below_boundary_write_us,
+        storage_backed_witness_free,
         exact_initial,
         exact_matching_delta,
         unrelated_quiet,
