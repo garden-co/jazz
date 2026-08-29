@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { createDb, Db, getDbSubscriptionSource, type QueryBuilder } from "../../src/runtime/db.js";
+import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
