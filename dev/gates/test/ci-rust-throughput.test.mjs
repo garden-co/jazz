@@ -1092,7 +1092,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
 });
@@ -1442,13 +1442,14 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(localCi, /correctness-test artifacts[\s\S]*build:test-artifacts/);
-  assert.match(localCi, /parallel Node and browser suites[\s\S]*run-ts-tests\.sh/);
+  assert.match(localCi, /native correctness-artifact producer[\s\S]*build:correctness-artifacts/);
+  assert.match(localCi, /TypeScript consumers[\s\S]*test:typescript-consumers/);
   assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
   assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
   assert.match(runner, /verify-jazz-tools-exports\.mjs/);
   assert.match(runner, /public export surface is incomplete/);
-  assert.match(runner, /Test children only\s+# consume those immutable artifacts/);
+  assert.match(runner, /producer receipt is checked before either suite starts/);
+  assert.match(runner, /correctness-artifact-producer\.mjs/);
   assert.match(runner, /--concurrency=2/);
   assert.match(
     runner,
@@ -1585,7 +1586,10 @@ test("a missing prepared native artifact prevents both TypeScript suites from st
       false,
       "browser suite started after failed artifact check",
     );
-    assert.match(result.stderr, /prepared release jazz-napi artifact did not load/);
+    assert.match(
+      result.stderr,
+      /prepared native correctness artifact manifest is missing or stale/,
+    );
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
@@ -1657,6 +1661,7 @@ test("missing public root or framework exports prevent both TypeScript suites fr
     // CI deliberately has no Jazz Tools build before it runs this contract.
     for (const source of ["run-ts-tests.sh", "verify-jazz-tools-exports.mjs"])
       write(`dev/gates/${source}`, fs.readFileSync(path.join(root, "dev/gates", source), "utf8"));
+    write("dev/artifacts/correctness-artifact-producer.mjs", "process.exit(0);\n");
     write("crates/jazz-napi/package.json", JSON.stringify({ type: "commonjs" }));
     write("crates/jazz-napi/index.js", "module.exports = {};\n");
     write(

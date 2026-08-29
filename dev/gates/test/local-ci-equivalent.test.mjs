@@ -220,7 +220,7 @@ test("CI-equivalent partitions cannot silently substitute their Rust or TypeScri
   );
 
   const typescript = planFor({ partition: "typescript" }).find(
-    ({ label }) => label === "parallel Node and browser suites",
+    ({ label }) => label === "TypeScript consumers",
   );
   assert.ok(typescript);
   assert.deepEqual(typescript.env, { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" });
@@ -296,7 +296,7 @@ test("planted bench/test/bin/example compile failures are surfaced rather than s
     );
     assert.ok(seen.includes("all Rust workspace target classes"));
     assert.equal(
-      seen.includes("correctness-test artifacts"),
+      seen.includes("native correctness-artifact producer"),
       false,
       "a target-class compile failure must stop before TS artifacts hide it",
     );
@@ -314,10 +314,32 @@ test("the generated-artifact boundary fails before Node/browser tests can use st
     () =>
       runPlan(typescript, async (item) => {
         seen.push(item.label);
-        if (item.label === "correctness-test artifacts")
+        if (item.label === "native correctness-artifact producer")
           throw new Error("generated artifact failure");
       }),
     /generated artifact failure/,
   );
-  assert.deepEqual(seen, ["all Rust workspace target classes", "correctness-test artifacts"]);
+  assert.deepEqual(seen, [
+    "all Rust workspace target classes",
+    "native correctness-artifact producer",
+  ]);
+});
+
+test("a successful native producer remains visible when a TypeScript consumer fails", async () => {
+  const typescript = planFor({ partition: "typescript" });
+  const seen = [];
+  await assert.rejects(
+    () =>
+      runPlan(typescript, async (item) => {
+        seen.push(item.label);
+        if (item.label === "TypeScript consumers") throw new Error("planted TS consumer failure");
+      }),
+    /planted TS consumer failure/,
+  );
+  assert.deepEqual(seen, [
+    "all Rust workspace target classes",
+    "native correctness-artifact producer",
+    "preinstalled Chromium",
+    "TypeScript consumers",
+  ]);
 });

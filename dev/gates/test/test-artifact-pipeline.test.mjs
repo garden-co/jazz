@@ -302,7 +302,9 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
     },
     undefined,
     undefined,
-    () => snapshots.push(calls.at(-1)?.label),
+    () => {
+      snapshots.push(calls.at(-1)?.label);
+    },
   );
 
   const labels = calls.map((call) => call.label);
@@ -315,8 +317,6 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
   ]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
-  assert.ok(labels.indexOf("jazz-tools") > labels.indexOf("fast WASM"));
-  assert.ok(labels.indexOf("derive local artifact expectations") < labels.indexOf("jazz-tools"));
   assert.ok(labels.indexOf("verify fast WASM provenance") < labels.indexOf("load release NAPI"));
   assert.ok(
     labels.indexOf("refresh repaired artifact expectations") >
@@ -351,7 +351,7 @@ test("aggregate CI lock selection reaches every Turbo artifact producer", async 
       lockPath,
     );
     for (const call of calls.filter(({ label }) =>
-      ["release NAPI", "CLI", "fast WASM", "jazz-tools", "repair release NAPI"].includes(label),
+      ["release NAPI", "CLI", "fast WASM", "repair release NAPI"].includes(label),
     )) {
       assert.equal(
         call.options.env.JAZZ_TEST_ARTIFACT_LOCK_PATH,
@@ -402,7 +402,7 @@ test("a failed build aborts its still-running sibling commands", async () => {
   let resolveTools;
   const running = buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
     if (label === "release NAPI") return Promise.resolve();
-    if (label === "CLI" || label === "fast WASM" || label === "jazz-tools")
+    if (label === "CLI" || label === "fast WASM")
       return new Promise((resolve, reject) => {
         if (label === "CLI") resolveCli = resolve;
         else if (label === "fast WASM") resolveWasm = resolve;
@@ -424,9 +424,6 @@ test("a failed build aborts its still-running sibling commands", async () => {
   assert.equal(resolveTools, undefined);
   resolveCli();
   resolveWasm();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(typeof resolveTools, "function");
-  resolveTools();
   await running;
 
   await assert.rejects(
@@ -507,9 +504,20 @@ test("CI uses the correctness artifact path while package builds keep release WA
   const packageJson = readFileSync(new URL("../../../package.json", import.meta.url), "utf8");
   const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
   const localCi = readFileSync(new URL("../local-ci-equivalent.mjs", import.meta.url), "utf8");
+  const consumers = readFileSync(new URL("../run-ts-consumers.mjs", import.meta.url), "utf8");
   assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(localCi, /correctness-test artifacts[\s\S]*pnpm[\s\S]*build:test-artifacts/);
-  assert.match(packageJson, /"build:test-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/);
+  assert.match(
+    localCi,
+    /native correctness-artifact producer[\s\S]*pnpm[\s\S]*build:correctness-artifacts/,
+  );
+  assert.match(
+    packageJson,
+    /"build:correctness-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/,
+  );
+  assert.match(
+    packageJson,
+    /"test:typescript-consumers": "node dev\/gates\/run-ts-consumers\.mjs"/,
+  );
   assert.match(
     packageJson,
     /"artifacts:unlock": "node dev\/gates\/build-test-artifacts\.mjs unlock"/,
@@ -534,6 +542,12 @@ test("CI uses the correctness artifact path while package builds keep release WA
       new RegExp(`"exec", "turbo", "run", "${task.replace(":", "\\:")}"`),
       `${task} correctness artifact must run through Turbo`,
     );
+  assert.doesNotMatch(pipeline, /--filter=jazz-tools/);
+  assert.ok(
+    consumers.indexOf("verifyCorrectnessArtifactProducer(root)") <
+      consumers.indexOf('"--filter=jazz-tools"'),
+    "TS consumers must reject a stale producer receipt before Jazz Tools can build",
+  );
 
   const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
   const expectedLease = [

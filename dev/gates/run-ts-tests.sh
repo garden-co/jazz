@@ -31,13 +31,18 @@ log_dir=${RUNNER_TEMP:-/tmp}
 node_tests_log="${log_dir}/jazz-node-tests-$$.log"
 browser_tests_log="${log_dir}/jazz-browser-tests-$$.log"
 
-# The workflow's top-level artifact gate prepares the release NAPI loader and
-# Jazz Tools public exports before either suite starts. Test children only
-# consume those immutable artifacts: allowing an example pretest to rebuild
-# either package races a sibling importer and can delete its dist files.
+# The producer receipt is checked before either suite starts. It binds the
+# immutable NAPI/WASM snapshot and CLI to this exact checkout, so a cache hit
+# from another revision cannot become a TypeScript false-green. Jazz Tools is
+# built by run-ts-consumers.mjs after that preflight; this runner only consumes
+# the prepared surface and seals it against child rebuilds.
 if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
+  if ! node dev/artifacts/correctness-artifact-producer.mjs; then
+    echo "prepared native correctness artifact manifest is missing or stale; run pnpm build:correctness-artifacts" >&2
+    exit 1
+  fi
   if ! node -e "require('./crates/jazz-napi')"; then
-    echo "prepared release jazz-napi artifact did not load; run pnpm build:test-artifacts before test-ts" >&2
+    echo "prepared release jazz-napi artifact did not load; run pnpm build:correctness-artifacts before test-ts" >&2
     exit 1
   fi
   if ! node dev/gates/verify-jazz-tools-exports.mjs; then

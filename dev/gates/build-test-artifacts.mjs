@@ -14,6 +14,10 @@ import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { snapshotCorrectnessArtifacts } from "../artifacts/test-artifact-store.mjs";
+import {
+  verifyCorrectnessArtifactProducer,
+  writeCorrectnessArtifactProducerManifest,
+} from "../artifacts/correctness-artifact-producer.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -375,6 +379,7 @@ export async function buildTestArtifacts(
   scope = createBuildScope(),
   lease = undefined,
   snapshot = () => {},
+  sealProducerManifest = () => {},
 ) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
@@ -452,16 +457,10 @@ export async function buildTestArtifacts(
     );
     await preflightNapi();
   }
-  // Seal the exact pair before jazz-tools bundles its broker worker. The
-  // mutable package publication paths are still useful to package builds, but
-  // correctness bundles must never follow a later replacement generation.
-  snapshot(root);
-  // The atomic WASM producer seals its matching manifest before publication.
-  await guardedRun(
-    "pnpm",
-    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
-    "jazz-tools",
-  );
+  // Seal the exact pair before the separate TypeScript consumer builds its
+  // broker worker. Mutable package publication paths remain useful to package
+  // builds, but correctness consumers must never follow a later replacement.
+  const correctnessSnapshot = snapshot(root);
 
   // A manifest is the contract that makes a cached/generated artifact safe to
   // consume. NAPI is built release because that is the loadable Linux mode;
@@ -483,6 +482,14 @@ export async function buildTestArtifacts(
     ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],
     "verify release NAPI provenance",
   );
+  // This is the producer/consumer boundary.  It is written only after every
+  // native artifact has loaded and its provenance has been verified.  The TS
+  // consumer gate validates this immutable receipt *before* it builds tools.
+  sealProducerManifest(root, correctnessSnapshot);
+  // The producer itself verifies the exact receipt it just published. This
+  // catches a partial/incorrect write here rather than deferring it to a TS
+  // consumer job that would otherwise report an unrelated build failure.
+  if (correctnessSnapshot) verifyCorrectnessArtifactProducer(root);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -498,7 +505,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exitCode = 1;
   } else
     withArtifactBuildLock((scope, lease) =>
-      buildTestArtifacts(command, scope, lease, snapshotCorrectnessArtifacts),
+      buildTestArtifacts(
+        command,
+        scope,
+        lease,
+        snapshotCorrectnessArtifacts,
+        writeCorrectnessArtifactProducerManifest,
+      ),
     ).catch((error) => {
       console.error(`test-artifacts: ${error.message}`);
       process.exitCode = 1;

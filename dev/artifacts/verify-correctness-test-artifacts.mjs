@@ -190,7 +190,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const failures = verifyCorrectnessTestArtifacts();
   if (failures.length) {
     for (const failure of failures) console.error(`correctness-artifacts: ${failure}`);
-    console.error("Fix: pnpm build:test-artifacts");
+    console.error("Fix: pnpm build:correctness-artifacts && pnpm test:typescript-consumers");
     process.exitCode = 1;
   } else console.log("correctness-artifacts: release NAPI + fast WASM binding surface is current");
 }

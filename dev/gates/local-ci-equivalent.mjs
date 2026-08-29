@@ -132,7 +132,7 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
-    command("correctness-test artifacts", "pnpm", ["build:test-artifacts"]),
+    command("native correctness-artifact producer", "pnpm", ["build:correctness-artifacts"]),
     command("preinstalled Chromium", "pnpm", [
       "exec",
       "playwright",
@@ -140,10 +140,9 @@ export const ciPartitions = Object.freeze({
       "--dry-run",
       "chromium",
     ]),
-    command("parallel Node and browser suites", "bash", ["dev/gates/run-ts-tests.sh"], {
-      // The test runner intentionally supports command overrides for its own
-      // harness tests.  A CI-equivalent invocation must not inherit one from
-      // a developer shell and silently test a smaller/different suite.
+    command("TypeScript consumers", "pnpm", ["test:typescript-consumers"], {
+      // The consumer runner intentionally supports command overrides for its
+      // own harness tests. A CI-equivalent invocation must not inherit one.
       env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
     }),
   ]),
@@ -187,8 +186,8 @@ export function assertFullWorkspaceCoverage(commands) {
 }
 
 export function assertArtifactBoundary(commands) {
-  const artifacts = commands.find(({ label }) => label === "correctness-test artifacts");
-  const suites = commands.find(({ label }) => label === "parallel Node and browser suites");
+  const artifacts = commands.find(({ label }) => label === "native correctness-artifact producer");
+  const suites = commands.find(({ label }) => label === "TypeScript consumers");
   if (!artifacts || !suites)
     throw new Error("CI-equivalent TypeScript plan omits artifacts or test suites.");
   if (commands.indexOf(artifacts) > commands.indexOf(suites))

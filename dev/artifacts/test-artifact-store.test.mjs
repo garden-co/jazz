@@ -20,6 +20,10 @@ import {
   readCorrectnessArtifactSnapshot,
   snapshotCorrectnessArtifacts,
 } from "./test-artifact-store.mjs";
+import {
+  verifyCorrectnessArtifactProducer,
+  writeCorrectnessArtifactProducerManifest,
+} from "./correctness-artifact-producer.mjs";
 
 const require = createRequire(import.meta.url);
 const jazzToolsRequire = createRequire(
@@ -119,6 +123,45 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
   } finally {
     rmSync(first, { recursive: true, force: true });
     rmSync(second, { recursive: true, force: true });
+  }
+});
+
+test("producer manifest binds the immutable snapshot and CLI to one checkout revision", () => {
+  const root = fixture("producer", "a".repeat(64), "b".repeat(64));
+  try {
+    // A real commit is deliberate: the manifest must identify a checkout, not
+    // merely whatever source files happened to exist while the producer ran.
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
+      { cwd: root },
+    );
+    const cli = join(root, "target", "debug", "jazz-tools");
+    mkdirSync(join(root, "target", "debug"), { recursive: true });
+    writeFileSync(cli, "first-cli");
+    const snapshot = snapshotCorrectnessArtifacts(root);
+    writeCorrectnessArtifactProducerManifest(root, snapshot);
+    assert.doesNotThrow(() => verifyCorrectnessArtifactProducer(root));
+
+    // Planted stale cache: a consumer must not accept the snapshot after the
+    // CLI producer artifact was replaced.
+    writeFileSync(cli, "different-cli");
+    assert.throws(() => verifyCorrectnessArtifactProducer(root), /CLI fingerprint is stale/);
+    writeFileSync(cli, "first-cli");
+
+    // A checkout move is likewise stale even when the artifact bytes happen
+    // to be identical; this is the false-green cache case the receipt closes.
+    writeFileSync(join(root, "README"), "next revision");
+    execFileSync("git", ["add", "README"], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "next"],
+      { cwd: root },
+    );
+    assert.throws(() => verifyCorrectnessArtifactProducer(root), /different checkout revision/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

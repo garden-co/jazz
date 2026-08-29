@@ -83,13 +83,17 @@ must never call a focused, crate-only, or partial-artifact receipt
 CI-equivalent. Use `--ci-partition <name>` only when reproducing one named CI
 job during diagnosis; it is likewise not a full CI-equivalent result.
 
-**Generated correctness bindings.** `pnpm build:test-artifacts` seals the
-fast-WASM/release-NAPI pair into a fingerprint-addressed store under the
-current worktree's ignored `target/` directory. Browser and native correctness
-tests consume that immutable pair, not the mutable package output directories. Do not copy
-or share generated `pkg/` or NAPI generations between lanes; rebuild in the
-checkout whose tests you are running. The explicit ABI/provenance preflight is
-intentional and must remain fail-closed.
+**Generated correctness bindings.** `pnpm build:correctness-artifacts` is the
+native producer: it builds the fast-WASM/release-NAPI/CLI trio, seals the
+WASM/NAPI pair into a fingerprint-addressed immutable store under this
+worktree's ignored `target/`, and writes a producer manifest bound to the exact
+checkout SHA and artifact hashes. `pnpm test:typescript-consumers` is the
+consumer: it rejects a missing, stale, or mismatched manifest _before_ building
+Jazz Tools and launching TS/browser suites. Do not copy or share generated
+`pkg/`, NAPI generations, snapshots, or producer manifests between lanes;
+rebuild in the checkout whose tests you are running. The boundary is deliberate
+and fail-closed: native production can succeed even when a TypeScript consumer
+build/test subsequently fails.
 
 - `cargo test -p jazz`
 - `cargo test -p groove`
