@@ -613,9 +613,13 @@ impl RuntimeSchema {
                     ("shape_id", ValueType::Uuid),
                     ("binding_id", ValueType::Uuid),
                     ("read_view_id", ValueType::Uuid),
-                    ("fact", ValueType::Bytes),
+                    // Program facts can contain an application result payload.
+                    // Keep their durable identity bounded so a promoted large
+                    // value is stored in the record body (where the backend
+                    // can use value overflow), not in an ordered B-tree key.
+                    ("fact_digest", ValueType::Bytes),
                 ]),
-                RecordDescriptor::new([("present", ValueType::U64)]),
+                RecordDescriptor::new([("fact", ValueType::Bytes)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CLEAN_CLOSE_MARKERS_STORE,

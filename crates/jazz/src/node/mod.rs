@@ -2052,8 +2052,35 @@ fn settled_program_fact_key(
     fact: &ViewFactEntry,
 ) -> Result<Vec<Value>, Error> {
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(codec::program_fact_storage_bytes(fact)?));
+    key.push(Value::Bytes(
+        settled_program_fact_digest(&codec::program_fact_storage_bytes(fact)?).to_vec(),
+    ));
     Ok(key)
+}
+
+/// Domain-separated identity for a settled program fact. Facts can include a
+/// hydrated application payload, so the full canonical encoding belongs in a
+/// value cell. The key keeps only this fixed-size identity, preserving ordered
+/// B-tree page bounds while retaining exact payload validation on recovery.
+const SETTLED_PROGRAM_FACT_DIGEST_DOMAIN: &str = "jazz.settled-program-fact-key.v1";
+
+fn settled_program_fact_digest(fact_bytes: &[u8]) -> [u8; 32] {
+    blake3::derive_key(SETTLED_PROGRAM_FACT_DIGEST_DOMAIN, fact_bytes)
+}
+
+fn settled_program_fact_storage_write(
+    binding_view_key: BindingViewKey,
+    fact: &ViewFactEntry,
+) -> Result<groove::db::DirectRecordStoreWrite, Error> {
+    let fact_bytes = codec::program_fact_storage_bytes(fact)?;
+    let mut key = binding_view_store_prefix(binding_view_key);
+    key.push(Value::Bytes(
+        settled_program_fact_digest(&fact_bytes).to_vec(),
+    ));
+    Ok(groove::db::DirectRecordStoreWrite::Set {
+        key,
+        value: vec![Value::Bytes(fact_bytes)],
+    })
 }
 
 fn binding_view_key_from_store_key(
