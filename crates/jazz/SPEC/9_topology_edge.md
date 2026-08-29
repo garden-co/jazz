@@ -107,7 +107,10 @@ boundaries; browser IndexedDB and worker ownership are integrability concerns, n
 alternate semantics.
 
 The main-thread client is deliberately non-durable: its authored transactions
-start at `Pending`/`None`. The worker relay persists the unchanged commit unit and
+start at `Pending`/`None`. Each live foreground owns an exclusive leased
+`NodeUuid` and mints its own transaction identities locally; its clean handoff
+may reuse that identity only after the worker durably records the runtime-owned
+HLC high-water, while an unclean termination retires it. The worker relay persists the unchanged commit unit and
 returns `Pending`/`Local`; that durability acknowledgement does not assign fate.
 The relay forwards later Edge/Global durability and authority fates back over the
 same client-worker link. A worker without an upstream can therefore satisfy

@@ -49,7 +49,13 @@ persistent relay identity remains stable and platform-supplied. Reusing a
 scope with a different path, schema, or
 identity fails. Trusted logout revokes the capability and atomically closes all
 relay/client aliases opened through it; guessed and revoked capabilities cannot
-open a scope. Tokens belong to upstream session negotiation. Logout also
+open a scope. Each attached UI client owns one exclusive foreground-node lease
+before it can mint a transaction. A clean detach reads the client runtime's
+complete minted-HLC high-water through the native core, atomically persists it
+while the lease remains active, and only then returns that node to the relay's
+reusable pool. A crash, failed readout/persistence, forced close, or other
+uncertain detach retires the node permanently; no expiry or handle-derived node
+may make it reusable. Tokens belong to upstream session negotiation. Logout also
 chooses either
 retention or deletion through a separate, user-visible storage-lifecycle API.
 No current host may reuse a relay after an auth-scope change.
