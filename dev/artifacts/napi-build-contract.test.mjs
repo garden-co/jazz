@@ -279,7 +279,7 @@ test("a SIGKILL after pointer publication cannot persist a mismatched fallback s
         [
           "--input-type=module",
           "-e",
-          `import { publishNapiGeneration } from ${JSON.stringify(moduleUrl)}; publishNapiGeneration(process.argv[1], process.argv[2], "next");`,
+          `import { publishExpectedFingerprint, publishNapiGeneration } from ${JSON.stringify(moduleUrl)}; publishNapiGeneration(process.argv[1], process.argv[2], "next", { afterPointerCommit: () => publishExpectedFingerprint("napi", "next", process.argv[2]) });`,
           staged,
           root,
         ],
