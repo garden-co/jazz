@@ -1155,8 +1155,14 @@ test("CodSpeed retains the route subscription binding-scale wall-time receipt", 
     "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
   );
   assert.equal(job["runs-on"], "codspeed-macro");
-  const commands = job.steps.map((step) => step.run).filter(Boolean).join("\n");
-  assert.match(commands, /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/);
+  const commands = job.steps
+    .map((step) => step.run)
+    .filter(Boolean)
+    .join("\n");
+  assert.match(
+    commands,
+    /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/,
+  );
   const run = job.steps.find((step) => step.with?.run)?.with?.run;
   assert.match(run, /^cargo codspeed run --package jazz --bench route_subscription_curve$/m);
   assert.doesNotMatch(run, /--features|JAZZ_ROUTE_CURVE_ROUTES/);
