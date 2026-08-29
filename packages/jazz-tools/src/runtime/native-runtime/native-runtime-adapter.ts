@@ -651,6 +651,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly pendingLocalSettlements = new Set<Promise<void>>();
+  // A streaming mutation can wait on its source while owning a native upload
+  // handle. A foreground lease cannot return until every admitted handle has
+  // published its write (and advanced the HLC) or has been aborted. Local
+  // settlement starts only after a write has already been minted.
+  private readonly pendingStreamingMutations = new Set<Promise<void>>();
   // Streaming sources can be consumed concurrently, but native `finish()`
   // mutates the owner runtime. WASM evaluates that runtime behind one async
   // borrow, so overlapping finalization can deadlock. Keep only this atomic
@@ -708,6 +713,9 @@ export class NativeRuntimeAdapter implements Runtime {
   // the native HLC, but physical native disposal still happens through the
   // ordinary client shutdown path.
   private foregroundLeaseQuiesced = false;
+  // A concurrent ordinary close must not dispose native state between a lease
+  // handoff's mutation drain and its HLC readout.
+  private foregroundLeaseCapture: Promise<bigint> | null = null;
   private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
@@ -900,13 +908,21 @@ export class NativeRuntimeAdapter implements Runtime {
    * native disposal after the lease owner has durably recorded this value.
    * @internal
    */
-  async quiesceForegroundTxTimeHighWater(): Promise<bigint> {
+  quiesceForegroundTxTimeHighWater(): Promise<bigint> {
     if (this !== this.ownerRuntime) {
-      return await this.ownerRuntime.quiesceForegroundTxTimeHighWater();
+      return this.ownerRuntime.quiesceForegroundTxTimeHighWater();
     }
+    if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
     if (this.closed) throw new Error("Native runtime is already closed");
     this.closed = true;
     this.foregroundLeaseQuiesced = true;
+    const capture = this.captureForegroundTxTimeHighWater();
+    this.foregroundLeaseCapture = capture;
+    return capture;
+  }
+
+  private async captureForegroundTxTimeHighWater(): Promise<bigint> {
+    await Promise.all(this.pendingStreamingMutations);
     await Promise.all(this.pendingLocalSettlements);
     await this.coreTickCompletion?.catch(() => undefined);
     return this.foregroundTxTimeHighWater();
@@ -1117,6 +1133,10 @@ export class NativeRuntimeAdapter implements Runtime {
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    await this.foregroundLeaseCapture?.catch(() => undefined);
+    if (this.pendingStreamingMutations.size > 0) {
+      await Promise.all(this.pendingStreamingMutations);
+    }
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
@@ -1207,6 +1227,7 @@ export class NativeRuntimeAdapter implements Runtime {
     _writeContext?: string | null,
     objectId?: string | null,
   ): InsertResult {
+    this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
@@ -1270,6 +1291,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const begin = this.db.beginStreamingMutationEncoded;
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    this.assertMutationAdmission(operation);
     if (this.currentTx(writeContext, operation)) {
       throw new Error("Streaming mutations are not supported inside a transaction");
     }
@@ -1327,6 +1349,12 @@ export class NativeRuntimeAdapter implements Runtime {
           branchView?.head,
           branchView?.base,
         );
+    const owner = this.ownerRuntime;
+    let releaseAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    owner.pendingStreamingMutations.add(admission);
     const encoder = new TextEncoder();
     const pushBounded = async (bytes: Uint8Array): Promise<void> => {
       const hostWindowBytes = 64 * 1024;
@@ -1358,7 +1386,6 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
-      const owner = this.ownerRuntime;
       const previousFinalization = owner.streamingFinalization;
       let releaseFinalization!: () => void;
       const finalization = new Promise<void>((resolve) => {
@@ -1376,6 +1403,9 @@ export class NativeRuntimeAdapter implements Runtime {
     } catch (error) {
       await upload.abort();
       throw error;
+    } finally {
+      releaseAdmission();
+      owner.pendingStreamingMutations.delete(admission);
     }
   }
 
@@ -1385,6 +1415,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): InsertResult {
+    this.assertMutationAdmission("Restore");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
@@ -1434,6 +1465,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: Record<string, Value>,
     writeContext?: string | null,
   ): MutationResult {
+    this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
@@ -1484,6 +1516,7 @@ export class NativeRuntimeAdapter implements Runtime {
     descriptors: readonly unknown[],
     writeContext?: string | null,
   ): MutationResult {
+    this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1518,6 +1551,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): MutationResult {
+    this.assertMutationAdmission("Upsert");
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -1577,6 +1611,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
+    this.assertMutationAdmission("Delete");
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -2280,6 +2315,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     return { kind: "committed", txId };
+  }
+
+  /** Refuse every mutation once a foreground lease begins clean handoff. */
+  private assertMutationAdmission(operation: string): void {
+    if (this.ownerRuntime.closed) {
+      throw new Error(`${operation} failed: native runtime is closed`);
+    }
   }
 
   private resultForRow(
