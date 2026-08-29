@@ -19,7 +19,7 @@ type SubscribeCall = {
   query: QueryBuilder<any>;
   options?: QueryOptions;
   session?: Session;
-  unsubscribe: ReturnType<typeof vi.fn>;
+  unsubscribe: SubscriptionHandle;
 };
 
 type UnitHarness = {
