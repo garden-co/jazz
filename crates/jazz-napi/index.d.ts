@@ -12,6 +12,14 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  /**
+   * Exact wire capabilities compiled into this native binding.
+   *
+   * The TypeScript WebSocket carrier uses this for its Hello instead of an
+   * independent feature list, so a package cannot advertise a codec this
+   * native artifact cannot decode.
+   */
+  wireFeatures(): number
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**

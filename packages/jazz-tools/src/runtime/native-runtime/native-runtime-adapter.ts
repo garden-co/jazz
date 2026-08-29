@@ -297,6 +297,8 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  /** Exact wire features compiled into the native artifact backing this DB. */
+  wireFeatures?(): number;
   setLargeValueStagingPolicy?(
     incomingBytesPerWindow: number,
     windowMs: number,
@@ -2085,6 +2087,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: transportIdentity,
+      features: this.nativeWireFeatures(),
       authJson,
       onFrame: (frame) => {
         if (generation !== this.serverConnectionGeneration) return;
@@ -2194,6 +2197,19 @@ export class NativeRuntimeAdapter implements Runtime {
       this.node,
       localEpoch,
     );
+  }
+
+  private nativeWireFeatures(): number {
+    if (!this.db.wireFeatures) {
+      throw new Error(
+        "native binding does not expose its wire feature mask; install the matching jazz-napi package",
+      );
+    }
+    const features = this.db.wireFeatures();
+    if (!Number.isSafeInteger(features) || features < 0 || features > 0xffff_ffff) {
+      throw new Error(`native binding returned invalid wire feature mask ${features}`);
+    }
+    return features;
   }
 
   async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {

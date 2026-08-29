@@ -542,6 +542,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () => ({
           connectUpstream: () => transport,
+          wireFeatures: () => CLIENT_WIRE_FEATURES,
           setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
             schedulerCallback = callback;
           },
@@ -1036,6 +1037,9 @@ function fakeDb<T extends object>(
   const result: Record<string, unknown> = {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
+    // The production binding advertises its compiled capability mask. Keep
+    // this transport fixture honest about the same handshake boundary.
+    wireFeatures: () => CLIENT_WIRE_FEATURES,
     beginTransaction: (
       openTransactionId: string,
       kind: FakeOpenBatch["kind"],

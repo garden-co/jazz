@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
+import { FEATURE_PAYLOAD_ZSTD } from "./websocket.js";
 
 type FrameFixture = { name: string; frame_hex: string };
 type ArtifactCorpus = {
@@ -37,6 +38,14 @@ describe("wire frame artifact corpus", () => {
         loadNapiModule() as Promise<unknown> as Promise<ArtifactFrameValidator>,
         loadWasmModuleForTest() as Promise<ArtifactFrameValidator>,
       ]);
+
+      // This executes the actual sealed artifact which package assembly
+      // publishes, rather than inferring transport support from Cargo.toml.
+      // A package receiver must advertise and decode the same zstd capability
+      // as the packaged jazz-tools server binary.
+      expect(BigInt(napi.__testWireFrameCorpusFeatures()) & BigInt(FEATURE_PAYLOAD_ZSTD)).not.toBe(
+        0n,
+      );
 
       for (const artifact of [napi, wasm]) {
         const negotiatedFeatures = artifact.__testWireFrameCorpusFeatures();

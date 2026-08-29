@@ -1504,6 +1504,16 @@ impl StreamingMutation {
 
 #[napi]
 impl NapiDb {
+    /// Exact wire capabilities compiled into this native binding.
+    ///
+    /// The TypeScript WebSocket carrier uses this for its Hello instead of an
+    /// independent feature list, so a package cannot advertise a codec this
+    /// native artifact cannot decode.
+    #[napi(js_name = "wireFeatures")]
+    pub fn wire_features(&self) -> u32 {
+        jazz::wire::current_wire_features() as u32
+    }
+
     fn require_trusted_backend(&self) -> napi::Result<()> {
         self.trusted_backend.then_some(()).ok_or_else(|| {
             napi::Error::from_reason("backend attribution requires an explicit backend runtime")
@@ -3449,6 +3459,25 @@ impl NapiDb {
         local_node: Buffer,
         local_epoch: BigInt,
     ) -> napi::Result<Transport> {
+        let local_features = jazz::wire::current_wire_features();
+        if protocol_version != jazz::wire::WIRE_PROTOCOL_VERSION {
+            return Err(napi::Error::from_reason(format!(
+                "server negotiated wire protocol {protocol_version}, but this native binding supports only {}",
+                jazz::wire::WIRE_PROTOCOL_VERSION
+            )));
+        }
+        let features = features as u64;
+        let unsupported = features & !local_features;
+        if unsupported != 0 {
+            return Err(napi::Error::from_reason(format!(
+                "server negotiated wire features {features:#x}, but this native binding was not compiled with {unsupported:#x}"
+            )));
+        }
+        if features & jazz::wire::FEATURE_SYNC_MESSAGE_PAYLOAD == 0 {
+            return Err(napi::Error::from_reason(
+                "server did not negotiate required sync message payload frames",
+            ));
+        }
         let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
             napi::Error::from_reason("server hello authority node must be 16 bytes")
         })?;
@@ -3474,14 +3503,14 @@ impl NapiDb {
                 epoch: remote_epoch,
             },
             link_identity: CoreAuthorSubject::for_test_bytes(local_node),
-            negotiated_features: features as u64,
+            negotiated_features: features,
         };
         let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
             NapiWireTransport {
                 queues: queues.clone(),
             },
             protocol_version,
-            features as u64,
+            features,
             None,
             Some(session_context),
         ));
@@ -3501,7 +3530,7 @@ impl NapiDb {
             queues,
             auxiliary_pump,
             protocol_version,
-            features: features as u64,
+            features,
         })
     }
 

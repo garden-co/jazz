@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["rocksdb"]
+# The published Node binding is a WebSocket peer. Its TypeScript carrier
+# advertises the binding's actual wire capabilities, so the default package
+# includes the same native zstd codec used by the shipped jazz-tools server.
+# RocksDB's unrelated zstd dependency does not enable Jazz transport zstd.
+default = ["rocksdb", "transport-compression-zstd"]
 rocksdb = ["dep:jazz-storage-rocksdb"]
+transport-compression-zstd = ["jazz/transport-compression-zstd"]
 
 [lib]
 crate-type = ["cdylib"]

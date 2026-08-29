@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
 import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { webSocketUrl } from "./native-runtime/websocket.js";
+import { FEATURE_PAYLOAD_ZSTD, webSocketUrl } from "./native-runtime/websocket.js";
 import { openConfig } from "./native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
@@ -105,6 +105,35 @@ it("accepts only canonical authors through the NAPI open-config codec", async ()
       ),
     ),
   ).toThrow(/canonical UTF-8 JSON/i);
+});
+
+it("ships a zstd-capable NAPI receiver and rejects an uncompiled negotiated feature before admission", async () => {
+  const { NapiDb } = await loadNapiModule();
+  const db = NapiDb.openMemory(
+    encodeSchema(TEST_SCHEMA),
+    openConfig(
+      deterministicBytes("napi-wire-capability:node"),
+      testAuthorBytes("napi-wire-capability:author"),
+      1,
+      true,
+    ),
+  );
+  try {
+    const features = db.wireFeatures();
+    expect(features & FEATURE_PAYLOAD_ZSTD).toBe(FEATURE_PAYLOAD_ZSTD);
+    expect(() =>
+      db.connectUpstreamWithSession(
+        1,
+        features | (1 << 30),
+        deterministicBytes("napi-wire-capability:remote"),
+        1n,
+        deterministicBytes("napi-wire-capability:local"),
+        1n,
+      ),
+    ).toThrow(/native binding was not compiled with 0x40000000/);
+  } finally {
+    await db.close();
+  }
 });
 
 const SIGNED_DEFAULT_CASES: Array<{
