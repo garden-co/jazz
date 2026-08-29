@@ -723,9 +723,10 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     await writeFile(
       join(appDirectory, "App.tsx"),
       [
-        'import { NATIVE_RELAY_ABI } from "jazz-rn";',
+        'import { NATIVE_RELAY_ABI, installNativeForegroundRuntime } from "jazz-rn";',
         "",
         "export const relayAbi: number = NATIVE_RELAY_ABI.maximum;",
+        "export const installForeground = installNativeForegroundRuntime;",
         "",
       ].join("\n"),
     );
@@ -764,6 +765,19 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
         "  get() {",
         "    return available ? {",
         "      getAbiVersion: () => abi,",
+        "      installForegroundRuntime: () => {",
+        "        globalThis.__jazzNativeForegroundRuntimeV1 = {",
+        "          abiVersion: abi,",
+        "          openAttached: (capability) => {",
+        "            if (!(capability instanceof Uint8Array) || capability.byteLength !== 32) throw new Error('unexpected capability');",
+        "            return {",
+        "              execute: (command) => command[0] === 0 ? Uint8Array.of(0, abi) : Uint8Array.of(1),",
+        "              tick: () => {},",
+        "              close: () => true,",
+        "            };",
+        "          },",
+        "        };",
+        "      },",
         "      execute: async (command) => `native:${command}`,",
         "    } : null;",
         "  },",
@@ -802,19 +816,36 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       runPackedRelay(
         {
           JAZZ_RN_PACKED_NATIVE_AVAILABLE: "1",
-          JAZZ_RN_PACKED_NATIVE_ABI: "3",
+          JAZZ_RN_PACKED_NATIVE_ABI: "7",
         },
         'const { executeNativeRelayCommand } = await import("jazz-rn"); process.stdout.write(await executeNativeRelayCommand("AQI="));',
       ),
       "native:AQI=",
       "the fresh app must execute the published relay entry point through its installed native module",
     );
+    assert.equal(
+      runPackedRelay(
+        {
+          JAZZ_RN_PACKED_NATIVE_AVAILABLE: "1",
+          JAZZ_RN_PACKED_NATIVE_ABI: "7",
+        },
+        [
+          'const relay = await import("jazz-rn");',
+          "const foreground = relay.installNativeForegroundRuntime().openAttached(new Uint8Array(32));",
+          "const result = relay.decodeNativeForegroundResponse(foreground.execute(relay.encodeNativeForegroundCommand('probe')));",
+          "if (result.type !== 'probe' || result.abiVersion !== 7) throw new Error(`unexpected foreground result: ${JSON.stringify(result)}`);",
+          "process.stdout.write('foreground:7');",
+        ].join(" "),
+      ),
+      "foreground:7",
+      "the fresh app must install and execute the packed private foreground ABI, not merely typecheck its declaration",
+    );
     for (const [name, environment, expected] of [
       [
         "missing native module",
         {
           JAZZ_RN_PACKED_NATIVE_AVAILABLE: "0",
-          JAZZ_RN_PACKED_NATIVE_ABI: "3",
+          JAZZ_RN_PACKED_NATIVE_ABI: "7",
         },
         /native relay is unavailable.*Expo Go never includes it/i,
       ],
@@ -830,9 +861,9 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
         "incompatible native ABI",
         {
           JAZZ_RN_PACKED_NATIVE_AVAILABLE: "1",
-          JAZZ_RN_PACKED_NATIVE_ABI: "4",
+          JAZZ_RN_PACKED_NATIVE_ABI: "8",
         },
-        /ABI 4 is incompatible with JavaScript ABI 3\.\.=3/i,
+        /ABI 8 is incompatible with JavaScript ABI 7\.\.=7/i,
       ],
     ]) {
       const diagnostic = runPackedRelay(
