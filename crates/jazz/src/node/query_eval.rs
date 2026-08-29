@@ -416,13 +416,20 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // A maintained source may use the same conservative equality access
-        // path as a one-shot source.  The source remains an ordinary IVM
-        // source: its hydration is selected from the durable index while
-        // subsequent table deltas pass through the very same predicate graph.
-        // In particular, this is not a separate snapshot/RPC path, so its
-        // initial frontier and live continuation share one membership proof.
-        let access_paths = self.query_program_access_paths(&request, allow_secondary_indexes)?;
+        // Retain the established, guarded primary-key paths. In particular a
+        // policy-scoped or declared-`id` root must stay a complete current
+        // source: a point cap there can strand a deletion-driven membership
+        // transition. The new selector contributes only secondary equality
+        // indexes for concrete maintained roots; it must not widen that
+        // legacy guard by injecting another primary-key cap.
+        let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        if allow_secondary_indexes {
+            access_paths.extend(
+                self.query_program_access_paths(&request, true)?
+                    .into_iter()
+                    .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+            );
+        }
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
