@@ -67,7 +67,8 @@ test("requires an exact registry receipt for a deliberate non-durable use", () =
         ],
       }),
     );
-    assert.equal(run(root).status, 0);
+    const clean = run(root);
+    assert.equal(clean.status, 0, clean.stderr);
     fs.appendFileSync(
       path.join(root, "crates/jazz/src/node/codec.rs"),
       "let more = postcard::to_allocvec(&other);\n",
@@ -129,8 +130,14 @@ test("resolves aliases, direct imports, groups, globs, and leading crate paths",
         "grouped direct",
         "use postcard::{to_allocvec as encode, from_bytes}; fn f() { encode(&value); }",
       ],
+      [
+        "nested group",
+        "use postcard::{experimental::{serialized_size as size}}; fn f() { size(&value); }",
+      ],
+      ["nested glob", "use postcard::{experimental::*}; fn f() { serialized_size(&value); }"],
       ["glob", "use postcard::*; fn f() { to_allocvec(&value); }"],
       ["leading crate", "fn f() { ::postcard::to_allocvec(&value); }"],
+      ["raw alias", "use postcard::to_allocvec as r#encode; fn f() { r#encode(&value); }"],
       [
         "json namespace alias",
         "use serde_json as json; fn f() { json::to_writer(&mut out, &value); }",
@@ -158,6 +165,36 @@ test("does not mistake a locally shadowed imported serializer name for a codec c
       "use postcard::to_allocvec as encode; fn f() { let encode = || (); encode(); }\n",
     );
     assert.equal(run(root).status, 0);
+    fs.writeFileSync(
+      path.join(root, "crates/jazz/src/node/codec.rs"),
+      "use postcard::to_allocvec as r#encode; fn f() { let r#encode = || (); r#encode(); }\n",
+    );
+    assert.equal(run(root).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ignores serializer spellings in Rust comments and string literals", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    fs.writeFileSync(
+      file,
+      [
+        "/* postcard::to_slice(&value); /* serde_json::to_writer(&mut out, &value); */ */",
+        "// postcard::to_allocvec(&value);",
+        'const DOC: &str = "serde_json::from_str(&value)";',
+        'const RAW: &str = r#"postcard::to_allocvec(&value)"#;',
+        "fn f() {}",
+      ].join("\n"),
+    );
+    const clean = run(root);
+    assert.equal(clean.status, 0, clean.stderr);
+    fs.appendFileSync(file, "\nfn f() { postcard::to_slice(&value, &mut output); }\n");
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /postcard::to_slice/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
