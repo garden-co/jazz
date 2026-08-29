@@ -464,11 +464,13 @@ test("trusted runners consume the validated immutable tool bundle", () => {
 test("Rust CI keeps the bounded real differential oracle in its shared command partition", () => {
   const workspace = job("test-rust-workspace");
   const differential = job("test-rust-differential");
+  const storageCompat = job("test-storage-compat");
   const aggregate = job("test-rust");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
 
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.match(differential, /local-ci-equivalent\.mjs --ci-partition rust-differential/);
+  assert.match(storageCompat, /local-ci-equivalent\.mjs --ci-partition storage-compat/);
   assert.match(
     localCi,
     /run-rust-tests\.mjs[\s\S]*--timeout-seconds[\s\S]*780[\s\S]*--nextest-profile[\s\S]*jazz-ci/,
@@ -487,9 +489,10 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.match(aggregate, /if: always\(\)/);
-  assert.match(aggregate, /needs: \[test-rust-workspace, test-rust-differential\]/);
+  assert.match(aggregate, /needs: \[test-rust-workspace, test-rust-differential, test-storage-compat\]/);
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{DIFFERENTIAL_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
   assert.match(differential, /rust-cache: "false"/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),

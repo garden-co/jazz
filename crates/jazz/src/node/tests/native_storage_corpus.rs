@@ -15,10 +15,10 @@ use sha2::{Digest, Sha256};
 /// The storage families that the native settlement producer must prove before
 /// its logical pack can be promoted to a committed historical fixture.
 ///
-/// `catalogue` is intentionally limited to the genesis/current-pointer path
-/// on this base.  The durable typed staged/active-lineage envelopes are owned
-/// by the still-unmerged #2306 stack; the corpus must not smuggle those heads
-/// in just to make a fixture look more complete.
+/// `catalogue` includes the committed active lineage and current-write pointer
+/// on this base.  It intentionally excludes pending/staged catalogue crash
+/// state: that state has a separate recovery receipt and must not be made part
+/// of a settled historical fixture merely to inflate this corpus.
 const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_catalogue",
     "jazz_catalogue_pointer",
@@ -36,17 +36,17 @@ const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "37d21323cc3feca56ca983dc29e7daf39d114efbb05294e4de5a0b146ce52f08";
+    "1f9cc421ea72a0066c4305ac38916c3b605b352ce4b6f205bb28f5ba0967e361";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "15d6328adeb9be044daa07e0032ae0109e78a2dd21a60dbf35368bcaa5fc150a";
+    "4c713b250eec00b8a6774e33869f5e1ed16e88624424bcb11675c5030ddbc9f9";
 const EPOCH_1_NATIVE_SQLITE_SHA256: &str =
-    "a95e7b9b3bc80a2ec24a6976817828cc79db50c9069248ef90670eaf570f9e40";
+    "4ba479e28c13f3c6233ab0acf65285bb503c6446083966cf72cc5ccba20f23f9";
 const EPOCH_1_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-rocksdb.tar.gz.base64");
 const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
-    "41c1444ec70ecc945444b96b67b1c96857b8b102a6ee0ae5a266332b484c75b5";
+    "1477e75cb48aa05e347a354b4b4d0edd4d31fde455f7b589390ade2605b0c1f3";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -264,12 +264,24 @@ where
     S: ReopenableStorage,
 {
     let publication = native_corpus_lineage(snapshot);
+    let target = publication.schema.id;
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(publication),
     })
     .expect("publish native corpus lineage");
+    // A published lineage is not itself a write-pointer change.  The corpus
+    // deliberately exercises both durable records: recovering an active lens
+    // and projecting the old note into its descendant current-write schema.
+    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorSubject::SYSTEM,
+        pointer: crate::protocol::CurrentWriteSchema {
+            revision: 1,
+            schema: target,
+        },
+    })
+    .expect("activate native corpus descendant write schema");
 }
 
 fn seed_native_corpus_settled_query_state<S>(node: &mut NodeState<S>)
@@ -413,6 +425,38 @@ fn native_corpus_authority_snapshot(schema: &JazzSchema) -> crate::protocol::Cat
     }
 }
 
+fn native_corpus_required_application_stores<S>(
+    node: &NodeState<S>,
+) -> BTreeSet<String>
+where
+    S: OrderedKvStorage,
+{
+    // Resolve the physical family names through the restored catalogue rather
+    // than logical lowering.  Logical tables are not storage identities; a
+    // lineage can retain a table name while changing which permanent physical
+    // table owns its historical records.
+    let mut stores = BTreeSet::new();
+    for version in node.catalogue_schemas().values() {
+        for table in &version.schema.tables {
+            let table_id = node
+                .physical_table_id_for_schema(version.id, &table.name)
+                .unwrap_or_else(|error| {
+                    panic!("resolve physical corpus table {}: {error}", table.name)
+                });
+            stores.extend([
+                physical_history_table_name(table_id),
+                physical_register_table_name(table_id),
+                physical_global_current_table_name(table_id),
+                physical_register_global_current_table_name(table_id),
+                physical_ahead_current_table_name(table_id),
+                physical_register_ahead_current_table_name(table_id),
+                physical_rejected_versions_table_name(table_id),
+            ]);
+        }
+    }
+    stores
+}
+
 fn native_corpus_receipt<S>(node: &NodeState<S>, schema: &JazzSchema) -> NativeCorpusReceipt
 where
     S: OrderedKvStorage,
@@ -460,38 +504,26 @@ where
     // immutable-history, register, current-winner, and rejected families. A
     // corpus that scans only `lower_to_groove()` therefore misses the bytes it
     // exists to freeze.
-    for table in &schema.tables {
-        let table_id = node
-            .physical_table_id_for_schema(schema.version_id(), &table.name)
-            .unwrap_or_else(|error| panic!("resolve physical corpus table {}: {error}", table.name));
-        for storage_table in [
-            physical_history_table_name(table_id),
-            physical_register_table_name(table_id),
-            physical_global_current_table_name(table_id),
-            physical_register_global_current_table_name(table_id),
-            physical_ahead_current_table_name(table_id),
-            physical_register_ahead_current_table_name(table_id),
-            physical_rejected_versions_table_name(table_id),
-        ] {
-            let rows = crate::db::block_on(
-                node.database.primary_key_scan_raw(&storage_table, &[]),
-            )
+    for storage_table in native_corpus_required_application_stores(node) {
+        let rows = crate::db::block_on(node.database.primary_key_scan_raw(&storage_table, &[]))
             .unwrap_or_else(|error| panic!("scan physical corpus store {storage_table}: {error}"));
-            assert!(
-                stores
-                    .insert(
-                        storage_table.clone(),
-                        rows.into_iter().map(|row| row.into_parts()).collect(),
-                    )
-                    .is_none(),
-                "one permanent physical table identity must have one receipt entry: {storage_table}"
-            );
-        }
+        assert!(
+            stores
+                .insert(
+                    storage_table.clone(),
+                    rows.into_iter().map(|row| row.into_parts()).collect(),
+                )
+                .is_none(),
+            "one permanent physical table identity must have one receipt entry: {storage_table}"
+        );
     }
     NativeCorpusReceipt { stores }
 }
 
-fn assert_native_corpus_has_required_families(receipt: &NativeCorpusReceipt) {
+fn assert_native_corpus_has_required_families<S>(node: &NodeState<S>, receipt: &NativeCorpusReceipt)
+where
+    S: OrderedKvStorage,
+{
     for store in NATIVE_CORPUS_REQUIRED_STORES {
         assert!(
             receipt.stores.contains_key(*store),
@@ -515,6 +547,24 @@ fn assert_native_corpus_has_required_families(receipt: &NativeCorpusReceipt) {
             "the settlement producer must actually write {store}"
         );
     }
+    let application = native_corpus_required_application_stores(node);
+    assert!(
+        application.iter().all(|store| receipt.stores.contains_key(store)),
+        "the corpus must scan every permanent physical application family derived from the authority manifest"
+    );
+    assert!(
+        application.iter().any(|store| {
+            store.ends_with("_history") && !receipt.stores[store].is_empty()
+        }),
+        "the authority-derived physical application closure must contain historical row records"
+    );
+    assert!(
+        application.iter().any(|store| {
+            (store.ends_with("_global_current") || store.ends_with("_ahead_current"))
+                && !receipt.stores[store].is_empty()
+        }),
+        "the authority-derived physical application closure must contain current row projections"
+    );
 }
 
 fn seed_native_corpus<S>(
@@ -602,6 +652,22 @@ where
 {
     let versions = node.query_table_versions("todos").expect("history reads");
     assert_eq!(versions.len(), 2, "both immutable history versions survive");
+    let source_schema = native_corpus_schema();
+    let source_todos = source_schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("native corpus source todos schema");
+    assert_eq!(
+        versions[0].cell(source_todos, "title").expect("decode first title"),
+        Some(v("settlement baseline")),
+        "the first historical title survives reopening exactly"
+    );
+    assert_eq!(
+        versions[1].cell(source_todos, "title").expect("decode second title"),
+        Some(v("mixed-write predecessor")),
+        "the later historical title survives reopening exactly"
+    );
     let latest = node.version_tx_id(&versions[1]).expect("latest history tx id");
     assert_eq!(node.version_tx_id(&versions[1]).unwrap(), latest);
     assert_eq!(
@@ -614,12 +680,73 @@ where
         .current_rows("todos", DurabilityTier::Local)
         .expect("current rows reopen");
     assert_eq!(rows.len(), 0, "branch rows stay out of the shared read view");
-    assert!(node
+    let note_versions = node
         .query_table_versions("notes")
-        .expect("independent table history")
+        .expect("independent table history");
+    let source_notes = source_schema
+        .tables()
         .iter()
-        .any(|version| version.row_uuid() == row(0xc3)));
+        .find(|table| table.name == "notes")
+        .expect("native corpus source notes schema")
+        .clone();
+    let historical_note = note_versions
+        .iter()
+        .find(|version| version.row_uuid() == row(0xc3))
+        .expect("independent note history survives");
+    assert_eq!(
+        historical_note.cell(&source_notes, "body").expect("decode historical note body"),
+        Some(v("independent table")),
+        "the old authored note body survives reopening exactly"
+    );
     assert!(versions.iter().all(|version| version.row_uuid() == row_uuid));
+
+    let active_schema = native_corpus_evolved_schema();
+    let active_shape = Query::from("notes")
+        .validate(&active_schema)
+        .expect("active notes query validates after reopen");
+    let active_binding = active_shape
+        .bind(BTreeMap::new())
+        .expect("active notes query binds after reopen");
+    let current_notes = node
+        .query_rows(&active_shape, &active_binding, DurabilityTier::Local)
+        .expect("current note projection reopens through NodeState");
+    let active_notes = active_schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "notes")
+        .expect("active notes schema");
+    let visible_note = current_notes
+        .iter()
+        .find(|current| current.row_uuid() == row(0xc3))
+        .expect("settled note remains visible in the active projection");
+    assert_eq!(
+        visible_note.cell(&active_notes, "body"),
+        Some(v("independent table")),
+        "active projection retains the old body"
+    );
+    assert_eq!(
+        visible_note.cell(&active_notes, "genre"),
+        Some(v("instrumental")),
+        "active migration lens supplies its durable default"
+    );
+    assert!(
+        current_notes.iter().all(|current| current.row_uuid() != row(0xc6)),
+        "a globally settled deletion remains invisible from normal current reads after reopen"
+    );
+    let active = node.current_write_schema().expect("current write schema reopens");
+    assert_eq!(active.revision, 1, "active write-schema revision survives reopen");
+    assert_eq!(
+        active.schema,
+        active_schema.version_id(),
+        "active write-schema pointer targets the published lineage descendant"
+    );
+    assert_eq!(node.catalogue_schemas().len(), 2, "genesis and descendant schemas reopen");
+    assert_eq!(node.catalogue_lenses().len(), 1, "active lineage lens reopens");
+    assert_eq!(
+        node.settled_authoritative_receipt_counts_for_test(),
+        (1, 1),
+        "settled result membership and program facts are recovered as NodeState query state"
+    );
 
     // The receipt above deliberately records the row descriptor, not the
     // chunk backend's private install receipt.  Prove the complementary
@@ -668,7 +795,7 @@ where
     publish_native_corpus_lineage(&mut producer, snapshot);
     seed_native_corpus_settled_query_state(&mut producer);
     let before_close = native_corpus_receipt(&producer, &schema);
-    assert_native_corpus_has_required_families(&before_close);
+    assert_native_corpus_has_required_families(&producer, &before_close);
     drop(producer);
     archive_historical();
 
@@ -738,7 +865,7 @@ where
     let mut reader = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
         .expect("current Jazz opens committed native corpus");
     let before_write = native_corpus_receipt(&reader, &schema);
-    assert_native_corpus_has_required_families(&before_write);
+    assert_native_corpus_has_required_families(&reader, &before_write);
     assert_eq!(
         native_corpus_pack(&before_write),
         epoch_1_native_corpus_pack(),
@@ -897,7 +1024,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     }
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "56e86db7698356339de33afbc7416abb38a1bff153340757dc9db383ba6fa0d3",
+        "9ad43563145a771423c5bbfabd7d38b7b69c2a8e935c7d5d581d5744231755c4",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
     assert_eq!(
@@ -1037,4 +1164,38 @@ fn native_jazz_corpus_digest_is_sensitive_to_application_row_bytes() {
 
     assert_ne!(native_corpus_checksum(&baseline), native_corpus_checksum(&changed_branch));
     assert_ne!(native_corpus_checksum(&baseline), native_corpus_checksum(&changed_note));
+}
+
+/// The system transaction records also contain authored values, so a checksum
+/// change alone cannot prove that the independent physical application scan is
+/// still present.  Removing that entire scan must fail the authority-manifest
+/// closure assertion before any digest comparison can accidentally pass.
+#[test]
+fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_families() {
+    let schema = native_corpus_schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = MemoryStorage::new(&refs).expect("open omission-sensitivity store");
+    let snapshot = native_corpus_authority_snapshot(&schema);
+    let mut node = crate::db::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), storage))
+        .expect("open omission-sensitivity node");
+    node.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .expect("install omission-sensitivity authority snapshot");
+    seed_native_corpus(&mut node, "settlement baseline", "independent table");
+    publish_native_corpus_lineage(&mut node, &snapshot);
+    seed_native_corpus_settled_query_state(&mut node);
+    let receipt = native_corpus_receipt(&node, &schema);
+    assert_native_corpus_has_required_families(&node, &receipt);
+
+    let mut omitted = receipt.clone();
+    for store in native_corpus_required_application_stores(&node) {
+        omitted.stores.remove(&store);
+    }
+    let omission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_native_corpus_has_required_families(&node, &omitted);
+    }));
+    assert!(
+        omission.is_err(),
+        "removing every physical application family must fail even though transaction records remain"
+    );
 }
