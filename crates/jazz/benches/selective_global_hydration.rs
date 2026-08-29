@@ -133,12 +133,19 @@ fn maintained_subscription_hydration_100k(bencher: divan::Bencher<'_, '_>) {
 
 fn benchmark_maintained_subscription_hydration(bencher: divan::Bencher<'_, '_>, table_rows: usize) {
     let fixture = HydrationFixture::new(table_rows);
+    let baseline_subscriptions = fixture.active_groove_subscriptions();
 
     // Keep the correctness/read-bound proof out of the measurement. The timed
     // operation below is exactly the same initial maintained hydration.
     fixture.assert_selective_hydration();
+    fixture.assert_subscription_baseline(baseline_subscriptions, "validation hydration");
 
     bencher.bench_local(|| divan::black_box(fixture.hydrate_maintained()));
+    // `SubscriptionStream::drop` only queues its finalizer so it can never
+    // block a caller suspended on storage. Divan drops each timed result, but
+    // does not run Jazz's owner turn for us; drain that queued work outside
+    // the timing boundary before this fixture is released or reused.
+    fixture.assert_subscription_baseline(baseline_subscriptions, "Divan samples");
 }
 
 #[derive(Clone, Copy)]
@@ -291,6 +298,24 @@ impl HydrationFixture {
         assert_selective_metrics(&measured.metrics, self.target_rows, "maintained");
     }
 
+    fn active_groove_subscriptions(&self) -> usize {
+        self.db.active_groove_subscriptions_for_test()
+    }
+
+    /// Drain the non-blocking `SubscriptionStream::drop` finalizers and prove
+    /// a repeated benchmark cannot retain a Groove graph per sample.
+    ///
+    /// This must remain outside `hydrate_maintained`: the timed receipt is the
+    /// opening/reset path, while finalization is an ordinary later owner turn.
+    fn assert_subscription_baseline(&self, baseline: usize, phase: &str) {
+        block_on(self.db.tick()).expect("drain queued maintained-subscription finalizers");
+        assert_eq!(
+            self.active_groove_subscriptions(),
+            baseline,
+            "{phase} must retire every dropped maintained Groove subscription"
+        );
+    }
+
     /// The timed operation: create one maintained subscription and consume its
     /// initial reset. It returns the same result digest and logical read
     /// counters asserted by `assert_selective_hydration`, but performs no
@@ -312,6 +337,10 @@ impl HydrationFixture {
             .map(|row| row.row_uuid())
             .collect::<Vec<_>>();
         let metrics = self.db.take_storage_read_metrics_for_test();
+        // This only queues teardown. The caller deliberately runs `Db::tick`
+        // after the timed operation, where the owner can retire the retained
+        // Groove subscription without contaminating the sample.
+        drop(subscription);
         HydrationMeasurement {
             row_count: rows.len(),
             result_digest: digest_rows(&rows),
