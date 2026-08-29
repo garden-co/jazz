@@ -29,14 +29,15 @@ changing only `todos.title`, then while changing only `notes.body`; each change
 must alter the digest. This prevents a metadata-only exporter from silently
 passing while excluding application rows.
 
-The currently populated historical families are catalogue genesis, durable
-node/schema identities, branch-keyed immutable versions/current projections,
-transaction/fate/global-change/merge-head records, and an authenticated
-indirect byte tree. Its fixed test-only capabilities exist solely to make this
-historical receipt reproducible; product writers continue to mint random
-capabilities. The registry additionally names provenance, catalogue pointers,
-deletion history, known state, settled result members, and program facts so an
-intentionally narrow producer cannot quietly become the final corpus.
+The currently populated historical families are catalogue genesis plus an
+active deterministic lineage/lens, durable node/schema identities,
+branch-keyed immutable versions/current projections, transaction/fate/global-
+change/merge-head records, globally settled deletion history, known-state and
+settled result/program facts, and an authenticated indirect byte tree. Its
+fixed test-only capabilities exist solely to make this historical receipt
+reproducible; product writers continue to mint random capabilities. The
+registry additionally tracks the more focused provenance and catalogue codec
+fixtures that supply corruption detail beyond this whole-root receipt.
 
 The producer's exact logical pack is committed as
 `epoch-1-native-jazz-corpus.pack.base64`; it is base64 only to keep its
