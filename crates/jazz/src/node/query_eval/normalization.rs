@@ -101,6 +101,7 @@ pub(super) fn current_query_output_request(
 pub(super) fn storage_backed_maintained_view_eligible(
     query: &JazzQuery,
     read_view: &ReadViewSpec,
+    normalized: &NormalizedRowSetShape,
 ) -> bool {
     read_view.is_default()
         && query.joins.is_empty()
@@ -113,6 +114,16 @@ pub(super) fn storage_backed_maintained_view_eligible(
         && query.policy_branches.iter().all(|branch| {
             branch.joins.is_empty() && branch.reachable.is_empty() && branch.inherits.is_empty()
         })
+        // `JazzQuery::includes` captures only caller-requested includes.
+        // Normalization also injects the default root-reference closure for
+        // reference-bearing tables, and that auxiliary source needs its
+        // version/replacement witnesses on a separate receiving node.  The
+        // storage-backed subset is consequently a proof over the normalized
+        // program, not a surface-query shortcut.
+        && normalized.closure_paths.is_empty()
+        && normalized.auxiliary_sources.is_empty()
+        && normalized.join_contributions.is_empty()
+        && normalized.reachable_contributions.is_empty()
 }
 
 fn app_row_payload_projection(

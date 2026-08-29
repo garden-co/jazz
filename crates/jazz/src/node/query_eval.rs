@@ -866,6 +866,9 @@ where
                 )
             })
             .flatten();
+        let storage_backed_result_materialization =
+            matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                && storage_backed_maintained_view_eligible(shape.query(), read_view, &input_shape);
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
                 shape,
@@ -883,9 +886,6 @@ where
             .catalogue_schemas
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-        let storage_backed_result_materialization =
-            matches!(output, CurrentQueryProgramOutput::MaintainedView)
-                && storage_backed_maintained_view_eligible(shape.query(), read_view);
         let mut output_request =
             current_query_output_request(output, shape.query(), &query_schema.schema);
         if storage_backed_result_materialization {

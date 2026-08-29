@@ -101,6 +101,168 @@ fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
 }
 
 #[test]
+fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_rehydrates_scalar_rows()
+ {
+    // A public query without `.include()` can still carry an implicit root
+    // reference closure.  It is not safe to drop witnesses for that shape:
+    // a separate receiver needs the referenced user body to render an issue.
+    let (_issue_dir, mut issue_node) = open_node();
+    let issue_shape = Query::from("issues")
+        .filter(eq(col("assignee"), param("user")))
+        .validate(&issue_node.catalogue.schema)
+        .expect("validate reference-bearing query");
+    let issue_binding = issue_shape
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(author(1).test_uuid()),
+        )]))
+        .expect("bind reference-bearing query");
+    let issue_program = issue_node
+        .compile_current_query_program_for_read_view(
+            &issue_shape,
+            &issue_binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            CurrentQueryProgramOutput::MaintainedView,
+            &ReadViewSpec::default(),
+        )
+        .expect("compile reference-bearing maintained query");
+    assert!(
+        issue_program
+            .request
+            .output
+            .facts
+            .contains(&crate::node::query_engine::ProgramFactKey::VersionWitnesses),
+        "implicit normalized reference closures keep self-contained witnesses"
+    );
+
+    // The optimized path remains available to a genuinely scalar root table,
+    // including the actual remote initial and incremental receiver path.
+    let scalar_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text)),
+    );
+    let (_server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0x41; 16]), scalar_schema.clone());
+    let (_reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0x42; 16]), scalar_schema);
+    let shape = Query::from("notes")
+        .validate(&server.catalogue.schema)
+        .expect("validate scalar query");
+    let binding = shape.bind(BTreeMap::new()).expect("bind scalar query");
+    let program = server
+        .compile_current_query_program_for_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            CurrentQueryProgramOutput::MaintainedView,
+            &ReadViewSpec::default(),
+        )
+        .expect("compile scalar maintained query");
+    assert!(
+        !program
+            .request
+            .output
+            .facts
+            .contains(&crate::node::query_engine::ProgramFactKey::VersionWitnesses),
+        "scalar root query uses storage-backed result materialization"
+    );
+    for node in [&mut server, &mut reader] {
+        register_query_shape(node, &shape, RegisterShapeOptions::default());
+        subscribe_query_binding(node, &shape, &binding);
+    }
+    commit_global_cells(
+        &mut server,
+        "notes",
+        row(0),
+        BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
+        1,
+        1,
+    );
+    let mut peer = PeerState::new();
+    let initial = peer
+        .rehydrate_query(&mut server, &shape, &binding)
+        .expect("serve scalar initial update");
+    reader
+        .apply_sync_message_settled(initial)
+        .expect("separate reader applies scalar initial update");
+    commit_global_cells(
+        &mut server,
+        "notes",
+        row(1),
+        BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
+        2,
+        2,
+    );
+    let delta = peer
+        .query_update(&mut server, &shape, &binding)
+        .expect("serve scalar incremental update");
+    reader
+        .apply_sync_message_settled(delta)
+        .expect("separate reader applies scalar incremental update");
+    assert_eq!(
+        reader
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .expect("read separately materialized scalar rows")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0), row(1)])
+    );
+
+    // Stream B removals never need to load a newer winner, while restoration
+    // must load exactly the restored content witness from the authoritative
+    // store. Exercise both across the separate receiver boundary.
+    delete_global(&mut server, "notes", row(0), 3, 3);
+    let removal = peer
+        .query_update(&mut server, &shape, &binding)
+        .expect("serve scalar removal update");
+    reader
+        .apply_sync_message_settled(removal)
+        .expect("separate reader applies scalar removal update");
+    assert_eq!(
+        reader
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .expect("read scalar rows after deletion")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(1)])
+    );
+    let restore_tx = server
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row(0), 4)
+                .made_by(AuthorSubject::SYSTEM)
+                .deletion(crate::tx::DeletionEvent::Restored),
+        )
+        .expect("restore scalar row");
+    server
+        .apply_fate_update(
+            restore_tx,
+            Fate::Accepted,
+            Some(GlobalTime(4)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept scalar restore");
+    let restore = peer
+        .query_update(&mut server, &shape, &binding)
+        .expect("serve scalar restoration update");
+    reader
+        .apply_sync_message_settled(restore)
+        .expect("separate reader applies scalar restoration update");
+    assert_eq!(
+        reader
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .expect("read scalar rows after restoration")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0), row(1)])
+    );
+}
+
+#[test]
 fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_source() {
     let (_dir, mut node) = open_node();
     let shape = Query::from("issues")
