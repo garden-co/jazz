@@ -175,6 +175,29 @@ the committed page-v1 fixture by raw IndexedDB transaction, opens it read-only,
 writes current data, reopens it, and proves corrupt/unknown manifests fail
 without changing pages.
 
+### Default-serialization boundary
+
+Authoritative storage code must not acquire a private Rust serialization
+spelling by accident. `dev/gates/default-serialization-persistence.mjs` scans
+every production source tree that owns an authoritative storage ingress, egress,
+or value carried across one. Raw `postcard`, `serde_json`, bincode, and
+MessagePack convenience byte calls fail unless their exact source count and
+non-durable classification are recorded in
+`dev/storage/default-serialization-registry.json`. Thus adding a default
+serializer in a persistence-owning module is a reviewable storage-format change,
+not an invisible implementation detail.
+
+The registry does not bless a serializer as durable. Its current exceptions are
+only semantic JSON parsing for already-authenticated large values, temporary
+in-memory query/fingerprint/measurement helpers, deliberately malformed test
+construction, and Jazz's explicit versioned catalogue public-schema JSON
+envelope. That `CATS` v1 envelope length-delimits the JSON, validates its schema
+identity, and requires decode/re-encode byte equality; it is a named canonical
+contract rather than an inferred serde layout. New authoritative structured
+state must instead use the codec profile's normative record/scalar or
+order-preserving-key codec, with permanent IDs, exact fixtures, and fail-closed
+decode rules.
+
 The only ordering property groove requires from the backing store is unsigned
 lexicographic byte order: bytes compare as `0x00 < ... < 0xff`, never as signed
 integers, locale text, or a backend-native collation. A range `ScanRequest` returns keys in that order and
