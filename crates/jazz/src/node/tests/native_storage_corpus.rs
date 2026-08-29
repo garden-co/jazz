@@ -7,6 +7,7 @@
 // executable beside the NodeState paths that actually write it.
 
 use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jazz_storage_rocksdb::Durability as RocksDurability;
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage as ImmediateSqliteStorage};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,11 @@ const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_settled_result_members",
     "jazz_settled_program_facts",
 ];
+const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
+const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
+    include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
+const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
+    "b99a4cfd4fdd615b64305f012891cd63517f0d99a591f25d6afc0db68faac2ae";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -55,6 +61,35 @@ fn native_corpus_checksum(receipt: &NativeCorpusReceipt) -> String {
         }
     }
     format!("{:x}", digest.finalize())
+}
+
+fn native_corpus_pack(receipt: &NativeCorpusReceipt) -> String {
+    let mut pack = format!("{NATIVE_CORPUS_PACK_HEADER}\n");
+    for (store, rows) in &receipt.stores {
+        for (key, value) in rows {
+            use std::fmt::Write as _;
+            writeln!(pack, "{store}\t{}\t{}", hex::encode(key), hex::encode(value))
+                .expect("writing an in-memory corpus pack cannot fail");
+        }
+    }
+    pack
+}
+
+fn epoch_1_native_corpus_pack() -> String {
+    let bytes = STANDARD
+        .decode(EPOCH_1_NATIVE_CORPUS_PACK_BASE64.trim())
+        .expect("committed native corpus pack must be base64");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        EPOCH_1_NATIVE_CORPUS_PACK_SHA256,
+        "committed native corpus pack checksum must match before it is compared"
+    );
+    let pack = String::from_utf8(bytes).expect("native corpus pack must be UTF-8");
+    assert!(
+        pack.starts_with(&format!("{NATIVE_CORPUS_PACK_HEADER}\n")),
+        "native corpus pack must retain its exact epoch header"
+    );
+    pack
 }
 
 fn assert_same_native_corpus(
@@ -559,6 +594,15 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
         "0a81edc17508c40d1a04c52bfc00e92f34da4bf9070d394dc038370701a2779b",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
+    assert_eq!(
+        native_corpus_pack(&rocks_receipt),
+        epoch_1_native_corpus_pack(),
+        "the pinned producer must reproduce the committed backend-neutral logical pack"
+    );
+    if let Some(path) = std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT") {
+        std::fs::write(path, native_corpus_pack(&rocks_receipt))
+            .expect("write requested native corpus pack");
+    }
 }
 
 /// Proves the frozen digest actually observes authored application content.
