@@ -67,16 +67,26 @@ async function launchAndAssert(phase) {
   const phaseStartedAt = Date.now();
   const launchPid = parseLaunchProcessId(
     simctl([
-      "launch", udid, "dev.jazz.rndeviceacceptance",
-      "-JazzDeviceRunNonce", runNonce,
-      "-JazzDeviceDeviceIdentifier", udid,
-      "-JazzDeviceAcceptancePhase", phase,
+      "launch",
+      udid,
+      "dev.jazz.rndeviceacceptance",
+      "-JazzDeviceRunNonce",
+      runNonce,
+      "-JazzDeviceDeviceIdentifier",
+      udid,
+      "-JazzDeviceAcceptancePhase",
+      phase,
     ]),
   );
   const expected = {
-    platform: "ios", deviceIdentifier: udid, buildFingerprint, runNonce, startedAt: phaseStartedAt,
+    platform: "ios",
+    deviceIdentifier: udid,
+    buildFingerprint,
+    runNonce,
+    startedAt: phaseStartedAt,
     scenarios: scenariosForAcceptancePhase(phase)
-      .filter((item) => item.state === "passed").map((item) => item.scenario),
+      .filter((item) => item.state === "passed")
+      .map((item) => item.scenario),
   };
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {

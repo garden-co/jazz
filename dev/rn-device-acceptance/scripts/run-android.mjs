@@ -34,14 +34,27 @@ async function launchAndAssert(phase) {
   const phaseStartedAt = Date.now();
   adb(["logcat", "-c"]);
   adb([
-    "shell", "am", "start", "-n", "dev.jazz.rndeviceacceptance/.MainActivity",
-    "--es", "jazzDeviceRunNonce", runNonce,
-    "--es", "jazzDeviceAcceptancePhase", phase,
+    "shell",
+    "am",
+    "start",
+    "-n",
+    "dev.jazz.rndeviceacceptance/.MainActivity",
+    "--es",
+    "jazzDeviceRunNonce",
+    runNonce,
+    "--es",
+    "jazzDeviceAcceptancePhase",
+    phase,
   ]);
   const expected = {
-    platform: "android", deviceIdentifier, buildFingerprint, runNonce, startedAt: phaseStartedAt,
+    platform: "android",
+    deviceIdentifier,
+    buildFingerprint,
+    runNonce,
+    startedAt: phaseStartedAt,
     scenarios: scenariosForAcceptancePhase(phase)
-      .filter((item) => item.state === "passed").map((item) => item.scenario),
+      .filter((item) => item.state === "passed")
+      .map((item) => item.scenario),
   };
   const deadline = Date.now() + 2 * 60 * 1000;
   for (;;) {

@@ -1,25 +1,114 @@
 type NativeRelayCapability = Uint8Array;
 type NativeRelayExecutor = { execute(commandBase64: string): Promise<string> };
 
+export type AdmittedRelay = {
+  executor: NativeRelayExecutor;
+  capability: NativeRelayCapability;
+};
+
 /** Probe is public link diagnostics; a successful Open is the admission proof. */
 export async function proveAdmittedRelay(
   executor: NativeRelayExecutor,
   capability: NativeRelayCapability,
 ): Promise<void> {
-  const openedRelay = decodeOpened(await executor.execute(encodeOpen(capability)));
-  const attachedClient = decodeAttached(await executor.execute(encodeAttach(openedRelay)));
+  let openedRelay: bigint | undefined;
+  let attachedClient: bigint | undefined;
+  let primaryFailure: unknown;
   try {
+    openedRelay = decodeOpened(await executor.execute(encodeOpen(capability)));
+    attachedClient = decodeAttached(await executor.execute(encodeAttach(openedRelay)));
     const response = Uint8Array.from(globalThis.atob(await executor.execute("AA==")), (byte) =>
       byte.charCodeAt(0),
     );
     if (response.length !== 2 || response[0] !== 0 || response[1] !== 3)
       throw new Error("installed Jazz relay returned an unexpected ABI probe response");
-  } finally {
-    if (!decodeClosed(await executor.execute(encodeCloseClient(attachedClient))))
-      throw new Error("native relay did not close the admitted UI peer");
-    if (!decodeClosed(await executor.execute(encodeCloseRelay(openedRelay))))
-      throw new Error("native relay did not close the admitted scope");
+  } catch (error) {
+    primaryFailure = error;
   }
+  let cleanupFailure: unknown;
+  if (attachedClient !== undefined) {
+    try {
+      if (!decodeClosed(await executor.execute(encodeCloseClient(attachedClient))))
+        cleanupFailure ??= new Error("native relay did not close the admitted UI peer");
+    } catch (error) {
+      cleanupFailure ??= error;
+    }
+  }
+  if (openedRelay !== undefined) {
+    try {
+      if (!decodeClosed(await executor.execute(encodeCloseRelay(openedRelay))))
+        cleanupFailure ??= new Error("native relay did not close the admitted scope");
+    } catch (error) {
+      cleanupFailure ??= error;
+    }
+  }
+  if (primaryFailure) throw primaryFailure;
+  if (cleanupFailure) throw cleanupFailure;
+}
+
+/**
+ * A trusted logout must invalidate both the opaque capability and every
+ * already-open relay/client alias derived from it. The replacement admission
+ * is deliberately a new trusted-native call: JavaScript never supplies a
+ * changed scope configuration through the generic command channel.
+ */
+export async function proveLogoutRevocation(
+  admitted: AdmittedRelay,
+  logout: () => Promise<void>,
+  readmitted: () => Promise<AdmittedRelay>,
+): Promise<void> {
+  await proveRevocationAndReplacement(admitted, logout, readmitted, "logout");
+}
+
+/** A native auth switch must retire every old-scope alias before admitting B. */
+export async function proveAuthScopeSwitch(
+  admitted: AdmittedRelay,
+  switchScope: () => Promise<AdmittedRelay>,
+): Promise<AdmittedRelay> {
+  let replacement: AdmittedRelay | undefined;
+  await proveRevocationAndReplacement(
+    admitted,
+    async () => {
+      replacement = await switchScope();
+    },
+    async () => {
+      if (!replacement)
+        throw new Error("trusted auth scope switch returned no replacement capability");
+      return replacement;
+    },
+    "auth scope switch",
+  );
+  if (!replacement) throw new Error("trusted auth scope switch returned no replacement capability");
+  return replacement;
+}
+
+async function proveRevocationAndReplacement(
+  admitted: AdmittedRelay,
+  revoke: () => Promise<void>,
+  readmitted: () => Promise<AdmittedRelay>,
+  operation: string,
+): Promise<void> {
+  const relay = decodeOpened(await admitted.executor.execute(encodeOpen(admitted.capability)));
+  const client = decodeAttached(await admitted.executor.execute(encodeAttach(relay)));
+  await revoke();
+
+  await assertRejected(
+    () => admitted.executor.execute(encodeOpen(admitted.capability)),
+    `${operation} capability after revocation`,
+  );
+  await assertRejected(
+    () => admitted.executor.execute(encodeAttach(relay)),
+    `relay alias retained after ${operation}`,
+  );
+  if (decodeClosed(await admitted.executor.execute(encodeCloseClient(client))))
+    throw new Error(`client alias remained live after ${operation}`);
+
+  const replacement = await readmitted();
+  if (replacement.capability.byteLength !== 32)
+    throw new Error("replacement admission capability must be exactly 32 bytes");
+  if (equalBytes(replacement.capability, admitted.capability))
+    throw new Error(`trusted ${operation} reused a revoked admission capability`);
+  await proveAdmittedRelay(replacement.executor, replacement.capability);
 }
 
 function encodeOpen(capability: Uint8Array): string {
@@ -66,6 +155,17 @@ function decodeAttached(encoded: string): bigint {
   const [client, offset] = readVarint(bytes, 1);
   if (offset !== bytes.length) throw new Error("native relay returned malformed Attach response");
   return client;
+}
+async function assertRejected(action: () => Promise<unknown>, expectation: string): Promise<void> {
+  try {
+    await action();
+  } catch {
+    return;
+  }
+  throw new Error(`native relay accepted ${expectation}`);
+}
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
 }
 function bytesOf(encoded: string): Uint8Array {
   return Uint8Array.from(globalThis.atob(encoded), (byte) => byte.charCodeAt(0));

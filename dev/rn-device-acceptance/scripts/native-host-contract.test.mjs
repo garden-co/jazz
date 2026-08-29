@@ -39,9 +39,12 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /Build\.FINGERPRINT/);
   assert.match(
     fixture,
-    /JazzRelayTrustedAdmission\.admit\(TrustedRelayScopeConfig\(/,
+    /JazzRelayTrustedAdmission\.admit\(scopeConfig\(/,
     "the foundation fixture must construct its trusted admission configuration in native code",
   );
+  assert.match(fixture, /fixture-user-b/);
+  assert.match(fixture, /JazzRelayTrustedAdmission\.replace/);
+  assert.match(fixture, /jazz-device-\$authScope\.sqlite/);
   assert.match(fixture, /jazzDeviceRunNonce/);
   assert.match(fixture, /applicationInfo\.sourceDir/);
   assert.match(fixture, /MessageDigest\.getInstance\("SHA-256"\)/);
@@ -92,7 +95,10 @@ test("each native JSI runtime owns an independent foreground lease", () => {
   assert.match(iosBridge, /std::unordered_map<JazzRelay \*, ForegroundRuntimeInstallation>/);
   assert.match(iosBridge, /foregroundRuntimeLeases\.find\(self\)/);
   assert.match(iosBridge, /foregroundRuntimeLeases\.erase\(found\)/);
-  assert.doesNotMatch(iosBridge, /static std::shared_ptr<jazz::rn::ForegroundRuntimeLease> foregroundRuntimeLease/);
+  assert.doesNotMatch(
+    iosBridge,
+    /static std::shared_ptr<jazz::rn::ForegroundRuntimeLease> foregroundRuntimeLease/,
+  );
 });
 
 test("Expo config plugin describes the real iOS receipt boundary without claiming TODO scenarios", () => {
