@@ -237,6 +237,13 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     // Core rate-limits. Capture it before the Core transport drains it.
     writer.tick().unwrap();
     core.tick().unwrap();
+    scheduler.take();
+    writer.tick().unwrap();
+    assert_eq!(
+        scheduler.take(),
+        vec![TickUrgency::Immediate, TickUrgency::AfterCurrentTurn],
+        "the requested upload frontier preserves its exact coalesced scheduler-owned writer wake"
+    );
     writer.tick().unwrap();
     let first_batch = writer_outbound
         .borrow()
@@ -372,6 +379,13 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
 
     writer.tick().unwrap();
     core.tick().unwrap();
+    scheduler.take();
+    writer.tick().unwrap();
+    assert_eq!(
+        scheduler.take(),
+        vec![TickUrgency::Immediate, TickUrgency::AfterCurrentTurn],
+        "the requested upload frontier preserves its exact coalesced scheduler-owned writer wake"
+    );
     writer.tick().unwrap();
     assert!(
         writer_outbound
