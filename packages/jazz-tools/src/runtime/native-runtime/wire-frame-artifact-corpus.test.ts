@@ -18,6 +18,10 @@ type ArtifactFrameValidator = {
   __testWireFrameCorpusFeatures(): string;
 };
 
+type WasmArtifactFrameValidator = ArtifactFrameValidator & {
+  WasmDb: { prototype: { wireFeatures?: () => number } };
+};
+
 // The source fixtures freeze the exact Rust-produced v1 bytes. This test then
 // sends every complete Hello/message frame through both freshly generated artifacts,
 // not a JavaScript mirror of the Rust frame/payload/compression decoder.
@@ -36,7 +40,7 @@ describe("wire frame artifact corpus", () => {
         // This is a deliberately test-only export (`skip_typescript` in
         // napi-rs), so production declarations must not advertise it.
         loadNapiModule() as Promise<unknown> as Promise<ArtifactFrameValidator>,
-        loadWasmModuleForTest() as Promise<ArtifactFrameValidator>,
+        loadWasmModuleForTest() as Promise<WasmArtifactFrameValidator>,
       ]);
 
       // This executes the actual sealed artifact which package assembly
@@ -46,6 +50,12 @@ describe("wire frame artifact corpus", () => {
       expect(BigInt(napi.__testWireFrameCorpusFeatures()) & BigInt(FEATURE_PAYLOAD_ZSTD)).not.toBe(
         0n,
       );
+
+      // A persistent browser worker creates a NativeRuntimeAdapter around this
+      // exact WasmDb export. It must use the artifact's own feature mask when
+      // sending its WebSocket Hello; otherwise a freshly sealed browser artifact
+      // fails before it can connect, even if the NAPI artifact is current.
+      expect(typeof wasm.WasmDb.prototype.wireFeatures).toBe("function");
 
       for (const artifact of [napi, wasm]) {
         const negotiatedFeatures = artifact.__testWireFrameCorpusFeatures();

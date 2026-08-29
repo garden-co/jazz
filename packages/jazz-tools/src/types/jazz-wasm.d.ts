@@ -293,6 +293,8 @@ declare module "jazz-wasm" {
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
     setRelayAuthoritySessionOwner(): void;
+    /** Exact wire features compiled into this WASM artifact. */
+    wireFeatures(): number;
     close(): Promise<boolean>;
     connectUpstream(): WasmTransport;
     connectUpstreamWithSession(

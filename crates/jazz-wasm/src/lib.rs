@@ -1077,6 +1077,16 @@ enum WasmTxKind {
 
 #[wasm_bindgen]
 impl WasmDb {
+    /// Exact wire capabilities compiled into this WASM artifact.
+    ///
+    /// The TypeScript WebSocket carrier uses this for its Hello instead of an
+    /// independent feature list, so a package cannot advertise a codec this
+    /// WASM artifact cannot decode.
+    #[wasm_bindgen(js_name = wireFeatures)]
+    pub fn wire_features(&self) -> u32 {
+        jazz::wire::current_wire_features() as u32
+    }
+
     fn require_trusted_backend(&self) -> Result<(), JsValue> {
         self.trusted_backend.then_some(()).ok_or_else(|| {
             JsValue::from_str("backend attribution requires an explicit backend runtime")
