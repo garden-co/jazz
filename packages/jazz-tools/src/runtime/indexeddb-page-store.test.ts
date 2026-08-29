@@ -87,6 +87,27 @@ describe("IndexedDbPageStore", () => {
     raw.close();
   });
 
+  it("retains an exact long canonical owner marker rather than requiring a lossy digest", async () => {
+    const name = databaseName();
+    const owner = JSON.stringify({
+      version: 1,
+      appId: "long-owner-app",
+      env: "dev",
+      auth: {
+        kind: "principal",
+        authMode: "external",
+        user: JSON.stringify(["https://issuer.example", "principal-".repeat(300)]),
+      },
+    });
+    expect(owner.length).toBeGreaterThan(1024);
+
+    const store = await IndexedDbPageStore.open(name, { owner });
+    store.close();
+    await expect(IndexedDbPageStore.open(name, { owner: `${owner}:other` })).rejects.toThrow(
+      "already owned by a different Jazz browser session",
+    );
+  });
+
   it("transfers an explicit browser database only after explicit destruction", async () => {
     const name = databaseName();
     const first = await IndexedDbPageStore.open(name, { owner: "app:alice" });

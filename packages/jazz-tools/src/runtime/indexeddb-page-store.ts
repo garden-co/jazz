@@ -205,7 +205,11 @@ export class IndexedDbPageStore {
    * explicit way to transfer an intentionally named database to a new owner.
    */
   private async claimBrowserRuntimeOwner(owner: string): Promise<void> {
-    if (typeof owner !== "string" || owner.length === 0 || owner.length > 1024) {
+    // This is canonical, exact identity data, not a fixed-width digest. Do
+    // not truncate or impose a small surrogate-size cap: that would either
+    // reintroduce collisions or make an otherwise valid issuer/subject unable
+    // to claim its browser root.
+    if (typeof owner !== "string" || owner.length === 0) {
       throw new Error("Invalid browser IndexedDB runtime owner");
     }
     const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
