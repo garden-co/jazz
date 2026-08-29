@@ -36,7 +36,7 @@ const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "b99a4cfd4fdd615b64305f012891cd63517f0d99a591f25d6afc0db68faac2ae";
+    "e3f4e1cffd6f3c2aec48cddd57bfad38f00b0b285470d13fed0cbf6282af1477";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -66,9 +66,14 @@ fn native_corpus_checksum(receipt: &NativeCorpusReceipt) -> String {
 fn native_corpus_pack(receipt: &NativeCorpusReceipt) -> String {
     let mut pack = format!("{NATIVE_CORPUS_PACK_HEADER}\n");
     for (store, rows) in &receipt.stores {
+        // Preserve empty authoritative families too.  A row-only listing
+        // cannot distinguish an empty-but-opened family from one the
+        // producer accidentally omitted from the corpus.
+        use std::fmt::Write as _;
+        writeln!(pack, "store\t{store}")
+            .expect("writing an in-memory corpus pack cannot fail");
         for (key, value) in rows {
-            use std::fmt::Write as _;
-            writeln!(pack, "{store}\t{}\t{}", hex::encode(key), hex::encode(value))
+            writeln!(pack, "entry\t{store}\t{}\t{}", hex::encode(key), hex::encode(value))
                 .expect("writing an in-memory corpus pack cannot fail");
         }
     }
@@ -411,6 +416,25 @@ where
         .iter()
         .any(|version| version.row_uuid() == row(0xc3)));
     assert!(versions.iter().all(|version| version.row_uuid() == row_uuid));
+
+    // The receipt above deliberately records the row descriptor, not the
+    // chunk backend's private install receipt.  Prove the complementary
+    // durable contract directly: reopening the current node materializes the
+    // whole indirect value through Groove's ordered chunk plane.
+    let table = node.table("todos").expect("todos table remains known").clone();
+    let attachment = versions[0]
+        .cell(&table, "attachment")
+        .expect("history attachment decodes")
+        .expect("first version carries the indirect attachment");
+    let Value::Large(value_ref) = attachment else {
+        panic!("first history attachment must retain its large-value descriptor");
+    };
+    assert_eq!(
+        crate::db::block_on(node.read_large_value_range(&value_ref, 0..value_ref.byte_length))
+            .expect("reopened large tree materializes"),
+        native_corpus_large_attachment(),
+        "the indirect byte tree survives the native reopen"
+    );
 }
 
 fn exercise_native_corpus<S>(
@@ -418,6 +442,7 @@ fn exercise_native_corpus<S>(
     snapshot: &crate::protocol::CatalogueSnapshot,
     open: impl Fn() -> S,
     open_with_incomplete_profile: impl Fn() -> Result<S, groove::storage::Error>,
+    archive_historical: impl Fn(),
 ) -> NativeCorpusReceipt
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -439,6 +464,7 @@ where
     let before_close = native_corpus_receipt(&producer, &schema);
     assert_native_corpus_has_required_families(&before_close);
     drop(producer);
+    archive_historical();
 
     // A profile that omits Jazz's own codec IDs must be rejected at the
     // adapter manifest boundary.  Reopening the right profile immediately
@@ -529,14 +555,17 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let rocks_path = rocks_directory.path().to_path_buf();
     let rocks_schema = schema.clone();
     let rocks_profile = profile.clone();
+    let rocks_open_path = rocks_path.clone();
     let rocks_wrong_path = rocks_path.clone();
     let rocks_wrong_schema = rocks_schema.clone();
+    let rocks_archive_path = std::env::var_os("JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT")
+        .map(std::path::PathBuf::from);
     let rocks_receipt = exercise_native_corpus(rocks_schema.clone(), &snapshot, move || {
         let families = rocks_schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(
             ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                &rocks_path,
+                &rocks_open_path,
                 &refs,
                 RocksDurability::FullSync,
                 &rocks_profile,
@@ -553,19 +582,37 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
             &groove::storage::StorageCodecProfile::groove_epoch_1(),
         )
         .map(YieldingStorage::wrap)
+    }, move || {
+        let Some(output) = &rocks_archive_path else {
+            return;
+        };
+        let output_file = std::fs::File::create(output).expect("create requested RocksDB archive");
+        let encoder = flate2::write::GzEncoder::new(output_file, flate2::Compression::best());
+        let mut archive = tar::Builder::new(encoder);
+        archive
+            .append_dir_all("rocksdb-epoch-1", &rocks_path)
+            .expect("archive requested RocksDB corpus store");
+        archive
+            .into_inner()
+            .expect("finish RocksDB tar archive")
+            .finish()
+            .expect("finish RocksDB gzip archive");
     });
 
     let sqlite_directory = tempfile::tempdir().expect("create SQLite corpus directory");
     let sqlite_path = sqlite_directory.path().join("jazz.sqlite");
     let sqlite_schema = schema;
+    let sqlite_open_path = sqlite_path.clone();
     let sqlite_wrong_path = sqlite_path.clone();
     let sqlite_wrong_schema = sqlite_schema.clone();
+    let sqlite_fixture_path = std::env::var_os("JAZZ_NATIVE_CORPUS_SQLITE_OUT")
+        .map(std::path::PathBuf::from);
     let sqlite_receipt = exercise_native_corpus(sqlite_schema.clone(), &snapshot, move || {
         let families = sqlite_schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(
             ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                &sqlite_path,
+                &sqlite_open_path,
                 &refs,
                 SqliteDurability::FullSync,
                 &profile,
@@ -582,6 +629,11 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
             &groove::storage::StorageCodecProfile::groove_epoch_1(),
         )
         .map(YieldingStorage::wrap)
+    }, move || {
+        let Some(output) = &sqlite_fixture_path else {
+            return;
+        };
+        std::fs::copy(&sqlite_path, output).expect("copy requested SQLite corpus store");
     });
 
     assert_same_native_corpus(
@@ -594,15 +646,19 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
         "0a81edc17508c40d1a04c52bfc00e92f34da4bf9070d394dc038370701a2779b",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
+    if let Some(path) = std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT") {
+        // Maintainers deliberately request this output only while reviewing a
+        // new epoch producer.  Write before the pinned comparison so the
+        // candidate receipt remains available when that comparison correctly
+        // fails after an intentional producer change.
+        std::fs::write(&path, native_corpus_pack(&rocks_receipt))
+            .expect("write requested native corpus pack");
+    }
     assert_eq!(
         native_corpus_pack(&rocks_receipt),
         epoch_1_native_corpus_pack(),
         "the pinned producer must reproduce the committed backend-neutral logical pack"
     );
-    if let Some(path) = std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT") {
-        std::fs::write(path, native_corpus_pack(&rocks_receipt))
-            .expect("write requested native corpus pack");
-    }
 }
 
 /// Proves the frozen digest actually observes authored application content.
