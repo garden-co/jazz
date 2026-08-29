@@ -154,6 +154,39 @@ fn maintained_empty_index_prefix_delivers_first_matching_insert_once() {
     );
 }
 
+/// A Local subscription remains complete when its settled source is indexed;
+/// the empty ahead overlay does not replace that indexed snapshot.
+#[test]
+fn maintained_local_index_snapshot_is_complete() {
+    let schema = indexed_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd3; 16]);
+    let db = open_db(0xd3, author, &schema);
+    let team = row(0xa3);
+    let matching = row(5);
+    for (id, row_team) in [(matching, team), (row(6), row(0xb3))] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "documents",
+            id,
+            author,
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(row_team.0)),
+                ("active".to_owned(), Value::Bool(true)),
+                ("title".to_owned(), Value::String("settled".to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&snapshot.rows), vec![matching]);
+    let node = db.node.node.borrow();
+    let metrics = node.query_engine_read_metrics();
+    assert!(metrics.source_index_probes >= 1);
+}
+
 #[test]
 fn negated_membership_uses_two_valued_null_semantics() {
     let schema = build_public_db_test_schema(
