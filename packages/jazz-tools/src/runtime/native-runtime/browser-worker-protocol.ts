@@ -7,7 +7,6 @@ export interface BrowserWorkerInitOptions {
   runtimeSources?: RuntimeSourcesConfig;
   schema: WasmSchema;
   dbName: string;
-  node: Uint8Array;
   author: Uint8Array;
   selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;

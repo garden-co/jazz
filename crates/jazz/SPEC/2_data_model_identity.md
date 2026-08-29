@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: `AuthorSubject::SYSTEM` MUST have the exact portable value `["urn:jazz:system","system"]`, and no authenticated user may claim the reserved system issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
-- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
+- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing physical replica MUST have a distinct `NodeUuid`, established before it mints any transaction and retained across that replica's reopen; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
 - `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
@@ -65,7 +65,13 @@ newtypes (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
 distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
 packed hybrid logical clock (`TxTime`,
 physical milliseconds plus a logical counter) with the writing node; the
-transaction is identified and tie-broken by both values (`INV-DATA-5`). The
+transaction is identified and tie-broken by both values (`INV-DATA-5`). Node
+identity is a physical-replica identity, not an app, account, author, database
+name, or worker-name derivation: two independent durable replicas may share all
+of those logical values but must still use distinct nodes, because equal HLC
+times would otherwise name the same transaction. A durable replica loads its
+node before minting and retains it across reopen so recovery and at-least-once
+delivery can recognize its own transactions. The
 An `AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
 in-memory intern is never durable or portable. The well-known
 `AuthorSubject::SYSTEM` string passes all policies (ch. 7, `INV-DATA-3`).

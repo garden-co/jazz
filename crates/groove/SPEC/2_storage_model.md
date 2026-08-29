@@ -455,7 +455,8 @@ receipt against the production page store; it does not substitute
 
 IndexedDB is one durable adapter, not a second logical Groove layout. Its
 database name; `pages`, `metadata`, and `storage-manifest` object-store names;
-and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
+and the `current`, `epoch`, and `replica-node-v1` keys are fixed within storage
+epoch 1. Before a
 caller receives a handle, `storage-manifest`/`epoch` must be the exact
 structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
 `1`, the mandatory Groove base plus the complete caller-composed Jazz codec
@@ -471,6 +472,17 @@ new incompatible layout uses a new epoch instead of guessing at these bytes.
 The browser's IndexedDB schema generation is separately `3`: that number only
 selects the object-store layout containing `storage-manifest`, and is not a
 Jazz adapter, metadata, or page-codec version.
+
+`storage-manifest`/`replica-node-v1` is a separate exact 16-byte random
+`NodeUuid`, generated in the same initial IndexedDB versionchange transaction
+as the epoch manifest. It is durable physical-replica metadata, not a
+decode-profile field: reopening the same IndexedDB database preserves it, while
+two independent browser storage replicas with the same app, author, and
+database name receive different values. It is read and validated before a
+browser worker opens Jazz and can mint a `TxId`; missing or malformed values
+fail closed before any page mutation. The value is deliberately not derived
+from an author, app id, or logical database name, since such derivation could
+alias transaction identities at equal HLC times across independent replicas.
 Browser page ids are JavaScript safe integers, so root, child, and next ids are
 bounded to `0..=2^53-1`; exhaustion fails instead of rounding an identity. The
 stored page size is validated before page write or decode.

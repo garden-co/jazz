@@ -24,3 +24,12 @@ An omitted, added, duplicate, or substituted ID fails profile admission before
 the adapter decodes or mutates ordinary data. Any incompatible inventory change
 requires a new storage epoch, migration decision, and updated fixture; this is
 not a per-adapter `Bytes` compatibility exception.
+
+The browser IndexedDB adapter additionally stores `storage-manifest`/
+`replica-node-v1`: one random exact 16-byte `NodeUuid` for that physical
+replica. It is created atomically with a fresh browser epoch manifest and
+validated before Jazz opens, but is deliberately outside this shared codec
+profile and its `JSM1` checksum: it identifies a physical transaction issuer,
+whereas this fixture identifies a common decode contract. The browser physical
+receipt proves same-replica reopen stability and distinct values for independent
+stores with the same logical name.

@@ -184,16 +184,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
       appId: options.appId,
       runtimeThread: "worker",
     });
+    const node = context.pageStore.replicaNode;
     const schema = encodeSchema(options.schema);
     const proof = options.selfSignedClientProof;
-    const config = openConfig(
-      options.node,
-      options.author,
-      1,
-      false,
-      options.initialSyncFlushEvery,
-      proof,
-    );
+    const config = openConfig(node, options.author, 1, false, options.initialSyncFlushEvery, proof);
     if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
       throw new Error(
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
@@ -212,7 +206,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
-      options.node,
+      node,
       options.author,
       1,
       false,
