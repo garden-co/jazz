@@ -285,6 +285,222 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
     );
 }
 
+/// Storage-backed scalar subscriptions resolve deletion/restore winners at
+/// their own Local or Edge current frontier instead of accidentally reading
+/// the Global register.
+///
+/// server ──tier-accepted insert/delete/restore──► peer ──ViewUpdate──► reader
+/// server ──later Local delete (Edge only)───────► Edge frontier unchanged
+#[test]
+fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() {
+    for tier in [DurabilityTier::Local, DurabilityTier::Edge] {
+        let scalar_schema =
+            public_query_eval_schema(PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text),
+            ));
+        let (_server_dir, mut server) = open_node_with_uuid(
+            NodeUuid::from_bytes([0x50 + tier as u8; 16]),
+            scalar_schema.clone(),
+        );
+        let (_reader_dir, mut reader) =
+            open_node_with_uuid(NodeUuid::from_bytes([0x60 + tier as u8; 16]), scalar_schema);
+        let shape = Query::from("notes")
+            .validate(&server.catalogue.schema)
+            .expect("validate scalar tier query");
+        let binding = shape.bind(BTreeMap::new()).expect("bind scalar tier query");
+        let program = server
+            .compile_current_query_program_for_read_view(
+                &shape,
+                &binding,
+                tier,
+                AuthorSubject::SYSTEM,
+                CurrentQueryProgramOutput::MaintainedView,
+                &ReadViewSpec::default(),
+            )
+            .expect("compile tiered scalar maintained query");
+        assert!(
+            !program
+                .request
+                .output
+                .facts
+                .contains(&crate::node::query_engine::ProgramFactKey::VersionWitnesses)
+                && !program
+                    .request
+                    .output
+                    .facts
+                    .contains(&crate::node::query_engine::ProgramFactKey::ReplacementWitnesses),
+            "{tier:?} scalar maintained view uses storage-backed witnesses"
+        );
+        let opts = RegisterShapeOptions {
+            tier,
+            ..RegisterShapeOptions::default()
+        };
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        for node in [&mut server, &mut reader] {
+            register_query_shape(node, &shape, opts.clone());
+            subscribe_query_binding_with_opts(node, &shape, &binding, opts.clone());
+        }
+
+        let commit = |node: &mut NodeState<RocksDbStorage>, now_ms, deletion| {
+            let mut write =
+                MergeableCommit::new("notes", row(0), now_ms).made_by(AuthorSubject::SYSTEM);
+            if let Some(deletion) = deletion {
+                write = write.deletion(deletion);
+            } else {
+                write = write.cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("tiered".to_owned()),
+                )]));
+            }
+            let tx_id = node
+                .commit_mergeable_settled(write)
+                .expect("commit tiered row");
+            node.apply_fate_update(tx_id, Fate::Accepted, None, Some(tier))
+                .expect("accept tiered row");
+            tx_id
+        };
+
+        let initial_tx = commit(&mut server, 1, None);
+        let mut peer = PeerState::new();
+        let initial = peer
+            .rehydrate_query_for_subscription_with_opts(
+                &mut server,
+                subscription,
+                &shape,
+                &binding,
+                opts.clone(),
+            )
+            .expect("serve initial tiered update")
+            .expect("initial tiered update is ready");
+        reader
+            .apply_sync_message_settled(initial)
+            .expect("reader applies tiered initial update");
+
+        let deletion_tx = commit(&mut server, 2, Some(crate::tx::DeletionEvent::Deleted));
+        let deletion = peer
+            .query_update_for_subscription_with_opts(
+                &mut server,
+                subscription,
+                &shape,
+                &binding,
+                opts.clone(),
+            )
+            .expect("serve tiered deletion update")
+            .expect("tiered deletion changes membership");
+        reader
+            .apply_sync_message_settled(deletion)
+            .expect("reader applies tiered deletion update");
+        assert!(
+            reader
+                .query_rows(&shape, &binding, tier)
+                .expect("read tiered deletion")
+                .is_empty(),
+            "{tier:?} deletion hides the scalar row"
+        );
+
+        let restore_tx = commit(&mut server, 3, Some(crate::tx::DeletionEvent::Restored));
+        let restored = peer
+            .query_update_for_subscription_with_opts(
+                &mut server,
+                subscription,
+                &shape,
+                &binding,
+                opts.clone(),
+            )
+            .expect("serve tiered restore update")
+            .expect("tiered restore changes membership");
+        let restored_bundles = match &restored {
+            SyncMessage::ViewUpdate(payload) => {
+                crate::protocol::expand_version_carriers(&payload.version_carriers)
+                    .expect("tiered restore carriers should expand")
+            }
+            _ => panic!("tiered scalar subscription must produce a view update"),
+        };
+        assert!(
+            restored_bundles.iter().any(|bundle| {
+                bundle.tx.tx_id == restore_tx
+                    && bundle.versions.iter().any(|version| {
+                        version.row_uuid() == row(0)
+                            && version.deletion() == Some(crate::tx::DeletionEvent::Restored)
+                    })
+            }),
+            "{tier:?} restore ships its visible register winner"
+        );
+        reader
+            .apply_sync_message_settled(restored)
+            .expect("reader applies tiered restore update");
+        assert_eq!(
+            reader
+                .query_rows(&shape, &binding, tier)
+                .expect("read restored tiered row")
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([row(0)]),
+            "{tier:?} ordinary reader lookup agrees with restored membership"
+        );
+
+        if tier == DurabilityTier::Edge {
+            let local_delete = server
+                .commit_mergeable_settled(
+                    MergeableCommit::new("notes", row(0), 4)
+                        .made_by(AuthorSubject::SYSTEM)
+                        .deletion(crate::tx::DeletionEvent::Deleted),
+                )
+                .expect("commit Local-only deletion");
+            server
+                .apply_fate_update(
+                    local_delete,
+                    Fate::Accepted,
+                    None,
+                    Some(DurabilityTier::Local),
+                )
+                .expect("accept Local-only deletion");
+            // This deliberately overwrites the ahead-current register at
+            // Local. Edge's executable source filters it out and sees no
+            // membership transition; its materialized reader stays visible.
+            if let Some(edge_after_local) = peer
+                .query_update_for_subscription_with_opts(
+                    &mut server,
+                    subscription,
+                    &shape,
+                    &binding,
+                    opts,
+                )
+                .expect("evaluate Edge after Local-only register write")
+            {
+                let SyncMessage::ViewUpdate(payload) = &edge_after_local else {
+                    panic!("Edge scalar subscription must produce a view update");
+                };
+                assert!(
+                    payload.result_member_adds.is_empty()
+                        && payload.result_member_removes.is_empty(),
+                    "a Local-only deletion must not change Edge result membership"
+                );
+                reader
+                    .apply_sync_message_settled(edge_after_local)
+                    .expect("reader applies no-op Edge update");
+            }
+            assert_eq!(
+                reader
+                    .query_rows(&shape, &binding, DurabilityTier::Edge)
+                    .expect("read Edge after Local-only register write")
+                    .into_iter()
+                    .map(|row| row.row_uuid())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([row(0)]),
+                "Edge remains at its prior visible register frontier"
+            );
+        }
+
+        assert_ne!(initial_tx, deletion_tx, "tiered transition tx ids differ");
+    }
+}
+
 #[test]
 fn relay_authority_session_key_is_explicit_and_does_not_replace_direct_edge_source() {
     let (_dir, mut node) = open_node();

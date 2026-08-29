@@ -294,27 +294,54 @@ where
         Ok(())
     }
 
-    /// Recover the current global deletion-register winner for an optimized
-    /// scalar root.  Result membership tells us that the row is visible, but
-    /// not whether that visibility is due to a later `Restored` register
-    /// event; the receiver must learn that event to keep its own register
-    /// current for later ordinary reads.
-    async fn storage_backed_maintained_global_deletion_winner(
+    /// Recover the deletion-register winner currently visible at the
+    /// subscription tier for an optimized scalar root. Result membership tells
+    /// us that the row is visible, but not whether that visibility is due to a
+    /// later `Restored` register event; the receiver must learn that event to
+    /// keep its own register current for later ordinary reads.
+    async fn storage_backed_maintained_deletion_winner(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
+        tier: DurabilityTier,
         context: &mut ViewEvaluationContext,
     ) -> Result<Option<VersionRow>, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
-        let Some(tx_id) = self
+        let global = self
             .visible_global_layer_tx_id_for_physical_table_now(
                 table_id,
                 row_uuid,
                 VersionLayer::Deletion,
             )
-            .await
-        else {
+            .await;
+        let tx_id = match tier {
+            // Global current storage already represents the settled winner.
+            DurabilityTier::Global => global,
+            // Local reads select the greatest global/ahead register winner.
+            DurabilityTier::Local => self.local_deletion_winner_tx_id(table, row_uuid).await?,
+            // Edge has the same current tables as Local, but an ahead winner
+            // only participates after Edge acceptance. If an unaccepted/local
+            // ahead winner shadows that table's current row, the executable
+            // Edge graph likewise falls back to the global winner.
+            DurabilityTier::Edge => {
+                match self.local_deletion_winner_tx_id(table, row_uuid).await? {
+                    Some(local) => match self.query_transaction_memo(local, context).await? {
+                        Some(stored)
+                            if matches!(stored.fate, Fate::Accepted)
+                                && stored.durability >= DurabilityTier::Edge =>
+                        {
+                            Some(local)
+                        }
+                        _ => global,
+                    },
+                    None => global,
+                }
+            }
+            // No-tier reads do not have a settled maintained source.
+            DurabilityTier::None => None,
+        };
+        let Some(tx_id) = tx_id else {
             return Ok(None);
         };
         let stored_tx = self
@@ -895,10 +922,11 @@ where
                 maintained_facts.replacement_for(entry_table, *row_uuid);
             let deletion_winner = match retained_deletion_winner {
                 Some(winner) => Some(winner),
-                None if allow_storage_witness_fallback && tier == DurabilityTier::Global => {
-                    self.storage_backed_maintained_global_deletion_winner(
+                None if allow_storage_witness_fallback => {
+                    self.storage_backed_maintained_deletion_winner(
                         entry_table,
                         *row_uuid,
+                        tier,
                         &mut context,
                     )
                     .await?
@@ -954,10 +982,11 @@ where
                 maintained_facts.replacement_for(entry_table, *row_uuid);
             let deletion_winner = match retained_deletion_winner {
                 Some(winner) => Some(winner),
-                None if allow_storage_witness_fallback && tier == DurabilityTier::Global => {
-                    self.storage_backed_maintained_global_deletion_winner(
+                None if allow_storage_witness_fallback => {
+                    self.storage_backed_maintained_deletion_winner(
                         entry_table,
                         *row_uuid,
+                        tier,
                         &mut context,
                     )
                     .await?
