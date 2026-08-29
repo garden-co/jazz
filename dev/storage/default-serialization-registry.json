@@ -29,16 +29,16 @@
           "path": "crates/groove/src/db/facade.rs",
           "canonicalPath": "serde_json::Value",
           "location": {
-            "line": 1755,
+            "line": 1782,
             "column": 24
           },
           "span": {
             "start": {
-              "line": 1755,
+              "line": 1782,
               "column": 24
             },
             "end": {
-              "line": 1755,
+              "line": 1782,
               "column": 41
             }
           },
@@ -59,16 +59,16 @@
           "path": "crates/groove/src/db/facade.rs",
           "canonicalPath": "serde_json::Value",
           "location": {
-            "line": 1791,
+            "line": 1818,
             "column": 19
           },
           "span": {
             "start": {
-              "line": 1791,
+              "line": 1818,
               "column": 19
             },
             "end": {
-              "line": 1791,
+              "line": 1818,
               "column": 36
             }
           },
@@ -89,16 +89,16 @@
           "path": "crates/groove/src/db/facade.rs",
           "canonicalPath": "serde_json::from_slice",
           "location": {
-            "line": 1791,
+            "line": 1818,
             "column": 39
           },
           "span": {
             "start": {
-              "line": 1791,
+              "line": 1818,
               "column": 39
             },
             "end": {
-              "line": 1791,
+              "line": 1818,
               "column": 61
             }
           },
@@ -119,16 +119,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::Value",
           "location": {
-            "line": 4582,
+            "line": 4606,
             "column": 18
           },
           "span": {
             "start": {
-              "line": 4582,
+              "line": 4606,
               "column": 18
             },
             "end": {
-              "line": 4582,
+              "line": 4606,
               "column": 35
             }
           },
@@ -149,16 +149,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::Deserializer::from_slice",
           "location": {
-            "line": 4625,
+            "line": 4649,
             "column": 26
           },
           "span": {
             "start": {
-              "line": 4625,
+              "line": 4649,
               "column": 26
             },
             "end": {
-              "line": 4625,
+              "line": 4649,
               "column": 62
             }
           },
@@ -179,16 +179,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::Value",
           "location": {
-            "line": 4626,
+            "line": 4650,
             "column": 26
           },
           "span": {
             "start": {
-              "line": 4626,
+              "line": 4650,
               "column": 26
             },
             "end": {
-              "line": 4626,
+              "line": 4650,
               "column": 43
             }
           },
@@ -209,16 +209,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::Value::Object",
           "location": {
-            "line": 4639,
+            "line": 4663,
             "column": 21
           },
           "span": {
             "start": {
-              "line": 4639,
+              "line": 4663,
               "column": 21
             },
             "end": {
-              "line": 4639,
+              "line": 4663,
               "column": 46
             }
           },
@@ -239,16 +239,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::Value::Array",
           "location": {
-            "line": 4640,
+            "line": 4664,
             "column": 21
           },
           "span": {
             "start": {
-              "line": 4640,
+              "line": 4664,
               "column": 21
             },
             "end": {
-              "line": 4640,
+              "line": 4664,
               "column": 45
             }
           },
@@ -269,16 +269,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::from_str",
           "location": {
-            "line": 4868,
+            "line": 4892,
             "column": 13
           },
           "span": {
             "start": {
-              "line": 4868,
+              "line": 4892,
               "column": 13
             },
             "end": {
-              "line": 4868,
+              "line": 4892,
               "column": 33
             }
           },
@@ -299,16 +299,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::Value",
           "location": {
-            "line": 4868,
+            "line": 4892,
             "column": 36
           },
           "span": {
             "start": {
-              "line": 4868,
+              "line": 4892,
               "column": 36
             },
             "end": {
-              "line": 4868,
+              "line": 4892,
               "column": 53
             }
           },
@@ -329,16 +329,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::Value",
           "location": {
-            "line": 5488,
+            "line": 5512,
             "column": 21
           },
           "span": {
             "start": {
-              "line": 5488,
+              "line": 5512,
               "column": 21
             },
             "end": {
-              "line": 5488,
+              "line": 5512,
               "column": 38
             }
           },
@@ -361,16 +361,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::from_slice",
           "location": {
-            "line": 5488,
+            "line": 5512,
             "column": 41
           },
           "span": {
             "start": {
-              "line": 5488,
+              "line": 5512,
               "column": 41
             },
             "end": {
-              "line": 5488,
+              "line": 5512,
               "column": 63
             }
           },
@@ -393,16 +393,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::json",
           "location": {
-            "line": 5489,
+            "line": 5513,
             "column": 54
           },
           "span": {
             "start": {
-              "line": 5489,
+              "line": 5513,
               "column": 54
             },
             "end": {
-              "line": 5489,
+              "line": 5513,
               "column": 70
             }
           },
@@ -425,16 +425,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::json",
           "location": {
-            "line": 5490,
+            "line": 5514,
             "column": 50
           },
           "span": {
             "start": {
-              "line": 5490,
+              "line": 5514,
               "column": 50
             },
             "end": {
-              "line": 5490,
+              "line": 5514,
               "column": 66
             }
           },
@@ -457,16 +457,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::json",
           "location": {
-            "line": 5491,
+            "line": 5515,
             "column": 48
           },
           "span": {
             "start": {
-              "line": 5491,
+              "line": 5515,
               "column": 48
             },
             "end": {
-              "line": 5491,
+              "line": 5515,
               "column": 64
             }
           },
@@ -489,16 +489,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "serde_json::json",
           "location": {
-            "line": 5492,
+            "line": 5516,
             "column": 57
           },
           "span": {
             "start": {
-              "line": 5492,
+              "line": 5516,
               "column": 57
             },
             "end": {
-              "line": 5492,
+              "line": 5516,
               "column": 73
             }
           },
@@ -521,16 +521,16 @@
           "path": "crates/groove/src/large_values.rs",
           "canonicalPath": "postcard::to_allocvec",
           "location": {
-            "line": 8003,
+            "line": 8027,
             "column": 17
           },
           "span": {
             "start": {
-              "line": 8003,
+              "line": 8027,
               "column": 17
             },
             "end": {
-              "line": 8003,
+              "line": 8027,
               "column": 38
             }
           },
@@ -4045,6 +4045,23 @@
           "workspaceInherited": false
         },
         {
+          "identity": "flate2|flate2|dev|all",
+          "crate": "flate2",
+          "package": "flate2",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.1.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
+        },
+        {
           "identity": "futures_channel|futures-channel|normal|all",
           "crate": "futures_channel",
           "package": "futures-channel",
@@ -4288,6 +4305,24 @@
           "serializerReexports": []
         },
         {
+          "identity": "jazz_storage_sqlite|jazz-storage-sqlite|dev|all",
+          "crate": "jazz_storage_sqlite",
+          "package": "jazz-storage-sqlite",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz-storage-sqlite",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
           "identity": "jazz_testkit|jazz-testkit|dev|all",
           "crate": "jazz_testkit",
           "package": "jazz-testkit",
@@ -4442,6 +4477,40 @@
           "workspaceInherited": false
         },
         {
+          "identity": "rocksdb|rust-rocksdb|dev|all",
+          "crate": "rocksdb",
+          "package": "rust-rocksdb",
+          "rename": "rocksdb",
+          "requirement": "^0.48.0",
+          "resolvedVersion": "0.48.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["lz4", "zstd"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
+        },
+        {
+          "identity": "rusqlite|rusqlite|dev|all",
+          "crate": "rusqlite",
+          "package": "rusqlite",
+          "rename": null,
+          "requirement": "^0.34",
+          "resolvedVersion": "0.34.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["bundled"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
+        },
+        {
           "identity": "rustc_hash|rustc-hash|normal|all",
           "crate": "rustc_hash",
           "package": "rustc-hash",
@@ -4541,6 +4610,23 @@
           "optional": false,
           "target": null,
           "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "tar|tar|dev|all",
+          "crate": "tar",
+          "package": "tar",
+          "rename": null,
+          "requirement": "^0.4",
+          "resolvedVersion": "0.4.46",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
           "workspaceInherited": false
         },
         {
@@ -5666,6 +5752,11 @@
     },
     {
       "crate": "jazz",
+      "dependency": "flate2|flate2|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
       "dependency": "futures_channel|futures-channel|normal|all",
       "classification": "reviewed-non-serializer"
     },
@@ -5736,6 +5827,11 @@
     },
     {
       "crate": "jazz",
+      "dependency": "jazz_storage_sqlite|jazz-storage-sqlite|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz",
       "dependency": "jazz_testkit|jazz-testkit|dev|all",
       "classification": "governed-path-dependency"
     },
@@ -5782,6 +5878,16 @@
     },
     {
       "crate": "jazz",
+      "dependency": "rocksdb|rust-rocksdb|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "rusqlite|rusqlite|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
       "dependency": "rustc_hash|rustc-hash|normal|all",
       "classification": "reviewed-non-serializer"
     },
@@ -5809,6 +5915,11 @@
     {
       "crate": "jazz",
       "dependency": "smallvec|smallvec|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "tar|tar|dev|all",
       "classification": "reviewed-non-serializer"
     },
     {
