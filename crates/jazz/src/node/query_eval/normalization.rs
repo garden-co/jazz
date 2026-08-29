@@ -93,11 +93,10 @@ pub(super) fn current_query_output_request(
 /// members and re-load their immutable content bodies from storage.
 ///
 /// This is intentionally a proof for the small common case, not a heuristic:
-/// one default-view root table, no relation/recursive/output expansion, and
-/// no aggregate.  Direct predicate-only policy alternatives are safe because
-/// their membership decision remains entirely in the root result terminal.
-/// Any shape that needs source provenance beyond that terminal keeps the
-/// self-contained version/replacement witness path.
+/// one default-view root table without a read-policy proof, relation/recursive
+/// output expansion, or aggregate. A policy-bearing root keeps its complete
+/// source witnesses: membership alone cannot preserve the policy's deletion
+/// and replacement liveness across a seeded maintained view.
 pub(super) fn storage_backed_maintained_view_eligible(
     query: &JazzQuery,
     tier: DurabilityTier,
@@ -113,9 +112,7 @@ pub(super) fn storage_backed_maintained_view_eligible(
         && query.includes.is_empty()
         && query.array_subqueries.is_empty()
         && query.aggregate.is_none()
-        && query.policy_branches.iter().all(|branch| {
-            branch.joins.is_empty() && branch.reachable.is_empty() && branch.inherits.is_empty()
-        })
+        && query.policy_branches.is_empty()
         // `JazzQuery::includes` captures only caller-requested includes.
         // Normalization also injects the default root-reference closure for
         // reference-bearing tables, and that auxiliary source needs its

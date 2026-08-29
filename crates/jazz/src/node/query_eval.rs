@@ -21,6 +21,7 @@ use super::maintained_subscription_view::{MaintainedSubscriptionView, Maintained
 use super::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint, MaintainedTerminalSchemasFootprint,
 };
+use super::query_engine::BranchViewSourceBase;
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
     AppProjectionTree, AppRowOutputRequest, AppRowSchema, CapabilityReport, ClaimPath, ClosurePath,
@@ -896,8 +897,20 @@ where
                 )
             })
             .flatten();
+        let query_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let root_has_read_policy = query_schema
+            .schema
+            .tables
+            .iter()
+            .find(|table| table.name == shape.query().table)
+            .is_some_and(|table| table.read_policy.is_some());
         let storage_backed_result_materialization =
             matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                && !root_has_read_policy
                 && self.storage_backed_maintained_root_has_identity_table_mapping(
                     shape.schema_version(),
                     &shape.query().table,
@@ -920,11 +933,6 @@ where
             )?,
             shape: input_shape,
         };
-        let query_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&shape.schema_version())
-            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let mut output_request =
             current_query_output_request(output, shape.query(), &query_schema.schema);
         if storage_backed_result_materialization {
@@ -3315,6 +3323,20 @@ where
                 .output
                 .facts
                 .contains(&ProgramFactKey::ReplacementWitnesses);
+        let inline_content_branch_keys = program
+            .request
+            .reads
+            .primary
+            .sources
+            .values()
+            .filter_map(|source| match source {
+                SourceExpr::BranchView {
+                    base: Some(BranchViewSourceBase::Snapshot(branch_key, _)),
+                    ..
+                } => Some(branch_key.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let subscription = self
             .subscribe_lowered_program(
                 program,
@@ -3337,6 +3359,9 @@ where
         let mut maintained = MaintainedSubscriptionView::default();
         if storage_backed_result_materialization {
             maintained.enable_storage_backed_result_materialization();
+        }
+        for branch_key in &inline_content_branch_keys {
+            maintained.enable_inline_content_branch_key(branch_key);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot_transitions = maintained.apply_multisink_deltas(

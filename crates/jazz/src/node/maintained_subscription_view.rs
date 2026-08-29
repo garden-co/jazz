@@ -75,6 +75,10 @@ pub(crate) struct MaintainedSubscriptionView {
     /// are loaded from immutable node storage on entry instead of being held
     /// as source-wide version/replacement terminal witnesses.
     storage_backed_result_materialization: bool,
+    /// Frozen branch bases are static graph inputs with an exact immutable
+    /// version identity. They do not emit a live Stream-B witness when a head
+    /// deletion or rejection exposes the inherited member.
+    inline_content_branch_keys: BTreeSet<Vec<u8>>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -90,6 +94,7 @@ impl Default for MaintainedSubscriptionView {
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
+            inline_content_branch_keys: BTreeSet::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -259,6 +264,11 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn enable_storage_backed_result_materialization(&mut self) {
         self.storage_backed_result_materialization = true;
+    }
+
+    pub(crate) fn enable_inline_content_branch_key(&mut self, branch_key: &BranchKey) {
+        self.inline_content_branch_keys
+            .insert(branch_key.canonical_bytes());
     }
 
     pub(crate) fn terminal_schemas_for_program(
@@ -717,6 +727,7 @@ impl MaintainedSubscriptionView {
             .filter(|(member, weight)| {
                 **weight > 0
                     && (self.storage_backed_result_materialization
+                        || self.result_member_has_inline_content_source(member)
                         || self.result_member_has_bundle_witness(member, node_aliases))
             })
             .map(|(member, _)| member.clone())
@@ -775,6 +786,13 @@ impl MaintainedSubscriptionView {
             .is_some_and(|version| {
                 version_tx_id_from_aliases(&version, node_aliases) == Some(tx_id)
             })
+    }
+
+    fn result_member_has_inline_content_source(&self, member: &ResultMemberEntry) -> bool {
+        member
+            .as_real_row()
+            .and_then(|row| row.branch_or_prefix.as_ref())
+            .is_some_and(|branch_key| self.inline_content_branch_keys.contains(branch_key))
     }
 
     fn apply_result_delta(

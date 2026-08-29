@@ -718,7 +718,7 @@ fn relay_authority_source_selection_requires_read_policy_for_exact_id() {
 #[test]
 fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
     let schema = owner_policy_schema();
-    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());
     let target = row(0x71);
     let shape = Query::from("issues")
         .filter(eq(col("id"), lit(Value::Uuid(target.0))))
@@ -731,6 +731,24 @@ fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_l
             .unwrap()
             .is_empty(),
         "policy-scoped maintained rows must retain their full source so deletion markers can remove them"
+    );
+    let program = node
+        .compile_current_query_program_for_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            CurrentQueryProgramOutput::MaintainedView,
+            &ReadViewSpec::default(),
+        )
+        .unwrap();
+    assert!(
+        program
+            .request
+            .output
+            .facts
+            .contains(&ProgramFactKey::VersionWitnesses),
+        "a configured root read policy must keep Stream-B witnesses even for a System seed"
     );
 }
 
