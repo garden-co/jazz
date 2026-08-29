@@ -16,6 +16,7 @@ import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
+  private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
 
@@ -55,14 +56,25 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
               type: "module",
               name,
             });
+    // Retain admission failures as state rather than leaving a process-wide
+    // bootstrap promise rejected. The manager converts this state back into
+    // the caller's `all()`/`wait()` rejection at its operation boundary; a
+    // tab which has not yet installed one must never produce an ambient
+    // unhandled-rejection event merely because its durable root is owned by
+    // another account.
     this.readyPromise = this.connect(
       runtime,
       { ...options, runtimeSources },
       fingerprint,
       workerName,
       createWorker,
+    ).then(
+      () => undefined,
+      (error: unknown) => {
+        this.readyError = error instanceof Error ? error : new Error(String(error));
+        callbacks.onFailure(this.readyError);
+      },
     );
-    void this.readyPromise.catch(callbacks.onFailure);
   }
 
   private async connect(
@@ -75,7 +87,15 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     let generation = readWorkerGeneration(workerName);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const generationName = `${workerName}:generation-${generation}`;
-      if (await this.connectOnce(runtime, options, fingerprint, generationName, createWorker)) {
+      const outcome = await this.connectOnce(
+        runtime,
+        options,
+        fingerprint,
+        generationName,
+        createWorker,
+      );
+      if (outcome.error) throw outcome.error;
+      if (outcome.connected) {
         return;
       }
       generation = advanceWorkerGeneration(workerName, generation);
@@ -89,17 +109,17 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     fingerprint: string,
     workerName: string,
     createWorker: (name: string) => SharedWorker,
-  ): Promise<boolean> {
+  ): Promise<{ connected: boolean; error?: Error }> {
     const worker = createWorker(workerName);
     this.worker = worker;
     const port = worker.port;
     port.start();
-    return new Promise<boolean>((resolve, reject) => {
+    return new Promise<{ connected: boolean; error?: Error }>((resolve) => {
       let bootstrapTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         cleanup();
         port.close();
         if (this.worker === worker) this.worker = null;
-        resolve(false);
+        resolve({ connected: false });
       }, 1000);
       const onMessage = (event: MessageEvent<BrowserSharedWorkerConnectResponse>) => {
         if (event.data?.type === "worker-alive") {
@@ -109,7 +129,11 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         }
         if (event.data?.type === "runtime-error") {
           cleanup();
-          reject(new Error(event.data.message));
+          // Do not reject a bare MessagePort callback promise. A browser can
+          // report that rejection before the caller's operation has observed
+          // readiness. The outer, constructor-owned state machine turns this
+          // into the same explicit error after it has installed containment.
+          resolve({ connected: false, error: new Error(event.data.message) });
           return;
         }
         if (event.data?.type !== "runtime-ready") return;
@@ -120,7 +144,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             releaseContext: true,
           } satisfies BrowserFollowerPortRequest);
           port.close();
-          resolve(true);
+          resolve({ connected: true });
           return;
         }
         this.connection = new MessagePortBrowserFollowerConnection(
@@ -138,11 +162,21 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           },
           options.logLevel === "trace",
         );
-        void this.connection.ready().then(() => resolve(true), reject);
+        void this.connection.ready().then(
+          () => resolve({ connected: true }),
+          (error: unknown) =>
+            resolve({
+              connected: false,
+              error: error instanceof Error ? error : new Error(String(error)),
+            }),
+        );
       };
       const onMessageError = () => {
         cleanup();
-        reject(new Error("Shared browser runtime port message error"));
+        resolve({
+          connected: false,
+          error: new Error("Shared browser runtime port message error"),
+        });
       };
       const cleanup = () => {
         if (bootstrapTimer) clearTimeout(bootstrapTimer);
@@ -161,8 +195,13 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     });
   }
 
-  async ready(): Promise<void> {
-    await this.readyPromise;
+  ready(): Promise<void> {
+    // The constructor-owned promise always settles successfully; this is the
+    // operation boundary that turns its retained admission failure back into
+    // a normal caller-visible rejection.
+    return this.readyPromise.then(() => {
+      if (this.readyError) throw this.readyError;
+    });
   }
 
   async waitForServerConnection(): Promise<void> {

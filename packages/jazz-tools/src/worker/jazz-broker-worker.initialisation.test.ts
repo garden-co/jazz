@@ -345,7 +345,11 @@ describe("broker worker context initialization", () => {
       message: "telemetry installation failed",
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
-    expect(mocks.openPageStore).not.toHaveBeenCalled();
+    // Durable root admission deliberately precedes all process-wide WASM and
+    // telemetry work. A telemetry failure therefore closes the already
+    // admitted handle before allowing a retry.
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
 
     expect(
       (await connect(enabledTelemetryOptions("telemetry-failure"), "retry-tab")).outcome,
@@ -356,7 +360,39 @@ describe("broker worker context initialization", () => {
     expect(mocks.installWasmTelemetry).toHaveBeenCalledTimes(2);
   });
 
-  it("disposes telemetry when page-store opening fails and retries the same key", async () => {
+  it("rejects a conflicting page-store owner before WASM, telemetry, native open, or peer admission", async () => {
+    // This is the exact admission oracle. If initialization moves *any* of
+    // these operations before IndexedDbPageStore.open, the test fails.
+    mocks.openPageStore.mockRejectedValueOnce(
+      new Error(
+        "IndexedDB database explicit-owner is already owned by a different Jazz browser session",
+      ),
+    );
+
+    const failed = await connect(options("explicit-owner"), "blocked-tab");
+    expect(failed.outcome).toEqual({
+      type: "runtime-error",
+      message:
+        "IndexedDB database explicit-owner is already owned by a different Jazz browser session",
+    });
+    expect(failed.port.close).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.loadWasmModule).not.toHaveBeenCalled();
+    expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
+    expect(mocks.openConfig).not.toHaveBeenCalled();
+    expect(mocks.openBrowser).not.toHaveBeenCalled();
+    expect(mocks.openBrowserWithSelfSignedProof).not.toHaveBeenCalled();
+    expect(mocks.fromDb).not.toHaveBeenCalled();
+    expect(mocks.runtimes).toEqual([]);
+
+    // `connectTab` owns and serializes this rejection to the port. Yielding a
+    // turn catches a regression that instead leaves a detached promise
+    // rejection after posting the operation-level error.
+    await Promise.resolve();
+    expect(failed.port.hasEvent((event) => event.type === "result")).toBe(false);
+  });
+
+  it("does not start WASM or telemetry when page-store opening fails and retries the same key", async () => {
     mocks.openPageStore.mockRejectedValueOnce(new Error("page-store open failed"));
 
     const failed = await connect(enabledTelemetryOptions("page-store-failure"), "failed-tab");
@@ -364,7 +400,8 @@ describe("broker worker context initialization", () => {
       type: "runtime-error",
       message: "page-store open failed",
     });
-    expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
+    expect(mocks.loadWasmModule).not.toHaveBeenCalled();
+    expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
     expect(mocks.openBrowser).not.toHaveBeenCalled();
 
     expect(
@@ -372,8 +409,8 @@ describe("broker worker context initialization", () => {
     ).toEqual({
       type: "runtime-ready",
     });
-    expect(mocks.telemetryDisposers).toHaveLength(2);
-    expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
+    expect(mocks.telemetryDisposers).toHaveLength(1);
+    expect(mocks.telemetryDisposers[0]).not.toHaveBeenCalled();
     expect(mocks.openPageStore).toHaveBeenCalledTimes(2);
   });
 
