@@ -49,8 +49,12 @@ impl Future for YieldOnce {
     }
 }
 
+/// Direct writes own resident recursive continuation turns.  The bounded
+/// evaluator may yield repeatedly, but `commit_batch` must publish its output
+/// before it returns; only genuinely cold storage is allowed to remain pending
+/// for a runtime owner.
 #[futures_test::test]
-async fn deep_recursive_step_evaluates_with_constant_stack() {
+async fn direct_recursive_write_drains_resident_continuations() {
     let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let seed = GraphBuilder::table("edges").project(["src", "dst"]);
@@ -70,24 +74,22 @@ async fn deep_recursive_step_evaluates_with_constant_stack() {
         step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
     }
     let subscription = database
-        .subscribe([(
-            "result",
-            GraphBuilder::recursive(seed, step, "frontier", 16),
-        )])
+        .subscribe_one_sink(GraphBuilder::recursive(seed, step, "frontier", 16))
+        .await
         .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     database.commit_batch(batch).await.unwrap();
 
+    assert!(
+        !database.has_pending_progress(),
+        "a direct resident write drains its self-scheduled recursive slices before returning"
+    );
+
     assert_eq!(
-        subscription
-            .recv()
-            .unwrap()
-            .get("result")
-            .unwrap()
-            .to_values()
-            .unwrap(),
+        subscription.recv().unwrap().to_values().unwrap(),
         vec![(vec![Value::U64(1), Value::U64(2)], 1)]
     );
 }
@@ -465,6 +467,10 @@ async fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() 
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
     database.commit_batch(batch).await.unwrap();
+    assert!(
+        !database.has_pending_progress(),
+        "prepared recursive direct writes drain their resident continuation turns"
+    );
     let mut initial = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut initial);
     assert_eq!(

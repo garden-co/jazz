@@ -5,9 +5,12 @@ use futures::task::{ArcWake, waker};
 
 use super::*;
 
-struct DirectSubscriptionWake(AtomicUsize);
+/// Counts immediate, in-memory continuation requests while a direct Database
+/// API call owns progress.  This deliberately does not retain an executor
+/// wake: cold storage must stay pending for a real runtime owner instead.
+struct DirectProgressWake(AtomicUsize);
 
-impl ArcWake for DirectSubscriptionWake {
+impl ArcWake for DirectProgressWake {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         arc_self.0.fetch_add(1, Ordering::AcqRel);
     }
@@ -19,7 +22,7 @@ impl Database {
     /// genuinely pending: this direct API has no durable owner waker to retain
     /// for external readiness, and callers may install one with
     /// [`Self::drive_ready_progress_with_waker`] or [`Self::poll_subscription`].
-    fn drive_resident_progress_now(
+    pub(super) fn drive_resident_progress_now(
         &mut self,
         progress_waker: &std::task::Waker,
         wake_count: &AtomicUsize,
@@ -37,6 +40,21 @@ impl Database {
                 std::task::Poll::Pending => return Ok(()),
             }
         }
+    }
+
+    /// A direct Database API call owns CPU-only continuations that it starts.
+    /// It must publish their terminal output before returning, but it must not
+    /// turn a cold storage request into a blocking call without a runtime
+    /// owner to resume it later.
+    pub(super) fn drain_self_scheduled_resident_progress(&mut self) -> Result<(), Error> {
+        let (wake_count, progress_waker) = Self::direct_progress_waker();
+        self.drive_resident_progress_now(&progress_waker, &wake_count.0)
+    }
+
+    fn direct_progress_waker() -> (Arc<DirectProgressWake>, std::task::Waker) {
+        let wake_count = Arc::new(DirectProgressWake(AtomicUsize::new(0)));
+        let progress_waker = waker(Arc::clone(&wake_count));
+        (wake_count, progress_waker)
     }
 
     /// Whether a suspended IVM evaluation still needs a future owner turn.
@@ -293,7 +311,7 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let wake_count = Arc::new(DirectSubscriptionWake(AtomicUsize::new(0)));
+        let wake_count = Arc::new(DirectProgressWake(AtomicUsize::new(0)));
         let progress_waker = waker(Arc::clone(&wake_count));
         let subscription = self
             .ivm_runtime
@@ -316,7 +334,10 @@ impl Database {
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
-        self.subscribe_with_waker(sinks, None)
+        let (wake_count, progress_waker) = Self::direct_progress_waker();
+        let subscription = self.subscribe_with_waker(sinks, Some(&progress_waker))?;
+        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        Ok(subscription)
     }
 
     /// Internal owner-loop subscription entrypoint.  A bounded opening poll
@@ -525,9 +546,19 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
-            .bind_shape_one_sink_with_output(prepared.id, &values, prepared.output, &storage)
-            .map_err(Error::IvmRuntime)
+        let (wake_count, progress_waker) = Self::direct_progress_waker();
+        let subscription = self
+            .ivm_runtime
+            .bind_shape_one_sink_with_output_and_waker(
+                prepared.id,
+                &values,
+                prepared.output,
+                &storage,
+                Some(&progress_waker),
+            )
+            .map_err(Error::IvmRuntime)?;
+        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        Ok(subscription)
     }
 
     /// Prepare a one-sink parameterized graph shape directly.
@@ -671,9 +702,13 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
-            .bind_shape_one_sink(shape, binding_values, &storage)
-            .map_err(Error::IvmRuntime)
+        let (wake_count, progress_waker) = Self::direct_progress_waker();
+        let subscription = self
+            .ivm_runtime
+            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, Some(&progress_waker))
+            .map_err(Error::IvmRuntime)?;
+        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        Ok(subscription)
     }
 
     /// Bind a prepared one-sink graph shape while projecting subscriber-visible
@@ -698,9 +733,19 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
-            .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
-            .map_err(Error::IvmRuntime)
+        let (wake_count, progress_waker) = Self::direct_progress_waker();
+        let subscription = self
+            .ivm_runtime
+            .bind_shape_one_sink_with_output_and_waker(
+                shape,
+                binding_values,
+                public_output,
+                &storage,
+                Some(&progress_waker),
+            )
+            .map_err(Error::IvmRuntime)?;
+        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        Ok(subscription)
     }
 
     /// Bind a routed multisink shape by positional values.
@@ -709,8 +754,12 @@ impl Database {
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
-        self.bind_shape_with_waker(shape, binding_values, None)
-            .await
+        let (wake_count, progress_waker) = Self::direct_progress_waker();
+        let subscription = self
+            .bind_shape_with_waker(shape, binding_values, Some(&progress_waker))
+            .await?;
+        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        Ok(subscription)
     }
 
     /// Internal owner-loop binding entrypoint; see [`Self::subscribe_with_waker`].

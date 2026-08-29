@@ -2980,7 +2980,7 @@ impl IvmRuntime {
         self.bind_shape_one_sink_with_waker(shape_id, binding_values, storage, None)
     }
 
-    fn bind_shape_one_sink_with_waker<S>(
+    pub(crate) fn bind_shape_one_sink_with_waker<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -3001,12 +3001,13 @@ impl IvmRuntime {
         Ok(subscription)
     }
 
-    pub(crate) fn bind_shape_one_sink_with_output<S>(
+    pub(crate) fn bind_shape_one_sink_with_output_and_waker<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
         public_output: RecordDescriptor,
         storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
     ) -> Result<Subscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3026,7 +3027,7 @@ impl IvmRuntime {
             storage,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now_with_waker(None)?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
