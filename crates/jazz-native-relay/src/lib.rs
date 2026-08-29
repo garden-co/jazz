@@ -3458,7 +3458,7 @@ mod tests {
     use jazz::groove::records::ValueType;
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
-    use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+    use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
     use jazz::tx::DurabilityTier;
     use std::sync::atomic::AtomicBool;
 
@@ -3471,12 +3471,335 @@ mod tests {
         .unwrap()
     }
 
+    fn permissive_schema() -> JazzSchema {
+        let allow = PolicyExpr::True;
+        let policies = TablePolicies::new()
+            .with_select(allow.clone())
+            .with_insert(allow.clone())
+            .with_update(Some(allow.clone()), allow.clone())
+            .with_delete(allow);
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("todos")
+                        .column("title", ColumnType::Text)
+                        .policies(policies),
+                )
+                .build(),
+        )
+        .unwrap()
+    }
+
     fn encoded_title_cells(title: &str) -> Vec<u8> {
         let descriptor = RecordDescriptor::new([("title", ValueType::String)]);
         let raw = descriptor
             .create(&[Value::String(title.to_owned())])
             .expect("fixture title record is valid");
         postcard::to_allocvec(&(descriptor, raw)).expect("fixture cells encode")
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DecodedForegroundRowBatch {
+        table: String,
+        descriptor: RecordDescriptor,
+        rows: Vec<DecodedForegroundRow>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DecodedForegroundRow {
+        row_id: RowUuid,
+        deleted: bool,
+        raw: Vec<u8>,
+    }
+
+    fn assert_exact_todo_rows(rows: &[u8], row_id: RowUuid, title: &str) {
+        let batches = postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(rows)
+            .expect("foreground row bytes use the shared binding row-batch codec");
+        assert_eq!(
+            batches.len(),
+            1,
+            "the query returns one contiguous todo batch"
+        );
+        let batch = &batches[0];
+        assert_eq!(batch.table, "todos");
+        assert_eq!(
+            batch.rows.len(),
+            1,
+            "the query returns exactly the seeded row"
+        );
+        let row = &batch.rows[0];
+        assert_eq!(
+            row.row_id, row_id,
+            "the exact row identity survives relay delivery"
+        );
+        assert!(!row.deleted, "the persisted row remains live");
+        let record = BorrowedRecord::new(&row.raw, &batch.descriptor);
+        let values = record
+            .to_values()
+            .expect("the row decodes through its binding descriptor");
+        assert_eq!(
+            values.first(),
+            Some(&Value::Uuid(row_id.0)),
+            "the physical row identity is exact"
+        );
+        assert_eq!(
+            values.get(1),
+            Some(&Value::Nullable(Some(Box::new(Value::String(
+                title.to_owned()
+            ))))),
+            "the declared logical title is exact"
+        );
+    }
+
+    /// Test-only owner for the same C ABI that Kotlin and Swift use.  It is
+    /// deliberately confined to this `#[cfg(test)]` module: a device fixture
+    /// needs to prove process close/reopen, but production bindings must not
+    /// expose a generic host-reset or SQLite-teardown operation to JavaScript.
+    struct NativeHostAbiFixture {
+        host: *mut JazzNativeRelayHost,
+        lease: *mut JazzNativeRelayHostLease,
+    }
+
+    impl NativeHostAbiFixture {
+        fn new() -> Self {
+            let host = jazz_native_relay_host_new();
+            assert!(!host.is_null(), "native host allocation succeeds");
+            let lease = unsafe { jazz_native_relay_host_retain(host) };
+            assert!(!lease.is_null(), "native host lease succeeds");
+            Self { host, lease }
+        }
+
+        fn admit(
+            &self,
+            sqlite_path: &std::path::Path,
+            auth_scope: &str,
+            schema: &JazzSchema,
+            byte: u8,
+        ) -> [u8; 32] {
+            let identity = DbIdentity {
+                node: NodeUuid::from_bytes([byte; 16]),
+                author: AuthorSubject::for_test_bytes([byte.wrapping_add(1); 16]),
+            };
+            let request = serde_json::json!({
+                "scope": {
+                    "app_namespace": "native-host-reopen-abi",
+                    "storage_namespace": "default",
+                    "auth_scope": auth_scope,
+                },
+                "sqlite_path": sqlite_path.display().to_string(),
+                "schema_json": serde_json::to_string(schema.public_schema()).unwrap(),
+                "identity": serde_json::to_value(identity).unwrap(),
+                "claims": {},
+            });
+            let request = serde_json::to_vec(&request).unwrap();
+            let mut output = JazzNativeRelayBytes::EMPTY;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_admit_scope_json(
+                        self.host,
+                        request.as_ptr(),
+                        request.len(),
+                        &mut output,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "trusted native admission succeeds"
+            );
+            let capability = unsafe { std::slice::from_raw_parts(output.data, output.len) };
+            assert_eq!(
+                capability.len(),
+                32,
+                "admission returns only one opaque capability"
+            );
+            let mut bytes = [0; 32];
+            bytes.copy_from_slice(capability);
+            unsafe { jazz_native_relay_bytes_free(&mut output) };
+            bytes
+        }
+
+        fn open_foreground(&self, capability: &[u8; 32]) -> u64 {
+            let mut foreground = 0;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_open_attached_foreground(
+                        self.lease,
+                        capability.as_ptr(),
+                        capability.len(),
+                        &mut foreground,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "C ABI opens one admitted foreground"
+            );
+            assert_ne!(foreground, 0);
+            foreground
+        }
+
+        fn execute(
+            &self,
+            foreground: u64,
+            command: ForegroundDbCommandRequest,
+        ) -> ForegroundDbCommandResponse {
+            let request = postcard::to_allocvec(&command).unwrap();
+            let mut output = JazzNativeRelayBytes::EMPTY;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_execute_foreground(
+                        self.lease,
+                        foreground,
+                        request.as_ptr(),
+                        request.len(),
+                        &mut output,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "foreground command succeeds through the native C ABI"
+            );
+            let response = postcard::from_bytes(unsafe {
+                std::slice::from_raw_parts(output.data, output.len)
+            })
+            .expect("native C ABI returns one canonical foreground response");
+            unsafe { jazz_native_relay_bytes_free(&mut output) };
+            response
+        }
+
+        fn tick(&self, foreground: u64) {
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_tick_attached_foreground(self.lease, foreground)
+                },
+                JazzNativeRelayStatus::Ok,
+                "native relay tick succeeds"
+            );
+        }
+
+        fn rows_after_sync(&self, foreground: u64) -> Vec<u8> {
+            // Local-first reads are allowed to finish with their current
+            // local knowledge. Drive the ordinary relay loop before starting
+            // the read, rather than treating an initial empty local snapshot
+            // as evidence that replication completed.
+            for _ in 0..64 {
+                self.tick(foreground);
+            }
+            let ForegroundDbCommandResponse::PreparedQuery { query } = self.execute(
+                foreground,
+                ForegroundDbCommandRequest::PrepareQuery {
+                    query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                },
+            ) else {
+                panic!("foreground query preparation must return a handle");
+            };
+
+            for _ in 0..64 {
+                match self.execute(foreground, ForegroundDbCommandRequest::All { query }) {
+                    ForegroundDbCommandResponse::Rows { rows } => return rows,
+                    ForegroundDbCommandResponse::Pending { operation } => {
+                        self.tick(foreground);
+                        match self
+                            .execute(foreground, ForegroundDbCommandRequest::Poll { operation })
+                        {
+                            ForegroundDbCommandResponse::Rows { rows } => return rows,
+                            ForegroundDbCommandResponse::Pending { .. } => self.tick(foreground),
+                            response => {
+                                panic!("foreground read failed after native tick: {response:?}")
+                            }
+                        }
+                    }
+                    response => {
+                        panic!("foreground All returned an unexpected response: {response:?}")
+                    }
+                }
+                self.tick(foreground);
+            }
+            panic!("foreground read did not settle after bounded native relay ticks");
+        }
+    }
+
+    impl Drop for NativeHostAbiFixture {
+        fn drop(&mut self) {
+            // Match platform teardown order: invalidate/release every retained
+            // foreground lease before dropping the host itself.
+            unsafe { jazz_native_relay_host_lease_free(self.lease) };
+            unsafe { jazz_native_relay_host_free(self.host) };
+        }
+    }
+
+    #[test]
+    fn native_c_abi_process_reopen_rehydrates_the_exact_persisted_foreground_row() {
+        // This is the close/reopen receipt that an RN device host needs, but
+        // it deliberately uses no device-only production API. The test owns a
+        // first host process, writes through its foreground C ABI, destroys
+        // that host, then starts a wholly fresh host and re-admits the same
+        // trusted scope.
+        let directory = tempfile::tempdir().unwrap();
+        let alice_path = directory.path().join("fixture-user-a.sqlite");
+        let schema = permissive_schema();
+        let row_id = [0x41; 16];
+        let row_uuid = RowUuid::from_bytes(row_id);
+        let title = "survives host restart";
+
+        {
+            let first_process = NativeHostAbiFixture::new();
+            let alice = first_process.admit(&alice_path, "fixture-user-a", &schema, 0x41);
+            let foreground = first_process.open_foreground(&alice);
+            let ForegroundDbCommandResponse::TransactionOpened { transaction } = first_process
+                .execute(
+                    foreground,
+                    ForegroundDbCommandRequest::BeginTransaction {
+                        kind: ForegroundTransactionKind::Mergeable,
+                    },
+                )
+            else {
+                panic!("foreground transaction must open");
+            };
+            assert_eq!(
+                first_process.execute(
+                    foreground,
+                    ForegroundDbCommandRequest::Insert {
+                        transaction,
+                        table: "todos".to_owned(),
+                        cells: encoded_title_cells(title),
+                        row_id: Some(row_id),
+                    },
+                ),
+                ForegroundDbCommandResponse::Inserted { row_id }
+            );
+            assert!(matches!(
+                first_process.execute(
+                    foreground,
+                    ForegroundDbCommandRequest::CommitTransaction { transaction },
+                ),
+                ForegroundDbCommandResponse::TransactionCommitted { tx_id } if tx_id != [0; 16]
+            ));
+
+            // First prove the foreground that committed through the C ABI can
+            // materialize its exact local row before we ask the relay to
+            // persist it for the next process.
+            let rows = first_process.rows_after_sync(foreground);
+            assert_exact_todo_rows(&rows, row_uuid, title);
+            assert_eq!(
+                first_process.execute(foreground, ForegroundDbCommandRequest::Close),
+                ForegroundDbCommandResponse::Closed { closed: true }
+            );
+        }
+
+        // Dropping `first_process` releases its last lease and host, which in
+        // turn closes the owner thread and SQLite. This fresh host has no
+        // in-memory registry, capabilities, foregrounds, or queries from the
+        // first process.
+        let second_process = NativeHostAbiFixture::new();
+        let alice = second_process.admit(&alice_path, "fixture-user-a", &schema, 0x41);
+        let reopened = second_process.open_foreground(&alice);
+        let reopened_rows = second_process.rows_after_sync(reopened);
+        assert_exact_todo_rows(&reopened_rows, row_uuid, title);
+
+        // Auth-scope-to-SQLite-path selection remains a trusted *platform*
+        // contract, not one the generic C admission ABI can infer or enforce:
+        // it intentionally accepts the complete path selected by Kotlin or
+        // Swift. Device acceptance must therefore prove scope isolation with
+        // the compiled Android/iOS fixture path selectors; this core C-ABI
+        // receipt deliberately proves only that an already-selected path
+        // survives a complete native-host recreation.
     }
 
     #[test]
