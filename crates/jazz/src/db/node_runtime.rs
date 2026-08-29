@@ -725,6 +725,7 @@ where
             });
     }
 
+    #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
         let progress_waker = self.query_runtime_waker();
         refresh_subscriptions_in(

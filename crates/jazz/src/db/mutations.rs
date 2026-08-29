@@ -2635,10 +2635,9 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
         let local_tier = if self.node.defer_local_persistence.get() {
-            // Publication is the synchronous visibility boundary. Refresh
-            // resident subscribers before returning, then let the host tick
-            // own suspendable persistence and later peer visibility.
-            self.refresh_subscriptions().await?;
+            // Admission stays synchronous, but maintained-view refresh can
+            // suspend on storage. The scheduled owner turn publishes it after
+            // persistence rather than polling cold query work in this write.
             self.node.queue_local_publication(published, None);
             DurabilityTier::None
         } else {
@@ -2666,6 +2665,9 @@ where
             } = outcome;
             loop {
                 if !publications.is_empty() {
+                    // Resident maintained terminals publish their immediate
+                    // local delta at the write boundary. Cold work is owned
+                    // by the scheduled runtime turn after this publication.
                     self.refresh_subscriptions().await?;
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {

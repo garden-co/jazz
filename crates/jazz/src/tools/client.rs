@@ -4,7 +4,9 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,6 +69,31 @@ const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
+
+struct StackSafeFuture<F> {
+    inner: Pin<Box<F>>,
+}
+
+impl<F> StackSafeFuture<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner: Box::pin(inner),
+        }
+    }
+}
+
+impl<F: Future> Future for StackSafeFuture<F> {
+    type Output = F::Output;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        stacker::maybe_grow(4 * 1024 * 1024, 8 * 1024 * 1024, || {
+            self.inner.as_mut().poll(context)
+        })
+    }
+}
 
 fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
@@ -359,7 +386,7 @@ impl Backend {
         identity: CoreDbIdentity,
     ) -> Result<Self> {
         Ok(Self(Rc::new(
-            CoreDb::open(CoreDbConfig::new(schema, storage, identity))
+            StackSafeFuture::new(CoreDb::open(CoreDbConfig::new(schema, storage, identity)))
                 .await
                 .map_err(|error| JazzError::Connection(error.to_string()))?,
         )))
@@ -370,8 +397,7 @@ impl Backend {
     }
 
     async fn close(&self) -> Result<()> {
-        self.0
-            .close()
+        StackSafeFuture::new(self.0.close())
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
         #[cfg(test)]
@@ -380,7 +406,7 @@ impl Backend {
     }
 
     async fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
-        self.0.connect_upstream(transport).await
+        StackSafeFuture::new(self.0.connect_upstream(transport)).await
     }
 
     fn detach_connection(&self, connection: &BackendConnection) -> bool {
@@ -392,8 +418,8 @@ impl Backend {
             .set_identity_claims(identity, claims.into_iter().collect());
     }
 
-    fn tick(&self) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.tick())
+    async fn tick(&self) -> std::result::Result<(), CoreDbError> {
+        StackSafeFuture::new(self.0.tick()).await
     }
 
     fn insert(
@@ -575,25 +601,33 @@ impl Backend {
         self.0.row_provenance(row)
     }
 
+    async fn row_provenance_for_subscription(
+        &self,
+        row: &crate::node::CurrentRow,
+    ) -> std::result::Result<Option<crate::node::RowProvenance>, CoreDbError> {
+        StackSafeFuture::new(self.0.row_provenance_async(row)).await
+    }
+
     async fn all(
         &self,
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        self.0.all(prepared, opts).await
+        StackSafeFuture::new(self.0.all(prepared, opts)).await
     }
 
-    fn transaction_all_for_identity(
+    async fn transaction_all_for_identity(
         &self,
         tx_id: OpenTransactionId,
         prepared: &crate::db::PreparedQuery,
         author: CoreAuthorSubject,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        crate::db::block_on(
+        StackSafeFuture::new(
             self.0
                 .transaction_all_for_identity(tx_id, prepared, author, opts),
         )
+        .await
     }
 
     async fn subscribe(
@@ -601,7 +635,7 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::SubscriptionStream, CoreDbError> {
-        self.0.subscribe(prepared, opts).await
+        StackSafeFuture::new(self.0.subscribe(prepared, opts)).await
     }
 
     fn write_state(
@@ -612,7 +646,7 @@ impl Backend {
     }
 
     async fn next_write_state_change(&self, tx_id: CoreTxId) {
-        self.0.next_write_state_change(tx_id).await;
+        StackSafeFuture::new(self.0.next_write_state_change(tx_id)).await;
     }
 
     fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
@@ -910,7 +944,7 @@ impl ClientDb {
         ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
-    fn query_transaction_rows(
+    async fn query_transaction_rows(
         &self,
         query: crate::query::Query,
         opts: CoreReadOpts,
@@ -925,14 +959,15 @@ impl ClientDb {
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        let rows = {
+        let backend = {
             let inner = self.inner.borrow();
             inner.ensure_transaction_open(transaction_id)?;
-            inner
-                .backend()?
-                .transaction_all_for_identity(transaction_id, &prepared, author, opts)
-                .map_err(|error| JazzError::Query(error.to_string()))?
+            inner.backend_clone()?
         };
+        let rows = backend
+            .transaction_all_for_identity(transaction_id, &prepared, author, opts)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         self.inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
@@ -1297,10 +1332,11 @@ impl ClientDb {
                     } else if urgency == TickUrgency::AfterCurrentTurn {
                         tokio::task::yield_now().await;
                     }
-                    let tick_result = match inner.borrow().backend() {
-                        Ok(db) => db.tick(),
+                    let backend = match inner.borrow().backend_clone() {
+                        Ok(db) => db,
                         Err(_) => return,
                     };
+                    let tick_result = backend.tick().await;
                     match tick_result {
                         Ok(()) => recovery_attempts = 0,
                         Err(error) => {
@@ -1718,16 +1754,22 @@ impl ClientDbInner {
                             normalize_subscription_updates(surviving_rows, added, updated, |row| {
                                 &row.occurrence_id
                             });
-                        let change_delta = (!reset_replaces_initial_view).then(|| {
-                            query_decoder.core_subscription_change_delta(
-                                &db,
-                                &query,
-                                &current_rows,
-                                &effective_added,
-                                &effective_updated,
-                                &removed,
+                        let change_delta = if reset_replaces_initial_view {
+                            None
+                        } else {
+                            Some(
+                                query_decoder
+                                    .core_subscription_change_delta(
+                                        &db,
+                                        &query,
+                                        &current_rows,
+                                        &effective_added,
+                                        &effective_updated,
+                                        &removed,
+                                    )
+                                    .await,
                             )
-                        });
+                        };
                         PublicQueryDecoder::apply_core_subscription_rows(
                             &mut current_rows,
                             &effective_added,
@@ -1740,12 +1782,14 @@ impl ClientDbInner {
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
                         let delta = if reset_replaces_initial_view {
-                            query_decoder.core_subscription_reset_delta(
-                                &db,
-                                &query,
-                                &previous_rows,
-                                &current_rows,
-                            )
+                            query_decoder
+                                .core_subscription_reset_delta(
+                                    &db,
+                                    &query,
+                                    &previous_rows,
+                                    &current_rows,
+                                )
+                                .await
                         } else {
                             change_delta.expect("non-reset subscription frame has a change delta")
                         };
@@ -2017,7 +2061,10 @@ fn core_author_from_session(session: &Session) -> Result<CoreAuthorSubject> {
     Ok(session.author_subject()?)
 }
 
-fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
+async fn core_storage(
+    schema: &crate::schema::JazzSchema,
+    context: &AppContext,
+) -> Result<StorageBundle> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -2033,15 +2080,15 @@ fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Res
                     "persistent client storage requires a target-shell storage factory".to_string(),
                 )
             })?;
-            crate::db::block_on(
-                factory.open(
+            factory
+                .open(
                     context.data_dir.join("jazz-core.rocksdb"),
                     column_families,
                     epoch_1_storage_codec_profile()
                         .map_err(|error| JazzError::Connection(error.to_string()))?,
-                ),
-            )
-            .map_err(|error| JazzError::Connection(error.to_string()))
+                )
+                .await
+                .map_err(|error| JazzError::Connection(error.to_string()))
         }
     }
 }
@@ -2769,7 +2816,7 @@ impl PublicQueryDecoder {
 }
 
 impl PublicQueryDecoder {
-    fn core_subscription_row_to_public(
+    async fn core_subscription_row_to_public(
         &self,
         db: &Backend,
         query: &Query,
@@ -2779,7 +2826,8 @@ impl PublicQueryDecoder {
         let _ = query;
         let encoded = public_subscription_record(&row.row)?;
         let provenance = db
-            .row_provenance(&row.row)
+            .row_provenance_for_subscription(&row.row)
+            .await
             .map_err(|error| JazzError::Query(error.to_string()))?
             .map(core_row_provenance_to_public)
             .unwrap_or_else(|| {
@@ -2804,31 +2852,28 @@ impl PublicQueryDecoder {
         Ok(public)
     }
 
-    fn core_subscription_snapshot_delta(
+    async fn core_subscription_snapshot_delta(
         &self,
         db: &Backend,
         query: &Query,
         rows: &[CoreSubscriptionOutputRow],
     ) -> Result<OrderedRowDelta> {
-        let added = rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let public = self.core_subscription_row_to_public(db, query, row)?;
-                Ok(OrderedAdded {
-                    id: public.id.clone(),
-                    index,
-                    row: public,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut added = Vec::with_capacity(rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            let public = self.core_subscription_row_to_public(db, query, row).await?;
+            added.push(OrderedAdded {
+                id: public.id.clone(),
+                index,
+                row: public,
+            });
+        }
         Ok(OrderedRowDelta {
             added,
             ..OrderedRowDelta::default()
         })
     }
 
-    fn core_subscription_reset_delta(
+    async fn core_subscription_reset_delta(
         &self,
         db: &Backend,
         query: &Query,
@@ -2844,7 +2889,9 @@ impl PublicQueryDecoder {
                 index,
             })
             .collect();
-        let mut delta = self.core_subscription_snapshot_delta(db, query, rows)?;
+        let mut delta = self
+            .core_subscription_snapshot_delta(db, query, rows)
+            .await?;
         delta.removed = removed;
         Ok(delta)
     }
@@ -2874,7 +2921,7 @@ impl PublicQueryDecoder {
         }
     }
 
-    fn core_subscription_change_delta(
+    async fn core_subscription_change_delta(
         &self,
         db: &Backend,
         query: &Query,
@@ -2883,33 +2930,29 @@ impl PublicQueryDecoder {
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) -> Result<OrderedRowDelta> {
-        let added = added_rows
-            .iter()
-            .map(|row| {
-                let public = self.core_subscription_row_to_public(db, query, row)?;
-                Ok(OrderedAdded {
-                    id: public.id.clone(),
-                    index: row.index,
-                    row: public,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let updated = updated_rows
-            .iter()
-            .map(|row| {
-                let public = self.core_subscription_row_to_public(db, query, row)?;
-                let content_changed = previous_rows
-                    .iter()
-                    .find(|previous| previous.occurrence_id == row.occurrence_id)
-                    .is_none_or(|previous| !previous.row.subscription_equivalent(&row.row));
-                Ok(OrderedUpdated {
-                    id: public.id.clone(),
-                    old_index: row.previous_index.unwrap_or(row.index),
-                    new_index: row.index,
-                    row: content_changed.then_some(public),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut added = Vec::with_capacity(added_rows.len());
+        for row in added_rows {
+            let public = self.core_subscription_row_to_public(db, query, row).await?;
+            added.push(OrderedAdded {
+                id: public.id.clone(),
+                index: row.index,
+                row: public,
+            });
+        }
+        let mut updated = Vec::with_capacity(updated_rows.len());
+        for row in updated_rows {
+            let public = self.core_subscription_row_to_public(db, query, row).await?;
+            let content_changed = previous_rows
+                .iter()
+                .find(|previous| previous.occurrence_id == row.occurrence_id)
+                .is_none_or(|previous| !previous.row.subscription_equivalent(&row.row));
+            updated.push(OrderedUpdated {
+                id: public.id.clone(),
+                old_index: row.previous_index.unwrap_or(row.index),
+                new_index: row.index,
+                row: content_changed.then_some(public),
+            });
+        }
         let removed = removed_rows
             .iter()
             .map(|row| OrderedRemoved {
@@ -3038,7 +3081,7 @@ impl JazzClient {
             let public_schema_convert = crate::schema::JazzSchema::new(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
             let identity = core_identity(&context, default_session.as_ref())?;
-            let storage = core_storage(&public_schema_convert, &context)?;
+            let storage = core_storage(&public_schema_convert, &context).await?;
             let auth = has_server.then(|| WsAuthConfig {
                 jwt_token: if context.backend_secret.is_some() {
                     None
@@ -3206,7 +3249,8 @@ impl JazzClient {
                 .write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
-                .query_transaction_rows(query.clone(), opts, transaction_id, table, author)?
+                .query_transaction_rows(query.clone(), opts, transaction_id, table, author)
+                .await?
         } else {
             let wait_for_coverage = matches!(opts.tier, CoreDurabilityTier::Global);
             self.db
@@ -3483,12 +3527,36 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::groove::storage::{Error as StorageError, StorageFactory, StorageFuture};
     use crate::ids::NodeUuid;
     use crate::tools::AppId;
     use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[derive(Debug)]
+    struct YieldingStorageFactory;
+
+    impl StorageFactory for YieldingStorageFactory {
+        fn open(
+            &self,
+            _path: std::path::PathBuf,
+            column_families: Vec<String>,
+            _codec_profile: crate::groove::storage::StorageCodecProfile,
+        ) -> StorageFuture<'_, std::result::Result<CoreStorage, StorageError>> {
+            Box::pin(async move {
+                // A target storage factory may need an executor turn before it
+                // can hand a boxed store back to the facade.
+                tokio::task::yield_now().await;
+                let refs = column_families
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                Ok(CoreStorage::new(CoreMemoryStorage::new(&refs)?))
+            })
+        }
+    }
 
     #[test]
     fn query_runtime_waker_enqueues_one_immediate_owner_turn() {
@@ -3500,6 +3568,27 @@ mod tests {
         waker.wake_by_ref();
         assert_eq!(scheduler.take(), Some(TickUrgency::Immediate));
         assert_eq!(scheduler.take(), None, "waking does not create a hot loop");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persistent_storage_open_yields_without_sync_polling() {
+        let temp_dir = TempDir::new().expect("temp client dir");
+        let mut context = make_offline_context_with_storage(
+            AppId::from_name("yielding-storage-factory"),
+            temp_dir.path().to_path_buf(),
+            declared_todo_schema(),
+            ClientStorage::Persistent,
+        );
+        context.storage_factory = Some(Arc::new(YieldingStorageFactory));
+
+        let client = tokio::time::timeout(Duration::from_secs(1), JazzClient::connect(context))
+            .await
+            .expect("storage factory must resume through the async connect owner turn")
+            .expect("connect yielding persistent storage");
+        client
+            .shutdown()
+            .await
+            .expect("close yielding persistent storage");
     }
 
     /// Product read tiers lower to the unchanged facade durability contract,

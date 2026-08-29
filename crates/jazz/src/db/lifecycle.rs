@@ -789,6 +789,7 @@ where
         self.node.tick().await
     }
 
+    #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
         let refreshed = self.node.refresh_subscriptions().await?;
         if refreshed > 0 {

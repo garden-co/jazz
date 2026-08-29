@@ -551,7 +551,6 @@ where
             .await?;
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.refresh_subscriptions().await?;
             self.node.queue_local_publication(published, None);
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
@@ -975,7 +974,6 @@ where
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.refresh_subscriptions().await?;
             self.node.queue_local_publication(published, Some(unit));
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
