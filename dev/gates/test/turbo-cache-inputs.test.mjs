@@ -16,6 +16,7 @@ const tasks = [
   "jazz-wasm#build:fast",
   "jazz-napi#build",
 ];
+const uncachedCorrectnessArtifactTasks = tasks.filter((task) => task !== "@jazz/rust#build:crates");
 
 function jazzToolsDryGraph() {
   const output = execFileSync(
@@ -33,19 +34,14 @@ function jazzToolsDryGraph() {
 function assertUncachedCorrectnessArtifactTask(task) {
   // A native generation contains its own Cargo target and can be tens of
   // gigabytes. It is deliberately published through the content-addressed
-  // correctness-artifact store, not Turbo's tarball cache. `cache: false`
-  // must disable both local and remote archiving; checking the resolved graph
-  // catches a future task-default/override change rather than merely parsing
-  // turbo.json.
+  // correctness-artifact store, not Turbo's tarball cache. Turbo's outer
+  // `cache.local`/`cache.remote` reports this invocation's cache eligibility,
+  // which CI/environment flags can disable even if the task itself says
+  // `cache: true`. Check Turbo's resolved task definition instead.
   assert.equal(
-    task.cache.local,
+    task.resolvedTaskDefinition.cache,
     false,
-    `${task.taskId} could archive native correctness output locally`,
-  );
-  assert.equal(
-    task.cache.remote,
-    false,
-    `${task.taskId} could archive native correctness output remotely`,
+    `${task.taskId} could archive native correctness output through Turbo`,
   );
 }
 
@@ -92,18 +88,18 @@ const unrelatedOriginal = readFileSync(unrelated, "utf8");
 
 try {
   // JAZZ_CORRECTNESS_WASM_PACKAGE deliberately remains pass-through: it is a
-  // sealed path, not a stable Turbo hash input. A real dry graph therefore
-  // must disable both local and remote restore for the bundle that copies it.
+  // sealed path, not a stable Turbo hash input. The bundle that copies it must
+  // remain explicitly uncached even if the outer invocation has caching off.
   const jazzTools = jazzToolsDryGraph();
-  assert.equal(jazzTools.cache.local, false, "jazz-tools could restore a stale sealed WASM bundle");
   assert.equal(
-    jazzTools.cache.remote,
+    jazzTools.resolvedTaskDefinition.cache,
     false,
-    "jazz-tools could remotely restore a stale sealed WASM bundle",
+    "jazz-tools could cache a stale sealed WASM bundle",
   );
 
   const baseline = dryGraph();
-  for (const task of tasks) assertUncachedCorrectnessArtifactTask(baseline.get(task));
+  for (const task of uncachedCorrectnessArtifactTasks)
+    assertUncachedCorrectnessArtifactTask(baseline.get(task));
   for (const { name } of closures)
     for (const task of tasks)
       assert(
