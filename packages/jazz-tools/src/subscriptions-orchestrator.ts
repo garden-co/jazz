@@ -387,7 +387,7 @@ export class SubscriptionsOrchestrator {
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     const generation = entry.generation;
     try {
-      entry.unsubscribe = this.db.subscribeDelta<T>(
+      const subscription = this.db.subscribeDelta<T>(
         entry.query,
         (delta) => {
           if (entry.generation !== generation) return;
@@ -426,6 +426,21 @@ export class SubscriptionsOrchestrator {
         entry.options,
         this.session ?? undefined,
       );
+      entry.unsubscribe = subscription;
+      if (subscription.ready) {
+        void subscription.ready.catch((error: unknown) => {
+          // A newer subscription or a caller teardown owns its own result.
+          // Never let a stale browser-worker open failure reject a recreated
+          // query entry.
+          if (entry.generation !== generation || entry.unsubscribe !== subscription) return;
+          entry.state = { status: "rejected", data: undefined, error };
+          entry.rejectfulfilled(error);
+          for (const listener of Array.from(entry.listeners)) {
+            listener.onError?.(error);
+          }
+          this.scheduleCleanup(entry);
+        });
+      }
     } catch (error) {
       // Only a synchronous setup (protocol-level) failure from the delta source
       // lands here and drives the entry to `rejected`. Data-level errors inside
