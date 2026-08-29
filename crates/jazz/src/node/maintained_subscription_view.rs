@@ -754,7 +754,6 @@ impl MaintainedSubscriptionView {
             version.table() == table.as_str()
                 && version.row_uuid() == row_uuid
                 && version.deletion().is_none()
-                && !version.is_register_record()
         }) || self
             .replacement_for(table.as_str(), row_uuid)
             .0
