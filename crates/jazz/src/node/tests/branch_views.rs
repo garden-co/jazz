@@ -851,8 +851,33 @@ fn maintained_witness_reloads_the_exact_large_nondefault_branch_version() {
     ))
     .unwrap()
     .is_none(), "a missing branch coordinate must never silently use a default branch");
+    // Model the maintained graph's real projection boundary: its history
+    // descriptor is unchanged, but a selected-out authored cell is represented
+    // by typed null. Falling through to this in-memory witness is forbidden;
+    // recovery must find the complete immutable row under the exact branch.
+    let mut partial_witness = branched.clone();
+    let descriptor = partial_witness.record.descriptor().clone();
+    let mut values = partial_witness.record.to_values().unwrap();
+    let title_position = node.catalogue.schema.tables[0]
+        .columns
+        .iter()
+        .position(|column| column.name == "title")
+        .unwrap();
+    values[crate::node::codec::HistoryRowRecord::USER_CELLS + title_position] =
+        Value::Nullable(None);
+    partial_witness.record = groove::records::OwnedRecord::new(
+        descriptor.create(&values).unwrap(),
+        descriptor,
+    );
+    assert_eq!(
+        partial_witness
+            .cell(&node.catalogue.schema.tables[0], "title")
+            .unwrap(),
+        None,
+        "the planted maintained witness must be observably partial"
+    );
     let canonical = futures::executor::block_on(
-        node.canonical_history_version_for_maintained_witness(&branched),
+        node.canonical_history_version_for_maintained_witness(&partial_witness),
     )
     .unwrap();
     let canonical_wire = node.version_record_from_row(&canonical).unwrap();
