@@ -1,5 +1,5 @@
 import type { Db, DbConfig } from "../../runtime/db.js";
-import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
+import { resolvePersistentDbBaseName } from "../../runtime/db.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   internalSessionFromVerifiedReservedJwtPayload,
@@ -39,8 +39,9 @@ function overlayBrowserWorkerSession(
 
 /**
  * Build the ready-to-use browser config in the host bundle, where the host's
- * resolved storage coordinates and worker URL are known. The overlay passes it
- * to its provider verbatim instead of duplicating those resolution rules.
+ * logical storage base and worker URL are known. The overlay resolves the
+ * physical coordinate once from that base instead of re-deriving a physical
+ * host name as though it were another caller-supplied base.
  */
 function buildOverlayDbConfig(
   config: DbConfig,
@@ -62,8 +63,9 @@ function buildOverlayDbConfig(
     ...identityCredential,
     ...(config.adminSecret ? { adminSecret: config.adminSecret } : {}),
     // `persistent` selects the SharedWorker connection so this client joins
-    // the host's IndexedDB-backed runtime. Its main-thread Db remains in-memory.
-    driver: { type: "persistent", dbName: resolveDefaultPersistentDbName(config) },
+    // the host's IndexedDB-backed runtime. Pass the original logical base so
+    // the usual app/environment/auth derivation yields that exact same root.
+    driver: { type: "persistent", dbName: resolvePersistentDbBaseName(config) },
     ...(browserWorkerSession
       ? { runtimeSources: { browserWorkerSession: structuredClone(browserWorkerSession) } }
       : {}),

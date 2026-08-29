@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { installInspectorHost } from "./host-bridge.js";
 import { INSPECTOR_HOST_GLOBAL } from "./inspector-host-types.js";
+import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
 
 function makeFakeDb(overrides: Record<string, unknown> = {}) {
   let changeCb: () => void = () => {};
@@ -135,7 +136,7 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("publishes persistent coordinates and forwards inspector control-port requests", async () => {
+  it("forwards the logical base so the overlay resolves exactly the host physical namespace", async () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({
       getConfig: () => ({
@@ -158,6 +159,9 @@ describe("installInspectorHost", () => {
     });
     expect(config.cookieSession).toBeUndefined();
     expect(config.runtimeSources).toBeUndefined();
+    expect(resolveDefaultPersistentDbName(config)).toBe(
+      resolveDefaultPersistentDbName((fake.db as any).getConfig()),
+    );
     await (window as any)[INSPECTOR_HOST_GLOBAL].openControlPort();
     expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });

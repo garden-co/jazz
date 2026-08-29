@@ -144,13 +144,18 @@ function trimOptionalString(value?: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** @internal Derive the physical browser persistence namespace for this Db config. */
-export function resolveDefaultPersistentDbName(config: DbConfig): string {
+/** @internal Resolve the caller-selected logical base for browser persistence. */
+export function resolvePersistentDbBaseName(config: DbConfig): string {
   const driver = resolveStorageDriver(config.driver);
   const explicitDbName = trimOptionalString(
     (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
   );
-  return createBrowserPhysicalDatabaseName(config, explicitDbName ?? config.appId);
+  return explicitDbName ?? config.appId;
+}
+
+/** @internal Derive the physical browser persistence namespace for this Db config. */
+export function resolveDefaultPersistentDbName(config: DbConfig): string {
+  return createBrowserPhysicalDatabaseName(config, resolvePersistentDbBaseName(config));
 }
 
 /**

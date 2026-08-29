@@ -35,9 +35,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     >,
   ) {
     // A physical database namespace has exactly one broker realm for a given
-    // worker asset. Auth scope is deliberately not part of this name: an
-    // incompatible account must reach the existing owner and fail clearly
-    // rather than silently opening a second page-store owner.
+    // worker asset. The physical namespace already includes the complete
+    // app/environment/auth scope, so different accounts intentionally reach
+    // separate workers and caches while same-scope tabs share one realm.
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = [
       "jazz-runtime",
