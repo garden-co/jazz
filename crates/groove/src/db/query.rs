@@ -255,10 +255,18 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        self.ivm_runtime
+        let subscription = self
+            .ivm_runtime
             .subscribe_one_sink(graph, &storage)
             .await
-            .map_err(Error::IvmRuntime)
+            .map_err(Error::IvmRuntime)?;
+        // `Database` is the runtime owner for its direct async API. A
+        // resident recursive hydration can intentionally yield between
+        // bounded traversal slices; unlike a browser/node owner loop there is
+        // no external continuation to consume a noop wake here. Drive that
+        // owned initial work to completion before exposing the subscription.
+        self.drive_progress().await?;
+        Ok(subscription)
     }
 
     /// Subscribe to several named IVM graph outputs as one logical stream.

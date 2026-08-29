@@ -70,8 +70,10 @@ async fn deep_recursive_step_evaluates_with_constant_stack() {
         step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
     }
     let subscription = database
-        .subscribe_one_sink(GraphBuilder::recursive(seed, step, "frontier", 16))
-        .await
+        .subscribe([(
+            "result",
+            GraphBuilder::recursive(seed, step, "frontier", 16),
+        )])
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -79,7 +81,13 @@ async fn deep_recursive_step_evaluates_with_constant_stack() {
     database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
-        expect_recv_vals(&subscription),
+        subscription
+            .recv()
+            .unwrap()
+            .get("result")
+            .unwrap()
+            .to_values()
+            .unwrap(),
         vec![(vec![Value::U64(1), Value::U64(2)], 1)]
     );
 }
@@ -126,13 +134,17 @@ async fn deep_recursive_hydration_yields_and_preserves_its_snapshot() {
     for _ in 0..48 {
         step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
     }
-    let subscription = database
-        .subscribe_one_sink(GraphBuilder::recursive(seed, step, "frontier", 16))
-        .await
-        .unwrap();
-
     let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
     let owner_waker = waker(Arc::clone(&wakes));
+    let subscription = database
+        .subscribe_with_waker(
+            [(
+                "result",
+                GraphBuilder::recursive(seed, step, "frontier", 16),
+            )],
+            Some(&owner_waker),
+        )
+        .unwrap();
     let mut previous_wakes = 0;
     let mut yielded = false;
     for _ in 0..128 {
@@ -161,7 +173,13 @@ async fn deep_recursive_hydration_yields_and_preserves_its_snapshot() {
         "the retained traversal converges without a hot-loop"
     );
     assert_eq!(
-        expect_recv_vals(&subscription),
+        subscription
+            .recv()
+            .unwrap()
+            .get("result")
+            .unwrap()
+            .to_values()
+            .unwrap(),
         vec![(vec![Value::U64(1), Value::U64(2)], 1)]
     );
 }
@@ -189,12 +207,11 @@ async fn recursive_hydration_retains_frontiers_until_the_full_closure_is_ready()
     insert_edge(&mut batch, 3, 3, 4);
     database.commit_batch(batch).await.unwrap();
 
-    let subscription = database
-        .subscribe_one_sink(reachability_graph(16))
-        .await
-        .unwrap();
     let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
     let owner_waker = waker(Arc::clone(&wakes));
+    let subscription = database
+        .subscribe_with_waker([("result", reachability_graph(16))], Some(&owner_waker))
+        .unwrap();
     for _ in 0..128 {
         database
             .drive_ready_progress_with_waker(Some(&owner_waker))
@@ -213,7 +230,13 @@ async fn recursive_hydration_retains_frontiers_until_the_full_closure_is_ready()
         "frontier phases hand their continuation back to the runtime owner"
     );
 
-    let mut values = expect_recv_vals(&subscription);
+    let mut values = subscription
+        .recv()
+        .unwrap()
+        .get("result")
+        .unwrap()
+        .to_values()
+        .unwrap();
     sort_pairs_by_value(&mut values);
     assert_eq!(
         values,
@@ -896,6 +919,27 @@ async fn recursive_graph_subscriptions_converge_on_self_cycles() {
     let values = subscription.recv().unwrap().to_values().unwrap();
 
     assert_eq!(values, [(vec![Value::U64(1), Value::U64(1)], 1)]);
+}
+
+/// The direct async Database API is itself the runtime owner. A resident
+/// recursive snapshot may use several cooperative IVM turns, but callers must
+/// not need to provide an external wake loop before they can consume it.
+#[futures_test::test]
+async fn direct_recursive_subscription_open_drives_resident_snapshot() {
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .expect("direct subscription opening drives the recursive snapshot");
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
 }
 
 #[futures_test::test]
