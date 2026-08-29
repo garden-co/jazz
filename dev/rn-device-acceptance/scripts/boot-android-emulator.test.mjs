@@ -13,24 +13,18 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
     const adb = join(fixture, "adb");
     const emulator = join(fixture, "emulator");
     const sessionLauncher = join(fixture, "session-launcher");
-    const timeout = join(fixture, "timeout");
     const log = join(fixture, "emulator.log");
     const config = join(fixture, "config.ini");
     writeFileSync(adb, `#!/usr/bin/env bash\nset -euo pipefail\n${adbBody}\n`);
     writeFileSync(emulator, `#!/usr/bin/env bash\nset -euo pipefail\n${emulatorBody}\n`);
-    // macOS has neither GNU `setsid` nor GNU `timeout`. These deliberately
-    // small test doubles exercise the receipt's bounded state machine without
-    // claiming to prove Linux process-group cleanup (covered below on Linux).
+    // macOS has no `setsid`. This deliberately small test double exercises
+    // the portable direct-child cleanup path without claiming to prove Linux
+    // process-group cleanup (covered below on Linux).
     writeFileSync(sessionLauncher, '#!/usr/bin/env bash\nexec "$@"\n');
-    writeFileSync(
-      timeout,
-      '#!/usr/bin/env bash\nduration=${2%s}\nshift 2\nexec perl -e \'alarm shift; exec @ARGV\' "$duration" "$@"\n',
-    );
     writeFileSync(config, "avd.id=acceptance\n");
     chmodSync(adb, 0o755);
     chmodSync(emulator, 0o755);
     chmodSync(sessionLauncher, 0o755);
-    chmodSync(timeout, 0o755);
     const result = spawnSync("bash", [script, "test-avd", log, config], {
       encoding: "utf8",
       env: {
@@ -44,7 +38,6 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
           : {
               JAZZ_ANDROID_SESSION_LAUNCHER: sessionLauncher,
               JAZZ_ANDROID_SESSION_PROCESS_GROUP: "0",
-              JAZZ_ANDROID_TIMEOUT_COMMAND: timeout,
             }),
         ...options.env,
       },
@@ -115,7 +108,7 @@ test("Android boot receipt accepts the device-to-boot-complete transition", () =
   }
 });
 
-test("Android boot receipt supports the macOS test launcher without relaxing the Linux default", () => {
+test("Android boot receipt uses a portable macOS launcher without GNU timeout", () => {
   withFixture(
     "portable-launcher",
     'case "$1" in get-state) echo device ;; shell) echo 1 ;; *) exit 2 ;; esac',
@@ -125,10 +118,12 @@ test("Android boot receipt supports the macOS test launcher without relaxing the
       env: {
         JAZZ_ANDROID_SESSION_LAUNCHER: "/bin/sh",
         JAZZ_ANDROID_SESSION_PROCESS_GROUP: "0",
-        JAZZ_ANDROID_TIMEOUT_COMMAND: "/usr/bin/timeout",
       },
     },
   );
+  // Plant the old macOS-only failure: no source receipt may hard-code the
+  // Linux coreutils path. On macOS the launcher takes its Perl fallback.
+  assert.doesNotMatch(readFileSync(script, "utf8"), /\/usr\/bin\/timeout/);
 });
 
 test(
