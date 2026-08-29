@@ -1884,11 +1884,80 @@ impl ReadViewKey {
         if canonical == RegisterShapeOptions::default() {
             return Self::default();
         }
-        let bytes = postcard::to_allocvec(&canonical)
-            .expect("register shape options are postcard encodable");
+        let bytes = canonical_register_shape_options_v1_bytes(&canonical);
         Self {
             id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
         }
+    }
+}
+
+// Permanent canonical input to UUIDv5 `ReadViewKey` identities. These keys
+// enter durable settled-result rows, so they cannot inherit Rust/postcard enum
+// discriminants or field layout.
+const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
+const READ_VIEW_KEY_CODEC_VERSION: u8 = 1;
+
+fn canonical_register_shape_options_v1_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
+    bytes.push(READ_VIEW_KEY_CODEC_VERSION);
+    bytes.push(match options.tier {
+        DurabilityTier::None => 0,
+        DurabilityTier::Local => 1,
+        DurabilityTier::Edge => 2,
+        DurabilityTier::Global => 3,
+    });
+    bytes.push(u8::from(options.propagate_upstream));
+    bytes.push(match options.binding_source {
+        BindingSource::Ordinary => 0,
+        BindingSource::RelayAuthoritySession => 1,
+    });
+    put_read_view_source(&mut bytes, &options.read_view.source);
+    bytes
+}
+
+fn put_read_view_source(bytes: &mut Vec<u8>, source: &ReadViewSourceSpec) {
+    match source {
+        ReadViewSourceSpec::Current => bytes.push(0),
+        ReadViewSourceSpec::BranchView { head, base } => {
+            bytes.push(1);
+            put_branch_selector(bytes, head);
+            match base {
+                None => bytes.push(0),
+                Some(BranchViewBase::Current(branch)) => {
+                    bytes.push(1);
+                    put_branch_selector(bytes, branch);
+                }
+                Some(BranchViewBase::Snapshot { branch, snapshot }) => {
+                    bytes.push(2);
+                    put_branch_selector(bytes, branch);
+                    put_snapshot_ref(bytes, snapshot);
+                }
+            }
+        }
+        ReadViewSourceSpec::Snapshot { snapshot } => {
+            bytes.push(2);
+            put_snapshot_ref(bytes, snapshot);
+        }
+    }
+}
+
+fn put_branch_selector(bytes: &mut Vec<u8>, selector: &BranchSelector) {
+    put_len(bytes, selector.values.len());
+    for (name, value) in &selector.values {
+        put_str(bytes, name);
+        put_bytes(bytes, &value.0);
+    }
+}
+
+fn put_snapshot_ref(bytes: &mut Vec<u8>, snapshot: &SnapshotRef) {
+    bytes.extend_from_slice(snapshot.owner.0.as_bytes());
+    bytes.extend_from_slice(&snapshot.global_base.0.to_le_bytes());
+    bytes.extend_from_slice(&snapshot.local_base.0.to_le_bytes());
+    put_len(bytes, snapshot.dots.len());
+    for dot in &snapshot.dots {
+        bytes.extend_from_slice(&dot.time.0.to_le_bytes());
+        bytes.extend_from_slice(dot.node.0.as_bytes());
     }
 }
 
@@ -3109,6 +3178,26 @@ fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
     serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
 }
 
+/// Canonical CATS v1 payload used by catalogue storage and publication identity.
+///
+/// This is deliberately a small explicit envelope rather than the serde layout
+/// of `SchemaVersion`: version, raw schema UUID, little-endian JSON length, and
+/// the canonical public-schema JSON bytes.
+pub(crate) fn canonical_catalogue_schema_v1_bytes(
+    schema: &SchemaVersion,
+) -> Result<Vec<u8>, String> {
+    const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+    let public_schema = durable_public_schema_json(&schema.schema)?;
+    let length = u32::try_from(public_schema.len())
+        .map_err(|_| "catalogue public schema payload too large".to_owned())?;
+    let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
+    payload.push(CATALOGUE_SCHEMA_VERSION);
+    payload.extend_from_slice(schema.id.0.as_bytes());
+    payload.extend_from_slice(&length.to_le_bytes());
+    payload.extend_from_slice(&public_schema);
+    Ok(payload)
+}
+
 fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     crate::tools::public_schema_convert::decode_public_schema_json(bytes)
 }
@@ -3906,12 +3995,10 @@ impl SchemaLineagePublication {
         put_str(&mut bytes, "jazz-schema-lineage-publication-v1");
         put_bytes(
             &mut bytes,
-            &serde_json::to_vec(&self.schema).expect("schema publication serializes"),
+            &canonical_catalogue_schema_v1_bytes(&self.schema)
+                .expect("schema publication has a canonical CATS v1 payload"),
         );
-        put_bytes(
-            &mut bytes,
-            &serde_json::to_vec(&self.lens).expect("lineage lens serializes"),
-        );
+        put_bytes(&mut bytes, &canonical_lens_bytes(&self.lens));
         let mut new_tables = self.new_tables.clone();
         new_tables.sort();
         put_len(&mut bytes, new_tables.len());
@@ -5646,6 +5733,24 @@ mod tests {
 
         assert_ne!(key(live.clone()), key(sibling));
         assert_ne!(key(live), key(frozen));
+
+        // Internal format receipt: this UUID is stored in settled result
+        // entries, so the exact canonical preimage must be pinned below the
+        // public subscription API boundary.
+        let options = RegisterShapeOptions {
+            tier: DurabilityTier::Edge,
+            read_view: ReadViewSpec::branch_view(selector(1), None),
+            propagate_upstream: false,
+            binding_source: BindingSource::RelayAuthoritySession,
+        };
+        assert_eq!(
+            hex::encode(canonical_register_shape_options_v1_bytes(&options)),
+            "4a52564b010200010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+        );
+        assert_eq!(
+            options.read_view_key().id,
+            uuid::uuid!("ab3adac6-1943-535a-8983-1541732f0fb1")
+        );
     }
 
     #[test]
