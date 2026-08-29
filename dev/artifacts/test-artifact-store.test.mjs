@@ -364,7 +364,10 @@ test("tampered, hard-linked, or incomplete stored generations fail on read and r
     const snapshot = snapshotCorrectnessArtifacts(root);
     const wasmJs = join(snapshot.wasmPackage, "jazz_wasm.js");
     assert.equal(readFileSync(wasmJs).length > 0, true);
-    assert.throws(() => writeFileSync(wasmJs, "tampered"), /EACCES|EPERM/);
+    // Publication makes the snapshot non-writable for ordinary consumers,
+    // but that is not an integrity boundary when the test runner is root.
+    // Deliberately grant write permission and mutate it, then prove every
+    // admission path rejects the changed sealed generation.
     chmodSync(wasmJs, 0o644);
     writeFileSync(wasmJs, "tampered");
     assert.throws(

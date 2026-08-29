@@ -6,6 +6,21 @@
 # suites reuse the artifact build completed before this script starts.
 set -u
 
+# The runner accepts small command overrides solely so its process-management
+# contract tests can use deterministic short-lived children. The shared local
+# CI partition sets this guard, matching CI's unmodified environment: an
+# inherited override would otherwise let a local "CI-equivalent" receipt skip
+# the suites that GitHub will run. Check this before the producer admission so
+# an unsafe inherited control always gets its own actionable diagnostic.
+if [[ "${JAZZ_REQUIRE_CI_TEST_COMMANDS:-0}" == "1" ]]; then
+  for override in JAZZ_NODE_TEST_COMMAND JAZZ_BROWSER_TEST_COMMAND JAZZ_SKIP_JAZZ_TOOLS_BUILD; do
+    if [[ -v "${override}" ]]; then
+      echo "${override} is a test-harness override and is forbidden by the CI-equivalent partition" >&2
+      exit 1
+    fi
+  done
+fi
+
 # This runner is deliberately not a standalone shortcut.  Its parent performs
 # the producer-manifest admission and supplies exact snapshot paths; accepting
 # a direct invocation would reintroduce mutable NAPI/WASM pointer selection.
@@ -20,20 +35,6 @@ if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
     JAZZ_CORRECTNESS_NAPI_FINGERPRINT; do
     if [[ -z "${!required_artifact_env:-}" ]]; then
       echo "run-ts-tests is missing sealed correctness artifact ${required_artifact_env}" >&2
-      exit 1
-    fi
-  done
-fi
-
-# The runner accepts small command overrides solely so its process-management
-# contract tests can use deterministic short-lived children.  The shared local
-# CI partition sets this guard, matching CI's unmodified environment: an
-# inherited override would otherwise let a local "CI-equivalent" receipt skip
-# the suites that GitHub will run.
-if [[ "${JAZZ_REQUIRE_CI_TEST_COMMANDS:-0}" == "1" ]]; then
-  for override in JAZZ_NODE_TEST_COMMAND JAZZ_BROWSER_TEST_COMMAND JAZZ_SKIP_JAZZ_TOOLS_BUILD; do
-    if [[ -v "${override}" ]]; then
-      echo "${override} is a test-harness override and is forbidden by the CI-equivalent partition" >&2
       exit 1
     fi
   done
