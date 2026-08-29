@@ -8,7 +8,13 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { createDb, Db, getDbSubscriptionSource, type QueryBuilder } from "../../src/runtime/db.js";
+import {
+  createDb,
+  Db,
+  getDbSubscriptionSource,
+  resolveDefaultPersistentDbName,
+  type QueryBuilder,
+} from "../../src/runtime/db.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
@@ -2786,134 +2792,77 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it("pins an explicit IndexedDB name across a real SharedWorker restart and permits transfer only after reset", async () => {
-    const ambientFailures: string[] = [];
-    const recordAmbientFailure = (event: ErrorEvent | PromiseRejectionEvent) => {
-      const value = "reason" in event ? event.reason : (event.error ?? event.message);
-      ambientFailures.push(value instanceof Error ? value.message : String(value));
-    };
-    globalThis.addEventListener("error", recordAmbientFailure);
-    globalThis.addEventListener("unhandledrejection", recordAmbientFailure);
+  it("keeps explicit-name account caches separate, shared per scope, and destroys only the selected scope", async () => {
     const appId = uniqueDbName("explicit-browser-owner-app");
-    const dbName = uniqueDbName("explicit-browser-owner-root");
-    const aliceSecret = generateAuthSecret();
-    const bobSecret = generateAuthSecret();
-    const alice = track(
-      await createDb({
-        appId,
-        secret: aliceSecret,
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    let firstInspector: MessagePort | null = null;
-    let sameOwner: Db | null = null;
-    let sameOwnerInspector: MessagePort | null = null;
+    const dbName = uniqueDbName("shared-device-cache");
+    const aliceJwt = makeStructurallyValidJwt("explicit-base-alice");
+    const bobJwt = makeStructurallyValidJwt("explicit-base-bob");
+    const aliceConfig = {
+      appId,
+      jwtToken: aliceJwt,
+      driver: { type: "persistent" as const, dbName },
+    };
+    const bobConfig = { appId, jwtToken: bobJwt, driver: { type: "persistent" as const, dbName } };
+    const alicePhysicalName = resolveDefaultPersistentDbName(aliceConfig);
+    const bobPhysicalName = resolveDefaultPersistentDbName(bobConfig);
+    expect(alicePhysicalName).toMatch(new RegExp(`^${dbName}::jazz-browser-v1::`));
+    expect(alicePhysicalName).not.toBe(bobPhysicalName);
+    expect(alicePhysicalName).not.toContain(aliceJwt);
+    expect(bobPhysicalName).not.toContain(bobJwt);
+
+    let alice: Db | null = track(await createDb(aliceConfig));
+    let aliceSecondTab: Db | null = null;
     let bob: Db | null = null;
-    let transferredBob: Db | null = null;
+    let aliceReopened: Db | null = null;
+    let bobReopened: Db | null = null;
     try {
       alice.insert(todos, { title: "Alice durable row", done: false });
       await waitForCondition(
         async () => (await alice.all(allTodos, { tier: "local" })).length === 1,
         8_000,
-        "first owner should persist its row before the worker is torn down",
+        "Alice should persist into her scoped root",
       );
 
-      // Closing the only context and explicitly terminating the realm proves
-      // the next claimant reads the persisted IDB owner marker, rather than a
-      // process-memory context map left by Alice's first worker.
-      firstInspector = await alice.openInspectorControlPort();
-      firstInspector.start();
-      await alice.shutdown();
-      untrack(alice);
-      await waitForWorkerContextRelease(firstInspector, dbName);
-      await terminateWorker(firstInspector);
-      firstInspector = null;
-
-      sameOwner = track(
-        await createDb({
-          appId,
-          secret: aliceSecret,
-          driver: { type: "persistent", dbName },
-        }),
+      // A second tab for the same canonical scope joins Alice's same worker
+      // and physical root, rather than creating a second cache.
+      aliceSecondTab = track(await createDb(aliceConfig));
+      expect(
+        (await aliceSecondTab.all(allTodos, { tier: "local" })).map((row) => row.title),
+      ).toEqual(["Alice durable row"]);
+      bob = track(await createDb(bobConfig));
+      await expect(bob.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      bob.insert(todos, { title: "Bob durable row", done: false });
+      await waitForTodos(
+        bob,
+        (rows) => rows.some((row) => row.title === "Bob durable row"),
+        "Bob should use his own scoped root",
       );
-      expect((await sameOwner.all(allTodos, { tier: "local" })).map((row) => row.title)).toEqual([
-        "Alice durable row",
-      ]);
-      sameOwnerInspector = await sameOwner.openInspectorControlPort();
-      sameOwnerInspector.start();
-      await sameOwner.shutdown();
-      untrack(sameOwner);
-      sameOwner = null;
-      await waitForWorkerContextRelease(sameOwnerInspector, dbName);
-      await terminateWorker(sameOwnerInspector);
-      sameOwnerInspector = null;
 
-      // This uses a different local-first account but exactly the same physical
-      // name. It arrives in a fresh SharedWorker realm, so a lossy owner
-      // substitution or `owner: undefined` admits it and makes this fail.
-      bob = track(
-        await createDb({
-          appId,
-          secret: bobSecret,
-          driver: { type: "persistent", dbName },
-        }),
-      );
-      const conflictingRead = bob.all(allTodos, { tier: "local" });
-      await expect(
-        withTimeout(
-          conflictingRead,
-          8_000,
-          "conflicting browser owner should reject during durable admission rather than hang",
-        ),
-      ).rejects.toThrow("already owned by a different Jazz browser session");
+      // Destruction is deliberately per physical scope. Bob's explicit reset
+      // cannot transfer or erase Alice's coexisting cache.
+      await bob.deleteClientStorage();
       await bob.shutdown();
       untrack(bob);
       bob = null;
 
-      // A conflicting durable root is an operation-level error. It must not
-      // additionally escape as an ambient error / unhandled rejection.
-      await sleep(50);
-      expect(ambientFailures).toEqual([]);
+      await aliceSecondTab.shutdown();
+      untrack(aliceSecondTab);
+      aliceSecondTab = null;
+      await alice.shutdown();
+      untrack(alice);
+      alice = null;
 
-      // Only the rightful owner can explicitly reset this namespace. Reset
-      // removes the durable marker together with the root, after which Bob can
-      // claim and use the same selected physical name.
-      sameOwner = track(
-        await createDb({
-          appId,
-          secret: aliceSecret,
-          driver: { type: "persistent", dbName },
-        }),
-      );
-      // `createDb()` is intentionally lazy. Materialize the rightful owner's
-      // connection before asking it to perform the explicit durable reset.
-      expect((await sameOwner.all(allTodos, { tier: "local" })).map((row) => row.title)).toEqual([
-        "Alice durable row",
-      ]);
-      await sameOwner.deleteClientStorage();
-      await sameOwner.shutdown();
-      untrack(sameOwner);
-      sameOwner = null;
-
-      transferredBob = track(
-        await createDb({
-          appId,
-          secret: bobSecret,
-          driver: { type: "persistent", dbName },
-        }),
-      );
-      await expect(transferredBob.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      aliceReopened = track(await createDb(aliceConfig));
+      expect(
+        (await aliceReopened.all(allTodos, { tier: "local" })).map((row) => row.title),
+      ).toEqual(["Alice durable row"]);
+      bobReopened = track(await createDb(bobConfig));
+      await expect(bobReopened.all(allTodos, { tier: "local" })).resolves.toEqual([]);
     } finally {
-      for (const db of [transferredBob, bob, sameOwner]) {
+      for (const db of [bobReopened, aliceReopened, bob, aliceSecondTab, alice]) {
         await db?.shutdown().catch(() => undefined);
         if (db) untrack(db);
       }
-      await alice.shutdown().catch(() => undefined);
-      untrack(alice);
-      firstInspector?.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
-      sameOwnerInspector?.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
-      globalThis.removeEventListener("error", recordAmbientFailure);
-      globalThis.removeEventListener("unhandledrejection", recordAmbientFailure);
     }
   });
 

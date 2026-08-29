@@ -228,7 +228,7 @@ export class IndexedDbPageStore {
     tx.abort();
     await done.catch(() => undefined);
     throw new Error(
-      `IndexedDB database ${this.name} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
+      `IndexedDB database ${this.name} is already owned by a different Jazz browser session; this indicates a wrong physical root or namespace derivation error. Reset this scoped database only if you intend to discard its cache`,
     );
   }
 

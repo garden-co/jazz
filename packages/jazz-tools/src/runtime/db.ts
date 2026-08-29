@@ -53,7 +53,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
 } from "./client-session.js";
-import { canonicalAuthorSubject } from "./author-id.js";
+import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
 import { authSecretSeedForMinting } from "./auth-secret-codec.js";
 import {
   getDbInternalSession,
@@ -144,28 +144,13 @@ function trimOptionalString(value?: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** @internal Derive the default browser persistence namespace for this Db config. */
+/** @internal Derive the physical browser persistence namespace for this Db config. */
 export function resolveDefaultPersistentDbName(config: DbConfig): string {
   const driver = resolveStorageDriver(config.driver);
   const explicitDbName = trimOptionalString(
     (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
   );
-  if (explicitDbName) {
-    return explicitDbName;
-  }
-
-  const session = resolveClientInternalSessionSync({
-    appId: config.appId,
-    jwtToken: config.jwtToken,
-    cookieSession: config.cookieSession,
-    trustedReservedSession: getTrustedReservedSession(config),
-  });
-
-  if (!session?.user_id || session.authMode === "anonymous") {
-    return config.appId;
-  }
-
-  return `${config.appId}::${encodeURIComponent(canonicalAuthorSubject(session.issuer, session.user_id))}`;
+  return createBrowserPhysicalDatabaseName(config, explicitDbName ?? config.appId);
 }
 
 /**

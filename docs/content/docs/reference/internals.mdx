@@ -226,14 +226,18 @@ database namespace. The worker owns the IndexedDB page store and the server conn
 communicates with that runtime through a message port. There is no tab-leader election, Web Locks
 dependency, or per-tab durable database.
 
-An explicit `driver.dbName` selects a **physical** IndexedDB namespace; it does not turn that
-namespace into a cross-account cache. On its first open Jazz pins a non-secret logical owner
-(app, environment, and authentication scope) next to the page-store manifest. Reopening as that
-owner, including after the worker restarts, is safe. A different account fails before Jazz opens or
-changes any pages, with an error that asks it to choose another name or explicitly reset the local
-database. `db.deleteClientStorage()` / logout with `wipeData` destroys the namespace and is the
-explicit transfer boundary. The durable owner is neither the foreground replica/node ID nor a
-credential; those remain separate identities.
+`driver.dbName` (and `dbName`) selects a **logical base**, not a physical IndexedDB namespace.
+Jazz derives the physical IndexedDB and SharedWorker namespace from that base plus app,
+environment, and canonical authentication scope. Thus accounts can coexist on one browser:
+reopening the same base as Alice selects Alice's prior cache, while Bob selects Bob's. The derived
+names and durable metadata contain no credential, token, secret, or arbitrary claims.
+
+On its first open Jazz also pins the exact non-secret logical owner (app, environment, and
+authentication scope) next to the page-store manifest. This is defense in depth against a
+derivation bug or low-level attempt to open the wrong physical root: that attempt fails before
+pages change. `db.deleteClientStorage()` / logout with `wipeData` destroys only the current scoped
+namespace; it does not erase another account's cache under the same logical base. The durable owner
+is neither the foreground replica/node ID nor a credential; those remain separate identities.
 
 Calling `db.disconnect()` in one tab explicitly takes that **whole persistent namespace** offline:
 the worker has one upstream connection, so every attached tab uses local-first fallback for

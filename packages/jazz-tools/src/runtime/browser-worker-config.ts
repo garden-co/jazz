@@ -205,6 +205,26 @@ export function createBrowserStorageOwner(config: DbConfig): string {
   });
 }
 
+/**
+ * Derive the physical IndexedDB/SharedWorker namespace from a caller-selected
+ * logical base and its complete, non-secret browser storage scope.
+ *
+ * `driver.dbName` and `config.dbName` are deliberately bases, not physical
+ * roots. This lets a shared device retain caches for Alice and Bob under the
+ * same application-selected base while routing each open back to the right
+ * account. The durable owner marker remains an independent backstop if a
+ * caller or future derivation ever reaches the wrong physical root.
+ */
+export function createBrowserPhysicalDatabaseName(config: DbConfig, baseName: string): string {
+  const scope = JSON.stringify({
+    version: 1,
+    appId: config.appId,
+    env: config.env ?? "dev",
+    auth: browserAuthScope(config),
+  });
+  return `${baseName}::jazz-browser-v1::${encodeURIComponent(scope)}`;
+}
+
 function resolveAuthClass(config: DbConfig): string {
   if (config.adminSecret) return "admin";
   const session = resolveClientInternalSessionSync({

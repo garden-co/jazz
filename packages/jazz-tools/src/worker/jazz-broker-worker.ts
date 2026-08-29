@@ -166,11 +166,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
   try {
     const { options } = context;
     // Opening the page store is also the durable ownership-admission gate for
-    // an explicitly named browser root.  Keep it before *any* WASM work: a
+    // a derived physical browser root. Keep it before *any* WASM work: a
     // rejected owner must not load or configure the process-wide WASM realm,
     // install telemetry, open a native database, or attach a follower.  In
-    // particular, an account accidentally pointed at another account's
-    // `driver.dbName` is an ordinary connect rejection, not a partially
+    // particular, a low-level attempt to open another account's physical root
+    // is an ordinary connect rejection, not a partially
     // initialized worker that can affect the rightful owner's next open.
     context.pageStore = await IndexedDbPageStore.open(options.dbName, {
       owner: options.storageOwner,
