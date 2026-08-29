@@ -25,7 +25,11 @@ import {
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
-import { createBrowserSharedWorkerBaseName } from "../../src/runtime/native-runtime/browser-shared-worker-connection.js";
+import {
+  createBrowserSharedWorkerBaseName,
+  SharedBrowserForegroundNodeLease,
+} from "../../src/runtime/native-runtime/browser-shared-worker-connection.js";
+import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -322,13 +326,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const appId = uniqueDbName("invalidated-physical-worker-epoch-app");
     const dbName = uniqueDbName("invalidated-physical-worker-epoch-root");
     const secret = generateAuthSecret();
-    const first = track(await createDb({ appId, secret, driver: { type: "persistent", dbName } }));
+    const storageOwner = createBrowserStorageOwner({ appId, secret });
+    const first = await SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner });
     try {
-      await first.all(allTodos, { tier: "local" });
       const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
       localStorage.setItem(`jazz:shared-worker-generation:${workerName}`, "1");
       await expect(
-        createDb({ appId, secret, driver: { type: "persistent", dbName } }),
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
       ).rejects.toThrow("active in another Jazz SharedWorker realm");
 
       // Planted lifecycle transition: this is not a clean worker handoff.
@@ -337,18 +341,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await IndexedDbPageStore.destroy(dbName);
       await sleep(100);
 
-      const successor = track(
-        await createDb({ appId, secret, driver: { type: "persistent", dbName } }),
-      );
+      const successor = await SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner });
       try {
-        await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+        expect(successor.node).not.toEqual(first.node);
       } finally {
-        await successor.shutdown();
-        untrack(successor);
+        await successor.retire();
       }
     } finally {
-      await first.shutdown().catch(() => undefined);
-      untrack(first);
+      await first.retire().catch(() => undefined);
     }
   });
 
