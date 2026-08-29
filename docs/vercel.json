@@ -1,4 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm build",
   "ignoreCommand": "node ../dev/scripts/skip-docs-vercel-deploy.mjs"
 }

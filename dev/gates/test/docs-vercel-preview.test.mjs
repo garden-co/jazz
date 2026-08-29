@@ -36,6 +36,7 @@ function pullRequest(overrides = {}) {
 }
 
 test("docs Vercel config delegates to the fail-closed preview filter", () => {
+  assert.equal(vercelConfig.buildCommand, "pnpm build");
   assert.equal(vercelConfig.ignoreCommand, "node ../dev/scripts/skip-docs-vercel-deploy.mjs");
   assert.equal(fs.existsSync(path.join(root, ".github/workflows/docs-vercel-preview.yml")), false);
 });
