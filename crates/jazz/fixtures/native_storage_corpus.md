@@ -66,7 +66,7 @@ RocksDB files remain backend-owned bytes, not interchange encodings.
 ## Pinned producer provenance
 
 The checked-in epoch-1 fixtures were produced from commit
-`7e205805cfb684e595609818137c54ab50351d8f` using the closed
+`7e205805ceb73920a119e7e0fb120f64da08c300` using the closed
 `epoch_1_storage_codec_profile`. The deterministic authority namespace is
 `4a` repeated 16 times; the producer node is `c0`, historical todo is `c1`,
 its branch selector is `c2`, the historical note is `c3`, the current-format
