@@ -64,7 +64,10 @@ libc = "0.2"
 criterion = "0.5"
 flate2 = "1"
 rusqlite = { version = "0.34", features = ["bundled"] }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"] }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+] }
 insta = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
