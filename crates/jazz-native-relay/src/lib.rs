@@ -12,13 +12,10 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::thread;
-
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
@@ -59,6 +56,9 @@ const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
 /// budget above; this is the independent bound for owner-thread work such as
 /// foreground opens, closes, and ticks.
 const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
+/// One physical queue slot is reserved for serialized host teardown. Ordinary
+/// work has its own atomic admission budget and therefore cannot consume it.
+const NATIVE_RELAY_OWNER_TEARDOWN_RESERVE: usize = 1;
 const NATIVE_RELAY_DRAIN_MAX_MESSAGES: usize = 64;
 const NATIVE_RELAY_DRAIN_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_RELAY_PUMP_MAX_CLIENTS: usize = 64;
@@ -516,7 +516,7 @@ struct OpenedForeground {
     relay: u64,
     client: u64,
     runtime_token: u64,
-    wake: Option<ForegroundWakeRegistration>,
+    wake: Option<Arc<ForegroundWakeState>>,
     lease: ForegroundNodeLease,
 }
 
@@ -544,6 +544,54 @@ impl ForegroundWakeRegistration {
                 0,
             )
         }
+    }
+}
+
+/// Thread-safe ownership indirection between an owner-local `Db` scheduler and
+/// a raw platform callback context.
+///
+/// Owner queue saturation can prevent the host from immediately replacing the
+/// scheduler inside the thread-affine `Db`. Inerting this state is independent
+/// of that queue: it synchronizes with an in-flight callback and guarantees
+/// that a scheduler retained by the owner can never dereference the context
+/// again. Only then may the host emit `CANCELLED`, allowing the platform to
+/// release its registration safely.
+struct ForegroundWakeState {
+    registration: Mutex<Option<ForegroundWakeRegistration>>,
+}
+
+impl ForegroundWakeState {
+    fn new(registration: ForegroundWakeRegistration) -> Self {
+        Self {
+            registration: Mutex::new(Some(registration)),
+        }
+    }
+
+    fn wake(&self, foreground: u64, kind: u8, delay_ms: u64) {
+        let registration = self
+            .registration
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(registration) = *registration else {
+            return;
+        };
+        unsafe {
+            (registration.callback)(
+                registration.context as *mut c_void,
+                foreground,
+                kind,
+                delay_ms,
+            )
+        }
+    }
+
+    /// Prevent every future raw-context call and wait for an in-flight one to
+    /// finish before handing the registration back for its final cancellation.
+    fn inert(&self) -> Option<ForegroundWakeRegistration> {
+        self.registration
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
     }
 }
 
@@ -975,15 +1023,19 @@ impl NativeRelayHost {
             .clients
             .get(&foreground.client)
             .map(|(_, client)| client.clone());
+        // First inert the shared state without touching the saturated owner
+        // queue. This is the actual raw-context ownership boundary: even if
+        // the owner retains its scheduler, it can no longer call the platform.
+        let wake = foreground.wake.and_then(|wake| wake.inert());
         let wake_cleared = client
             .as_ref()
             .ok_or(JazzNativeRelayStatus::LifecycleFailure)
             .and_then(|client| {
                 client
-                    .set_foreground_wake_callback(foreground_handle, None, 0)
+                    .set_foreground_wake_callback(foreground_handle, None)
                     .map_err(relay_status)
             });
-        if let Some(wake) = foreground.wake {
+        if let Some(wake) = wake {
             wake.cancelled(foreground_handle);
         }
 
@@ -1094,13 +1146,29 @@ impl NativeRelayHost {
         context: usize,
     ) -> Result<(), JazzNativeRelayStatus> {
         let client = self.foreground_client(foreground)?.clone();
+        let wake = callback.map(|callback| {
+            Arc::new(ForegroundWakeState::new(ForegroundWakeRegistration {
+                callback,
+                context,
+            }))
+        });
         client
-            .set_foreground_wake_callback(foreground, callback, context)
+            .set_foreground_wake_callback(foreground, wake.clone())
             .map_err(relay_status)?;
-        self.foregrounds
-            .get_mut(&foreground)
-            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
-            .wake = callback.map(|callback| ForegroundWakeRegistration { callback, context });
+        let previous = std::mem::replace(
+            &mut self
+                .foregrounds
+                .get_mut(&foreground)
+                .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                .wake,
+            wake,
+        );
+        // The owner command completed before its response, so the prior
+        // scheduler is already dropped. Inerting its host-held state now is
+        // only defensive against future changes which retain scheduler clones.
+        if let Some(previous) = previous {
+            let _ = previous.inert();
+        }
         Ok(())
     }
 
@@ -2183,21 +2251,16 @@ impl NativeRelayClient {
     fn set_foreground_wake_callback(
         &self,
         foreground: u64,
-        callback: Option<ForegroundWakeCallback>,
-        context: usize,
+        wake: Option<Arc<ForegroundWakeState>>,
     ) -> Result<(), RelayError> {
         let id = self.id;
-        self.relay.run(move |worker| {
+        self.relay.run_teardown(move |worker| {
             let client = worker
                 .clients
                 .get(&id)
                 .ok_or(RelayError::UnknownClient(id))?;
-            client.db.set_tick_scheduler(callback.map(|callback| {
-                Rc::new(ForegroundWakeScheduler {
-                    callback,
-                    context,
-                    foreground,
-                }) as Rc<dyn TickScheduler>
+            client.db.set_tick_scheduler(wake.map(|wake| {
+                Rc::new(ForegroundWakeScheduler { wake, foreground }) as Rc<dyn TickScheduler>
             }));
             Ok(())
         })
@@ -2226,7 +2289,7 @@ impl NativeRelayClient {
 
     fn minted_tx_time_high_water(&self) -> Result<TxTime, RelayError> {
         let id = self.id;
-        self.relay.run(move |worker| {
+        self.relay.run_teardown(move |worker| {
             let client = worker
                 .clients
                 .get(&id)
@@ -2237,7 +2300,7 @@ impl NativeRelayClient {
 
     pub fn close(self) -> Result<(), RelayError> {
         let id = self.id;
-        self.relay.run(move |worker| {
+        self.relay.run_teardown(move |worker| {
             let mut client = worker
                 .clients
                 .remove(&id)
@@ -2371,13 +2434,12 @@ impl NativeRelayClient {
 }
 
 struct ForegroundWakeScheduler {
-    callback: ForegroundWakeCallback,
-    context: usize,
+    wake: Arc<ForegroundWakeState>,
     foreground: u64,
 }
 impl ForegroundWakeScheduler {
     fn wake(&self, kind: u8, delay_ms: u64) {
-        unsafe { (self.callback)(self.context as *mut c_void, self.foreground, kind, delay_ms) }
+        self.wake.wake(self.foreground, kind, delay_ms);
     }
 }
 impl TickScheduler for ForegroundWakeScheduler {
@@ -2403,6 +2465,7 @@ pub struct NativeRelay {
 
 struct RelayInner {
     jobs: Mutex<Option<mpsc::SyncSender<RelayCommand>>>,
+    normal_queue_depth: Arc<AtomicUsize>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     liveness: Arc<RelayLiveness>,
     wire: NativeRelayWire,
@@ -3497,8 +3560,31 @@ fn bounded_round_robin_ids<T>(clients: &BTreeMap<u64, T>, cursor: Option<u64>) -
 
 type RelayJob = Box<dyn FnOnce(&mut RelayWorker) + Send + 'static>;
 
+struct NormalOwnerQueuePermit(Arc<AtomicUsize>);
+
+impl NormalOwnerQueuePermit {
+    fn acquire(depth: &Arc<AtomicUsize>) -> Result<Self, RelayError> {
+        depth
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| {
+                (depth < NATIVE_RELAY_OWNER_COMMAND_MAX).then_some(depth + 1)
+            })
+            .map_err(|_| RelayError::OwnerQueueFull)?;
+        Ok(Self(Arc::clone(depth)))
+    }
+}
+
+impl Drop for NormalOwnerQueuePermit {
+    fn drop(&mut self) {
+        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
+}
+
 enum RelayCommand {
-    Run(RelayJob),
+    Run {
+        job: RelayJob,
+        _normal_permit: Option<NormalOwnerQueuePermit>,
+    },
     Shutdown(mpsc::Sender<()>),
 }
 
@@ -3511,8 +3597,10 @@ impl NativeRelay {
         let identity = config.identity;
         let liveness = Arc::new(RelayLiveness::new());
         let wire = NativeRelayWire::for_owner(Arc::clone(&liveness));
-        let (commands, receiver) =
-            mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
+        let (commands, receiver) = mpsc::sync_channel::<RelayCommand>(
+            NATIVE_RELAY_OWNER_COMMAND_MAX + NATIVE_RELAY_OWNER_TEARDOWN_RESERVE,
+        );
+        let normal_queue_depth = Arc::new(AtomicUsize::new(0));
         let (started_tx, started_rx) = mpsc::channel();
         let owner_wire = wire.clone();
         let owner_liveness = Arc::clone(&liveness);
@@ -3536,7 +3624,10 @@ impl NativeRelay {
                 };
                 while let Ok(command) = receiver.recv() {
                     match command {
-                        RelayCommand::Run(job) => job(&mut worker),
+                        RelayCommand::Run {
+                            job,
+                            _normal_permit,
+                        } => job(&mut worker),
                         RelayCommand::Shutdown(done) => {
                             drop(worker);
                             let _ = done.send(());
@@ -3552,6 +3643,7 @@ impl NativeRelay {
         Ok(Self {
             inner: Arc::new(RelayInner {
                 jobs: Mutex::new(Some(commands)),
+                normal_queue_depth,
                 join: Mutex::new(Some(join)),
                 liveness,
                 wire,
@@ -3631,10 +3723,32 @@ impl NativeRelay {
         &self,
         operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
+        self.run_with_queue_class(operation, false)
+    }
+
+    /// Host lifecycle work uses the one reserved physical queue slot. The
+    /// `NativeRelayHost` serializes these calls under its mutex, so at most one
+    /// teardown command can occupy the reserve while ordinary callers remain
+    /// bounded by `NATIVE_RELAY_OWNER_COMMAND_MAX` independent permits.
+    fn run_teardown<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
+    ) -> Result<T, RelayError> {
+        self.run_with_queue_class(operation, true)
+    }
+
+    fn run_with_queue_class<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
+        teardown: bool,
+    ) -> Result<T, RelayError> {
         let (response_tx, response_rx) = mpsc::channel();
         let job: RelayJob = Box::new(move |worker| {
             let _ = response_tx.send(operation(worker));
         });
+        let normal_permit = (!teardown)
+            .then(|| NormalOwnerQueuePermit::acquire(&self.inner.normal_queue_depth))
+            .transpose()?;
         let admitted = {
             let _terminal = self.inner.liveness.enter()?;
             self.inner
@@ -3643,7 +3757,10 @@ impl NativeRelay {
                 .map_err(|_| RelayError::Poisoned("relay command queue"))?
                 .as_ref()
                 .ok_or(RelayError::Closed)?
-                .try_send(RelayCommand::Run(job))
+                .try_send(RelayCommand::Run {
+                    job,
+                    _normal_permit: normal_permit,
+                })
                 .map_err(|error| match error {
                     mpsc::TrySendError::Full(_) => RelayError::OwnerQueueFull,
                     mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
@@ -4087,6 +4204,7 @@ mod tests {
     struct QueuedNativeWake {
         active: AtomicBool,
         cancelled: AtomicUsize,
+        callbacks_after_cancel: AtomicUsize,
         queued: Mutex<Vec<(u64, u8, u64)>>,
         delivered: AtomicUsize,
     }
@@ -4131,7 +4249,99 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((foreground, kind, delay_ms));
+        } else {
+            wake.callbacks_after_cancel.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    struct SaturatedOwner {
+        release: Option<mpsc::Sender<()>>,
+        drained: mpsc::Receiver<()>,
+    }
+
+    impl SaturatedOwner {
+        fn release_and_wait(mut self) {
+            self.release
+                .take()
+                .expect("owner blocker remains held")
+                .send(())
+                .expect("owner blocker remains alive");
+            self.drained
+                .recv()
+                .expect("owner drains every admitted saturation job");
+        }
+    }
+
+    impl Drop for SaturatedOwner {
+        fn drop(&mut self) {
+            // A failed assertion must not leave the relay owner blocked and
+            // make fixture shutdown hang indefinitely.
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    /// Deterministically occupy the owner and fill every bounded command slot.
+    /// This is an internal queue-failure seam: the public C ABI can observe
+    /// backpressure, but cannot safely manufacture a blocked owner thread.
+    fn saturate_owner(relay: &NativeRelay) -> SaturatedOwner {
+        let sender = relay
+            .inner
+            .jobs
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("relay owner queue is live")
+            .clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        sender
+            .try_send(RelayCommand::Run {
+                job: Box::new(move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }),
+                _normal_permit: None,
+            })
+            .expect("owner blocker enters an empty queue");
+        started_rx.recv().expect("owner blocker started");
+
+        for _ in 0..NATIVE_RELAY_OWNER_COMMAND_MAX {
+            sender
+                .try_send(RelayCommand::Run {
+                    job: Box::new(|_| {}),
+                    _normal_permit: None,
+                })
+                .expect("every bounded owner slot is available exactly once");
+        }
+        let (drained_tx, drained_rx) = mpsc::channel();
+        sender
+            .try_send(RelayCommand::Run {
+                job: Box::new(move |_| {
+                    let _ = drained_tx.send(());
+                }),
+                _normal_permit: None,
+            })
+            .expect("the final owner slot carries a deterministic drain receipt");
+        assert!(matches!(
+            sender.try_send(RelayCommand::Run {
+                job: Box::new(|_| {}),
+                _normal_permit: None,
+            }),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+        SaturatedOwner {
+            release: Some(release_tx),
+            drained: drained_rx,
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SaturatedTeardownKind {
+        Close,
+        Revoke,
+        RuntimeInvalidation,
     }
 
     #[test]
@@ -4443,6 +4653,189 @@ mod tests {
                 Err(jazz::foreground_node_lease::ForegroundNodeLeaseError::DuplicateNode),
                 "B's still-live foreground retains its own exclusive lease"
             );
+        }
+    }
+
+    #[test]
+    fn saturated_owner_cannot_outlive_a_cancelled_raw_wake_context() {
+        // Internal native-host lifecycle receipt. Saturating the owner makes
+        // both scheduler clearing and owner-local client removal fail with
+        // `OwnerQueueFull`. Close, revoke, and runtime invalidation must still
+        // make the retained scheduler inert before telling the platform its
+        // raw callback context can be freed.
+        for teardown in [
+            SaturatedTeardownKind::Close,
+            SaturatedTeardownKind::Revoke,
+            SaturatedTeardownKind::RuntimeInvalidation,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let fixture = NativeHostAbiFixture::new();
+            let schema = permissive_schema();
+            let path = directory.path().join("shared-saturated-owner.sqlite");
+
+            // Two distinct capabilities intentionally name the exact same
+            // trusted scope. They share one owner, while revoking A must not
+            // revoke B's independent admission.
+            let a_capability = fixture.admit(&path, "shared-owner", &schema, 0x91);
+            let b_capability = fixture.admit(&path, "shared-owner", &schema, 0x91);
+            assert_ne!(a_capability, b_capability);
+            let b_runtime = unsafe { jazz_native_relay_host_retain(fixture.host, 2) };
+            assert!(!b_runtime.is_null());
+            let a = fixture.open_foreground(&a_capability);
+            let mut b = 0;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_open_attached_foreground(
+                        b_runtime,
+                        b_capability.as_ptr(),
+                        b_capability.len(),
+                        &mut b,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+            assert_ne!(b, 0);
+
+            let (a_lease, b_lease, scope, a_client) = unsafe {
+                let host = (*fixture.host).inner.lock().unwrap();
+                (
+                    host.foregrounds[&a].lease,
+                    host.foregrounds[&b].lease,
+                    host.foregrounds[&a].scope.clone(),
+                    host.foreground_client(a).unwrap().clone(),
+                )
+            };
+            let a_wake = Arc::new(QueuedNativeWake::active());
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_set_foreground_wake_callback(
+                        fixture.lease,
+                        a,
+                        Some(queue_native_wake),
+                        Arc::as_ptr(&a_wake) as *mut c_void,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+
+            let saturated = saturate_owner(&a_client.relay);
+            match teardown {
+                SaturatedTeardownKind::Close => {
+                    let mut closed = true;
+                    assert_eq!(
+                        unsafe {
+                            jazz_native_relay_host_lease_close_attached_foreground(
+                                fixture.lease,
+                                a,
+                                &mut closed,
+                            )
+                        },
+                        JazzNativeRelayStatus::LifecycleFailure
+                    );
+                    assert!(!closed);
+                }
+                SaturatedTeardownKind::Revoke => assert_eq!(
+                    unsafe {
+                        jazz_native_relay_host_revoke_scope_capability(
+                            fixture.host,
+                            a_capability.as_ptr(),
+                            a_capability.len(),
+                        )
+                    },
+                    JazzNativeRelayStatus::LifecycleFailure
+                ),
+                SaturatedTeardownKind::RuntimeInvalidation => assert_eq!(
+                    unsafe {
+                        jazz_native_relay_host_lease_invalidate_foreground_runtime(fixture.lease)
+                    },
+                    JazzNativeRelayStatus::LifecycleFailure
+                ),
+            }
+            assert_eq!(
+                a_wake.cancelled.load(Ordering::Acquire),
+                1,
+                "{teardown:?} inertizes the callback before reporting its forced retirement"
+            );
+
+            // A late HostObject finalizer is an idempotent no-op even while
+            // the owner queue remains saturated; it must not attempt another
+            // scheduler operation or reinterpret the failed teardown as live.
+            let mut late_closed = true;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_close_attached_foreground(
+                        fixture.lease,
+                        a,
+                        &mut late_closed,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+            assert!(!late_closed);
+            unsafe {
+                let mut host = (*fixture.host).inner.lock().unwrap();
+                assert!(
+                    host.foregrounds.contains_key(&b),
+                    "{teardown:?} preserves B's foreground while its shared owner is saturated"
+                );
+                assert!(
+                    host.admitted_scopes
+                        .contains_key(&AdmissionCapability(b_capability)),
+                    "{teardown:?} preserves B's independent admission"
+                );
+                let pool = host.foreground_node_leases.get_mut(&scope).unwrap();
+                assert_eq!(
+                    pool.acquire_reusable(),
+                    None,
+                    "{teardown:?} never clean-returns A while B is live"
+                );
+                assert_eq!(
+                    pool.acquire_fresh(a_lease.node),
+                    Err(jazz::foreground_node_lease::ForegroundNodeLeaseError::DuplicateNode),
+                    "{teardown:?} permanently retires A"
+                );
+                assert_eq!(
+                    pool.acquire_fresh(b_lease.node),
+                    Err(jazz::foreground_node_lease::ForegroundNodeLeaseError::DuplicateNode),
+                    "{teardown:?} keeps B's lease active"
+                );
+            }
+
+            saturated.release_and_wait();
+            assert_eq!(
+                unsafe { jazz_native_relay_host_lease_tick_attached_foreground(b_runtime, b) },
+                JazzNativeRelayStatus::Ok,
+                "{teardown:?} leaves B usable after shared-owner backpressure clears"
+            );
+            // The owner still has A's Db because its close command could not
+            // enter the full queue. A real scheduler request after the
+            // platform has processed cancellation must nevertheless never
+            // touch that raw context again.
+            a_client
+                .with_db(|db| {
+                    db.schedule_tick(TickUrgency::Immediate);
+                    Ok(())
+                })
+                .expect("orphaned owner client remains available until terminal cleanup");
+            assert_eq!(
+                a_wake.callbacks_after_cancel.load(Ordering::Acquire),
+                0,
+                "{teardown:?} leaves only an inert owner scheduler"
+            );
+
+            let mut b_closed = false;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_close_attached_foreground(
+                        b_runtime,
+                        b,
+                        &mut b_closed,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+            assert!(b_closed);
+            unsafe { jazz_native_relay_host_lease_free(b_runtime) };
         }
     }
 
