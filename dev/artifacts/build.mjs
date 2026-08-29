@@ -330,7 +330,7 @@ export function publishNapiGeneration(
   stagePath,
   packageDir,
   fingerprint,
-  { lease = undefined } = {},
+  { lease = undefined, beforePointerCommit = undefined } = {},
 ) {
   const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireArtifactLease();
   let generationPath;
@@ -348,6 +348,10 @@ export function publishNapiGeneration(
       `generation-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
     renameSync(stagePath, generationPath);
+    // The package-local fallback expectation and the pointer form one reader
+    // contract. Publish the fallback first: if it cannot be written, no new
+    // pointer can expose a generation that disagrees with fallback readers.
+    beforePointerCommit?.();
     // The pointer is the sole reader-facing runtime switch. All generated JS,
     // d.ts, native bytes and stage manifest are already present in this directory.
     if (process.env.JAZZ_NAPI_BUILD_FAULT === "pointer-write")
@@ -476,8 +480,8 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
         throw new Error("planted NAPI publication-boundary failure");
       publishNapiGeneration(napiStage, join(root, "crates", "jazz-napi"), fingerprint, {
         lease: artifactLock.lease,
+        beforePointerCommit: () => publishExpectedFingerprint(kind, fingerprint),
       });
-      publishExpectedFingerprint(kind, fingerprint);
     }
   } finally {
     if (wasmStage && existsSync(wasmStage.path))

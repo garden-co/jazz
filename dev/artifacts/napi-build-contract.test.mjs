@@ -210,6 +210,29 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
   }
 });
 
+test("a fallback-marker failure occurs before the NAPI pointer can expose a new generation", () => {
+  const root = fixture();
+  const prior = "prior";
+  try {
+    publishNapiGeneration(stage(root, ".napi-stage-good", prior), root, prior);
+    const pointer = readFileSync(join(root, "native-binding.pointer.cjs"), "utf8");
+    const generations = readdirSync(join(root, ".native-artifacts")).sort();
+    assert.throws(
+      () =>
+        publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next", {
+          beforePointerCommit: () => {
+            throw new Error("planted fallback-marker failure");
+          },
+        }),
+      /fallback-marker failure/,
+    );
+    assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
+    assert.deepEqual(readdirSync(join(root, ".native-artifacts")).sort(), generations);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a newly generated public export absent from the stable package declaration fails before activation", () => {
   const root = fixture();
   try {

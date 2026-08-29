@@ -17,6 +17,17 @@ const tasks = [
   "jazz-napi#build",
 ];
 
+function jazzToolsDryGraph() {
+  const output = execFileSync(
+    "pnpm",
+    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--dry=json"],
+    { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
+  );
+  const task = JSON.parse(output).tasks.find((candidate) => candidate.taskId === "jazz-tools#build");
+  assert.ok(task, "dry graph omitted jazz-tools#build");
+  return task;
+}
+
 function dryGraph() {
   const output = execFileSync(
     "pnpm",
@@ -59,6 +70,13 @@ const originals = new Map(closures.map(({ file }) => [file, readFileSync(file, "
 const unrelatedOriginal = readFileSync(unrelated, "utf8");
 
 try {
+  // JAZZ_CORRECTNESS_WASM_PACKAGE deliberately remains pass-through: it is a
+  // sealed path, not a stable Turbo hash input. A real dry graph therefore
+  // must disable both local and remote restore for the bundle that copies it.
+  const jazzTools = jazzToolsDryGraph();
+  assert.equal(jazzTools.cache.local, false, "jazz-tools could restore a stale sealed WASM bundle");
+  assert.equal(jazzTools.cache.remote, false, "jazz-tools could remotely restore a stale sealed WASM bundle");
+
   const baseline = dryGraph();
   for (const { name } of closures)
     for (const task of tasks)
@@ -97,4 +115,4 @@ try {
   writeFileSync(unrelated, unrelatedOriginal);
 }
 
-console.log("Turbo artifact cache inputs are sensitive to closure edits only.");
+console.log("Turbo artifact cache inputs are sensitive to closure edits only; sealed Jazz Tools bundles cannot restore.");

@@ -488,6 +488,13 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "JAZZ_CORRECTNESS_NAPI_BINDING",
     "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
   ]);
+  // Correctness consumers inject a content-addressed WASM package through a
+  // pass-through environment variable. Turbo does not include pass-through
+  // values in its task hash, so restoring Jazz Tools' bundled output could
+  // otherwise pair a verified current snapshot with stale embedded WASM.
+  // Keep the native producers cacheable below their publication boundary;
+  // only this reader-facing bundle task is deliberately uncached.
+  assert.equal(turbo.tasks["jazz-tools#build"].cache, false);
   assert.deepEqual(turbo.tasks.test.passThroughEnv, turbo.tasks["jazz-tools#build"].passThroughEnv);
 });
 

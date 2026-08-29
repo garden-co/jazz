@@ -126,6 +126,7 @@
       "outputs": []
     },
     "jazz-tools#build": {
+      "cache": false,
       "inputs": [
         "package.json",
         "src/**",
