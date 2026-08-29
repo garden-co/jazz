@@ -9,7 +9,7 @@ native adapters under the closed `epoch_1_storage_codec_profile`.
 Its settlement-baseline logical-receipt SHA-256 is:
 
 ```text
-e28546f6a4d9c4c3ef1d857f976e0d094a76906c86f56306c8f2349bab959d92
+6f1d6396d88b5e5c9dc0c9b87c29d58a61a1c7fad8a0a440fbe5814a39c7a323
 ```
 
 The digest is over sorted system and physical application store names and, for
@@ -49,23 +49,25 @@ fixtures that supply corruption detail beyond this whole-root receipt.
 The producer's exact logical pack is committed as
 `epoch-1-native-jazz-corpus.pack.base64`; it is base64 only to keep its
 canonical binary values safe in a text repository. Its SHA-256 is
-`fe81ca9b7b7cefdded25f2f6657578abdb0d4ebfef31191e6328e2225b3b55a3`.
+`c085228978da30355c822e77a725be4fe5b2ee3ef815886fc512da79733760d0`.
 It explicitly lists empty authoritative families as well as entries, so an
 omitted opened family cannot look the same as an empty one.
 
 The same pinned producer has two backend-specific physical receipts:
 
 - `epoch-1-native-jazz.sqlite.gz.base64` — gzip payload SHA-256
-  `4c713b250eec00b8a6774e33869f5e1ed16e88624424bcb11675c5030ddbc9f9`,
+  `57b2df3cc4bf0c16702ae388a2892b49b735943b982fcf70a31804c2556e0d18`,
   decompressed SQLite SHA-256
-  `4ba479e28c13f3c6233ab0acf65285bb503c6446083966cf72cc5ccba20f23f9`.
+  `c466f29dfca1725cc1f41383d924f706ea6cb5d83b21bdcdaa469fe92fab586c`.
 - `epoch-1-native-jazz-rocksdb.tar.gz.base64` — archive SHA-256
-  `1477e75cb48aa05e347a354b4b4d0edd4d31fde455f7b589390ade2605b0c1f3`.
+  `8125fcb0f5089ac96589808a85d9b142ad6b4680c1a170ea237698c1e761424a`.
 
-The logical receipt was expanded to cover the already-present Groove metadata
-ledger; fresh-root reopening verified both pinned physical artifacts unchanged,
-so this coverage-only update intentionally does not replace their backend-owned
-SQLite/RocksDB bytes or checksums.
+This regeneration replaces the two settled-state records with fixed,
+domain-separated digest keys and typed Groove-record values: `jazz_settled_program_facts`
+keeps its full semantic fact in the value, while `jazz_settled_result_members`
+keeps the full member receipt in the value. The logical pack and both physical
+artifacts therefore change together. The deterministic producer/reopen receipt
+proves the new records survive fresh SQLite and RocksDB roots before promotion.
 
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`
 checks each payload before materializing it, inspects SQLite and RocksDB using
@@ -97,8 +99,8 @@ alias); delete the old candidate or choose a new path deliberately.
 
 ## Pinned producer provenance
 
-The checked-in epoch-1 fixtures were produced from commit
-`7e205805ceb73920a119e7e0fb120f64da08c300` using the closed
+The checked-in epoch-1 fixtures were regenerated from storage candidate
+`2ebd3590a` using the closed
 `epoch_1_storage_codec_profile`. The deterministic authority namespace is
 `4a` repeated 16 times; the producer node is `c0`, historical todo is `c1`,
 its branch selector is `c2`, the historical note is `c3`, the current-format
