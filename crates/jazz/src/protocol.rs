@@ -1954,8 +1954,12 @@ fn put_snapshot_ref(bytes: &mut Vec<u8>, snapshot: &SnapshotRef) {
     bytes.extend_from_slice(snapshot.owner.0.as_bytes());
     bytes.extend_from_slice(&snapshot.global_base.0.to_le_bytes());
     bytes.extend_from_slice(&snapshot.local_base.0.to_le_bytes());
-    put_len(bytes, snapshot.dots.len());
-    for dot in &snapshot.dots {
+    // Dots are a frontier set, not an ordered stream.  A caller can construct
+    // the same snapshot through differently ordered or repeated observations;
+    // JRVK therefore commits to the sorted unique TxId set.
+    let dots = snapshot.dots.iter().copied().collect::<BTreeSet<_>>();
+    put_len(bytes, dots.len());
+    for dot in dots {
         bytes.extend_from_slice(&dot.time.0.to_le_bytes());
         bytes.extend_from_slice(dot.node.0.as_bytes());
     }
@@ -5750,6 +5754,43 @@ mod tests {
         assert_eq!(
             options.read_view_key().id,
             uuid::uuid!("ab3adac6-1943-535a-8983-1541732f0fb1")
+        );
+    }
+
+    #[test]
+    fn read_view_key_canonicalizes_snapshot_dot_set_order_and_duplicates() {
+        let dot_a = TxId::new(TxTime(7), NodeUuid::from_bytes([0x71; 16]));
+        let dot_b = TxId::new(TxTime(9), NodeUuid::from_bytes([0x72; 16]));
+        let snapshot = |dots| SnapshotRef {
+            owner: NodeUuid::from_bytes([0x70; 16]),
+            global_base: GlobalTime(5),
+            local_base: TxTime(6),
+            dots,
+        };
+        let options = |snapshot| RegisterShapeOptions {
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Snapshot { snapshot },
+            },
+            ..RegisterShapeOptions::default()
+        };
+
+        let ordered = options(snapshot(vec![dot_a, dot_b]));
+        let permuted_and_duplicated = options(snapshot(vec![dot_b, dot_a, dot_b, dot_a]));
+        let ordered_bytes = canonical_register_shape_options_v1_bytes(&ordered);
+        let equivalent_bytes = canonical_register_shape_options_v1_bytes(&permuted_and_duplicated);
+
+        assert_eq!(ordered_bytes, equivalent_bytes);
+        assert_eq!(
+            hex::encode(ordered_bytes),
+            "4a52564b0103010002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
+        );
+        assert_eq!(
+            ordered.read_view_key(),
+            permuted_and_duplicated.read_view_key()
+        );
+        assert_eq!(
+            ordered.read_view_key().id,
+            uuid::uuid!("0227f6f4-5ca2-5778-9e6d-78f33a70d750")
         );
     }
 

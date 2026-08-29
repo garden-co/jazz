@@ -773,6 +773,15 @@ resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
+The permanent `JRVK` V1 preimage for that resolved identity is `magic "JRVK" |
+version 1 | tier:u8 | propagate_upstream:u8 | binding_source:u8 | source`. A
+snapshot source encodes `owner:uuid | global_base:u64le | local_base:u64le |
+dot_count:u32le | dots`, where every dot is `tx_time:u64le | node:uuid`. Dots
+are a set: the encoder sorts `TxId` by `(time, node)` and removes duplicates
+before writing `dot_count` and the dot sequence. Thus equivalent snapshot
+frontiers yield the same UUIDv5 read-view key regardless of observation order
+or repeated dots. No generic Rust serializer is part of this durable identity.
+
 The serving authority maintains flat result members, association state, and
 version witnesses for each program instance, then its output terminal renders
 the structured result tree (§6.4). The subscriber receives and stores its own

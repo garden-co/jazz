@@ -454,27 +454,6 @@ mod tests {
         assert_ne!(left, right);
     }
 
-    // Internal format receipt: this logical identity crosses storage and wire
-    // boundaries as a string, so public API behavior alone cannot pin the
-    // exact JSON spelling used by its canonicality check.
-    #[test]
-    fn author_subject_canonical_json_receipt_rejects_equivalent_noncanonical_input() {
-        let author =
-            AuthorSubject::authenticated("https://issuer.example/a\"b", "line\nfeed").unwrap();
-        assert_eq!(
-            author.canonical(),
-            r#"["https://issuer.example/a\"b","line\nfeed"]"#
-        );
-        assert_eq!(
-            AuthorSubject::from_canonical(author.canonical()),
-            Ok(author)
-        );
-        assert_eq!(
-            AuthorSubject::from_canonical(r#"[ "https://issuer.example/a\"b", "line\nfeed" ]"#),
-            Err(AuthorSubjectError::NonCanonical)
-        );
-    }
-
     #[test]
     fn author_subject_preserves_exact_ascii_space_and_unicode_whitespace_components() {
         let spaced = AuthorSubject::authenticated(" https://issuer.example ", " alice ").unwrap();

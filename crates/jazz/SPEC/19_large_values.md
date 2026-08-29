@@ -71,18 +71,14 @@ required to bind authorization and lifecycle.
 
 ### Frozen V1 JSON and chunking boundary
 
-Jazz's JSON columns inherit Groove V1's literal-source contract. A supplied
-JSON scalar is syntactically validated UTF-8 source; Jazz neither normalizes
-object key order, duplicate keys, numeric spelling, escape spelling, nor
-Unicode before staging or publication. Parsed reads use Groove's ordinary JSON
-semantics (including the parser's last-duplicate-key behavior), but those
-read-only paths do not rewrite stored bytes. JSON mutation remains a complete
-replacement lowered to the same bounded byte-edit tail as all other large
-scalars; Jazz must not add a JSON-specific persistent object, merge, or locator
-model at this boundary. The current public `JsonSet` convenience transformation
-parses then emits a replacement source, so its exact source-preservation policy
-is explicitly deferred to #2337; it does not redefine the byte preservation
-contract for supplied values or reads.
+Jazz's JSON columns inherit Groove V1's literal-source contract. A JSON scalar
+is syntactically validated UTF-8 source; Jazz neither normalizes object key
+order, duplicate keys, numeric spelling, escape spelling, nor Unicode before
+staging or publication. Parsed reads use Groove's ordinary JSON semantics
+(including the parser's last-duplicate-key behavior), but those parse results
+do not rewrite the stored bytes. JSON mutation remains a complete replacement
+lowered to the same bounded byte-edit tail as all other large scalars; Jazz
+must not add an object-like patch, merge, or locator API at this boundary.
 
 The descriptor's V1 format selector jointly governs its root, nested edit
 records, and schema-known `Chunked = 3` physical scalar arm before Groove
