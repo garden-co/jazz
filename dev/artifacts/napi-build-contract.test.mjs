@@ -245,10 +245,17 @@ test("a newly generated public export absent from the stable package declaration
 
 test("Turbo keys the tracked package wrappers that define the native ABI contract", () => {
   const turbo = JSON.parse(readFileSync(new URL("../../turbo.json", import.meta.url), "utf8"));
-  const inputs = turbo.tasks["jazz-napi#build"].inputs;
+  const task = turbo.tasks["jazz-napi#build"];
+  // This producer publishes a leased pointer plus an expectation compiled
+  // into the native binary. Turbo restores outputs outside that lease, so a
+  // cached restore could pair one generation with another generation's
+  // expected fingerprint. Keep caching at Cargo/sccache, not at this
+  // reader-facing publication boundary.
+  assert.equal(task.cache, false);
+  const inputs = task.inputs;
   for (const path of ["index.cjs", "index.mjs", "index.d.ts", "native-binding.cjs"])
     assert.ok(inputs.includes(`$TURBO_ROOT$/crates/jazz-napi/${path}`), path);
-  const outputs = turbo.tasks["jazz-napi#build"].outputs;
+  const outputs = task.outputs;
   for (const output of [
     "native-binding.pointer.cjs",
     "native-artifact-fingerprint.cjs",
@@ -260,6 +267,8 @@ test("Turbo keys the tracked package wrappers that define the native ABI contrac
 });
 
 test("independent producers only publish their own expected marker", () => {
+  assert.match(build, /if \(kind !== "napi"\) return/);
+  assert.match(build, /native-artifact-fingerprint\.cjs/);
   assert.doesNotMatch(build, /native-artifact-fingerprint-\$\{kind\}\.ts/);
   assert.doesNotMatch(
     build,

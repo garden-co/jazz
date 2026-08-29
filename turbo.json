@@ -30,6 +30,7 @@
       "outputs": [".next/**", "!.next/cache/**"]
     },
     "jazz-napi#build": {
+      "cache": false,
       "inputs": [
         "package.json",
         "Cargo.toml",
