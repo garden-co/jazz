@@ -53,6 +53,10 @@ struct VersionDecodePlan {
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
     result_weights: BTreeMap<ResultMemberEntry, i64>,
+    /// Result memberships already exposed to the subscription consumer. A
+    /// result-current terminal can advance before the companion content
+    /// witness terminal, so raw membership alone is not publishable.
+    published_result_members: BTreeSet<ResultMemberEntry>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     /// Incrementally maintained collector output. The key is the root row and
     /// the encoded tree so a -/+ replacement for one root never requires
@@ -71,6 +75,7 @@ impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
             result_weights: BTreeMap::new(),
+            published_result_members: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
             structured_app_row_descriptor: None,
@@ -325,6 +330,17 @@ impl MaintainedSubscriptionView {
             transitions.requires_authoritative_membership_reconcile |=
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
+        // A multisink delta need not contain every terminal that participates
+        // in one maintained result. In particular, a current-membership row
+        // can arrive before its content witness while a cold source finishes
+        // on a later runtime turn. Keep that raw membership internally, but
+        // do not publish Stream A until its Stream B bundle witness is
+        // present. A later content-only delta revisits all pending members and
+        // promotes the now-complete one without requiring another membership
+        // edge.
+        let (adds, removes) = self.reconcile_publishable_result_members(node_aliases);
+        transitions.adds = adds;
+        transitions.removes = removes;
         Ok(transitions)
     }
 
@@ -467,6 +483,12 @@ impl MaintainedSubscriptionView {
                 .result_weights
                 .keys()
                 .map(|member| result_member_entry_bytes(member) + mem::size_of::<i64>())
+                .sum::<usize>()
+            + btree_map_bytes(self.published_result_members.len())
+            + self
+                .published_result_members
+                .iter()
+                .map(result_member_entry_bytes)
                 .sum::<usize>();
         let result_payloads_bytes = btree_map_bytes(self.result_payloads.len())
             + self
@@ -619,6 +641,67 @@ impl MaintainedSubscriptionView {
                     .insert(payload.member.clone(), payload.clone());
             }
         }
+        // An authoritative reset has already published these aggregate
+        // members through its replacement snapshot. Do not re-emit them when
+        // the next unrelated multisink delta is drained.
+        self.published_result_members
+            .retain(|member| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        self.published_result_members.extend(
+            self.result_weights
+                .iter()
+                .filter(|(member, weight)| {
+                    matches!(member, ResultMemberEntry::Synthetic { .. }) && **weight > 0
+                })
+                .map(|(member, _)| member.clone()),
+        );
+    }
+
+    fn reconcile_publishable_result_members(
+        &mut self,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> (Vec<ResultMemberEntry>, Vec<ResultMemberEntry>) {
+        let publishable = self
+            .result_weights
+            .iter()
+            .filter(|(member, weight)| {
+                **weight > 0 && self.result_member_has_bundle_witness(member, node_aliases)
+            })
+            .map(|(member, _)| member.clone())
+            .collect::<BTreeSet<_>>();
+        let adds = publishable
+            .difference(&self.published_result_members)
+            .cloned()
+            .collect();
+        let removes = self
+            .published_result_members
+            .difference(&publishable)
+            .cloned()
+            .collect();
+        self.published_result_members = publishable;
+        (adds, removes)
+    }
+
+    fn result_member_has_bundle_witness(
+        &self,
+        member: &ResultMemberEntry,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> bool {
+        let Some((table, row_uuid, tx_id)) = member.as_row() else {
+            // Synthetic aggregate output is self-contained in its payload
+            // fact, so it has no Stream B history-row witness.
+            return true;
+        };
+        self.versions_by_tx(tx_id).iter().any(|version| {
+            version.table() == table.as_str()
+                && version.row_uuid() == row_uuid
+                && version.deletion().is_none()
+                && !version.is_register_record()
+        }) || self
+            .replacement_for(table.as_str(), row_uuid)
+            .0
+            .is_some_and(|version| {
+                version_tx_id_from_aliases(&version, node_aliases) == Some(tx_id)
+            })
     }
 
     fn apply_result_delta(
@@ -2755,6 +2838,47 @@ mod tests {
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn membership_waits_for_later_content_witness_before_publication() {
+        // Model two separately delivered multisink deltas: Stream A reports
+        // membership first, while a cold Stream B finishes the exact history
+        // witness only on the later runtime turn. Publishing the first delta
+        // would make the wire builder fail closed for the missing bundle.
+        let aliases = aliases();
+        let member = ResultMemberEntry::from(result(row(1), 10));
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        maintained
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
+            .unwrap();
+        let (adds, removes) = maintained.reconcile_publishable_result_members(&aliases);
+        assert!(
+            adds.is_empty(),
+            "Stream A must remain pending without Stream B"
+        );
+        assert!(removes.is_empty());
+
+        maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        let (adds, removes) = maintained.reconcile_publishable_result_members(&aliases);
+        assert_eq!(adds, vec![member.clone()]);
+        assert!(removes.is_empty());
+
+        maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
+            .unwrap();
+        let (adds, removes) = maintained.reconcile_publishable_result_members(&aliases);
+        assert!(adds.is_empty());
+        assert_eq!(removes, vec![member]);
     }
 
     #[test]
