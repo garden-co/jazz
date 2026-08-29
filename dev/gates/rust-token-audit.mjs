@@ -55,14 +55,21 @@ export function rustTokens(source) {
     }
     const raw = source.slice(index).match(/^(?:br|rb|r)(#{0,255})"/);
     if (raw) {
+      const start = index;
+      const startLine = line;
+      const startColumn = column;
       const end = source.indexOf('"' + raw[1], index + raw[0].length);
       advance(source.slice(index, end === -1 ? source.length : end + raw[1].length + 1));
+      add("literal", source.slice(start, index), start, startLine, startColumn);
       continue;
     }
     if (
       source[index] === '"' ||
       ((source[index] === "b" || source[index] === "c") && source[index + 1] === '"')
     ) {
+      const start = index;
+      const startLine = line;
+      const startColumn = column;
       advance(source[index]);
       if (source[index] === '"') advance(source[index]);
       while (index < source.length) {
@@ -71,6 +78,7 @@ export function rustTokens(source) {
         if (character === "\\" && index < source.length) advance(source[index]);
         else if (character === '"') break;
       }
+      add("literal", source.slice(start, index), start, startLine, startColumn);
       continue;
     }
     if (source[index] === "'") {
@@ -102,14 +110,19 @@ export function rustTokens(source) {
 }
 
 export function serializerReferences(tokens, roots) {
+  const rootPaths = [...roots]
+    .map((root) => root.split("::"))
+    .sort((left, right) => right.length - left.length || left.join("::").localeCompare(right.join("::")));
   const references = [];
   for (let index = 0; index < tokens.length; index += 1) {
-    if (tokens[index].kind !== "ident" || !roots.has(tokens[index].text)) continue;
+    if (tokens[index].kind !== "ident") continue;
+    const root = rootPaths.find((parts) => matchesPath(tokens, index, parts));
+    if (!root) continue;
     // A local named postcard is not a crate path. A crate root is followed by
     // a path separator or macro delimiter.
-    if (tokens[index + 1]?.text !== "::" && tokens[index + 1]?.text !== "!") continue;
-    const parts = [tokens[index].text];
-    let cursor = index + 1;
+    let cursor = index + root.length * 2 - 1;
+    if (tokens[cursor]?.text !== "::" && tokens[cursor]?.text !== "!") continue;
+    const parts = [...root];
     while (tokens[cursor]?.text === "::" && tokens[cursor + 1]?.kind === "ident") {
       parts.push(tokens[cursor + 1].text);
       cursor += 2;
@@ -138,7 +151,7 @@ export function serializerReferences(tokens, roots) {
     if (
       stack.length &&
       tokens[index].kind === "ident" &&
-      roots.has(tokens[index].text) &&
+      rootPaths.some((parts) => parts.length === 1 && parts[0] === tokens[index].text) &&
       tokens[index + 1]?.text !== "::" &&
       tokens[index + 1]?.text !== "!"
     ) {
@@ -148,7 +161,17 @@ export function serializerReferences(tokens, roots) {
   return [...references, ...bareMacroReferences].sort((left, right) => left.index - right.index);
 }
 
+function matchesPath(tokens, index, parts) {
+  for (let offset = 0; offset < parts.length; offset += 1) {
+    const token = tokens[index + offset * 2];
+    if (token?.kind !== "ident" || token.text !== parts[offset]) return false;
+    if (offset + 1 < parts.length && tokens[index + offset * 2 + 1]?.text !== "::") return false;
+  }
+  return true;
+}
+
 export function serializerImports(tokens, roots) {
+  const rootPaths = [...roots].map((root) => root.split("::"));
   const imports = [];
   for (let index = 0; index < tokens.length; index += 1) {
     if (tokens[index].text !== "use") continue;
@@ -157,12 +180,52 @@ export function serializerImports(tokens, roots) {
       cursor < tokens.length && tokens[cursor].text !== ";";
       cursor += 1
     ) {
-      if (tokens[cursor].kind === "ident" && roots.has(tokens[cursor].text)) {
-        imports.push({ root: tokens[cursor].text, line: tokens[cursor].line });
+      const root = rootPaths.find((parts) => matchesPath(tokens, cursor, parts));
+      if (root) {
+        imports.push({ root: root.join("::"), line: tokens[cursor].line });
       }
     }
   }
   return imports;
+}
+
+/**
+ * `include!` and `#[path] mod` can make a source file outside the reviewed
+ * persistence-owner tree part of a compiled module. The caller permits only
+ * literal includes whose target is already collected; every path module and
+ * unresolvable include remains a source escape.
+ */
+export function persistenceSourceEscapes(tokens) {
+  const escapes = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].text === "include" && tokens[index + 1]?.text === "!")
+      escapes.push({
+        kind: "include!",
+        line: tokens[index].line,
+        literal: tokens[index + 3]?.kind === "literal" ? tokens[index + 3].text : undefined,
+      });
+    if (tokens[index].text !== "#" || tokens[index + 1]?.text !== "[") continue;
+    let close = index + 2;
+    let depth = 1;
+    for (; close < tokens.length && depth; close += 1) {
+      if (tokens[close].text === "[") depth += 1;
+      if (tokens[close].text === "]") depth -= 1;
+    }
+    if (!tokens.slice(index + 2, close - 1).some((token) => token.text === "path")) continue;
+    let cursor = close;
+    while (tokens[cursor] && ![";", "{", "}"].includes(tokens[cursor].text)) {
+      if (tokens[cursor].text === "mod") {
+        escapes.push({
+          kind: "#[path] mod",
+          line: tokens[index].line,
+          literal: tokens.slice(index + 2, close - 1).find((token) => token.kind === "literal")?.text,
+        });
+        break;
+      }
+      cursor += 1;
+    }
+  }
+  return escapes;
 }
 
 export function serializerExternCrates(tokens, roots) {
@@ -256,7 +319,10 @@ function itemSpans(tokens) {
       end,
       kind: tokens[index].text,
       name: itemName(tokens, index, end),
-      cfgTest: attributes.some((attribute) => /cfg\s*\(\s*test\s*\)/.test(attribute.text)),
+      // Only a direct cfg predicate that logically implies `test` marks a
+      // declaration as test-only. In particular cfg_attr can be enabled in
+      // production and must never transfer a reviewed test allowance.
+      cfgTest: attributes.some((attribute) => cfgAttributeImpliesTest(attribute.text)),
       openBrace: declarationOpenBrace(tokens, index, end),
     });
   }
@@ -360,9 +426,74 @@ function fieldContext(tokens, target, parents) {
       ? "#" + countTupleFields(tokens, owner.openBrace + 1, start)
       : [...segment.slice(0, colon)].reverse().find((token) => token.kind === "ident")?.text ?? "<anonymous>";
   const cfgTest = segment.some(
-    (token, index) => token.text === "#" && /cfg\s*\(\s*test\s*\)/.test(attributeText(segment, index)),
+    (token, index) => token.text === "#" && cfgAttributeImpliesTest(attributeText(segment, index)),
   );
   return { identity: "field " + name, cfgTest };
+}
+
+/**
+ * Conservative boolean implication for direct `#[cfg(...)]` attributes.
+ * We need only prove P => test: `all` inherits a proof from any conjunct,
+ * while `any` needs every alternative to prove it. Everything else, including
+ * `cfg_attr`, is a production boundary. This deliberately is not a complete
+ * cfg evaluator; uncertain syntax fails closed.
+ */
+function cfgAttributeImpliesTest(attribute) {
+  const compact = attribute.replace(/\s+/g, "");
+  const match = compact.match(/^#\[cfg\((.*)\)\]$/);
+  if (!match) return false;
+  const parsed = parseCfgPredicate(match[1]);
+  return parsed !== undefined && predicateImpliesTest(parsed);
+}
+
+function parseCfgPredicate(source) {
+  let cursor = 0;
+  const parse = () => {
+    const identifier = source.slice(cursor).match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+    if (!identifier) return undefined;
+    cursor += identifier.length;
+    if (source[cursor] !== "(") {
+      // Bare atoms other than `test` do not imply test. Key/value atoms are
+      // parsed below as opaque non-test predicates.
+      if (source[cursor] === "=") {
+        cursor += 1;
+        if (source[cursor] !== '"') return undefined;
+        cursor += 1;
+        const end = source.indexOf('"', cursor);
+        if (end === -1) return undefined;
+        cursor = end + 1;
+      }
+      return { kind: "atom", name: identifier };
+    }
+    cursor += 1;
+    const children = [];
+    if (source[cursor] !== ")") {
+      while (true) {
+        const child = parse();
+        if (!child) return undefined;
+        children.push(child);
+        if (source[cursor] === ",") {
+          cursor += 1;
+          continue;
+        }
+        break;
+      }
+    }
+    if (source[cursor] !== ")") return undefined;
+    cursor += 1;
+    if (!["all", "any", "not"].includes(identifier)) return { kind: "atom", name: identifier };
+    if (identifier === "not" && children.length !== 1) return undefined;
+    return { kind: identifier, children };
+  };
+  const result = parse();
+  return result && cursor === source.length ? result : undefined;
+}
+
+function predicateImpliesTest(predicate) {
+  if (predicate.kind === "atom") return predicate.name === "test";
+  if (predicate.kind === "all") return predicate.children.some(predicateImpliesTest);
+  if (predicate.kind === "any") return predicate.children.length > 0 && predicate.children.every(predicateImpliesTest);
+  return false;
 }
 
 function countTupleFields(tokens, bodyStart, segmentStart) {

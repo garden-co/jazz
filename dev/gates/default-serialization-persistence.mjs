@@ -10,6 +10,7 @@ import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   describeEndpoint,
+  persistenceSourceEscapes,
   rustTokens,
   serializerExternCrates,
   serializerImports,
@@ -61,35 +62,33 @@ if (snapshotOnly) {
 }
 if (refreshRegistry) {
   const snapshots = snapshotDependencies(cargoMetadata(root), registry.scope.paths);
-  registry.schemaVersion = 4;
+  registry.schemaVersion = 5;
   registry.directDependencySnapshots = snapshots;
   registry.dependencyClassifications = snapshots
     .flatMap((snapshot) =>
       snapshot.dependencies.map((dependency) => ({
         crate: snapshot.crate,
         dependency: dependency.identity,
-        classification: serializerPackages.has(dependency.package)
-          ? "governed-serializer"
-          : "reviewed-non-serializer",
-        ...(serializerPackages.has(dependency.package) ? { roots: [dependency.crate] } : {}),
+        classification: dependency.path
+          ? "governed-path-dependency"
+          : serializerPackages.has(dependency.package)
+            ? "governed-serializer"
+            : "reviewed-non-serializer",
+        ...(serializerPackages.has(dependency.package) && !dependency.path
+          ? { roots: [dependency.crate] }
+          : {}),
       })),
     )
     .sort((left, right) =>
       left.crate.localeCompare(right.crate) || left.dependency.localeCompare(right.dependency),
     );
-  registry.scope.serializerCrates = [
-    ...new Set(
-      registry.dependencyClassifications
-        .filter((entry) => entry.classification === "governed-serializer")
-        .flatMap((entry) => entry.roots),
-    ),
-  ].sort();
+  registry.scope.serializerCrates = serializerRootsFromSnapshots(snapshots);
   fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2) + "\n");
   console.log("refreshed direct dependency snapshot and explicit classifications; review this policy change");
   process.exit(0);
 }
 if (
-  registry?.schemaVersion !== 4 ||
+  registry?.schemaVersion !== 5 ||
   !Array.isArray(registry.scope?.paths) ||
   !Array.isArray(registry.scope?.serializerCrates) ||
   !Array.isArray(registry.allowances) ||
@@ -110,7 +109,9 @@ for (const entry of registry.dependencyClassifications) {
     !entry ||
     typeof entry.crate !== "string" ||
     typeof entry.dependency !== "string" ||
-    !["governed-serializer", "reviewed-non-serializer"].includes(entry.classification) ||
+    !["governed-serializer", "reviewed-non-serializer", "governed-path-dependency"].includes(
+      entry.classification,
+    ) ||
     (entry.classification === "governed-serializer" && !Array.isArray(entry.roots))
   )
     fail("invalid dependency classification " + JSON.stringify(entry));
@@ -123,23 +124,26 @@ const directDependencies = snapshots.flatMap((snapshot) =>
 );
 if (classifiedDependencies.size !== directDependencies.length)
   fail("every direct external dependency available to a persistence owner needs an explicit classification");
-const directSerializerCrates = [];
 for (const { crate, dependency } of directDependencies) {
   const classification = classifiedDependencies.get(crate + "\u0000" + dependency.identity);
   if (!classification)
     fail("unclassified direct dependency " + crate + ": " + dependency.identity);
-  if (classification.classification === "governed-serializer") {
+  if (dependency.path) {
+    if (classification.classification !== "governed-path-dependency")
+      fail("direct path/workspace dependency must be governed: " + crate + ": " + dependency.identity);
+  } else if (classification.classification === "governed-path-dependency") {
+    fail("governed path dependency is no longer a path/workspace dependency: " + crate + ": " + dependency.identity);
+  } else if (classification.classification === "governed-serializer") {
     if (!serializerPackages.has(dependency.package))
       fail("only known serializer packages may be governed: " + dependency.package);
     const expectedRoots = [dependency.crate].sort();
     if (JSON.stringify([...classification.roots].sort()) !== JSON.stringify(expectedRoots))
       fail("governed serializer roots must exactly match direct crate alias for " + dependency.identity);
-    directSerializerCrates.push(...classification.roots);
   } else if (serializerPackages.has(dependency.package)) {
     fail("known serializer package must be governed: " + crate + ": " + dependency.identity);
   }
 }
-const uniqueSerializerRoots = [...new Set(directSerializerCrates)].sort();
+const uniqueSerializerRoots = serializerRootsFromSnapshots(snapshots);
 const serializerRoots = new Set(uniqueSerializerRoots);
 if (
   JSON.stringify([...new Set(registry.scope.serializerCrates)].sort()) !==
@@ -202,6 +206,22 @@ for (const allowance of registry.allowances) {
 
 for (const [relative, source] of files) {
   const tokens = rustTokens(source);
+  for (const escape of persistenceSourceEscapes(tokens)) {
+    // Existing node implementation files use include! as a deliberately
+    // namespace-sharing split. They are safe only because the literal resolves
+    // to another source file already collected by this audit. A computed,
+    // absolute, parent-traversing, or otherwise uncollected include is a source
+    // escape and fails closed. `#[path] mod` has no such contained form here.
+    if (escape.kind === "include!" && includedSourceIsCollected(relative, escape.literal, files)) continue;
+    fail(
+      relative +
+        ":" +
+        escape.line +
+        ": " +
+        escape.kind +
+        " is prohibited at the persistence boundary unless it is an already-collected literal source file",
+    );
+  }
   for (const external of serializerExternCrates(tokens, serializerRoots))
     fail(
       relative +
@@ -234,6 +254,28 @@ for (const [relative, source] of files) {
           endpoint.canonicalPath,
       );
   }
+}
+
+function includedSourceIsCollected(relative, literal, files) {
+  const value = rustStringLiteral(literal);
+  if (value === undefined) return false;
+  const target = path.posix
+    .normalize(path.posix.join(path.posix.dirname(relative), value))
+    .replace(/^\.\//, "");
+  return files.has(target);
+}
+
+function rustStringLiteral(literal) {
+  if (typeof literal !== "string") return undefined;
+  if (literal.startsWith('"')) {
+    try {
+      return JSON.parse(literal);
+    } catch {
+      return undefined;
+    }
+  }
+  const raw = literal.match(/^(?:br|rb|r)(#{0,255})"([\s\S]*)"\1$/);
+  return raw?.[2];
 }
 if (expected.size)
   fail(
@@ -333,7 +375,6 @@ export function snapshotDependencies(metadata, scopePaths = registry.scope.paths
       crate: pkg.name,
       manifest: path.relative(root, pkg.manifest_path).replaceAll(path.sep, "/"),
       dependencies: pkg.dependencies
-        .filter((dependency) => !dependency.path)
         .map((dependency) => snapshotDependency(pkg, dependency, resolved, resolvedNodes))
         .sort(
           (left, right) =>
@@ -354,6 +395,15 @@ function snapshotDependency(owner, dependency, resolved, resolvedNodes) {
   // cargo metadata exposes the effective manifest semantics. `workspace` is
   // not preserved as a first-class field, so record the observable inherited
   // form when it is present in the manifest; all other fields are exact.
+  const pathDependency = dependency.path
+    ? resolvedPackage ??
+      [...resolved.values()].find(
+        (candidate) =>
+          path.resolve(path.dirname(candidate.manifest_path)) === path.resolve(dependency.path),
+      )
+    : undefined;
+  if (dependency.path && !pathDependency)
+    fail("cannot resolve direct path/workspace dependency source: " + dependency.path);
   return {
     identity: [crate, dependency.name, kind ?? "normal", target ?? "all"].join("|"),
     crate,
@@ -363,14 +413,70 @@ function snapshotDependency(owner, dependency, resolved, resolvedNodes) {
     resolvedVersion: resolvedPackage?.version ?? null,
     source: dependency.source ?? null,
     registry: dependency.registry ?? null,
-    path: dependency.path ?? null,
+    // Cargo reports path dependencies as absolute host paths. Keep a portable
+    // workspace-relative identity instead; the registry records the package
+    // source surface, not the checkout location.
+    path: dependency.path ? path.relative(root, dependency.path).replaceAll(path.sep, "/") : null,
     features: [...dependency.features].sort(),
     defaultFeatures: dependency.uses_default_features,
     optional: dependency.optional,
     target,
     kind,
     workspaceInherited: manifestUsesWorkspaceDependency(owner.manifest_path, crate, dependency.name),
+    // This is deliberately the small public re-export surface, not a source
+    // hash. Ordinary implementation edits in a workspace dependency must not
+    // churn every persistence audit snapshot, but adding/removing an explicit
+    // serializer spelling that a persistence owner can reach must be reviewed.
+    ...(pathDependency
+      ? { serializerReexports: publicSerializerReexports(pathDependency) }
+      : {}),
   };
+}
+
+function serializerRootsFromSnapshots(snapshots) {
+  return [
+    ...new Set(
+      snapshots.flatMap((snapshot) =>
+        snapshot.dependencies.flatMap((dependency) => {
+          if (serializerPackages.has(dependency.package)) return [dependency.crate];
+          if (!dependency.path) return [];
+          return (dependency.serializerReexports ?? []).map(
+            (reexport) => dependency.crate + "::" + reexport.alias,
+          );
+        }),
+      ),
+    ),
+  ].sort();
+}
+
+function publicSerializerReexports(pkg) {
+  const lib = pkg.targets?.find((target) => target.kind.includes("lib"));
+  if (!lib || !fs.existsSync(lib.src_path)) return [];
+  const serializerRoots = new Set(
+    pkg.dependencies
+      .filter((dependency) => serializerPackages.has(dependency.name))
+      .map((dependency) => dependency.rename ?? dependency.name.replaceAll("-", "_")),
+  );
+  if (!serializerRoots.size) return [];
+  return explicitPublicSerializerReexports(rustTokens(fs.readFileSync(lib.src_path, "utf8")), serializerRoots);
+}
+
+function explicitPublicSerializerReexports(tokens, serializerRoots) {
+  const reexports = [];
+  for (let index = 0; index + 3 < tokens.length; index += 1) {
+    if (tokens[index].text !== "pub" || tokens[index + 1]?.text !== "use") continue;
+    const root = tokens[index + 2];
+    if (root?.kind !== "ident" || !serializerRoots.has(root.text)) continue;
+    let alias = root.text;
+    let cursor = index + 3;
+    if (tokens[cursor]?.text === "as" && tokens[cursor + 1]?.kind === "ident") {
+      alias = tokens[cursor + 1].text;
+      cursor += 2;
+    }
+    if (tokens[cursor]?.text !== ";") continue;
+    reexports.push({ root: root.text, alias });
+  }
+  return reexports.sort((left, right) => left.alias.localeCompare(right.alias) || left.root.localeCompare(right.root));
 }
 function manifestUsesWorkspaceDependency(manifestPath, crate, packageName) {
   const source = fs.readFileSync(manifestPath, "utf8");
