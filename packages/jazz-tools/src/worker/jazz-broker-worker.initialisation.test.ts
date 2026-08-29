@@ -415,7 +415,33 @@ describe("broker worker context initialization", () => {
     expect(mocks.openPageStore).toHaveBeenCalledTimes(2);
   });
 
+  it("passes the persisted replica node through its exact config to a normal WASM open", async () => {
+    const initOptions = options("replica-node-config-normal-open");
+    // The config is opaque WASM input. A distinct sentinel makes this an
+    // identity check, rather than merely proving a value-shaped config opened.
+    const config = Uint8Array.from([0xa1, 0xb2, 0xc3]);
+    mocks.openConfig.mockReturnValueOnce(config);
+
+    expect((await connect(initOptions, "normal-open-tab")).outcome).toEqual({
+      type: "runtime-ready",
+    });
+
+    expect(mocks.openConfig.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]?.replicaNode);
+    expect(mocks.openConfig.mock.calls[0]?.slice(1)).toEqual([
+      initOptions.author,
+      1,
+      false,
+      initOptions.initialSyncFlushEvery,
+      undefined,
+    ]);
+    expect(mocks.openBrowser.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]);
+    expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
+  });
+
   it("closes the page store and telemetry when browser DB opening fails, then retries", async () => {
+    const rejectedConfig = Uint8Array.from([0xd4]);
+    const retryConfig = Uint8Array.from([0xe5]);
+    mocks.openConfig.mockReturnValueOnce(rejectedConfig).mockReturnValueOnce(retryConfig);
     mocks.openBrowser.mockRejectedValueOnce(new Error("browser DB open failed"));
 
     const failed = await connect(enabledTelemetryOptions("browser-db-failure"), "failed-tab");
@@ -435,6 +461,13 @@ describe("broker worker context initialization", () => {
     expect(mocks.pageStores[1]?.close).not.toHaveBeenCalled();
     expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
+    // A failed WASM open evicts its context and retries from a newly opened
+    // page-store handle. Each attempt must derive its opaque config from that
+    // attempt's admitted physical-replica identity.
+    expect(mocks.openConfig.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]?.replicaNode);
+    expect(mocks.openConfig.mock.calls[1]?.[0]).toBe(mocks.pageStores[1]?.replicaNode);
+    expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
+    expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
   });
 
   it("carries a verified local-first proof from worker open to follower admission", async () => {
