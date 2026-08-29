@@ -2447,6 +2447,23 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        self.subscribe_one_sink_with_waker(graph, storage, None)
+            .await
+    }
+
+    /// Internal direct-subscription opening with an optional continuation
+    /// waker. Runtime owners use the multi-sink entrypoint; this exists for
+    /// the database convenience API to drain only its resident continuation
+    /// chain without losing a cold-storage wake.
+    pub(crate) async fn subscribe_one_sink_with_waker<S>(
+        &mut self,
+        graph: GraphBuilder,
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
@@ -2476,11 +2493,16 @@ impl IvmRuntime {
                     .insert(plan.key.clone(), shape.id());
                 shape.id()
             };
-            return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
+            return self.bind_shape_one_sink_with_waker(
+                shape_id,
+                &[plan.binding_value],
+                storage,
+                progress_waker,
+            );
         }
         let multisink = self.subscribe_staged(vec![(DEFAULT_SINK.to_owned(), graph)], storage)?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now_with_waker(None)?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
@@ -2955,6 +2977,19 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        self.bind_shape_one_sink_with_waker(shape_id, binding_values, storage, None)
+    }
+
+    fn bind_shape_one_sink_with_waker<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
         let multisink = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
@@ -2962,7 +2997,7 @@ impl IvmRuntime {
             storage,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now_with_waker(None)?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 

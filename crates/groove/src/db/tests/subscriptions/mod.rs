@@ -38,6 +38,10 @@ async fn cold_hydration_wakes_the_supplied_owner_once_without_polling() {
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
         .unwrap();
+    assert!(
+        database.has_pending_progress(),
+        "a direct opening returns while its controlled ScanOpen is cold instead of awaiting it"
+    );
     let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
     let owner_waker = waker(Arc::clone(&wakes));
     database

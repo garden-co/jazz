@@ -1,6 +1,44 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use futures::task::{ArcWake, waker};
+
 use super::*;
 
+struct DirectSubscriptionWake(AtomicUsize);
+
+impl ArcWake for DirectSubscriptionWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 impl Database {
+    /// Drain continuation turns which the IVM itself has explicitly scheduled
+    /// for already-resident work. Stop as soon as a storage/chunk request is
+    /// genuinely pending: this direct API has no durable owner waker to retain
+    /// for external readiness, and callers may install one with
+    /// [`Self::drive_ready_progress_with_waker`] or [`Self::poll_subscription`].
+    fn drive_resident_progress_now(
+        &mut self,
+        progress_waker: &std::task::Waker,
+        wake_count: &AtomicUsize,
+    ) -> Result<(), Error> {
+        loop {
+            let before = wake_count.load(Ordering::Acquire);
+            let mut cx = std::task::Context::from_waker(progress_waker);
+            match self.poll_progress(&mut cx) {
+                std::task::Poll::Ready(result) => return result,
+                // Cooperative resident work explicitly self-wakes before it
+                // yields, so keep draining it synchronously. A real cold
+                // request does not wake until external readiness and remains
+                // pending for the caller's actual runtime owner.
+                std::task::Poll::Pending if wake_count.load(Ordering::Acquire) != before => {}
+                std::task::Poll::Pending => return Ok(()),
+            }
+        }
+    }
+
     /// Whether a suspended IVM evaluation still needs a future owner turn.
     ///
     /// An external chunk completion can wake an evaluation which then starts a
@@ -255,17 +293,17 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let wake_count = Arc::new(DirectSubscriptionWake(AtomicUsize::new(0)));
+        let progress_waker = waker(Arc::clone(&wake_count));
         let subscription = self
             .ivm_runtime
-            .subscribe_one_sink(graph, &storage)
+            .subscribe_one_sink_with_waker(graph, &storage, Some(&progress_waker))
             .await
             .map_err(Error::IvmRuntime)?;
-        // `Database` is the runtime owner for its direct async API. A
-        // resident recursive hydration can intentionally yield between
-        // bounded traversal slices; unlike a browser/node owner loop there is
-        // no external continuation to consume a noop wake here. Drive that
-        // owned initial work to completion before exposing the subscription.
-        self.drive_progress().await?;
+        // A direct async opening owns the immediately-resident continuation
+        // chain, but it must not await a cold read with no durable owner to
+        // resume it. Drain only self-scheduled cooperative slices here.
+        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
         Ok(subscription)
     }
 
