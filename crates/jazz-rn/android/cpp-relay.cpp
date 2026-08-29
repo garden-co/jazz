@@ -30,8 +30,10 @@ jbyteArray copy_response(JNIEnv *env, jazz_native_relay_bytes *output,
 struct ForegroundRuntimeInstallation {
   ForegroundRuntimeInstallation(
       jazz_native_relay_host *host,
+      jlong runtime_token,
       const std::shared_ptr<facebook::react::CallInvoker> &callInvoker)
-      : lease(std::make_shared<jazz::rn::ForegroundRuntimeLease>(host, callInvoker)) {}
+      : lease(std::make_shared<jazz::rn::ForegroundRuntimeLease>(
+            host, static_cast<uint64_t>(runtime_token), callInvoker)) {}
 
   std::mutex mutex;
   std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
@@ -58,7 +60,8 @@ std::shared_ptr<ForegroundRuntimeInstallation> foregroundInstallation(
     return found->second;
   }
   if (!callInvoker) return nullptr;
-  auto installation = std::make_shared<ForegroundRuntimeInstallation>(host, callInvoker);
+  auto installation = std::make_shared<ForegroundRuntimeInstallation>(
+      host, runtime_token, callInvoker);
   foreground_installations.emplace(key, installation);
   return installation;
 }

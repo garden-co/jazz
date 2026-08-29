@@ -21,6 +21,10 @@
 #include <unordered_map>
 #endif
 
+@interface JazzRelay ()
+@property(nonatomic, assign) uint64_t foregroundRuntimeToken;
+@end
+
 @implementation JazzRelay
 
 // New-Architecture modules still require this registration hook: it binds the
@@ -33,10 +37,12 @@ RCT_EXPORT_MODULE()
 static jazz_native_relay_host *relayHost = NULL;
 static NSUInteger relayRuntimeReferences = 0;
 static NSMutableSet<NSData *> *trustedCapabilities = nil;
+static uint64_t nextForegroundRuntimeToken = 1;
 // Each module instance owns one JSI runtime lease. A process may host several
 // React Native bridges against the same durable relay; invalidating A must not
 // make B's factory or foregrounds uncallable.
 struct ForegroundRuntimeInstallation {
+  uint64_t runtimeToken;
   facebook::jsi::Runtime *runtime;
   std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
 };
@@ -67,6 +73,8 @@ static NSError *RelayLifecycleError(NSString *message) {
   if (self != nil) {
     @synchronized([JazzRelay class]) {
       EnsureRelayHost();
+      if (nextForegroundRuntimeToken == 0) return nil;
+      self.foregroundRuntimeToken = nextForegroundRuntimeToken++;
       relayRuntimeReferences += 1;
     }
   }
@@ -134,8 +142,9 @@ static NSError *RelayLifecycleError(NSString *message) {
       foregroundRuntimeLeases.erase(previous);
     }
     auto lease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
-        EnsureRelayHost(), callInvoker);
-    foregroundRuntimeLeases.emplace(self, ForegroundRuntimeInstallation{&runtime, lease});
+        EnsureRelayHost(), self.foregroundRuntimeToken, callInvoker);
+    foregroundRuntimeLeases.emplace(
+        self, ForegroundRuntimeInstallation{self.foregroundRuntimeToken, &runtime, lease});
     jazz::rn::installForegroundRuntime(runtime, lease);
   }
 #else
@@ -148,10 +157,11 @@ static NSError *RelayLifecycleError(NSString *message) {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
     if (const auto found = foregroundRuntimeLeases.find(self);
-        found != foregroundRuntimeLeases.end()) {
+      found != foregroundRuntimeLeases.end()) {
       found->second.lease->invalidate();
       foregroundRuntimeLeases.erase(found);
     }
+    self.foregroundRuntimeToken = 0;
     if (relayRuntimeReferences > 0) relayRuntimeReferences -= 1;
     DestroyRelayHostIfUnused();
   }

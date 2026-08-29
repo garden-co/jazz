@@ -24,8 +24,9 @@ class ForegroundRuntimeLease {
  public:
   ForegroundRuntimeLease(
       jazz_native_relay_host *host,
+      uint64_t runtime_token,
       std::shared_ptr<facebook::react::CallInvoker> callInvoker)
-      : lease_(jazz_native_relay_host_retain(host)),
+      : lease_(jazz_native_relay_host_retain(host, runtime_token)),
         callInvoker_(std::move(callInvoker)) {}
   ~ForegroundRuntimeLease();
 

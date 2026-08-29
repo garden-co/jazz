@@ -70,6 +70,9 @@ const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
 /// they reach a foreground owner. Keep this independent from both peer-frame
 /// and trusted-admission budgets.
 const NATIVE_RELAY_FOREGROUND_COMMAND_MAX_BYTES: usize = 1024 * 1024;
+/// Direct C callers are a test/embedding seam, never a platform JSI runtime.
+/// Keep their aliases distinct from every platform-issued runtime token.
+const DIRECT_FOREGROUND_RUNTIME_TOKEN: u64 = u64::MAX;
 /// Open core transactions retain mutable runtime state. Their handles are
 /// foreground-local and bounded exactly like suspended foreground operations.
 const NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX: usize = 64;
@@ -512,6 +515,7 @@ struct OpenedForeground {
     scope: RelayScope,
     relay: u64,
     client: u64,
+    runtime_token: u64,
     wake: Option<ForegroundWakeRegistration>,
     lease: ForegroundNodeLease,
 }
@@ -813,7 +817,11 @@ impl NativeRelayHost {
     fn open_foreground(
         &mut self,
         admitted_scope: AdmissionCapability,
+        runtime_token: u64,
     ) -> Result<u64, JazzNativeRelayStatus> {
+        if runtime_token == 0 {
+            return Err(JazzNativeRelayStatus::InvalidArgument);
+        }
         let (config, author, claims) = {
             let admitted = self
                 .admitted_scopes
@@ -895,6 +903,7 @@ impl NativeRelayHost {
                 scope,
                 relay: relay_handle,
                 client: client_handle,
+                runtime_token,
                 wake: None,
                 lease,
             },
@@ -983,6 +992,40 @@ impl NativeRelayHost {
             }
         }
         Ok(true)
+    }
+
+    /// Platform runtime invalidation is an uncertain shutdown. It must retire
+    /// only aliases owned by that token, preserve sibling runtimes, and never
+    /// return a node identity to the reusable pool without a confirmed HLC
+    /// handoff.
+    fn retire_foregrounds_for_runtime(&mut self, runtime_token: u64) {
+        let foregrounds = self
+            .foregrounds
+            .iter()
+            .filter_map(|(handle, opened)| {
+                (opened.runtime_token == runtime_token).then_some(*handle)
+            })
+            .collect::<Vec<_>>();
+        for handle in foregrounds {
+            let Some(foreground) = self.foregrounds.remove(&handle) else {
+                continue;
+            };
+            if let Some(wake) = foreground.wake {
+                wake.cancelled(handle);
+            }
+            if let Some((_, client)) = self.clients.remove(&foreground.client) {
+                let _ = client.close();
+            }
+            let opened = self.relays.remove(&foreground.relay);
+            let final_alias = !self
+                .relays
+                .values()
+                .any(|remaining| remaining.scope == foreground.scope);
+            if let Some(opened) = opened.filter(|_| final_alias) {
+                let _ = self.registry.close(&opened.scope);
+            }
+            self.retire_foreground_lease(&foreground.scope, foreground.lease);
+        }
     }
 
     fn set_foreground_wake_callback(
@@ -1206,6 +1249,7 @@ pub struct JazzNativeRelayHost {
 #[repr(C)]
 pub struct JazzNativeRelayHostLease {
     inner: Arc<Mutex<NativeRelayHost>>,
+    runtime_token: u64,
 }
 
 #[unsafe(no_mangle)]
@@ -1240,12 +1284,16 @@ pub unsafe extern "C" fn jazz_native_relay_host_free(host: *mut JazzNativeRelayH
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jazz_native_relay_host_retain(
     host: *mut JazzNativeRelayHost,
+    runtime_token: u64,
 ) -> *mut JazzNativeRelayHostLease {
-    if host.is_null() {
+    if host.is_null() || runtime_token == 0 || runtime_token == DIRECT_FOREGROUND_RUNTIME_TOKEN {
         return std::ptr::null_mut();
     }
     let inner = unsafe { Arc::clone(&(&*host).inner) };
-    Box::into_raw(Box::new(JazzNativeRelayHostLease { inner }))
+    Box::into_raw(Box::new(JazzNativeRelayHostLease {
+        inner,
+        runtime_token,
+    }))
 }
 
 /// Release one host lease returned by [`jazz_native_relay_host_retain`].
@@ -1257,6 +1305,27 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_free(lease: *mut JazzNativ
     if !lease.is_null() {
         unsafe { drop(Box::from_raw(lease)) };
     }
+}
+
+/// Retire every alias belonging to this platform runtime. Repeating it is
+/// safe, and it intentionally does not cleanly recycle foreground node IDs.
+///
+/// # Safety
+/// `lease` must be a live lease returned by host_retain.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_invalidate_foreground_runtime(
+    lease: *mut JazzNativeRelayHostLease,
+) -> JazzNativeRelayStatus {
+    if lease.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let lease = unsafe { &*lease };
+    let mut host = match lease.inner.lock() {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    host.retire_foregrounds_for_runtime(lease.runtime_token);
+    JazzNativeRelayStatus::Ok
 }
 
 /// Execute lifecycle commands against one explicit host context.
@@ -1428,7 +1497,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_open_attached_foreground(
         Ok(host) => host,
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
-    match host.open_foreground(AdmissionCapability(bytes)) {
+    match host.open_foreground(AdmissionCapability(bytes), DIRECT_FOREGROUND_RUNTIME_TOKEN) {
         Ok(foreground) => {
             unsafe { *out_foreground = foreground };
             JazzNativeRelayStatus::Ok
@@ -1517,11 +1586,12 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_open_attached_foreground(
     let capability = unsafe { std::slice::from_raw_parts(capability, capability_len) };
     let mut bytes = [0_u8; 32];
     bytes.copy_from_slice(capability);
-    let mut host = match unsafe { (&*lease).inner.lock() } {
+    let lease = unsafe { &*lease };
+    let mut host = match lease.inner.lock() {
         Ok(host) => host,
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
-    match host.open_foreground(AdmissionCapability(bytes)) {
+    match host.open_foreground(AdmissionCapability(bytes), lease.runtime_token) {
         Ok(foreground) => {
             unsafe { *out_foreground = foreground };
             JazzNativeRelayStatus::Ok
@@ -3723,7 +3793,7 @@ mod tests {
         fn new() -> Self {
             let host = jazz_native_relay_host_new();
             assert!(!host.is_null(), "native host allocation succeeds");
-            let lease = unsafe { jazz_native_relay_host_retain(host) };
+            let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
             assert!(!lease.is_null(), "native host lease succeeds");
             Self { host, lease }
         }
@@ -4994,7 +5064,7 @@ mod tests {
             })
             .expect("trusted fixture admission succeeds");
 
-        let first = host.open_foreground(capability).unwrap();
+        let first = host.open_foreground(capability, 1).unwrap();
         let first_lease = host.foregrounds[&first].lease;
         let first_client = host.foreground_client(first).unwrap().clone();
         let transaction = first_client
@@ -5015,7 +5085,7 @@ mod tests {
         assert!(first_high_water > TxTime::default());
 
         assert!(host.close_foreground(first).unwrap());
-        let second = host.open_foreground(capability).unwrap();
+        let second = host.open_foreground(capability, 2).unwrap();
         let second_lease = host.foregrounds[&second].lease;
         assert_eq!(second_lease.node, first_lease.node);
         assert_eq!(second_lease.confirmed_tx_time, first_high_water);
@@ -5058,7 +5128,7 @@ mod tests {
             })
             .expect("trusted fixture admission succeeds");
 
-        let first = host.open_foreground(capability).unwrap();
+        let first = host.open_foreground(capability, 1).unwrap();
         let first_lease = host.foregrounds[&first].lease;
         let first_client = host.foregrounds[&first].client;
         drop(host.clients.remove(&first_client));
@@ -5067,7 +5137,7 @@ mod tests {
             Err(JazzNativeRelayStatus::LifecycleFailure)
         );
 
-        let second = host.open_foreground(capability).unwrap();
+        let second = host.open_foreground(capability, 2).unwrap();
         assert_ne!(host.foregrounds[&second].lease.node, first_lease.node);
         assert!(host.close_foreground(second).unwrap());
     }
@@ -5305,7 +5375,7 @@ mod tests {
                 })
                 .expect("trusted fixture admission succeeds")
         };
-        let lease = unsafe { jazz_native_relay_host_retain(host) };
+        let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
         assert!(!lease.is_null());
         let mut foreground = 0;
         assert_eq!(
@@ -5341,6 +5411,78 @@ mod tests {
         );
         assert!(closed);
         unsafe { jazz_native_relay_host_lease_free(lease) };
+    }
+
+    #[test]
+    fn invalidating_one_retained_runtime_retires_only_its_foregrounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let capability = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "independent-foreground-leases".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: Some("opaque-validated-subject".to_owned()),
+                    },
+                    sqlite_path: directory
+                        .path()
+                        .join("foreground.sqlite")
+                        .display()
+                        .to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0xc1; 16]),
+                        author: AuthorSubject::for_test_bytes([0xc2; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                })
+                .unwrap()
+        };
+        let first_lease = unsafe { jazz_native_relay_host_retain(host, 1) };
+        let second_lease = unsafe { jazz_native_relay_host_retain(host, 2) };
+        let open = |lease| {
+            let mut foreground = 0;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_open_attached_foreground(
+                        lease,
+                        capability.0.as_ptr(),
+                        capability.0.len(),
+                        &mut foreground,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+            foreground
+        };
+        let first = open(first_lease);
+        let second = open(second_lease);
+        assert_eq!(
+            unsafe { jazz_native_relay_host_lease_invalidate_foreground_runtime(first_lease) },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_eq!(
+            unsafe { jazz_native_relay_host_lease_tick_attached_foreground(first_lease, first) },
+            JazzNativeRelayStatus::InvalidHandle,
+            "runtime invalidation retires its foreground before a JS finalizer runs"
+        );
+        assert_eq!(
+            unsafe { jazz_native_relay_host_lease_tick_attached_foreground(second_lease, second) },
+            JazzNativeRelayStatus::Ok,
+            "runtime invalidation cannot revoke a sibling runtime sharing the relay"
+        );
+        assert_eq!(
+            unsafe { jazz_native_relay_host_lease_invalidate_foreground_runtime(second_lease) },
+            JazzNativeRelayStatus::Ok
+        );
+        assert!(unsafe { (*host).inner.lock().unwrap().foregrounds.is_empty() });
+        unsafe { jazz_native_relay_host_lease_free(first_lease) };
+        unsafe { jazz_native_relay_host_lease_free(second_lease) };
+        unsafe { jazz_native_relay_host_free(host) };
     }
 
     #[test]
@@ -5469,7 +5611,7 @@ mod tests {
                 })
                 .expect("trusted fixture admission succeeds")
         };
-        let lease = unsafe { jazz_native_relay_host_retain(host) };
+        let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
         let mut foreground = 0;
         assert_eq!(
             unsafe {
@@ -5625,7 +5767,7 @@ mod tests {
                 })
                 .expect("trusted fixture admission succeeds")
         };
-        let lease = unsafe { jazz_native_relay_host_retain(host) };
+        let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
         let mut foreground = 0;
         assert_eq!(
             unsafe {

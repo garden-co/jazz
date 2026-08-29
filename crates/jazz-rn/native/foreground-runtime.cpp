@@ -241,6 +241,10 @@ void ForegroundRuntimeLease::invalidate() {
   for (const auto &registration : registrations) {
     registration->deactivateAndClear(nativeLease);
   }
+  // This is an unclean runtime handoff: JS finalizers may never run. Rust
+  // must retire exactly this runtime's aliases and node leases before a
+  // sibling bridge can continue using the shared relay host.
+  (void)jazz_native_relay_host_lease_invalidate_foreground_runtime(nativeLease);
 }
 
 void ForegroundRuntimeLease::trackWakeRegistration(

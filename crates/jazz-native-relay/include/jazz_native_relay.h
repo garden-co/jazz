@@ -39,12 +39,17 @@ typedef struct jazz_native_relay_host_lease jazz_native_relay_host_lease;
 typedef void (*jazz_native_relay_foreground_wake_callback)(void *context, uint64_t foreground, uint8_t wake_kind, uint64_t delay_ms);
 jazz_native_relay_host *jazz_native_relay_host_new(void);
 void jazz_native_relay_host_free(jazz_native_relay_host *host);
-/* Retain host state for one JSI factory/runtime. The platform can release its
- * host wrapper while foreground HostObjects still exist; those objects must
- * use this lease-only API and free it after invalidation/finalization. */
+/* Retain host state for one non-zero platform-issued JSI runtime token. The
+ * token scopes invalidation: destroying one bridge must never retire a
+ * sibling bridge's foreground aliases. */
 jazz_native_relay_host_lease *jazz_native_relay_host_retain(
-    jazz_native_relay_host *host);
+    jazz_native_relay_host *host,
+    uint64_t runtime_token);
 void jazz_native_relay_host_lease_free(jazz_native_relay_host_lease *lease);
+/* Retire every foreground/client alias opened by this runtime without a clean
+ * handoff. This is idempotent; late JS finalizers then observe closed handles. */
+jazz_native_relay_status jazz_native_relay_host_lease_invalidate_foreground_runtime(
+    jazz_native_relay_host_lease *lease);
 jazz_native_relay_status jazz_native_relay_host_execute(
     jazz_native_relay_host *host,
     const uint8_t *request,

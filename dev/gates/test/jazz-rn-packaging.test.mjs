@@ -261,14 +261,16 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
       "NativeForegroundRuntimeFactory",
       "NativeForegroundRuntime",
       "NativeForegroundCommand",
+      "NativeForegroundTransactionKind",
       "NativeForegroundResponse",
+      "NativeForegroundSubscriptionEvent",
       "installNativeForegroundRuntime",
       "encodeNativeForegroundCommand",
       "decodeNativeForegroundResponse",
       "executeNativeRelayCommand",
     ]),
   );
-  assert.equal(relayExports.length, 10, "relay must expose exactly its fixed ABI declarations");
+  assert.equal(relayExports.length, 12, "relay must expose exactly its fixed ABI declarations");
 
   assert.equal(
     indexExports.length,
@@ -1441,7 +1443,7 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   assert.match(androidBridge, /trustedCapabilities -=/);
   assert.match(androidBridge, /releaseRuntime/);
   assert.match(androidModule, /void initialize\(\)[\s\S]*?bridge\.acquireRuntime\(\)/);
-  assert.match(androidModule, /void invalidate\(\)[\s\S]*?bridge\.releaseRuntime\(runtimeToken\)/);
+  assert.match(androidModule, /void invalidate\(\)[\s\S]*?bridge\.releaseRuntime\(releasedToken\)/);
   assert.match(iosRelay, /JazzRelayTrustedAdmission/);
   assert.match(iosRelay, /jazz_native_relay_host_admit_scope_json/);
   assert.match(iosRelay, /jazz_native_relay_host_revoke_scope_capability/);
@@ -1485,7 +1487,7 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   assert.match(runtime, /lockIfActive\(\)/);
   assert.match(
     runtime,
-    /jazz_native_relay_host_lease_invalidate_foreground_runtime\(lease_\)/,
+    /jazz_native_relay_host_lease_invalidate_foreground_runtime\(nativeLease\)/,
     "platform teardown must retire Rust foreground aliases before making JSI finalizers inert",
   );
   assert.match(
@@ -1513,26 +1515,21 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   );
   assert.match(
     androidCpp,
-    /unordered_map<uint64_t, std::shared_ptr<ForegroundRuntimeInstallation>>/,
-    "Android's native registry must key installations by stable runtime token, not host pointer",
+    /using ForegroundRuntimeKey = std::pair<jazz_native_relay_host \*, jlong>;/,
+    "Android's native registry must include the stable runtime token rather than keying only by host pointer",
   );
   assert.match(androidCpp, /nativeInvalidateForegroundRuntime\([\s\S]*?jlong runtime_token/);
   assert.doesNotMatch(androidCpp, /unordered_map<jazz_native_relay_host \*/);
   assert.match(iosRelay, /uint64_t foregroundRuntimeToken/);
-  assert.match(iosRelay, /BOOL ownsForegroundRuntimeLease/);
   assert.match(
     iosRelay,
-    /unordered_map<uint64_t, std::shared_ptr<ForegroundRuntimeInstallation>>/,
-    "iOS must keep separate foreground leases for separately invalidated runtimes",
+    /unordered_map<JazzRelay \*, ForegroundRuntimeInstallation>/,
+    "iOS must retain one separate foreground lease per module/runtime instance",
   );
   assert.match(
     iosRelay,
-    /InvalidateForegroundInstallation\(EnsureRelayHost\(\), self\.foregroundRuntimeToken\)/,
-  );
-  assert.match(
-    iosRelay,
-    /ownsForegroundRuntimeLease = NO;[\s\S]*?foregroundRuntimeToken = 0;[\s\S]*?InvalidateForegroundInstallation\(EnsureRelayHost\(\), releasedToken\)/,
-    "iOS must clear a module's runtime ownership before release so repeated invalidation cannot decrement a sibling lease",
+    /found->second\.lease->invalidate\(\);[\s\S]*?foregroundRuntimeLeases\.erase\(found\);[\s\S]*?self\.foregroundRuntimeToken = 0;/,
+    "iOS teardown must retire only its module's lease before releasing its runtime token",
   );
   assert.doesNotMatch(iosRelay, /static facebook::jsi::Runtime \*foregroundJsiRuntime/);
   assert.match(runtime, /jazz_native_relay_host_lease_open_attached_foreground/);
