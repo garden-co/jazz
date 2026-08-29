@@ -137,6 +137,12 @@ test("rejects serializer imports in every alias, group, glob, and raw form", () 
       ["nested glob", "use postcard::{experimental::*}; fn f() { serialized_size(&value); }"],
       ["glob", "use postcard::*; fn f() { to_allocvec(&value); }"],
       ["leading crate", "use ::postcard::to_allocvec; fn f() { to_allocvec(&value); }"],
+      ["raw crate root", "use r#postcard::to_allocvec; fn f() { to_allocvec(&value); }"],
+      ["leading raw crate root", "use ::r#postcard::to_allocvec; fn f() { to_allocvec(&value); }"],
+      [
+        "nested raw crate root",
+        "use r#postcard::{experimental::{serialized_size as size}}; fn f() { size(&value); }",
+      ],
       ["raw alias", "use postcard::to_allocvec as r#encode; fn f() { r#encode(&value); }"],
       [
         "json namespace alias",
@@ -151,6 +157,25 @@ test("rejects serializer imports in every alias, group, glob, and raw form", () 
       const result = run(root);
       assert.notEqual(result.status, 0, name);
       assert.match(result.stderr, /serializer imports are prohibited at the persistence boundary/);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects fully-qualified raw serializer crate identifiers", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    for (const source of [
+      "fn f() { r#postcard::to_allocvec(&value); }",
+      "fn f() { ::r#postcard::to_slice(&value, &mut output); }",
+      "fn f() { r#serde_json::to_writer(&mut output, &value); }",
+    ]) {
+      fs.writeFileSync(file, `${source}\n`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, source);
+      assert.match(result.stderr, /unregistered default serialization/);
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
