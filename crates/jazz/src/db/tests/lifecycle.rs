@@ -75,3 +75,41 @@ fn db_close_is_idempotent() {
     doctest_support::block_on(db.close()).unwrap();
     doctest_support::block_on(db.close()).unwrap();
 }
+
+#[test]
+fn foreground_handoff_high_water_includes_an_unsubmitted_public_write() {
+    // This lifecycle-only receipt deliberately reaches the hidden handoff
+    // boundary: applications cannot query or seed a runtime HLC. The write is
+    // otherwise public and has no upstream, so it proves a clean lease return
+    // covers a TxId that was minted locally but never submitted.
+    let first = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let floor = TxTime::new(1_000_000, 17);
+    doctest_support::block_on(first.seed_foreground_tx_time_high_water(floor));
+
+    let first_write = first
+        .insert(
+            "todos",
+            doctest_support::todo_cells("unsubmitted foreground write", false),
+            Default::default(),
+        )
+        .unwrap();
+    let first_tx = first_write.mergeable_tx_id();
+    assert!(first_tx.time > floor);
+    assert_eq!(
+        doctest_support::block_on(first.foreground_tx_time_high_water()),
+        first_tx.time
+    );
+
+    // A later owner of the same node begins strictly above every identity the
+    // prior runtime allocated, even when its wall clock has not advanced.
+    let second = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    doctest_support::block_on(second.seed_foreground_tx_time_high_water(first_tx.time));
+    let second_write = second
+        .insert(
+            "todos",
+            doctest_support::todo_cells("continued foreground write", false),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(second_write.mergeable_tx_id().time > first_tx.time);
+}
