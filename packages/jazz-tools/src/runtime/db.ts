@@ -209,8 +209,18 @@ export interface DbSubscriptionSource {
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
     session?: Session,
-  ): () => void;
+  ): SubscriptionHandle;
 }
+
+/**
+ * Cancels a subscription. Browser-worker followers also expose the initial
+ * admission boundary so framework bindings can surface an asynchronous open
+ * failure through their ordinary subscription error state rather than as an
+ * ambient exception.
+ *
+ * @internal
+ */
+export type SubscriptionHandle = (() => void) & { readonly ready?: Promise<void> };
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
 
@@ -2356,22 +2366,22 @@ export class Db {
     options?: QueryOptions,
     session?: Session,
     statusReady = false,
-  ): () => void {
+  ): SubscriptionHandle {
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
-    // See all(): only a newly attached browser peer delays this tier's
-    // subscription setup until it knows the shared worker's state. All other
-    // runtimes, including established browser peers, start synchronously.
-    const initialOfflineState =
-      !statusReady && options?.tier === ReadTier.RemoteIfPossible
-        ? this.connection.initialExplicitOfflineState()
-        : null;
-    if (initialOfflineState) {
+    // A newly attached browser peer has no durable runtime until its worker
+    // handshake completes. In particular, do not publish the ordinary local
+    // empty seed before that handshake: a storage-open failure belongs to the
+    // initiating subscription, not to an ambient deferred exception after a
+    // misleading successful result. Direct runtimes and already-ready browser
+    // peers return null and retain their synchronous local subscription path.
+    const initialReadiness = !statusReady ? this.connection.initialExplicitOfflineState() : null;
+    if (initialReadiness) {
       let unsubscribed = false;
       let unsubscribe = () => {};
       const readyAbort = new AbortController();
-      void initialOfflineState
+      const ready = initialReadiness
         .then(() => {
           if (unsubscribed || readyAbort.signal.aborted) return;
           const installed = this.subscribeDelta(query, callback, options, session, true);
@@ -2384,15 +2394,20 @@ export class Db {
         })
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
-          setTimeout(() => {
-            throw error;
-          }, 0);
+          throw error;
         });
-      return () => {
+      // Direct `Db.subscribe` has historically returned only cancellation, so
+      // retain an internal rejection handler for callers that do not consume
+      // the readiness property. Framework bindings consume `ready` below via
+      // DbSubscriptionSource and surface it as their normal error state.
+      void ready.catch(() => undefined);
+      const handle = (() => {
         unsubscribed = true;
         readyAbort.abort();
         unsubscribe();
-      };
+      }) as SubscriptionHandle;
+      Object.defineProperty(handle, "ready", { value: ready });
+      return handle;
     }
     const manager = new SubscriptionManager<T>();
     const builderJson = query._build();

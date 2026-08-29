@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
+import { createDb, Db, getDbSubscriptionSource, type QueryBuilder } from "../../src/runtime/db.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
@@ -301,7 +301,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(db).toBeInstanceOf(Db);
   });
 
-  it("keeps createDb schema-lazy but rejects the first local read when durable storage cannot open", async () => {
+  it("keeps createDb schema-lazy and rejects the first local subscription when durable storage cannot open", async () => {
     const ambientErrors: string[] = [];
     const unhandledRejections: string[] = [];
     const recordAmbientError = (event: ErrorEvent) => {
@@ -351,14 +351,34 @@ describe("SharedWorker bridge with IndexedDB", () => {
         }),
       );
       // `createDb` intentionally does not select a schema or open durable
-      // storage. The first schema-backed public operation owns the failure.
+      // storage. The first schema-backed subscription owns the failure. This
+      // assertion is intentionally synchronous: the old path published an
+      // empty local seed here before the worker attempted to open IndexedDB.
+      const cancelledDeltas: unknown[] = [];
+      const cancelled = getDbSubscriptionSource(reopened).subscribeDelta(
+        todos,
+        (delta) => cancelledDeltas.push(delta),
+        { tier: "local" },
+      );
+      cancelled();
+      const subscriptionDeltas: unknown[] = [];
+      const subscription = getDbSubscriptionSource(reopened).subscribeDelta(
+        todos,
+        (delta) => subscriptionDeltas.push(delta),
+        { tier: "local" },
+      );
+      expect(cancelledDeltas).toEqual([]);
+      expect(subscriptionDeltas).toEqual([]);
+      await expect(cancelled.ready ?? Promise.resolve()).resolves.toBeUndefined();
       await expect(
         withTimeout(
-          reopened.all(todos, { tier: "local" }),
+          subscription.ready ?? Promise.resolve(),
           5_000,
-          "corrupt storage read did not settle",
+          "corrupt storage subscription did not settle",
         ),
       ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+      expect(subscriptionDeltas).toEqual([]);
+      subscription();
       // The rejected operation leaves no durable peer to flush. Shutdown is
       // still an explicit observation point for the same readiness failure, not
       // an ambient error deferred to best-effort test cleanup.
