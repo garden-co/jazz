@@ -1530,6 +1530,12 @@ mod catalogue_payload_tests {
         let encoded = encode_catalogue_schema(&schema).unwrap();
         assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
+        // Internal format receipt: publication content addressing consumes this
+        // exact CATS V1 byte payload rather than a serde SchemaVersion layout.
+        assert_eq!(
+            hex::encode(&encoded),
+            "010c17f7ec32c55d97acc37a8aeda133760d0000007b227461626c6573223a7b7d7d"
+        );
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
     }
 
