@@ -46,34 +46,18 @@ resources:
 
 ## Vercel deployment
 
-GitHub owns deployments so a preview is an explicit review choice rather than
-an automatic side effect of every branch. The `Docs preview (Vercel)` workflow
-deploys only a trusted, same-repository pull request carrying the `docs` label.
-It builds this app locally without credentials, then performs one credentialed
-remote Vercel preview deployment. Label removal or closing the PR cancels an
-in-flight preview; forks never receive Vercel credentials.
+The `jazz2-docs` Vercel project is connected to this GitHub repository with
+Root Directory `docs`. Its checked-in Ignored Build Step consults GitHub's
+public pull-request API and builds only an open, trusted, same-repository pull
+request carrying the `docs` label. Branch deployments, forks, untrusted
+authors, unlabeled or closed pull requests, malformed metadata, and failed API
+lookups are skipped.
 
-Before using the label, perform this external Vercel setup: create/link a
-project whose Root Directory is `docs`, then disable or disconnect its automatic
-Git deployments. This workflow is the sole deployment authority. Configure
-these repository settings:
-
-- Variables: `VERCEL_DOCS_ORG_ID`, `VERCEL_DOCS_PROJECT_ID`
-- Secret: `VERCEL_DOCS_TOKEN`, scoped only to the docs project/team operations
-  required to create preview deployments
+Production is deliberately disabled: every production event, including a push
+to `main`, exits successfully from the Ignored Build Step and does not build.
+Enable production later only by changing the checked-in filter and its tests.
 
 The Vercel project's **Preview** environment must contain no sensitive values:
-the labeled PR's code is built remotely. Put production-only secrets only in
-Vercel's Production environment when production deployment is enabled.
-
-Applying `docs` is a maintainer trust decision: it trusts the workflow
-definition committed on that same-repository PR to upload its source with the
-docs deployment token. The workflow builds the checkout without credentials in
-one job, and gives a separate job only the pinned Vercel uploader plus source
-checkout. This boundary reduces exposure; it cannot make a maintainer-approved
-workflow change safe for sensitive Preview environment values.
-
-Production deployment is deliberately disabled in the workflow: it has no
-`main` push trigger and its production job is permanently false. At release
-time, enable the documented main-only job deliberately. Do not enable Vercel's
-automatic Git deployment as a substitute.
+applying `docs` is a maintainer trust decision that allows the pull request's
+code to run in Vercel's remote build environment. No Vercel access token or
+GitHub Actions secret is required for this deployment path.

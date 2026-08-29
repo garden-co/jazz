@@ -7,6 +7,11 @@ Vercel configuration. It is an intentionally fail-open Ignored Build Step
 helper: it skips pull-request previews targeting
 `codex/jazz-core-engine-swap`; all other cases continue their build.
 
-Its details are intentionally local to the Inspector project. Docs previews are
-owned by `.github/workflows/docs-vercel-preview.yml`; no docs Vercel Ignore
-Build Step is required.
+Its details are intentionally local to the Inspector project.
+
+## Docs Vercel deployment filter
+
+`skip-docs-vercel-deploy.mjs` is the fail-closed Ignored Build Step for the
+`jazz2-docs` project. It permits only open, trusted, same-repository pull
+requests carrying the `docs` label. All production events—including `main`—and
+all failed or incomplete GitHub lookups are skipped.
