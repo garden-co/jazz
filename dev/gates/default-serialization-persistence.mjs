@@ -5,8 +5,9 @@
  * Authoritative state uses the normative Groove record/scalar or ordered-key
  * codecs. A small number of source uses remain for semantic JSON parsing,
  * in-memory query helpers, and the explicitly versioned catalogue JSON
- * payload. They live in the registry with an exact source-count receipt so a
- * new default serde/postcard call cannot silently become durable state.
+ * payload. They live in the registry with an exact source-count and boundary
+ * classification so a new default serde/postcard call cannot silently become
+ * durable state.
  */
 import fs from "node:fs";
 import path from "node:path";
