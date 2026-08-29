@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { ReadTier } from "../runtime/index.js";
 import {
   PostcardWriter,
   createRecord,
@@ -218,7 +219,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     });
 
     await expect(client.db.all(app.notes)).resolves.toMatchObject([{ title: "Native note" }]);
-    let unsubscribe = () => undefined;
+    let unsubscribe: () => void = () => {};
     const published = new Promise<unknown[]>((resolve) => {
       unsubscribe = client!.db.subscribe(app.notes, (notes) => {
         if (notes.length > 0) resolve(notes);
@@ -231,7 +232,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     expect(() => client!.db.insert(app.notes, { title: "unsupported" })).toThrow(
       /supports local read queries and subscriptions only; insert is unavailable/,
     );
-    await expect(client.db.all(app.notes, { tier: "remote" })).rejects.toThrow(
+    await expect(client.db.all(app.notes, { tier: ReadTier.Remote })).rejects.toThrow(
       /remote tiers.*not implemented/,
     );
     expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6]));

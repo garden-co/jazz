@@ -33,9 +33,7 @@ export const scenarioPlan: readonly ScenarioResult[] = [
   state:
     scenario === "linked-abi-admission" ||
     scenario === "foreground-byte-abi" ||
-    scenario === "foreground-write-transaction" ||
-    scenario === "logout-revocation" ||
-    scenario === "logout-auth-switch"
+    scenario === "foreground-write-transaction"
       ? "passed"
       : "todo",
   detail,

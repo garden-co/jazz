@@ -9,6 +9,8 @@ import com.jazzrn.JazzRelayTrustedAdmission
 import com.jazzrn.TrustedRelayScopeConfig
 import android.util.Base64
 import android.os.Build
+import java.io.FileInputStream
+import java.security.MessageDigest
 
 /**
  * Test-app-only trusted fixture. It is compiled into the development build,
@@ -41,19 +43,14 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     promise.resolve(null)
   }
 
-  /**
-   * Launch evidence is read by trusted host code. In particular, JavaScript
-   * does not get to select the nonce, artifact fingerprint, or device id that
-   * it later places in a device receipt.
-   */
   @ReactMethod fun receiptContext(promise: Promise) {
     try {
       val activity = reactApplicationContext.currentActivity
         ?: error("acceptance activity is unavailable")
       val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
         ?: error("acceptance launch did not include a run nonce")
-      val buildFingerprint = activity.intent.getStringExtra("jazzDeviceBuildFingerprint")
-        ?: error("acceptance launch did not include an APK fingerprint")
+      // Hash the installed package itself, rather than echoing an adb extra.
+      val buildFingerprint = sha256File(reactApplicationContext.applicationInfo.sourceDir)
       val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
         ?: error("Android build fingerprint is unavailable")
       promise.resolve(Arguments.createMap().apply {
@@ -65,11 +62,21 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
   }
 
-  /**
-   * iOS Release does not make JavaScript console output a dependable host
-   * receipt transport. Keep both fixtures structurally identical so the JS
-   * acceptance proof has one post-proof sink on every device platform.
-   */
+  private fun sha256File(path: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    FileInputStream(path).use { input ->
+      val buffer = ByteArray(32 * 1024)
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+  }
+
+  /** See the matching iOS fixture: JavaScript supplies the verified protocol
+   * line after its relay proof; this method only persists that line. */
   @ReactMethod fun recordReceipt(receipt: String, promise: Promise) {
     try {
       require(receipt.startsWith("JAZZ_DEVICE_RESULT ") && receipt.length <= 16_384) {

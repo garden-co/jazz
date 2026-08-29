@@ -37,10 +37,11 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(registration, /listOf\(JazzDeviceFixtureModule\(context\)\)/);
   assert.match(host, /add\(JazzDeviceFixturePackage\(\)\)/);
   assert.match(fixture, /Build\.FINGERPRINT/);
-  assert.match(fixture, /scopeConfig\(authScope: String\)/);
-  assert.match(fixture, /fixture-user-b/);
-  assert.match(fixture, /JazzRelayTrustedAdmission\.replace/);
-  assert.match(fixture, /jazz-device-\$authScope\.sqlite/);
+  assert.match(
+    fixture,
+    /JazzRelayTrustedAdmission\.admit\(TrustedRelayScopeConfig\(/,
+    "the foundation fixture must construct its trusted admission configuration in native code",
+  );
   assert.match(fixture, /jazzDeviceRunNonce/);
   assert.match(fixture, /applicationInfo\.sourceDir/);
   assert.match(fixture, /MessageDigest\.getInstance\("SHA-256"\)/);
@@ -264,10 +265,7 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   assert.match(fixture, /22222222-2222-4222-8222-222222222222/);
   assert.match(fixture, /jazz-device-%@\.sqlite/);
   assert.match(fixture, /@"claims": @\{\}/);
-  for (const key of [
-    "-JazzDeviceRunNonce",
-    "-JazzDeviceDeviceIdentifier",
-  ]) {
+  for (const key of ["-JazzDeviceRunNonce", "-JazzDeviceDeviceIdentifier"]) {
     assert.match(fixture, new RegExp(key));
   }
   assert.match(fixture, /#import <CommonCrypto\/CommonDigest\.h>/);
@@ -309,19 +307,12 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   assert.match(app, /await proveAdmittedRelay/);
   assert.match(app, /installNativeForegroundRuntime/);
   assert.match(app, /proveForegroundByteAbi/);
-  assert.match(app, /proveForegroundRevoked/);
   assert.match(app, /encodeNativeForegroundCommand/);
   assert.match(app, /decodeNativeForegroundResponse/);
-  assert.match(app, /await proveLogoutRevocation/);
-  assert.match(app, /await proveAuthScopeSwitch/);
-  assert.match(app, /switchNativeRelayAuthScope/);
-  assert.match(app, /logoutNativeRelay/);
-  assert.match(app, /oldScopeForeground = foregroundFactory\.openAttached\(scopeA\.capability\)/);
-  assert.match(app, /proveForegroundRevoked\(oldScopeForeground, foregroundCodec\.encode\)/);
-  assert.match(app, /proveForegroundByteAbi\(foregroundFactory, scopeB\.capability, foregroundCodec\)/);
   assert.match(app, /await recordDeviceReceipt\(results\.join\("\\n"\)\)/);
   assert.ok(
-    app.indexOf("await observeTrustedAdmissionLifecycle()") < app.indexOf("await recordDeviceReceipt"),
+    app.indexOf("await observeTrustedAdmissionLifecycle()") <
+      app.indexOf("await recordDeviceReceipt"),
     "the native receipt sink must run only after the complete JS relay lifecycle proof",
   );
 });

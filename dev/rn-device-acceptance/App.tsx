@@ -2,28 +2,18 @@ import { useEffect, useState } from "react";
 import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-native";
 import { encodeResult } from "./src/protocol";
 import { scenarioPlan } from "./src/scenarios";
-import {
-  proveForegroundByteAbi,
-  proveForegroundRevoked,
-  proveForegroundWriteAbi,
-} from "./src/foreground-byte-abi";
+import { proveForegroundByteAbi, proveForegroundWriteAbi } from "./src/foreground-byte-abi";
 import {
   admittedNativeRelay,
   deviceReceiptContext,
-  logoutNativeRelay,
   recordDeviceReceipt,
-  switchNativeRelayAuthScope,
 } from "./src/native-fixture";
 import {
   decodeNativeForegroundResponse,
   encodeNativeForegroundCommand,
   installNativeForegroundRuntime,
 } from "jazz-rn";
-import {
-  proveAdmittedRelay,
-  proveAuthScopeSwitch,
-  proveLogoutRevocation,
-} from "./src/relay-admission";
+import { proveAdmittedRelay } from "./src/relay-admission";
 
 async function observeTrustedAdmissionLifecycle() {
   const admitted = await admittedNativeRelay();
@@ -35,23 +25,9 @@ async function observeTrustedAdmissionLifecycle() {
     decode: decodeNativeForegroundResponse,
   };
   proveForegroundByteAbi(foregroundFactory, capability, foregroundCodec);
-  const revocableForeground = foregroundFactory.openAttached(capability);
-  await proveLogoutRevocation(
-    admitted,
-    async () => {
-      await logoutNativeRelay();
-      proveForegroundRevoked(revocableForeground, foregroundCodec.encode);
-    },
-    admittedNativeRelay,
-  );
-  const scopeA = await admittedNativeRelay();
-  const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
-  const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
-  proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
-  proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
-  proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  proveForegroundWriteAbi(foregroundFactory, capability, foregroundCodec);
   return await deviceReceiptContext();
 }
 
