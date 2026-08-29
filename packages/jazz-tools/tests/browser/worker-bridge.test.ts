@@ -23,6 +23,7 @@ import {
   INDEXEDDB_STORAGE_MANIFEST,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
+  IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
 import { createBrowserSharedWorkerBaseName } from "../../src/runtime/native-runtime/browser-shared-worker-connection.js";
 import {
@@ -3183,7 +3184,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       // ownership would mutate this state and forward Bob's claims into the
       // durable Alice worker before the guard could reject it.
       expect(() => db.updateAuthToken(bobJwt)).toThrow(
-        "Cannot change the authenticated user of a live persistent browser Db",
+        "Changing auth principal on a live client is not supported. Recreate the Db.",
       );
       expect(db.getAuthState()).toEqual(aliceState);
       await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([]);
