@@ -36,17 +36,17 @@ const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "d30a5eb83b9ea6efedaaed691ab514b2fa662419e170c556df755e8c85a3439e";
+    "f61811d6750867017e67786ccafd092b965594b06165cc3252fcc1d79c340441";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "717c4f2d7e5ddfeef91aba014c47b0340148c9352b240e0eca84368769f0b039";
+    "07edc6ac52ff31118ae8ce90390ad942f5fd406187a0f17b2592ee963c8a59d4";
 const EPOCH_1_NATIVE_SQLITE_SHA256: &str =
-    "c6f6aab28154359d800e7ca81739d257b4456f53c2a9b416128afeec67c32356";
+    "c972bf4b036c2d12cd72637f931f60f784b1e33f2d31ef654c7d9e44f69fbd4c";
 const EPOCH_1_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-rocksdb.tar.gz.base64");
 const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
-    "e930e931b74425f788f84f5b2776b8dcb4043fb9b8c7391385571b8bf53653d6";
+    "03f12e133bab81896db6cc1ee56be720c6c09e3c0d2bfa0c2d9396f155bc106a";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -190,6 +190,86 @@ fn native_corpus_schema() -> JazzSchema {
             )
             .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text)),
     )
+}
+
+fn native_corpus_evolved_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch_id", PublicColumnType::Uuid)
+                    .column("title", PublicColumnType::Text)
+                    .column("attachment", PublicColumnType::Bytea)
+                    .branch_by("branch_id"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("body", PublicColumnType::Text)
+                    .column("genre", PublicColumnType::Text),
+            ),
+    )
+}
+
+fn native_corpus_lineage(
+    snapshot: &crate::protocol::CatalogueSnapshot,
+) -> SchemaLineagePublication {
+    let namespace = uuid::Uuid::from_bytes([0x4a; 16]);
+    let source = native_corpus_schema();
+    let target = SchemaVersion::new(native_corpus_evolved_schema());
+    let mut publication = SchemaLineagePublication::author_from_prior(
+        &source,
+        &snapshot.genesis_physical_identities,
+        target.clone(),
+        MigrationLens::new(
+            source.version_id(),
+            target.id,
+            vec![
+                TableLens {
+                    source_table: "todos".to_owned(),
+                    target_table: "todos".to_owned(),
+                    ops: Vec::new(),
+                },
+                TableLens {
+                    source_table: "notes".to_owned(),
+                    target_table: "notes".to_owned(),
+                    ops: vec![LensOp::AddColumn {
+                        column: "genre".to_owned(),
+                        default: v("instrumental"),
+                    }],
+                },
+            ],
+        )
+        .expect("native corpus lineage is valid"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .expect("native corpus lineage is valid");
+    publication.physical_identities.tables.get_mut("notes")
+        .expect("lineage retains notes table")
+        .columns.get_mut("genre")
+        .expect("lineage allocates genre column")
+        .id = crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v5(
+            &namespace,
+            b"table/notes/column/genre",
+        ));
+    publication.id = publication.content_id();
+    publication
+}
+
+fn publish_native_corpus_lineage<S>(
+    node: &mut NodeState<S>,
+    snapshot: &crate::protocol::CatalogueSnapshot,
+)
+where
+    S: ReopenableStorage,
+{
+    let publication = native_corpus_lineage(snapshot);
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
+    })
+    .expect("publish native corpus lineage");
 }
 
 fn native_corpus_branch(byte: u8) -> BranchSelector {
@@ -531,6 +611,7 @@ where
         "settlement baseline",
         "independent table",
     );
+    publish_native_corpus_lineage(&mut producer, snapshot);
     let before_close = native_corpus_receipt(&producer, &schema);
     assert_native_corpus_has_required_families(&before_close);
     drop(producer);
@@ -760,7 +841,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     }
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "0194e6e7ad2cfdea7650ae9e3c2a50f8ad6429c8d63116cbee3e34a844aa5727",
+        "2de7abdde4b6a7c84bcb8de01e4cfa674883b94c1aaf94096c0646f8178ddf20",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
     assert_eq!(
