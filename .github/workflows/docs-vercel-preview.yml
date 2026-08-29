@@ -112,7 +112,7 @@ jobs:
           done
           deployment_url="$(
             "${{ steps.vercel.outputs.bin }}" deploy --yes \
-              --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}" \
+              --token="${VERCEL_TOKEN}" \
               -m git_pr="${{ github.event.pull_request.number }}" \
               -m git_sha="${{ github.event.pull_request.head.sha }}" \
               | tail -n1
