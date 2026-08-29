@@ -265,6 +265,21 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   assert.match(iosFixture, /-JazzDeviceAcceptancePhase/);
 });
 
+test("device acceptance is a registered, narrowly scoped pnpm workspace package", () => {
+  const workspace = fs.readFileSync(path.resolve(root, "../../pnpm-workspace.yaml"), "utf8");
+  const lockfile = fs.readFileSync(path.resolve(root, "../../pnpm-lock.yaml"), "utf8");
+  const rootPackage = fs.readFileSync(path.resolve(root, "../../package.json"), "utf8");
+  const turbo = fs.readFileSync(path.resolve(root, "../../turbo.json"), "utf8");
+
+  assert.match(workspace, /^  - dev\/rn-device-acceptance$/m);
+  assert.match(lockfile, /^  dev\/rn-device-acceptance:/m);
+  // Registering the app gives CI its declared Expo dependencies. It must not
+  // turn every root build/test into a device build: the app owns explicit
+  // `verify`/`device:*` scripts and has neither generic Turbo task.
+  assert.doesNotMatch(rootPackage, /rn-device-acceptance/);
+  assert.doesNotMatch(turbo, /rn-device-acceptance/);
+});
+
 test("Android bootstrap rejects corrupt pinned archives before extraction", () => {
   const bootstrap = read("scripts/bootstrap-android.sh");
   assert.match(bootstrap, /verify-pinned-archive\.sh/);
