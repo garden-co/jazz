@@ -106,6 +106,31 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
+  it("identifies a missing wire mask as a generic native-runtime artifact mismatch", () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+            wireFeatures: undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    expect(() => runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}")).toThrow(
+      "native runtime binding does not expose its wire feature mask; install the matching Jazz native runtime package",
+    );
+  });
+
   it("uses the canonical credential author for websocket identity, not the raw runtime host", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

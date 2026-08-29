@@ -2202,7 +2202,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private nativeWireFeatures(): number {
     if (!this.db.wireFeatures) {
       throw new Error(
-        "native binding does not expose its wire feature mask; install the matching jazz-napi package",
+        "native runtime binding does not expose its wire feature mask; install the matching Jazz native runtime package",
       );
     }
     const features = this.db.wireFeatures();
