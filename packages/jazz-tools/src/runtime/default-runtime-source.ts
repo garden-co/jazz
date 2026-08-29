@@ -35,6 +35,7 @@ import { httpUrlToWs } from "./url.js";
 import { authorBytesForSession, canonicalAuthorSubject } from "./author-id.js";
 import {
   createBrowserAuthSessionKey,
+  createBrowserStorageOwner,
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
@@ -298,6 +299,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         appId: config.appId,
+        storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),

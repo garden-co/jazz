@@ -5,7 +5,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   LOCAL_FIRST_JWT_ISSUER,
 } from "./client-session.js";
-import { createBrowserAuthSessionKey } from "./browser-worker-config.js";
+import { createBrowserAuthSessionKey, createBrowserStorageOwner } from "./browser-worker-config.js";
 import { setTrustedReservedSession } from "./db-internal-session.js";
 
 function toBase64Url(value: unknown): string {
@@ -39,6 +39,9 @@ describe("resolveDefaultPersistentDbName", () => {
 
     expect(createBrowserAuthSessionKey(configFor("alice"))).not.toBe(
       createBrowserAuthSessionKey(configFor("bob")),
+    );
+    expect(createBrowserStorageOwner(configFor("alice"))).not.toBe(
+      createBrowserStorageOwner(configFor("bob")),
     );
   });
 

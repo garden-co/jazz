@@ -106,6 +106,16 @@ benches may collapse this into in-process nodes while preserving the same role
 boundaries; browser IndexedDB and worker ownership are integrability concerns, not
 alternate semantics.
 
+For persistent browsers, the physical IndexedDB name has one durable, non-secret
+owner identity: app, environment, and authentication scope. The first worker to
+open an explicitly selected name atomically pins that identity beside the page
+store manifest. The same owner may release and reopen it across worker restarts;
+an incompatible owner fails before receiving a page-store handle or mutating a
+page. Deleting the entire browser namespace is the explicit ownership-transfer
+operation. This physical ownership is distinct from a foreground replica/node ID,
+which remains per live client, and from credentials, which are never persisted as
+the ownership marker.
+
 The main-thread client is deliberately non-durable: its authored transactions
 start at `Pending`/`None`. The worker relay persists the unchanged commit unit and
 returns `Pending`/`Local`; that durability acknowledgement does not assign fate.

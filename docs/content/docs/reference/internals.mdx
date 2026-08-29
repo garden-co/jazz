@@ -226,6 +226,15 @@ database namespace. The worker owns the IndexedDB page store and the server conn
 communicates with that runtime through a message port. There is no tab-leader election, Web Locks
 dependency, or per-tab durable database.
 
+An explicit `driver.dbName` selects a **physical** IndexedDB namespace; it does not turn that
+namespace into a cross-account cache. On its first open Jazz pins a non-secret logical owner
+(app, environment, and authentication scope) next to the page-store manifest. Reopening as that
+owner, including after the worker restarts, is safe. A different account fails before Jazz opens or
+changes any pages, with an error that asks it to choose another name or explicitly reset the local
+database. `db.deleteClientStorage()` / logout with `wipeData` destroys the namespace and is the
+explicit transfer boundary. The durable owner is neither the foreground replica/node ID nor a
+credential; those remain separate identities.
+
 Calling `db.disconnect()` in one tab explicitly takes that **whole persistent namespace** offline:
 the worker has one upstream connection, so every attached tab uses local-first fallback for
 `"remote-if-possible"` reads and remote reads wait until any tab calls `db.reconnect()`. This is

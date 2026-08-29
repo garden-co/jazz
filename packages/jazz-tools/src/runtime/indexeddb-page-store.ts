@@ -15,6 +15,12 @@ export const INDEXEDDB_BTREE_METADATA_STORE = "metadata";
 /** The epoch manifest is deliberately outside the ordinary tree metadata plane. */
 export const INDEXEDDB_STORAGE_MANIFEST_STORE = "storage-manifest";
 export const INDEXEDDB_STORAGE_MANIFEST_KEY = "epoch";
+/**
+ * A browser-runtime concern stored alongside (but deliberately not inside)
+ * the durable adapter epoch manifest. It binds an explicitly named physical
+ * IndexedDB root to the first logical Jazz owner that opens it.
+ */
+export const INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY = "browser-runtime-owner";
 const CURRENT_METADATA_KEY = "current";
 const MIN_PAGE_SIZE = 1024;
 const MAX_PAGE_SIZE = 0x8000_0000;
@@ -117,7 +123,11 @@ export class IndexedDbPageStore {
 
   static async open(
     name: string,
-    onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void,
+    options: {
+      /** Stable, non-secret logical owner for an explicitly selected browser root. */
+      owner?: string;
+      onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void;
+    } = {},
   ): Promise<IndexedDbPageStore> {
     const request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
     let rejectedPreSettlementDatabase = false;
@@ -152,9 +162,10 @@ export class IndexedDbPageStore {
       }
       throw error;
     }
-    const store = new IndexedDbPageStore(db, name, onInvalidated);
+    const store = new IndexedDbPageStore(db, name, options.onInvalidated);
     try {
       await store.assertStorageManifest();
+      if (options.owner) await store.claimBrowserRuntimeOwner(options.owner);
       return store;
     } catch (error) {
       store.close();
@@ -184,6 +195,37 @@ export class IndexedDbPageStore {
     );
     await done;
     assertStorageManifest(value);
+  }
+
+  /**
+   * Claim the physical browser root exactly once. The marker intentionally
+   * survives normal worker release and restart: a later incompatible auth
+   * scope must fail before it receives a page-store handle or mutates data.
+   * `destroy()` removes the whole root, including this marker, which is the
+   * explicit way to transfer an intentionally named database to a new owner.
+   */
+  private async claimBrowserRuntimeOwner(owner: string): Promise<void> {
+    if (typeof owner !== "string" || owner.length === 0 || owner.length > 1024) {
+      throw new Error("Invalid browser IndexedDB runtime owner");
+    }
+    const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+    const done = transactionDone(tx);
+    const manifest = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    const existing = await requestResult(manifest.get(INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY));
+    if (existing === undefined) {
+      manifest.put(owner, INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY);
+      await done;
+      return;
+    }
+    if (existing === owner) {
+      await done;
+      return;
+    }
+    tx.abort();
+    await done.catch(() => undefined);
+    throw new Error(
+      `IndexedDB database ${this.name} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
+    );
   }
 
   async readPage(pageId: number): Promise<Uint8Array | null> {

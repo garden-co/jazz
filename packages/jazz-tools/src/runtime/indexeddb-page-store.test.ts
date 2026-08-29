@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
+  INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
   INDEXEDDB_BTREE_FORMAT_MAGIC,
   INDEXEDDB_BTREE_FORMAT_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
@@ -46,6 +47,56 @@ describe("IndexedDbPageStore", () => {
     expect(await store.readPage(7)).toEqual(new Uint8Array([1, 2, 3]));
     expect(await store.readPage(3)).toEqual(new Uint8Array([4, 5]));
     store.close();
+  });
+
+  it("pins an explicit browser owner across release/reopen and rejects another owner before mutation", async () => {
+    const name = databaseName();
+    const alice = await IndexedDbPageStore.open(name, { owner: "app:alice" });
+    await alice.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+      pages: new Map([[1, new Uint8Array([7])]]),
+    });
+    alice.close();
+
+    // Normal worker release/restart preserves ownership and permits the same
+    // logical account to reclaim its physical root.
+    const reopened = await IndexedDbPageStore.open(name, { owner: "app:alice" });
+    expect(await reopened.readPage(1)).toEqual(new Uint8Array([7]));
+    reopened.close();
+
+    // The rejected claim must not get a page-store handle or modify the
+    // existing tree. This is the planted sensitivity oracle: removing the
+    // owner comparison makes this assertion fail.
+    await expect(IndexedDbPageStore.open(name, { owner: "app:bob" })).rejects.toThrow(
+      "already owned by a different Jazz browser session",
+    );
+    const verify = await IndexedDbPageStore.open(name, { owner: "app:alice" });
+    expect(await verify.readPage(1)).toEqual(new Uint8Array([7]));
+    expect((await verify.metadata())?.generation).toBe(1);
+    verify.close();
+
+    const raw = await openRawDatabase(name);
+    const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    expect(
+      await requestResult(
+        tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY),
+      ),
+    ).toBe("app:alice");
+    await transactionDone(tx);
+    raw.close();
+  });
+
+  it("transfers an explicit browser database only after explicit destruction", async () => {
+    const name = databaseName();
+    const first = await IndexedDbPageStore.open(name, { owner: "app:alice" });
+    first.close();
+    await expect(IndexedDbPageStore.open(name, { owner: "app:bob" })).rejects.toThrow(
+      "already owned by a different Jazz browser session",
+    );
+    await IndexedDbPageStore.destroy(name);
+    const transferred = await IndexedDbPageStore.open(name, { owner: "app:bob" });
+    transferred.close();
   });
 
   it("persists only supplied dirty pages and can delete retired pages", async () => {
@@ -282,7 +333,9 @@ describe("IndexedDbPageStore", () => {
   it("invalidates an open store when its IndexedDB database is externally deleted", async () => {
     const name = databaseName();
     const invalidations: Error[] = [];
-    const store = await IndexedDbPageStore.open(name, (error) => invalidations.push(error));
+    const store = await IndexedDbPageStore.open(name, {
+      onInvalidated: (error) => invalidations.push(error),
+    });
     await store.commit({
       expectedGeneration: 0,
       metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },

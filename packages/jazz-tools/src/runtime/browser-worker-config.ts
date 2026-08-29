@@ -149,6 +149,22 @@ export function createBrowserAuthSessionKey(config: DbConfig): string {
   return output;
 }
 
+/**
+ * Stable, non-secret owner identity for a physical browser persistence root.
+ * This is intentionally separate from the IDB name (physical location) and
+ * from the foreground replica/node identity. An explicitly supplied name is
+ * therefore still safe: it is permanently bound to one app/environment/auth
+ * scope until the caller explicitly destroys that database.
+ */
+export function createBrowserStorageOwner(config: DbConfig): string {
+  return JSON.stringify({
+    version: 1,
+    appId: config.appId,
+    env: config.env ?? "dev",
+    authSessionKey: createBrowserAuthSessionKey(config),
+  });
+}
+
 function resolveAuthClass(config: DbConfig): string {
   if (config.adminSecret) return "admin";
   const session = resolveClientInternalSessionSync({

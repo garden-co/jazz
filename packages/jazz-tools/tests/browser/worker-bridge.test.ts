@@ -2786,6 +2786,49 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
+  it("pins an explicit IndexedDB name to one browser auth scope without mutating it on conflict", async () => {
+    const appId = uniqueDbName("explicit-browser-owner-app");
+    const dbName = uniqueDbName("explicit-browser-owner-root");
+    const alice = track(
+      await createDb({
+        appId,
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    alice.insert(todos, { title: "Alice durable row", done: false });
+    await waitForCondition(
+      async () => (await alice.all(allTodos, { tier: "local" })).length === 1,
+      8_000,
+      "first owner should persist its row before the conflicting open",
+    );
+
+    // This uses a different local-first account but exactly the same physical
+    // name. A regression that restores auth-scoped worker names lets this
+    // second runtime open the root and makes this receipt fail.
+    const bob = track(
+      await createDb({
+        appId,
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    await expect(
+      withTimeout(
+        bob.all(allTodos, { tier: "local" }),
+        8_000,
+        "conflicting browser owner should fail rather than hang",
+      ),
+    ).rejects.toThrow("incompatible persistent browser configuration");
+
+    // The failed claimant did not clear, replace, or append to the owner's
+    // existing physical store.
+    expect((await alice.all(allTodos, { tier: "local" })).map((row) => row.title)).toEqual([
+      "Alice durable row",
+    ]);
+    await bob.shutdown();
+  });
+
   it("fans out auth loss and accepts same-principal refresh from either tab", async () => {
     const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions("auth-fanout");
     const dbName = uniqueDbName("auth-fanout");

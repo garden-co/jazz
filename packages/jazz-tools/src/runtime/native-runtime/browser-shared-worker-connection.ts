@@ -33,14 +33,13 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       | "onStorageInvalidated"
     >,
   ) {
-    // A local database namespace is one browser replica/session. Tabs opening
-    // that same replica share its worker; explicitly separate replicas must
-    // not share one WASM realm, because their independent runtime lifecycles
-    // can overlap. Inspector controls aggregate across these workers.
+    // A physical database namespace has exactly one broker realm for a given
+    // worker asset. Auth scope is deliberately not part of this name: an
+    // incompatible account must reach the existing owner and fail clearly
+    // rather than silently opening a second page-store owner.
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = [
       "jazz-runtime",
-      options.authSessionKey,
       options.dbName,
       createBrowserWorkerAssetScope(runtimeSources),
     ].join(":");
