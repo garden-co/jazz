@@ -20,7 +20,14 @@ import {
   type NativeForegroundModule,
 } from "./native-foreground-db.js";
 
-export type NativeRelayCapability = Uint8Array;
+/**
+ * Opaque authority supplied by trusted native platform admission.  It is
+ * deliberately only a field of the React-Native client configuration: app
+ * code must neither construct a scope nor use low-level foreground helpers.
+ */
+export type ReactNativeRelayConfig = Readonly<{
+  capability: Uint8Array;
+}>;
 
 export type ReactNativeDbConfig = DbConfig & {
   /**
@@ -39,7 +46,7 @@ export type ReactNativeDbConfig = DbConfig & {
    * persistent RN runtime consumes it through its installed JSI foreground
    * engine; application JavaScript cannot construct scope configuration.
    */
-  nativeRelay?: Readonly<{ capability: NativeRelayCapability }>;
+  nativeRelay?: ReactNativeRelayConfig;
 };
 
 export const REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR =

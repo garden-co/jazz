@@ -55,7 +55,7 @@ import {
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   type JazzClient,
   type ReactNativeSqliteStorageDriver,
-  type NativeRelayCapability,
+  type JazzClientConfig,
   useLocalFirstAuth,
 } from "./index.js";
 
@@ -63,10 +63,7 @@ const app = s.defineApp({
   notes: s.table({ title: s.string() }),
 });
 
-const nativeRelayCapability = Uint8Array.from(
-  { length: 32 },
-  (_, index) => index,
-) as NativeRelayCapability;
+const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
 
 function nativeRelayReceipt() {
   const commands: number[] = [];
@@ -136,6 +133,20 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     });
 
     await expect(client.db.all(app.notes)).resolves.toEqual([]);
+  });
+
+  it("accepts native admission only through the public RN client config", () => {
+    const config: JazzClientConfig = {
+      appId: "react-native-native-relay-public-config",
+      nativeRelay: { capability: nativeRelayCapability },
+      cookieSession: {
+        issuer: "https://issuer.example",
+        user_id: "public-config-reader",
+        claims: {},
+        authMode: "external",
+      },
+    };
+    expect(config.nativeRelay?.capability).toBe(nativeRelayCapability);
   });
 
   it("rejects the default persistent configuration", async () => {

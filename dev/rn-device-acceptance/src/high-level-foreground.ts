@@ -1,4 +1,4 @@
-import { createJazzClient, schema as s } from "jazz-tools/react-native";
+import { createJazzClient, schema as s, type JazzClientConfig } from "jazz-tools/react-native";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }),
@@ -12,7 +12,7 @@ const app = s.defineApp({
  * schema-backed insert, local query, subscription publication, and shutdown.
  */
 export async function proveHighLevelForegroundRuntime(capability: Uint8Array): Promise<void> {
-  const client = await createJazzClient({
+  const config: JazzClientConfig = {
     appId: "jazz-device-acceptance",
     nativeRelay: { capability },
     cookieSession: {
@@ -21,7 +21,8 @@ export async function proveHighLevelForegroundRuntime(capability: Uint8Array): P
       claims: {},
       authMode: "external",
     },
-  });
+  };
+  const client = await createJazzClient(config);
   const title = "high-level-foreground-row";
   let observed = false;
   const unsubscribe = client.db.subscribe(app.todos, (todos) => {

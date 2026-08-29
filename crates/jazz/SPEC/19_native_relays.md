@@ -483,12 +483,14 @@ factory ABI is incompatible fails before opening a runtime with the existing
    `jazz-tools/react-native` select this runtime source rather than loading
    `jazz-wasm`; remove the JavaScript relay-frame adapter from the foreground
    path once the host owns the peer link.
-4. Add black-box Rust, TypeScript, Android-emulator, and iOS-simulator
-   receipts: open two foreground runtimes from one admitted capability; write
-   in A; observe the subscription change in B; reload B without losing relay
-   durability; revoke the capability and prove every foreground operation
-   fails. Plant a wrong/missing B observation and require the device receipt
-   to fail.
+4. Black-box Rust, TypeScript, Android-emulator, and iOS-simulator receipts
+   now cover capability admission/revocation, process reopen, scope-selected
+   durability, and two aliases in **one** installed JSI runtime. The required
+   proof that two **physical JSI runtimes** open from one admitted capability,
+   write in A, and publish the subscription change in B remains pending. It
+   must plant a wrong/missing B observation and require the installed-device
+   receipt to fail; no same-runtime alias receipt may be used as evidence for
+   that multi-runtime property.
 5. Add native upstream transport/auth-refresh ownership after the local
    two-runtime receipt is stable. Tokens remain in platform-owned session
    negotiation and never enter the JSI foreground factory.

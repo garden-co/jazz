@@ -1,22 +1,12 @@
 # jazz-rn
 
 This directory is the React Native package for Jazz's native relay boundary.
-It is not yet a supported React Native Jazz client: its autolinked Android and
-iOS modules deliberately report that the Rust relay artifact is unavailable.
+It is a narrow alpha rather than general React Native support. A matching
+native development or release build, plus a capability issued by trusted
+platform admission, enables the ordinary local-first public `Db` API. Expo Go
+cannot contain this native module.
 
-The active restoration work is deliberately split in two:
-
-- `jazz-storage-sqlite` implements the portable ordered-KV storage contract
-  that a native host will use.
-- `jazz-native-relay` establishes the process-local, scope-keyed native relay
-  boundary: a durable relay `Db` and ordinary in-memory UI clients communicating
-  through Jazz's normal peer protocol.
-
-Those crates have Rust contract tests, but they are not wired through this
-package yet. The former UniFFI/JSI surface has been removed rather than left as
-a broken alternative runtime path.
-
-The package now contains the real foreground-owner substrate. The shared JSI
+The shared JSI
 HostObject source plus Rust C ABI opens one memory-only foreground `Db` only
 from an already admitted opaque 32-byte capability, runs ordinary bounded core
 turns, and closes that exact alias. It does not accept storage paths, schema,
@@ -34,12 +24,11 @@ contract and staged acceptance path are specified in
 [`jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
 
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
-iOS autolink the module, report ABI `0` (unavailable), and explicitly reject
-commands unless a development or release assembly stages the shared Rust relay
-artifact. Staged Android libraries, the shared header, and the iOS XCFramework
-are included by the npm package file contract. `expo prebuild` and bare React
-Native integration can therefore succeed without an artifact, but they do
-**not** make Jazz usable on a device yet.
+iOS autolink the module and reject relay use unless a matching development or
+release assembly stages the shared Rust relay artifact. Staged Android
+libraries, the shared header, and the iOS XCFramework are included by the npm
+package file contract. `expo prebuild` and bare React Native discovery prove
+install-time wiring; they are not a substitute for an installed-device receipt.
 
 `jazz-rn` requires the React Native **New Architecture**. Android Gradle and
 iOS CocoaPods fail early with an install/configuration instruction otherwise.
@@ -47,11 +36,11 @@ For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`; the plugin
 sets `newArchEnabled`. Bare React Native apps must enable the New Architecture
 themselves. This requirement does not make Expo Go capable of loading Jazz.
 
-The current repository gate executes Expo prebuild for Android and iOS, then
-inspects Expo's autolinking contracts for this package. It is intentionally not
-a native build receipt: this Linux development environment has neither Java
-nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
-respective Blacksmith runners before claiming platform or device support.
+The repository runs source/package receipts plus label-gated Android-emulator
+and iOS-simulator installed-device workflows. They prove native admission,
+capability revocation, process reopen, scope-selected SQLite isolation, and
+one-runtime foreground operation. They do **not** yet prove communication
+between two physical JSI runtimes; that acceptance receipt remains pending.
 The shared host codec now stages trusted native scope admission/revocation via
 random 256-bit capabilities, client open-close, bounded `Pump`, directional
 bounded peer-frame send/drain, and handle/queue diagnostics. Kotlin and
@@ -113,10 +102,11 @@ it cannot contain the relay module.
 
 Expo Go is not supported. For a bare Android host set `newArchEnabled=true`;
 for iOS install pods with `RCT_NEW_ARCH_ENABLED=1 bundle exec pod install`.
-Use the `rn-preview-release` pull-request label when a preview must build the
-native relay artifacts. This is still not yet a supported high-level React
-Native Jazz client: the source-level adapter is wired, but the assembled
-platform artifact and Android/iOS device receipts remain outstanding.
+Use the `react-native/rn-preview-release` pull-request label when a preview
+must run the expensive native artifact and device workflows. The alpha still
+does not support every Jazz operation family: remote tiers, branches, restore,
+large-value diffs, custom attribution, and relation terminal operations fail
+closed rather than taking a separate React-Native path.
 
 Bare React Native uses the same direct dependency and autolinking metadata, but
 has no Expo plugin: enable the New Architecture in the host project before
@@ -132,18 +122,19 @@ the native artifact/release workflows and are checked separately by the device
 acceptance app. A source checkout with no staged native artifacts should fail
 at relay use rather than pretend to provide persistence.
 
-## What remains before React Native is supported
+## What remains before React Native is generally supported
 
-1. Extend the staged host lifecycle codec with shared event/peer-frame drainage
-   (not an object-per-row API).
-2. Build real iOS XCFramework and Android AAR/shared-library slices from that
-   module.
-3. Verify bare React Native autolinking plus Expo prebuild/development builds
-   on Android and iOS in CI, using a first-party device app and structured
-   two-foreground-runtime scenario results.
+1. Prove two **physical** JSI runtimes attached to one relay on installed
+   Android and iOS apps; the present receipt only covers two aliases in one JSI
+   runtime.
+2. Complete and test the remaining maintained `NativeDb` families without
+   creating an object-per-row React Native API.
+3. Turn the narrow capability-gated alpha into a documented app-facing
+   authentication/admission integration.
 
-Expo Go cannot load Jazz native code. Expo development builds will be supported
-once the native module and artifacts above exist.
+Expo Go cannot load Jazz native code. Expo development builds and bare React
+Native hosts must include a matching native module and receive admission from
+trusted platform code.
 
 The normative host design and its implementation ledger live in
 [`crates/jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md).

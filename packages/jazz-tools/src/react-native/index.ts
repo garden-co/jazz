@@ -1,5 +1,5 @@
 export { createDb, Db, type DbConfig } from "./create-db.js";
-export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-client.js";
 export {
   JazzProvider,
   type JazzProviderProps,
@@ -31,7 +31,5 @@ export { schema } from "../index.js";
 export {
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
-  type NativeRelayCapability,
-  type ReactNativeDbConfig,
 } from "./runtime-source.js";
 export { REACT_NATIVE_UNSUPPORTED_ERROR } from "./native-foreground-db.js";

@@ -3847,21 +3847,27 @@ mod tests {
         }
 
         fn open_foreground(&self, capability: &[u8; 32]) -> u64 {
-            let mut foreground = 0;
+            let (status, foreground) = self.try_open_foreground(capability);
             assert_eq!(
-                unsafe {
-                    jazz_native_relay_host_lease_open_attached_foreground(
-                        self.lease,
-                        capability.as_ptr(),
-                        capability.len(),
-                        &mut foreground,
-                    )
-                },
+                status,
                 JazzNativeRelayStatus::Ok,
                 "C ABI opens one admitted foreground"
             );
             assert_ne!(foreground, 0);
             foreground
+        }
+
+        fn try_open_foreground(&self, capability: &[u8; 32]) -> (JazzNativeRelayStatus, u64) {
+            let mut foreground = 0;
+            let status = unsafe {
+                jazz_native_relay_host_lease_open_attached_foreground(
+                    self.lease,
+                    capability.as_ptr(),
+                    capability.len(),
+                    &mut foreground,
+                )
+            };
+            (status, foreground)
         }
 
         fn execute(
@@ -3894,12 +3900,44 @@ mod tests {
 
         fn tick(&self, foreground: u64) {
             assert_eq!(
-                unsafe {
-                    jazz_native_relay_host_lease_tick_attached_foreground(self.lease, foreground)
-                },
+                self.tick_status(foreground),
                 JazzNativeRelayStatus::Ok,
                 "native relay tick succeeds"
             );
+        }
+
+        fn tick_status(&self, foreground: u64) -> JazzNativeRelayStatus {
+            unsafe { jazz_native_relay_host_lease_tick_attached_foreground(self.lease, foreground) }
+        }
+
+        fn insert_todo(&self, foreground: u64, row_id: [u8; 16], title: &str) {
+            let ForegroundDbCommandResponse::TransactionOpened { transaction } = self.execute(
+                foreground,
+                ForegroundDbCommandRequest::BeginTransaction {
+                    kind: ForegroundTransactionKind::Mergeable,
+                },
+            ) else {
+                panic!("foreground transaction must open");
+            };
+            assert_eq!(
+                self.execute(
+                    foreground,
+                    ForegroundDbCommandRequest::Insert {
+                        transaction,
+                        table: "todos".to_owned(),
+                        cells: encoded_title_cells(title),
+                        row_id: Some(row_id),
+                    },
+                ),
+                ForegroundDbCommandResponse::Inserted { row_id }
+            );
+            assert!(matches!(
+                self.execute(
+                    foreground,
+                    ForegroundDbCommandRequest::CommitTransaction { transaction },
+                ),
+                ForegroundDbCommandResponse::TransactionCommitted { tx_id } if tx_id != [0; 16]
+            ));
         }
 
         fn rows_after_sync(&self, foreground: u64) -> Vec<u8> {
@@ -4029,6 +4067,95 @@ mod tests {
         // the compiled Android/iOS fixture path selectors; this core C-ABI
         // receipt deliberately proves only that an already-selected path
         // survives a complete native-host recreation.
+    }
+
+    #[test]
+    fn native_c_abi_foregrounds_use_the_exact_admitted_capability_and_scope() {
+        // This is intentionally an exact C-ABI receipt rather than a host-map
+        // unit test. Admit A before B, then prove B's actual foreground sees
+        // B's exact trusted scope. Replacing the capability lookup in
+        // `open_foreground` with `.values().next()` makes B attach to A and
+        // fails this receipt before revocation can mask that mix-up.
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let schema = permissive_schema();
+        let a_capability = fixture.admit(
+            &directory.path().join("scope-a.sqlite"),
+            "scope-a",
+            &schema,
+            0x51,
+        );
+        let b_capability = fixture.admit(
+            &directory.path().join("scope-b.sqlite"),
+            "scope-b",
+            &schema,
+            0x61,
+        );
+        let forged_capability = [0xa5; 32];
+        assert_ne!(forged_capability, a_capability);
+        assert_ne!(forged_capability, b_capability);
+
+        let (forged_status, forged_foreground) = fixture.try_open_foreground(&forged_capability);
+        assert_eq!(forged_status, JazzNativeRelayStatus::InvalidHandle);
+        assert_eq!(
+            forged_foreground, 0,
+            "a valid-length, unadmitted capability cannot produce an opaque handle"
+        );
+
+        let a = fixture.open_foreground(&a_capability);
+        let b = fixture.open_foreground(&b_capability);
+        assert!(matches!(
+            fixture.execute(a, ForegroundDbCommandRequest::Probe),
+            ForegroundDbCommandResponse::Probe { abi_version } if abi_version == NATIVE_RELAY_ABI_VERSION
+        ));
+        assert!(matches!(
+            fixture.execute(b, ForegroundDbCommandRequest::Probe),
+            ForegroundDbCommandResponse::Probe { abi_version } if abi_version == NATIVE_RELAY_ABI_VERSION
+        ));
+
+        fixture.insert_todo(a, [0xa1; 16], "scope-a-only");
+        fixture.insert_todo(b, [0xb1; 16], "scope-b-only");
+        assert_exact_todo_rows(
+            &fixture.rows_after_sync(a),
+            RowUuid::from_bytes([0xa1; 16]),
+            "scope-a-only",
+        );
+        assert_exact_todo_rows(
+            &fixture.rows_after_sync(b),
+            RowUuid::from_bytes([0xb1; 16]),
+            "scope-b-only",
+        );
+
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_revoke_scope_capability(
+                    fixture.host,
+                    a_capability.as_ptr(),
+                    a_capability.len(),
+                )
+            },
+            JazzNativeRelayStatus::Ok,
+            "trusted native code may revoke exactly A's capability"
+        );
+        assert_eq!(
+            fixture.tick_status(a),
+            JazzNativeRelayStatus::InvalidHandle,
+            "revocation retires A's already-open foreground"
+        );
+        assert_eq!(
+            fixture.tick_status(b),
+            JazzNativeRelayStatus::Ok,
+            "revoking A cannot disturb B's separately admitted foreground"
+        );
+        let (reopen_a_status, reopen_a) = fixture.try_open_foreground(&a_capability);
+        assert_eq!(reopen_a_status, JazzNativeRelayStatus::InvalidHandle);
+        assert_eq!(reopen_a, 0);
+        let b_after_a_revoke = fixture.open_foreground(&b_capability);
+        assert_eq!(
+            fixture.tick_status(b_after_a_revoke),
+            JazzNativeRelayStatus::Ok,
+            "B remains admissible after A revocation"
+        );
     }
 
     #[test]

@@ -21,17 +21,20 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
       },
     },
     {
-      encodeNativeForegroundCommand(command) {
-        if (typeof command === "object" && command.type === "prepareQuery") return Uint8Array.of(0);
-        if (typeof command === "object" && command.type === "all") return Uint8Array.of(1);
-        if (typeof command === "object" && command.type === "subscribe") return Uint8Array.of(2);
-        if (typeof command === "object" && command.type === "drainSubscription")
-          return Uint8Array.of(3);
-        if (typeof command === "object" && command.type === "poll") return Uint8Array.of(4);
-        if (command === "close") return Uint8Array.of(5);
+      encodeNativeForegroundCommand(command: unknown) {
+        const type =
+          typeof command === "object" && command !== null
+            ? (command as { type?: unknown }).type
+            : command;
+        if (type === "prepareQuery") return Uint8Array.of(0);
+        if (type === "all") return Uint8Array.of(1);
+        if (type === "subscribe") return Uint8Array.of(2);
+        if (type === "drainSubscription") return Uint8Array.of(3);
+        if (type === "poll") return Uint8Array.of(4);
+        if (type === "close") return Uint8Array.of(5);
         throw new Error("unexpected foreground fixture command");
       },
-      decodeNativeForegroundResponse(bytes) {
+      decodeNativeForegroundResponse(bytes: Uint8Array) {
         switch (bytes[0]) {
           case 0:
             return { type: "preparedQuery", query: 10 };

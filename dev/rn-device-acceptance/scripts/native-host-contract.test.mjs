@@ -8,6 +8,71 @@ import test from "node:test";
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 
+// Documentation is part of the native-package contract. Normalize prose
+// formatting so legitimate wrapping/Markdown emphasis edits do not turn this
+// into a brittle snapshot, while materially stronger or weaker claims fail.
+const prose = (text) => text.replace(/[`*]/g, "").replace(/\s+/g, " ").trim();
+
+function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
+  assert.match(
+    packageReadme,
+    /narrow alpha rather than general React Native support/,
+    "the package must not claim broad RN support",
+  );
+  assert.match(
+    packageReadme,
+    /matching native development or release build.*capability issued by trusted platform admission/i,
+    "persistent foreground use must retain both native-build and trusted-admission requirements",
+  );
+  assert.match(
+    packageReadme,
+    /two physical JSI runtimes.*remains pending/i,
+    "same-runtime alias coverage must not be advertised as a multi-runtime device proof",
+  );
+  assert.match(
+    installGuide,
+    /narrow, capability-gated foreground alpha.*matching native development\/release build.*trusted platform admission/i,
+    "the public install guide must describe the same constrained boundary",
+  );
+  assert.match(
+    spec,
+    /physical JSI runtime.*pending/i,
+    "the normative implementation sequence must retain the missing physical-runtime proof",
+  );
+  assert.doesNotMatch(
+    packageReadme,
+    /high-level jazz client.*under restoration|modules deliberately report that the Rust relay artifact is unavailable/i,
+    "removed pre-foreground claims must not survive in the packaging README",
+  );
+}
+
+function jobIfCondition(workflow, job) {
+  const escapedJob = job.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const section = new RegExp(
+    `^  ${escapedJob}:\\n([\\s\\S]*?)(?=^  [A-Za-z0-9_-]+:|(?![\\s\\S]))`,
+    "m",
+  ).exec(workflow)?.[1];
+  assert.ok(section, `workflow is missing ${job}`);
+  const condition = /^    if: >-\n([\s\S]*?)(?=^    (?:name|runs-on):)/m.exec(section)?.[1];
+  assert.ok(condition, `${job} must have a block scalar if condition before name/runs-on`);
+  return condition.replace(/\s+/g, " ").trim();
+}
+
+function assertRnDeviceWorkflowContract(workflow) {
+  const ios = jobIfCondition(workflow, "ios-simulator");
+  const android = jobIfCondition(workflow, "android-device-acceptance");
+  assert.equal(
+    android,
+    ios,
+    "Android and iOS native device jobs must use one identical opt-in contract",
+  );
+  assert.match(
+    android,
+    /github\.event_name == 'workflow_dispatch' \|\| \( contains\(github\.event\.pull_request\.labels\.\*\.name, 'react-native\/rn-preview-release'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
+    "native device jobs run only when manually dispatched or for a same-repository RN-preview PR",
+  );
+}
+
 test("Android fixture BuildConfig fields and package registration remain compile-shaped", () => {
   const gradle = read("android/app/build.gradle");
   const fixture = read(
@@ -129,6 +194,31 @@ test("Expo config plugin describes the real iOS receipt boundary without claimin
   assert.doesNotMatch(plugin, /this workflow is source-only/);
 });
 
+test("RN packaging and public docs describe the proven alpha boundary semantically", () => {
+  const packageReadme = prose(
+    fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/README.md"), "utf8"),
+  );
+  const installGuide = prose(
+    fs.readFileSync(path.resolve(root, "../../docs/content/docs/install/client.mdx"), "utf8"),
+  );
+  const spec = prose(
+    fs.readFileSync(path.resolve(root, "../../crates/jazz/SPEC/19_native_relays.md"), "utf8"),
+  );
+  assertCurrentRnBoundary(packageReadme, installGuide, spec);
+
+  // Plant the tempting but false extrapolation from two aliases in one JSI
+  // runtime to two physical runtimes. The semantic receipt must reject it.
+  assert.throws(
+    () =>
+      assertCurrentRnBoundary(
+        packageReadme.replace("two physical JSI runtimes", "two aliases in one JSI runtime"),
+        installGuide,
+        spec,
+      ),
+    /same-runtime alias coverage/i,
+  );
+});
+
 test("device fixture does not import internal jazz-tools relay-frame types", () => {
   const fixture = read("src/native-fixture.ts");
   assert.doesNotMatch(fixture, /NativeRelay(?:Capability|Executor)/);
@@ -192,10 +282,17 @@ test("dispatch device workflow uses hosted KVM while source jobs remain cheap", 
   assert.match(workflow, /scripts\/boot-android-emulator\.sh/);
   assert.doesNotMatch(workflow, /adb wait-for-device/);
   assert.match(workflow, /android-device-acceptance:[\s\S]*timeout-minutes: 45/);
-  assert.match(workflow, /react-native\/rn-preview-release/);
-  assert.match(
-    workflow,
-    /android-device-acceptance:[\s\S]*contains\(github\.event\.pull_request\.labels\.\*\.name, 'react-native\/rn-preview-release'\)[\s\S]*head\.repo\.full_name == github\.repository/,
+  assertRnDeviceWorkflowContract(workflow);
+  assert.throws(
+    () =>
+      assertRnDeviceWorkflowContract(
+        workflow.replace(
+          "contains(github.event.pull_request.labels.*.name, 'react-native/rn-preview-release')",
+          "contains(github.event.pull_request.labels.*.name, 'react-native')",
+        ),
+      ),
+    /identical opt-in contract|same-repository RN-preview PR/,
+    "a planted broad Android label must not silently enable a different device gate",
   );
   assert.doesNotMatch(workflow, /labels\.\*\.name, 'react-native'/);
   assert.match(workflow, /scripts\/create-android-avd\.sh[\s\\]+jazz-device-acceptance-api35/);
