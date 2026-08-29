@@ -1,8 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { schema as s } from "../../index.js";
+import { createDb } from "../db.js";
 import {
   acquireNodeForegroundNodeLease,
   nodeForegroundNodeLeaseDirectoryForTest,
@@ -13,6 +15,7 @@ import { createBrowserAuthSessionKey } from "../browser-worker-config.js";
 const roots: string[] = [];
 let restoreCwd: (() => void) | undefined;
 const publicRuntimeEntry = new URL("../../../dist/runtime/index.js", import.meta.url).href;
+const memoryApp = s.defineApp({ notes: s.table({ title: s.string() }) });
 
 afterEach(async () => {
   restoreCwd?.();
@@ -123,6 +126,15 @@ describe("Node foreground node leases", () => {
     await continued.retire();
   });
 
+  it("rejects a handoff high-water outside the native u64 HLC domain", async () => {
+    const lease = await acquireNodeForegroundNodeLease(await isolatedOptions());
+    await expect(lease.returnWithHighWater(1n << 64n)).rejects.toThrow(
+      "Invalid Node foreground lease handoff",
+    );
+    // The failed handoff leaves its active claim quarantined; do not retire it
+    // in this receipt because the tested invariant is exactly no reuse.
+  });
+
   it("allocates distinct nodes to concurrent foreground processes", async () => {
     const options = await isolatedOptions();
     const [first, second] = await Promise.all([
@@ -133,116 +145,70 @@ describe("Node foreground node leases", () => {
     await Promise.all([first.retire(), second.retire()]);
   });
 
-  it("fails closed on a torn state receipt", async () => {
-    const options = await isolatedOptions();
-    const directory = nodeForegroundNodeLeaseDirectoryForTest(options);
-    await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, "state.json"), "{torn", { flag: "w" });
-    await expect(acquireNodeForegroundNodeLease(options)).rejects.toThrow(
-      "Invalid Node foreground lease state",
-    );
+  it("keeps explicit memory mode filesystem-free after a real public write", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jazz-node-memory-foreground-lease-"));
+    roots.push(root);
+    const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(root);
+    try {
+      const db = await createDb({ appId: "memory-lease-test", driver: { type: "memory" } });
+      db.insert(memoryApp.notes, { title: "first write" });
+      await db.shutdown();
+      await expect(readdir(join(root, ".jazz"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      cwdSpy.mockRestore();
+    }
   });
 
-  it("retires a dirty node after its definitely-dead owner leaves a stale lock", async () => {
+  it("quarantines an unknown active claim rather than reclaiming it", async () => {
     const options = await isolatedOptions();
     const directory = nodeForegroundNodeLeaseDirectoryForTest(options);
     const deadNode = "11".repeat(16);
-    await mkdir(directory, { recursive: true });
+    await mkdir(join(directory, "active"), { recursive: true });
     await writeFile(
-      join(directory, "state.json"),
+      join(directory, "active", deadNode),
       JSON.stringify({
-        format: "jazz-node-foreground-node-leases-v1",
-        clean: [],
-        dirty: [{ node: deadNode, confirmedTxTime: "900" }],
-        retired: [],
+        format: "jazz-node-foreground-node-leases-v2",
+        node: deadNode,
+        token: "00000000-0000-4000-8000-000000000000",
       }),
     );
-    await writeFile(
-      join(directory, `slot-${deadNode}.lock`),
-      JSON.stringify({
-        pid: 999_999_999,
-        host: hostname(),
-        processStartIdentity: null,
-        nonce: "00000000-0000-4000-8000-000000000000",
-      }),
-    );
-
     const lease = await acquireNodeForegroundNodeLease(options);
     expect(lease.node).not.toEqual(Buffer.from(deadNode, "hex"));
     await lease.retire();
   });
 
-  it("fails closed rather than stealing a foreign or malformed state lock", async () => {
+  it("fails closed on a malformed reusable receipt and retains its active claim", async () => {
     const options = await isolatedOptions();
     const directory = nodeForegroundNodeLeaseDirectoryForTest(options);
-    await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, "state.lock"), "not a receipt", { flag: "w" });
+    const node = "22".repeat(16);
+    await mkdir(join(directory, "reusable"), { recursive: true });
+    await writeFile(join(directory, "reusable", node), "not-json");
     await expect(acquireNodeForegroundNodeLease(options)).rejects.toThrow(
-      "invalid foreground lease lock receipt",
+      "Invalid Node foreground lease receipt",
     );
-
-    await writeFile(
-      join(directory, "state.lock"),
-      JSON.stringify({
-        pid: process.pid,
-        host: "another-host",
-        processStartIdentity: null,
-        nonce: "00000000-0000-4000-8000-000000000000",
-      }),
-      { flag: "w" },
-    );
-    await expect(acquireNodeForegroundNodeLease(options)).rejects.toThrow(
-      "foreground lease lock belongs to a different host",
-    );
+    expect(await readdir(join(directory, "active"))).toContain(node);
   });
 
-  it("treats a recycled-PID receipt as abandoned and permanently retires its node", async () => {
-    if (process.platform !== "linux") return;
-    const options = await isolatedOptions();
-    const directory = nodeForegroundNodeLeaseDirectoryForTest(options);
-    const deadNode = "22".repeat(16);
-    await mkdir(directory, { recursive: true });
-    await writeFile(
-      join(directory, "state.json"),
-      JSON.stringify({
-        format: "jazz-node-foreground-node-leases-v1",
-        clean: [],
-        dirty: [{ node: deadNode, confirmedTxTime: "900" }],
-        retired: [],
-      }),
-    );
-    await writeFile(
-      join(directory, `slot-${deadNode}.lock`),
-      JSON.stringify({
-        pid: process.pid,
-        host: hostname(),
-        // Deliberately differs from this live process's /proc start tick.
-        processStartIdentity: "recycled-pid",
-        nonce: "00000000-0000-4000-8000-000000000000",
-      }),
-    );
-
-    const lease = await acquireNodeForegroundNodeLease(options);
-    expect(lease.node).not.toEqual(Buffer.from(deadNode, "hex"));
-    await lease.retire();
-    const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
-    expect(state.retired).toContain(deadNode);
-  });
-
-  it("keeps app and auth namespaces isolated inside one cwd", async () => {
+  it("keeps app, environment, and auth namespaces isolated inside one cwd", async () => {
     const first = await isolatedOptions();
-    const second = { ...first, appId: "another-app" };
-    expect(nodeForegroundNodeLeaseDirectoryForTest(second)).not.toBe(
-      nodeForegroundNodeLeaseDirectoryForTest(first),
-    );
-    const [firstLease, secondLease] = await Promise.all([
+    const variants = [
+      { ...first, appId: "another-app" },
+      { ...first, env: "production" },
+      { ...first, authScope: "another-user" },
+    ];
+    for (const variant of variants) {
+      expect(nodeForegroundNodeLeaseDirectoryForTest(variant)).not.toBe(
+        nodeForegroundNodeLeaseDirectoryForTest(first),
+      );
+    }
+    const [firstLease, ...otherLeases] = await Promise.all([
       acquireNodeForegroundNodeLease(first),
-      acquireNodeForegroundNodeLease(second),
+      ...variants.map(acquireNodeForegroundNodeLease),
     ]);
     try {
-      expect(firstLease.node).not.toEqual(secondLease.node);
+      for (const lease of otherLeases) expect(firstLease.node).not.toEqual(lease.node);
     } finally {
-      await Promise.all([firstLease.retire(), secondLease.retire()]);
+      await Promise.all([firstLease.retire(), ...otherLeases.map((lease) => lease.retire())]);
     }
   });
 
@@ -264,32 +230,27 @@ describe("Node foreground node leases", () => {
     const second = spawnPublicPersistentDb(root, appId, "hold");
     try {
       await Promise.all([first.ready, second.ready]);
-      const whileLive = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
-      expect(whileLive.dirty).toHaveLength(2);
-      expect(new Set(whileLive.dirty.map((slot: { node: string }) => slot.node)).size).toBe(2);
+      expect(await readdir(join(directory, "active"))).toHaveLength(2);
 
       await Promise.all([killChild(first.child), killChild(second.child)]);
 
-      // A fresh public Db creation detects both definitely-dead processes,
-      // retires their nodes, and exposes only a new identity. It then closes
-      // cleanly, making that new node the sole reusable one.
+      // A crash leaves both active claims quarantined. The recovered process
+      // receives a fresh UUID, then returns only that UUID cleanly.
       const recovered = spawnPublicPersistentDb(root, appId, "close");
       await recovered.ready;
       await waitForExit(recovered.child);
 
-      const afterRecovery = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
-      expect(afterRecovery.dirty).toEqual([]);
-      expect(afterRecovery.clean).toHaveLength(1);
-      expect(afterRecovery.retired).toHaveLength(2);
-      const cleanReplacementNode = afterRecovery.clean[0].node;
+      expect(await readdir(join(directory, "active"))).toHaveLength(2);
+      const clean = await readdir(join(directory, "reusable"));
+      expect(clean).toHaveLength(1);
+      const cleanReplacementNode = clean[0];
 
       const reopened = spawnPublicPersistentDb(root, appId, "hold");
       await reopened.ready;
       try {
-        const afterReopen = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
-        expect(afterReopen.dirty).toHaveLength(1);
-        expect(afterReopen.dirty[0].node).toBe(cleanReplacementNode);
-        expect(afterReopen.retired).toHaveLength(2);
+        const active = await readdir(join(directory, "active"));
+        expect(active).toHaveLength(3);
+        expect(active).toContain(cleanReplacementNode);
       } finally {
         await killChild(reopened.child);
       }

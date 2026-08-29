@@ -1,27 +1,33 @@
 /**
  * Node-only durable foreground TxId lease pool.
  *
+ * There deliberately is no process-wide lock. A node's `active/<uuid>` file
+ * is its exclusive O_EXCL claim, while `reusable/<uuid>` is a separately
+ * durable high-water receipt. An abandoned active claim is never removed or
+ * inferred safe: it permanently quarantines that UUID.
+ *
  * This module is dynamically imported only from a Node runtime source. Keep
  * every `node:` import here so browser and React Native bundles never resolve
  * filesystem code.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, rename, unlink, type FileHandle } from "node:fs/promises";
-import { hostname } from "node:os";
+import { mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { ForegroundNodeLease } from "../runtime-source.js";
 
-const FORMAT = "jazz-node-foreground-node-leases-v1";
-const STATE_FILE = "state.json";
-const STATE_LOCK_FILE = "state.lock";
+const FORMAT = "jazz-node-foreground-node-leases-v2";
+const ACTIVE_DIRECTORY = "active";
+const REUSABLE_DIRECTORY = "reusable";
+const RETIRED_DIRECTORY = "retired";
+const NODE_RE = /^[0-9a-f]{32}$/;
+const MAX_TX_TIME = (1n << 64n) - 1n;
 
-type StoredSlot = { node: string; confirmedTxTime: string };
-type StoredState = {
+type ReusableReceipt = {
   format: typeof FORMAT;
-  clean: StoredSlot[];
-  dirty: StoredSlot[];
-  retired: string[];
+  node: string;
+  confirmedTxTime: string;
 };
+type ActiveClaim = { format: typeof FORMAT; node: string; token: string };
 
 export type NodeForegroundNodeLeaseOptions = {
   appId: string;
@@ -31,42 +37,44 @@ export type NodeForegroundNodeLeaseOptions = {
 };
 
 /**
- * Acquire a node identity for exactly one live Node process.
+ * Acquire an exclusive NodeUuid for one live foreground runtime.
  *
- * Slot locks stay held for the process lifetime. A later process first turns
- * every dirty slot whose previous PID has exited into a permanently retired
- * UUID, then allocates only a clean or fresh node. There is intentionally no
- * expiry or PID-time heuristic that could reuse an uncertain identity.
+ * A claim is created before its receipt is read. Thus two processes cannot
+ * both consume a returned UUID, and a crash at any point leaves an active
+ * claim which future processes skip forever. This intentionally trades a rare
+ * UUID leak for no possibility of TxId reuse.
  */
 export async function acquireNodeForegroundNodeLease(
   options: NodeForegroundNodeLeaseOptions,
 ): Promise<ForegroundNodeLease> {
   const directory = leaseDirectory(options);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  return await withStateLock(directory, async () => {
-    const state = await readState(directory);
-    await retireAbandonedDirtySlots(directory, state);
+  await ensureDirectories(directory);
 
-    const slot = state.clean.pop() ?? {
-      node: randomBytes(16).toString("hex"),
-      confirmedTxTime: "0",
-    };
-    const slotLock = await acquireSlotLock(directory, slot.node);
+  for (;;) {
+    // Directory iteration is only a reuse optimisation. The O_EXCL claim is
+    // the arbitration primitive.
+    const candidates = await reusableNodes(directory);
+    const node = candidates.shift() ?? randomBytes(16).toString("hex");
+    const claim = await tryAcquireActiveClaim(directory, node);
+    if (!claim) continue;
     try {
-      state.dirty.push(slot);
-      // The dirty record is the admission point: never expose an identity
-      // until its active ownership survives a process crash.
-      await writeStateAtomically(directory, state);
-      return new NodeForegroundNodeLease(directory, slot, slotLock);
+      if (await exists(retiredPath(directory, node))) {
+        await leaveClaimQuarantined(claim);
+        continue;
+      }
+      const receipt = await readReusableReceipt(directory, node);
+      return new NodeForegroundNodeLease(
+        directory,
+        node,
+        claim,
+        receipt ? BigInt(receipt.confirmedTxTime) : 0n,
+      );
     } catch (error) {
-      // No caller received this identity. Best-effort release avoids leaving a
-      // live-process lock that could otherwise block the still-clean slot
-      // forever; a cleanup failure remains fail-closed and is reported.
-      await slotLock.close().catch(() => undefined);
-      await unlink(slotLockPath(directory, slot.node)).catch(() => undefined);
+      // Do not remove a claim after any uncertain read/validation failure.
+      await leaveClaimQuarantined(claim);
       throw error;
     }
-  });
+  }
 }
 
 /** @internal Test-only locator for white-box durability receipts. */
@@ -78,51 +86,46 @@ export function nodeForegroundNodeLeaseDirectoryForTest(
 
 class NodeForegroundNodeLease implements ForegroundNodeLease {
   readonly node: Uint8Array;
-  readonly confirmedTxTime: bigint;
   private finished = false;
 
   constructor(
     private readonly directory: string,
-    private readonly slot: StoredSlot,
-    private readonly slotLock: FileHandle,
+    private readonly nodeHex: string,
+    private readonly claim: ActiveClaim,
+    readonly confirmedTxTime: bigint,
   ) {
-    this.node = Buffer.from(slot.node, "hex");
-    this.confirmedTxTime = BigInt(slot.confirmedTxTime);
+    this.node = Buffer.from(nodeHex, "hex");
   }
 
-  async returnWithHighWater(highWater: bigint): Promise<void> {
-    if (this.finished || highWater < 0n) throw new Error("Invalid Node foreground lease handoff");
-    await this.finish(async (state) => {
-      const slot = takeDirtySlot(state, this.slot.node);
-      // A corrupted/old caller must not move the durable floor backwards.
-      const confirmedTxTime =
-        highWater > BigInt(slot.confirmedTxTime) ? highWater : BigInt(slot.confirmedTxTime);
-      state.clean.push({ ...slot, confirmedTxTime: confirmedTxTime.toString() });
-    });
+  async returnWithHighWater(runtimeHighWater: bigint): Promise<void> {
+    if (this.finished || !isTxTime(runtimeHighWater)) {
+      throw new Error("Invalid Node foreground lease handoff");
+    }
+    try {
+      // The active claim remains present while we publish the receipt. A crash
+      // before unlink quarantines this UUID despite the new receipt.
+      const existing = await readReusableReceipt(this.directory, this.nodeHex);
+      const confirmedTxTime = maxBigInt(
+        this.confirmedTxTime,
+        existing ? BigInt(existing.confirmedTxTime) : 0n,
+        runtimeHighWater,
+      );
+      await writeReusableReceipt(this.directory, this.nodeHex, confirmedTxTime);
+      await removeOwnedActiveClaim(this.directory, this.claim);
+      this.finished = true;
+    } catch (error) {
+      throw new Error(`Node foreground lease handoff failed: ${asError(error).message}`);
+    }
   }
 
   async retire(): Promise<void> {
     if (this.finished) return;
-    await this.finish(async (state) => {
-      const slot = takeDirtySlot(state, this.slot.node);
-      state.retired.push(slot.node);
-    });
-  }
-
-  private async finish(update: (state: StoredState) => Promise<void>): Promise<void> {
     try {
-      await withStateLock(this.directory, async () => {
-        const state = await readState(this.directory);
-        await update(state);
-        await writeStateAtomically(this.directory, state);
-      });
-      // Release only after the durable state has been atomically renamed and
-      // fsynced. A failure leaves both lock and dirty record in place.
-      await this.slotLock.close();
-      await unlink(slotLockPath(this.directory, this.slot.node));
+      await writeRetiredReceipt(this.directory, this.nodeHex);
+      await removeOwnedActiveClaim(this.directory, this.claim);
       this.finished = true;
     } catch (error) {
-      throw new Error(`Node foreground lease handoff failed: ${asError(error).message}`);
+      throw new Error(`Node foreground lease retirement failed: ${asError(error).message}`);
     }
   }
 }
@@ -134,219 +137,203 @@ function leaseDirectory(options: NodeForegroundNodeLeaseOptions): string {
   return resolve(process.cwd(), ".jazz", "foreground-node-leases", "v1", namespace);
 }
 
-async function withStateLock<T>(directory: string, run: () => Promise<T>): Promise<T> {
-  const lockPath = join(directory, STATE_LOCK_FILE);
-  const handle = await acquireExclusiveLock(lockPath);
-  try {
-    return await run();
-  } finally {
-    await handle.close();
-    await unlink(lockPath).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    });
+async function ensureDirectories(directory: string): Promise<void> {
+  await Promise.all(
+    [
+      directory,
+      activeDirectory(directory),
+      reusableDirectory(directory),
+      retiredDirectory(directory),
+    ].map((path) => mkdir(path, { recursive: true, mode: 0o700 })),
+  );
+}
+
+async function reusableNodes(directory: string): Promise<string[]> {
+  const entries = await readdir(reusableDirectory(directory), { withFileTypes: true });
+  const candidates: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !NODE_RE.test(entry.name)) continue;
+    if (
+      !(await exists(activePath(directory, entry.name))) &&
+      !(await exists(retiredPath(directory, entry.name)))
+    ) {
+      candidates.push(entry.name);
+    }
   }
+  return candidates.sort();
 }
 
-async function acquireSlotLock(directory: string, node: string) {
-  return await acquireExclusiveLock(slotLockPath(directory, node));
-}
-
-async function acquireExclusiveLock(path: string) {
-  for (;;) {
-    const receipt = `${JSON.stringify({
-      pid: process.pid,
-      host: hostname(),
-      processStartIdentity: await processStartIdentity(process.pid),
-      nonce: randomUUID(),
-    })}\n`;
-    const staging = `${path}.${process.pid}.${randomUUID()}.acquiring`;
+async function tryAcquireActiveClaim(directory: string, node: string): Promise<ActiveClaim | null> {
+  if (!NODE_RE.test(node)) throw new Error("Invalid Node foreground lease node");
+  const claim: ActiveClaim = { format: FORMAT, node, token: randomUUID() };
+  try {
+    const file = await open(activePath(directory, node), "wx", 0o600);
     try {
-      const staged = await open(staging, "wx", 0o600);
-      try {
-        await staged.writeFile(receipt);
-        await staged.sync();
-      } finally {
-        await staged.close();
-      }
-      await link(staging, path);
-      await unlink(staging);
-      return await open(path, "r");
-    } catch (error) {
-      await unlink(staging).catch((unlinkError: unknown) => {
-        if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError;
-      });
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (await lockOwnerIsAlive(path)) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-        continue;
-      }
-      // A dead owner cannot complete a critical section. Removing its stale
-      // lock lets the new process retire its dirty slot under the state lock.
-      await unlink(path).catch((unlinkError: unknown) => {
-        if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError;
-      });
+      await file.writeFile(`${JSON.stringify(claim)}\n`);
+      await file.sync();
+    } finally {
+      await file.close();
     }
-  }
-}
-
-async function lockOwnerIsAlive(path: string): Promise<boolean> {
-  try {
-    const owner = parseLockOwner(await readFile(path, "utf8"));
-    if (owner.host !== hostname()) {
-      throw new Error("foreground lease lock belongs to a different host");
-    }
-    process.kill(owner.pid, 0);
-    if (owner.processStartIdentity !== null) {
-      const current = await processStartIdentity(owner.pid);
-      if (current && current !== owner.processStartIdentity) return false;
-    }
-    return true;
+    await syncDirectory(activeDirectory(directory));
+    return claim;
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ESRCH" || code === "ENOENT") return false;
-    // EPERM and malformed/partial/foreign receipts fail closed: never steal.
-    if (code === "EPERM") return true;
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return null;
     throw error;
   }
 }
 
-type LockOwner = {
-  pid: number;
-  host: string;
-  processStartIdentity: string | null;
-  nonce: string;
-};
-
-function parseLockOwner(value: string): LockOwner {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new Error("invalid foreground lease lock receipt");
+async function removeOwnedActiveClaim(directory: string, claim: ActiveClaim): Promise<void> {
+  const path = activePath(directory, claim.node);
+  const actual = parseActiveClaim(await readFile(path, "utf8"));
+  if (actual.token !== claim.token || actual.node !== claim.node) {
+    throw new Error("Node foreground lease active claim is no longer owned by this runtime");
   }
-  if (!parsed || typeof parsed !== "object")
-    throw new Error("invalid foreground lease lock receipt");
-  const owner = parsed as Partial<LockOwner>;
-  if (
-    !Number.isSafeInteger(owner.pid) ||
-    Number(owner.pid) <= 0 ||
-    typeof owner.host !== "string" ||
-    owner.host.length === 0 ||
-    (owner.processStartIdentity !== null && typeof owner.processStartIdentity !== "string") ||
-    typeof owner.nonce !== "string" ||
-    !/^[0-9a-f-]{36}$/i.test(owner.nonce)
-  ) {
-    throw new Error("invalid foreground lease lock receipt");
-  }
-  return owner as LockOwner;
+  await unlink(path);
+  await syncDirectory(activeDirectory(directory));
 }
 
-async function processStartIdentity(pid: number): Promise<string | null> {
-  if (process.platform !== "linux") return null;
+async function leaveClaimQuarantined(_claim: ActiveClaim): Promise<void> {
+  // Intentionally empty: an unremoved active claim is the durable quarantine.
+}
+
+async function readReusableReceipt(
+  directory: string,
+  node: string,
+): Promise<ReusableReceipt | null> {
   try {
-    // Linux field 22 is the monotonic process-start tick. It distinguishes
-    // recycled PIDs without assuming that procfs exists on another platform.
-    return (await readFile(`/proc/${pid}/stat`, "utf8")).trim().split(" ")[21] ?? null;
+    return parseReusableReceipt(await readFile(reusablePath(directory, node), "utf8"), node);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+    throw new Error(`Invalid Node foreground lease receipt: ${asError(error).message}`);
   }
 }
 
-async function readState(directory: string): Promise<StoredState> {
+async function writeReusableReceipt(
+  directory: string,
+  node: string,
+  confirmedTxTime: bigint,
+): Promise<void> {
+  const receipt: ReusableReceipt = {
+    format: FORMAT,
+    node,
+    confirmedTxTime: confirmedTxTime.toString(),
+  };
+  await writeFileAtomically(reusablePath(directory, node), `${JSON.stringify(receipt)}\n`);
+}
+
+async function writeRetiredReceipt(directory: string, node: string): Promise<void> {
+  const path = retiredPath(directory, node);
   try {
-    const state = JSON.parse(await readFile(join(directory, STATE_FILE), "utf8"));
-    assertState(state);
-    return state;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
-    throw new Error(`Invalid Node foreground lease state: ${asError(error).message}`);
-  }
-}
-
-async function retireAbandonedDirtySlots(directory: string, state: StoredState): Promise<void> {
-  const remaining: StoredSlot[] = [];
-  for (const slot of state.dirty) {
-    if (await lockOwnerIsAlive(slotLockPath(directory, slot.node))) {
-      remaining.push(slot);
-    } else {
-      state.retired.push(slot.node);
-      await unlink(slotLockPath(directory, slot.node)).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      });
+    const file = await open(path, "wx", 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify({ format: FORMAT, node })}\n`);
+      await file.sync();
+    } finally {
+      await file.close();
     }
+    await syncDirectory(retiredDirectory(directory));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
-  state.dirty = remaining;
 }
 
-async function writeStateAtomically(directory: string, state: StoredState): Promise<void> {
-  assertState(state);
-  const destination = join(directory, STATE_FILE);
-  const temporary = join(directory, `.${STATE_FILE}.${process.pid}.${randomUUID()}.tmp`);
-  const encoded = `${JSON.stringify(state)}\n`;
+async function writeFileAtomically(destination: string, value: string): Promise<void> {
+  const temporary = join(dirname(destination), `.${randomUUID()}.tmp`);
   const file = await open(temporary, "wx", 0o600);
   try {
-    await file.writeFile(encoded);
+    await file.writeFile(value);
     await file.sync();
   } finally {
     await file.close();
   }
   await rename(temporary, destination);
-  // Durably publish the rename before a node is exposed/reused. Directory
-  // fsync is POSIX-specific; failure is fail-closed rather than guessed away.
-  const parent = await open(dirname(destination), "r");
+  await syncDirectory(dirname(destination));
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, "r");
   try {
-    await parent.sync();
+    await directory.sync();
   } finally {
-    await parent.close();
+    await directory.close();
   }
 }
 
-function emptyState(): StoredState {
-  return { format: FORMAT, clean: [], dirty: [], retired: [] };
+async function exists(path: string): Promise<boolean> {
+  try {
+    await readFile(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
-function takeDirtySlot(state: StoredState, node: string): StoredSlot {
-  const index = state.dirty.findIndex((slot) => slot.node === node);
-  if (index < 0) throw new Error("Node foreground lease is no longer active");
-  const [slot] = state.dirty.splice(index, 1);
-  if (!slot) throw new Error("Node foreground lease is no longer active");
-  return slot;
-}
-
-function assertState(value: unknown): asserts value is StoredState {
-  if (!value || typeof value !== "object") throw new Error("state is not an object");
-  const state = value as Partial<StoredState>;
+function parseReusableReceipt(value: string, expectedNode: string): ReusableReceipt {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("receipt is not JSON");
+  }
+  const receipt = parsed as Partial<ReusableReceipt>;
   if (
-    state.format !== FORMAT ||
-    !Array.isArray(state.clean) ||
-    !Array.isArray(state.dirty) ||
-    !Array.isArray(state.retired)
+    !receipt ||
+    receipt.format !== FORMAT ||
+    receipt.node !== expectedNode ||
+    typeof receipt.confirmedTxTime !== "string" ||
+    !/^(0|[1-9][0-9]*)$/.test(receipt.confirmedTxTime) ||
+    !isTxTime(BigInt(receipt.confirmedTxTime))
+  )
+    throw new Error("receipt has an invalid shape");
+  return receipt as ReusableReceipt;
+}
+
+function parseActiveClaim(value: string): ActiveClaim {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("active claim is not JSON");
+  }
+  const claim = parsed as Partial<ActiveClaim>;
+  if (
+    !claim ||
+    claim.format !== FORMAT ||
+    typeof claim.node !== "string" ||
+    !NODE_RE.test(claim.node) ||
+    typeof claim.token !== "string" ||
+    !/^[0-9a-f-]{36}$/i.test(claim.token)
   ) {
-    throw new Error("state has an incompatible format");
+    throw new Error("active claim has an invalid shape");
   }
-  const nodes = new Set<string>();
-  for (const slot of [...state.clean, ...state.dirty]) {
-    if (!slot || typeof slot !== "object") throw new Error("invalid slot");
-    if (
-      !/^[0-9a-f]{32}$/.test(slot.node) ||
-      !/^(0|[1-9][0-9]*)$/.test(slot.confirmedTxTime) ||
-      nodes.has(slot.node)
-    ) {
-      throw new Error("invalid slot");
-    }
-    nodes.add(slot.node);
-  }
-  for (const node of state.retired) {
-    if (!/^[0-9a-f]{32}$/.test(node) || nodes.has(node)) throw new Error("invalid retired slot");
-    nodes.add(node);
-  }
+  return claim as ActiveClaim;
 }
 
-function slotLockPath(directory: string, node: string): string {
-  return join(directory, `slot-${node}.lock`);
+function activeDirectory(directory: string): string {
+  return join(directory, ACTIVE_DIRECTORY);
 }
-
+function reusableDirectory(directory: string): string {
+  return join(directory, REUSABLE_DIRECTORY);
+}
+function retiredDirectory(directory: string): string {
+  return join(directory, RETIRED_DIRECTORY);
+}
+function activePath(directory: string, node: string): string {
+  return join(activeDirectory(directory), node);
+}
+function reusablePath(directory: string, node: string): string {
+  return join(reusableDirectory(directory), node);
+}
+function retiredPath(directory: string, node: string): string {
+  return join(retiredDirectory(directory), node);
+}
+function maxBigInt(...values: bigint[]): bigint {
+  return values.reduce((max, value) => (value > max ? value : max), 0n);
+}
+function isTxTime(value: bigint): boolean {
+  return value >= 0n && value <= MAX_TX_TIME;
+}
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
