@@ -186,8 +186,11 @@ current physical rows, transaction/merge metadata, and an indirect content
 tree together through both SQLite and RocksDB. Current Jazz must first inspect
 the committed backend store read-only, then open that same logical snapshot
 without writes, materialize its content tree, and preserve it across a mixed
-current-format write and a third-process reopen. This corpus is storage-epoch
-evidence, not a compatibility decoder for pre-epoch-alpha roots.
+current-format write and a third-process reopen. Regeneration produces fresh
+backend-owned candidate bytes which are copied/unpacked into independent roots
+and put through that same full receipt before their checksums can be promoted;
+only the logical pack is deterministic. This corpus is storage-epoch evidence,
+not a compatibility decoder for pre-epoch-alpha roots.
 
 ### 4.4 Deletion as a separate layer
 
