@@ -317,6 +317,40 @@ describe("SharedWorker bridge with IndexedDB", () => {
     }
   });
 
+  it("releases an invalidated physical-worker epoch so a successor generation can reopen", async () => {
+    const appId = uniqueDbName("invalidated-physical-worker-epoch-app");
+    const dbName = uniqueDbName("invalidated-physical-worker-epoch-root");
+    const secret = generateAuthSecret();
+    const first = track(await createDb({ appId, secret, driver: { type: "persistent", dbName } }));
+    try {
+      await first.all(allTodos, { tier: "local" });
+      const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+      localStorage.setItem(`jazz:shared-worker-generation:${workerName}`, "1");
+      await expect(
+        createDb({ appId, secret, driver: { type: "persistent", dbName } }),
+      ).rejects.toThrow("active in another Jazz SharedWorker realm");
+
+      // Planted lifecycle transition: this is not a clean worker handoff.
+      // IDB versionchange/delete invalidates the live worker handle, so the
+      // successor must be admitted after that handle releases its Web Lock.
+      await IndexedDbPageStore.destroy(dbName);
+      await sleep(100);
+
+      const successor = track(
+        await createDb({ appId, secret, driver: { type: "persistent", dbName } }),
+      );
+      try {
+        await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      } finally {
+        await successor.shutdown();
+        untrack(successor);
+      }
+    } finally {
+      await first.shutdown().catch(() => undefined);
+      untrack(first);
+    }
+  });
+
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
   const errorListeners = new Set<(event: ErrorEvent) => void>();
@@ -3122,6 +3156,41 @@ describe("SharedWorker bridge with IndexedDB", () => {
       20000,
       "First tab should receive the refreshed auth state from the shared worker",
     );
+  }, 60000);
+
+  it("rejects a principal-changing live auth update before local or worker state changes", async () => {
+    const { appId } = await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
+    const dbName = uniqueDbName("live-auth-owner-guard");
+    const aliceJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000aa11",
+      undefined,
+      appId,
+    );
+    const bobJwt = await getJazzServerJwtForUser(
+      "00000000-0000-0000-0000-00000000bb22",
+      undefined,
+      appId,
+    );
+    const db = track(
+      await createDb({ appId, jwtToken: aliceJwt, driver: { type: "persistent", dbName } }),
+    );
+    try {
+      await db.all(allTodos, { tier: "local" });
+      const aliceState = db.getAuthState();
+      expect(aliceState.session?.user).toBeDefined();
+
+      // Planted positive: applying Bob before BrowserConnectionManager checks
+      // ownership would mutate this state and forward Bob's claims into the
+      // durable Alice worker before the guard could reject it.
+      expect(() => db.updateAuthToken(bobJwt)).toThrow(
+        "Cannot change the authenticated user of a live persistent browser Db",
+      );
+      expect(db.getAuthState()).toEqual(aliceState);
+      await expect(db.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+    } finally {
+      await db.shutdown();
+      untrack(db);
+    }
   }, 60000);
 
   it("can update an optional row field to null", async () => {

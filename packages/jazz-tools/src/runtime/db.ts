@@ -1542,11 +1542,17 @@ export class Db {
       jwtToken,
       trustedReservedSession,
     });
+    const tokenChanged = previousToken !== jwtToken;
+    // Browser persistent roots are principal-bound. Let the connection manager
+    // reject a token-carried incompatible switch while config, local auth state
+    // and worker claims still describe the preceding principal.
+    if (tokenChanged && this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) {
+      this.connection.updateAuth({ jwtToken, trustedReservedSession });
+    }
+
     const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
     );
-    const tokenChanged = previousToken !== jwtToken;
-
     if (!tokenChanged && published.value === previousState) {
       published.rollback();
       return false;
@@ -1555,7 +1561,9 @@ export class Db {
     this.config.jwtToken = jwtToken;
     setTrustedReservedSession(this.config, trustedReservedSession);
 
-    this.connection.updateAuth({ jwtToken, trustedReservedSession });
+    // A same-token package-private session refresh cannot cross the public
+    // principal boundary above; preserve the old no-op/refresh behavior.
+    if (!tokenChanged) this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }
@@ -1568,11 +1576,14 @@ export class Db {
       ...this.config,
       cookieSession,
     });
+    const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
+    if (sessionChanged && this.authStateStore.validateCookieSession(cookieSession)) {
+      this.connection.updateAuth({ cookieSession });
+    }
+
     const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyCookieSession(cookieSession),
     );
-    const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
-
     if (!sessionChanged && published.value === previousState) {
       published.rollback();
       return false;
@@ -1580,7 +1591,7 @@ export class Db {
 
     this.config.cookieSession = cookieSession;
 
-    this.connection.updateAuth({ cookieSession });
+    if (!sessionChanged) this.connection.updateAuth({ cookieSession });
 
     return true;
   }

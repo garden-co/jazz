@@ -91,6 +91,7 @@ type PhysicalDatabaseOwner = {
   epoch: BrowserPhysicalDatabaseEpoch;
   pageStore: IndexedDbPageStore;
   release: Promise<void> | null;
+  disposeInvalidation: (() => void) | null;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
@@ -132,8 +133,19 @@ async function ensurePhysicalDatabaseOwner(
   try {
     pageStore = await IndexedDbPageStore.open(dbName, { owner: storageOwner });
     await pageStore.claimBrowserWorkerEpoch(epoch.id);
-    const owner: PhysicalDatabaseOwner = { epoch, pageStore, release: null };
+    const owner: PhysicalDatabaseOwner = {
+      epoch,
+      pageStore,
+      release: null,
+      disposeInvalidation: null,
+    };
     physicalDatabaseOwners.set(dbName, owner);
+    // Lease-only bootstrap has no RuntimeContext listener yet. The physical
+    // owner itself must release this realm's lock when another agent deletes
+    // or upgrades the root underneath it.
+    owner.disposeInvalidation = pageStore.onInvalidated(() =>
+      releaseInvalidatedPhysicalDatabaseOwner(dbName),
+    );
     return owner;
   } catch (error) {
     pageStore?.close();
@@ -150,6 +162,8 @@ async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
       try {
         await owner.pageStore.releaseBrowserWorkerEpoch(owner.epoch.id);
       } finally {
+        owner.disposeInvalidation?.();
+        owner.disposeInvalidation = null;
         owner.pageStore.close();
         owner.epoch.release();
         physicalDatabaseOwners.delete(dbName);
@@ -157,6 +171,20 @@ async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
     })();
   }
   await owner.release;
+}
+
+/**
+ * An external IDB delete/versionchange invalidates every handle, including a
+ * lease-only bootstrap that has no tab context to close. The epoch record may
+ * already be gone, but `releasePhysicalDatabaseOwner` still releases the Web
+ * Lock in its finally path. Clear active lease bookkeeping first: those IDs
+ * belonged to the erased root and must not keep this realm artificially live.
+ */
+function releaseInvalidatedPhysicalDatabaseOwner(dbName: string): void {
+  foregroundLeaseOwners.delete(dbName);
+  void releasePhysicalDatabaseOwner(dbName)
+    .catch(() => undefined)
+    .finally(() => maybeCloseWorker());
 }
 
 workerGlobal.onconnect = (event) => {
@@ -1039,6 +1067,8 @@ function handleStorageInvalidation(context: RuntimeContext): void {
   if (context.storageInvalidated) return;
   context.storageInvalidated = true;
   contexts.delete(context.key);
+  context.disposePageStoreInvalidation?.();
+  context.disposePageStoreInvalidation = null;
   context.pageStore = null;
   context.runtime?.discard();
   context.runtime = null;
@@ -1046,6 +1076,10 @@ function handleStorageInvalidation(context: RuntimeContext): void {
   context.disposeTelemetry = null;
   context.disposeAuxiliaryTrace?.();
   context.disposeAuxiliaryTrace = null;
+  // Context listeners cover active runtimes; the physical-owner listener also
+  // covers lease-only bootstrap. This is idempotent so either ordering safely
+  // releases the erased root's epoch/lock.
+  releaseInvalidatedPhysicalDatabaseOwner(context.options.dbName);
   broadcast(context, { type: "storage-invalidated" });
   setTimeout(() => closeContextPeers(context), 0);
 }

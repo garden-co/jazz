@@ -175,12 +175,17 @@ export class BrowserConnectionManager extends ConnectionManager {
     // before mutating Db config or forwarding anything to the worker, so a
     // rejected Alice -> Bob switch cannot expose Alice's local rows to Bob.
     const nextConfig = { ...this.host.config, ...auth } as DbForConnection["config"];
-    setTrustedReservedSession(nextConfig, getTrustedReservedSession(this.host.config));
+    setTrustedReservedSession(
+      nextConfig,
+      "trustedReservedSession" in auth
+        ? auth.trustedReservedSession
+        : getTrustedReservedSession(this.host.config),
+    );
     assertBrowserStorageOwnerUnchanged(this.host.config, nextConfig);
     super.updateAuth(auth);
     void this.connection?.updateAuth(
-      JSON.stringify(runtimeAuth(this.host.config)),
-      runtimeSessionClaims(this.host.config),
+      JSON.stringify(runtimeAuth(nextConfig)),
+      runtimeSessionClaims(nextConfig),
     );
   }
 
