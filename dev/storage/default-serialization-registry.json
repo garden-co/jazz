@@ -1,8 +1,8 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "scope": {
     "description": "Every production source location that owns an authoritative persistence ingress, egress, or value carried across one. Test and benchmark directories are deliberately out of scope: they may construct historical or malformed bytes, but cannot define a production storage spelling.",
-    "serializerCrates": ["ciborium", "postcard", "serde_json"],
+    "serializerCrates": ["postcard", "serde_json"],
     "paths": [
       "crates/groove/src/db",
       "crates/groove/src/storage",
@@ -22,317 +22,3703 @@
   },
   "allowances": [
     {
-      "id": "large-value-json-streaming-semantic-parse",
-      "path": "crates/groove/src/large_values.rs",
-      "api": "serde_json::Deserializer::from_slice",
-      "expectedOccurrences": 1,
-      "classification": "Streaming semantic parse of already-authenticated JSON bytes while applying a user JSON operation. Its iterator result is reserialized by the explicit large-value V1 records; the serde deserializer is not a persisted container codec.",
-      "anchors": ["776cf153bb7d51ec17594c77a55d1f680a02e43d75d507d7c89c4d53842c12d5"]
-    },
-    {
-      "id": "catalogue-nested-json-number-parse",
-      "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
-      "api": "serde_json::from_str",
-      "expectedOccurrences": 1,
-      "classification": "Explicit semantic parse of a JSON number primitive inside the versioned catalogue nested-value algebra. Decode immediately re-encodes with Number::to_string and rejects a noncanonical spelling; no serde container layout is durable.",
-      "anchors": ["bf406fb4558b4479621719b9aafbed59552c05b885cf0042723c6a29c8849c71"]
-    },
-    {
-      "id": "protocol-wire-fixture-postcard-encode",
-      "path": "crates/jazz/src/protocol.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 12,
-      "classification": "Protocol module's hostile-wire and compatibility receipts. Production wire ingress/egress is versioned by crate::wire; these test-only constructors do not define durable storage or identity bytes.",
-      "anchors": [
-        "ed390eb0d0a3cda421628d35fc6a40981f2cf13a28381871de655251ca717001",
-        "81e79b4d3f11ce9292d810418fea6e4448b1051e9726dbf125c99fdfe2bac916",
-        "319870b0fc208f7667fbfcce127cb920e24ac76f21e2ff046d8a2ebb69255d38",
-        "0f2f0b1441c2dee48b2aad8b55763a805706b32c711798aadfa7cbea6f49e370",
-        "e25aeb050135be5f2e15466d8d47e41ae771110a4fc21909d9155b34ea884827",
-        "7c5d728e4d7ae09afd4d6a4c6bf1880b022ea5f3eb0ef1473f3f5f0c5912e516",
-        "c2c1531b77aee0c56d6fdf4d2ed7fd24468140c6cde77060e96da4003340614a",
-        "59d8d35b4686c36f5406c2dfb7e87c9182d4ccdc30ef201d742cbaa8b2039c5a",
-        "4d2444c50686fc973b42eea7d167d104a613714770f0fff7b4d492b9de379800",
-        "43f57446535593727d6dceed267490ed7dba8266f1c4ab0103b748a81148f3ec",
-        "a0cc136dde8dbec0f033c49399856c1dbd1fb4db9238e54ff942fcaf9ebfc1ee",
-        "0e33c86fd693fc2d8a8bab55380750f351764bcb7bc0de2a85923e45b4d722fc"
+      "id": "serde-json-value-crates-groove-src-db-facade-1755-24",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/db/facade.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 1755,
+            "column": 24
+          },
+          "span": {
+            "start": {
+              "line": 1755,
+              "column": 24
+            },
+            "end": {
+              "line": 1755,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "impl Database"
+          },
+          "boundary": "production"
+        }
       ]
     },
     {
-      "id": "protocol-wire-fixture-postcard-decode",
-      "path": "crates/jazz/src/protocol.rs",
-      "api": "postcard::from_bytes",
-      "expectedOccurrences": 8,
-      "classification": "Protocol module's hostile-wire and compatibility receipts; see protocol-wire-fixture-postcard-encode.",
-      "anchors": [
-        "ed390eb0d0a3cda421628d35fc6a40981f2cf13a28381871de655251ca717001",
-        "382213eb1454cb32916bfeb3a41ffc862c884214b65d9c1ec09307c4c5c1ffa4",
-        "3f4e840352f5200a8a615a887f58b8970625e86cf62538e18e1883bed7872529",
-        "59d83160f1267d98cb9e855d334b7fa65444454da9b6b57474e4c957e51b6b6a",
-        "9ab148d222e49e632787b61d1af10078f7fa7924f0e5b49f1d5070c18b1dfbec",
-        "4a6320d4b7b3c003ecca2a216857db82a7f9f7db24b2031e1c9e8cfbbcd7924d",
-        "8243f40d6179865e63f0a92b4525bf1c8f33b122569574ae094ea3964345b4a7",
-        "d5cc56498fbdb8cfe5334f52b369b1df68ab9ff6dbba45680edce5eb73ceab30"
+      "id": "serde-json-value-crates-groove-src-db-facade-1791-19",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/db/facade.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 1791,
+            "column": 19
+          },
+          "span": {
+            "start": {
+              "line": 1791,
+              "column": 19
+            },
+            "end": {
+              "line": 1791,
+              "column": 36
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn read_large_json_pointer"
+          },
+          "boundary": "production"
+        }
       ]
     },
     {
-      "id": "schema-version-public-json-v1",
-      "path": "crates/jazz/src/protocol.rs",
-      "api": "serde_json::to_vec",
-      "expectedOccurrences": 2,
-      "classification": "Canonical public-schema JSON, including the explicit CATS v1 schema envelope. Publication content IDs consume the CATS v1 bytes directly, never this Rust serde wrapper. The second occurrence is a test receipt.",
-      "anchors": [
-        "6523391704f728b71bb9f709b155988fad571cd0b7ae9f7b38364d350326bf26",
-        "1c7bcbb68fd534d0bf41ab334c44e6001629af55e899cc03d4b7aa626691d9a5"
-      ]
-    },
-    {
-      "id": "protocol-public-schema-test-decode",
-      "path": "crates/jazz/src/protocol.rs",
-      "api": "serde_json::from_slice",
-      "expectedOccurrences": 1,
-      "classification": "Test-only physical-manifest round-trip receipt.",
-      "anchors": ["1c7bcbb68fd534d0bf41ab334c44e6001629af55e899cc03d4b7aa626691d9a5"]
-    },
-    {
-      "id": "protocol-public-schema-test-string-decode",
-      "path": "crates/jazz/src/protocol.rs",
-      "api": "serde_json::from_str",
-      "expectedOccurrences": 2,
-      "classification": "Test-only SchemaVersion public-schema envelope receipt.",
-      "anchors": [
-        "540bf4b6105748fa5d121fcbeec14f9fe2826cd0b75a6d68e67da79b11f0d064",
-        "d33a063ddc7fb353912d52b22c6965fb5c86a00832c369f9783c354512dcb4e1"
-      ]
-    },
-    {
-      "id": "protocol-public-schema-test-string-encode",
-      "path": "crates/jazz/src/protocol.rs",
-      "api": "serde_json::to_string",
-      "expectedOccurrences": 1,
-      "classification": "Test-only SchemaVersion public-schema envelope receipt.",
-      "anchors": ["0346b8af8fa8c13c9382c539450ce2a1b027efe421dc3559b66f03fea35d164e"]
-    },
-    {
-      "id": "catalogue-public-schema-json-v1-decode",
-      "path": "crates/jazz/src/tools/public_schema_convert.rs",
-      "api": "serde_json::from_slice",
-      "expectedOccurrences": 1,
-      "classification": "The CATS v1 public-schema payload decoder. The owning codec re-encodes and rejects a noncanonical payload byte-for-byte.",
-      "anchors": ["52a187fd2bea28dd7fa08ed937998de81a9ed8c3d243d15af6832561b817b5da"]
-    },
-    {
-      "id": "public-schema-perf-fixture-json",
-      "path": "crates/jazz/src/tools/public_schema_convert.rs",
-      "api": "serde_json::from_str",
-      "expectedOccurrences": 1,
-      "classification": "Test-only policy graph performance fixture parser.",
-      "anchors": ["fcd2a29bd14fd6c973fe840d5850e3bf554f1a0ac2296e3fccfe3ac729a1d6d4"]
-    },
-    {
-      "id": "author-subject-canonical-json-encode",
-      "path": "crates/jazz/src/ids.rs",
-      "api": "serde_json::to_string",
-      "expectedOccurrences": 2,
-      "classification": "The normative public AuthorSubject identity is the exact canonical JSON two-string tuple [issuer,subject]. Decode re-encodes and rejects alternate spellings; frozen receipts pin the Rust serializer spelling. The second occurrence is its reserved-issuer receipt.",
-      "anchors": [
-        "3e47daad0e8c23fac603d4a6ecc30909b413cf02d2e49c49d43322bada83e9ef",
-        "e450bd0ee587c8911fea78cb2945bf2e2b903cff2070496e5f32ebfd0a264c55"
-      ]
-    },
-    {
-      "id": "author-subject-canonical-json-decode",
-      "path": "crates/jazz/src/ids.rs",
-      "api": "serde_json::from_str",
-      "expectedOccurrences": 3,
-      "classification": "Decodes the normative AuthorSubject JSON tuple, then re-encodes to reject noncanonical input. One occurrence is test-only UUID fixture support; the portable identity decode endpoints remain covered by frozen receipts.",
-      "anchors": [
-        "bb24bf10ee56a4ac2eeeeaeb72ddbf8faf43c6b64c7aa4c40ac7279b93872d89",
-        "3cbc60075facdbeddf289a8cd54fd571bc65685c3ef8fe6a88f341e50870e7d1",
-        "b627c7fb969035fde03b3f3bdeb1a58742b852d1dbe1459b7e90d92685f6ff53"
-      ]
-    },
-    {
-      "id": "typed-schema-view-fingerprint",
-      "path": "crates/jazz/src/db.rs",
-      "api": "serde_json::to_vec",
-      "expectedOccurrences": 1,
-      "classification": "A process-local typed-facade map key. It is immediately domain-separated and hashed, and never enters node or adapter storage.",
-      "anchors": ["bbc38773f117ba217e944fde9bb25f05fc64ecc27fa8ff03e82a11ff03707a54"]
-    },
-    {
-      "id": "relay-upstream-subscription-key",
-      "path": "crates/jazz/src/db/peer_connection.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 1,
-      "classification": "Temporary UUIDv5 input for an in-memory relay subscription handle; it is not a persisted subscription identity.",
-      "anchors": ["f09dd5d010b2086507bab87dfa8ef2cdc4ef2bc9d4d69c39fe8d0441f768c8e2"]
-    },
-    {
-      "id": "catalogue-snapshot-fingerprint",
-      "path": "crates/jazz/src/db/peer_connection.rs",
-      "api": "serde_json::to_vec",
-      "expectedOccurrences": 1,
-      "classification": "Temporary BLAKE3 input that suppresses duplicate peer sends in the current process; the snapshot itself crosses the versioned sync path.",
-      "anchors": ["56430487d03f474c0a41c0d82cf4ac4b9c2cce2c44e4cd4f04ecf3d77d52d341"]
-    },
-    {
-      "id": "subscription-size-measurements",
-      "path": "crates/jazz/src/db/lifecycle.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 3,
-      "classification": "Testing-feature size estimators; the encoded bytes are measured then discarded.",
-      "anchors": [
-        "c54df64650141a32a0cdc7ec753178f7b9a3adb6a78bef0dc81458f9ceee4946",
-        "7d311c33d28661957a8b782c784d702a58b4c5c4a33bd6687eac236fd05066c2",
-        "cc4a51e8b0eceeb99a01945e6b5c72f2d834ec83b007a91d507c244f55f13b4e"
-      ]
-    },
-    {
-      "id": "json-api-semantic-transform",
-      "path": "crates/jazz/src/db/mutations.rs",
-      "api": "serde_json::from_str",
-      "expectedOccurrences": 1,
-      "classification": "Public JSON pointer read/set behavior. JsonSet explicitly transforms application JSON source into a full replacement before Groove stages its ordinary byte edit; this is not an engine-owned record/key codec. Source-preserving versus semantic rewrite behavior is tracked by #2337.",
-      "anchors": ["dfe02b19de0889c7e34da046519432ba086c21c4237d9317b3d552c8514b19f2"]
-    },
-    {
-      "id": "json-api-semantic-transform-slice",
-      "path": "crates/jazz/src/db/mutations.rs",
-      "api": "serde_json::from_slice",
-      "expectedOccurrences": 1,
-      "classification": "Public JSON pointer read/set behavior; see json-api-semantic-transform.",
-      "anchors": ["0fa6e0f9fd561e48a763d1d817556c7c603d9109427e1ba950dc8ad4972d3018"]
-    },
-    {
-      "id": "json-api-semantic-transform-write",
-      "path": "crates/jazz/src/db/mutations.rs",
-      "api": "serde_json::to_vec",
-      "expectedOccurrences": 1,
-      "classification": "Public JSON pointer read/set behavior; see json-api-semantic-transform.",
-      "anchors": ["451d412148a93c4d70388b50a498d84c820c04925e39fa63ede058018b18e40c"]
-    },
-    {
-      "id": "large-value-json-semantics",
-      "path": "crates/groove/src/large_values.rs",
-      "api": "serde_json::from_str",
-      "expectedOccurrences": 1,
-      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
-      "anchors": ["f67368b5320ac27f8be465bfebd5946dd8514e36e24364f35c847f76baf673d7"]
-    },
-    {
-      "id": "large-value-json-semantics-slice",
-      "path": "crates/groove/src/large_values.rs",
-      "api": "serde_json::from_slice",
-      "expectedOccurrences": 1,
-      "classification": "Semantic validation/materialization of user-declared JSON bytes; see large-value-json-semantics.",
-      "anchors": ["2bb907d1ae7f8e37b31666abd3bf42ad20d526fab4e95c49b7d9b038381c363e"]
-    },
-    {
-      "id": "catalogue-public-schema-json-v1",
-      "path": "crates/jazz/src/node/codec.rs",
-      "api": "serde_json::to_vec",
-      "expectedOccurrences": 1,
-      "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout.",
-      "anchors": ["e10a9e087af36fe2f9078e766c98ff6751c5aba704ac67628d3d6cf9db592391"]
-    },
-    {
-      "id": "catalogue-codec-test-only-postcard",
-      "path": "crates/jazz/src/node/codec.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 1,
-      "classification": "A malformed legacy-byte test only; the production codec never admits this postcard value.",
-      "anchors": ["148f332ee942a1246f37eb7d25c5af50f4bba27f6d890b8a59e02f132482b6c0"]
-    },
-    {
-      "id": "subscription-equivalence-temporary-value-key",
-      "path": "crates/jazz/src/node/mod.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 1,
-      "classification": "Temporary in-memory comparison key for a subscription publication decision; it is never written to an OrderedKVStorage family.",
-      "anchors": ["121404b1d523b8216de98752c2226f8906795abe8c5696d3e753f11455433c62"]
-    },
-    {
-      "id": "normalized-query-literal-carrier",
-      "path": "crates/jazz/src/node/query_eval/normalization.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 4,
-      "classification": "In-memory normalized-query literals and a process-local policy fingerprint. The carrier is decoded before lowering and is not a persisted query or storage key.",
-      "anchors": [
-        "85ddc170fb15d7bc7f79ecc70483f2b32a1a0907e0c4617bf3a3df57f1343110",
-        "6fca902d1e9edd5179ea9749a63e64c1f78fa1aef6f02f806f51aacea2bb696a",
-        "4f5bf0c176543453c48f7d45ef17d3bd9a74bda33ef7e5522c95c4be996046a6",
-        "9fa0d62766f7adc68dfd9cf214a6897a3d3203c95f1dcc6bda94e0122914c83d"
-      ]
-    },
-    {
-      "id": "lowered-query-literal-carrier",
-      "path": "crates/jazz/src/node/query_engine/lowering/graph_lowering.rs",
-      "api": "postcard::from_bytes",
-      "expectedOccurrences": 6,
-      "classification": "Decodes the in-memory normalized-query literal carrier above. It is not a storage/recovery decoder.",
-      "anchors": [
-        "1df31d3c03cc79f489de6f012a6867bb8596ae4efb7b60ec4f46c72429f67fca",
-        "59e4a0babda8e36b180a90e900292359a28b41eb250326633fba24d274fb7a8d",
-        "7cce13b29c65d2d2ced5b84b2facc4cb5b695412146f31d334c60a60ebcdc333",
-        "4c41d34227b4dffe5cd63d8fdecc7df297a60a541c1c039d6fa824b4300f56d0",
-        "4c41d34227b4dffe5cd63d8fdecc7df297a60a541c1c039d6fa824b4300f56d0",
-        "7cce13b29c65d2d2ced5b84b2facc4cb5b695412146f31d334c60a60ebcdc333"
-      ]
-    },
-    {
-      "id": "read-source-literal-carrier",
-      "path": "crates/jazz/src/node/query_eval/read_sources.rs",
-      "api": "postcard::from_bytes",
-      "expectedOccurrences": 1,
-      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
-      "anchors": ["a608d0bf8b4bf466f2fe7d86eb40eff698582b9213d74475f169823a1849f9cc"]
-    },
-    {
-      "id": "authorization-scope-fingerprint",
-      "path": "crates/jazz/src/node/query_eval/authorization.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 8,
-      "classification": "Temporary inputs to BLAKE3 authorization scope fingerprints and their unit receipts. They are never persisted or used as a durable identity.",
-      "anchors": [
-        "3e1f1188613b16d878a55f4cd9cd1e50e4ee23444b9bea6780cc47e47772a8c8",
-        "3bc128bd79af1ea6d13e78217e1e912cea2e6a737b275935df6c0d38baff6767",
-        "e3423b430c4752e8d671e695ed7531e27b54bcd09285dc2706e9e4679ca1f898",
-        "27610528a03cb67383b6233427ca1afe8f5a955bf48dcc0cc6e580a984f7b2db",
-        "b4b8a7133fe924f27470c747c440c1968a227bc513fe6af5bfe8816996706303",
-        "bfd023e9e2462b2aebb78cf2c78fa6857a0e5160283d069753381d097365cebe",
-        "3f0f1dd305708833fb705eda90d268fe6e5cba90b5759b7159aee6fe5669204f",
-        "b560a84730343b752892af50db3a772140be3f6f9d428d85baa7a38adb5bd8b0"
-      ]
-    },
-    {
-      "id": "maintained-view-footprint-measurement",
-      "path": "crates/jazz/src/node/query_eval/maintained_views.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 4,
-      "classification": "Testing-only footprint measurement; the result is discarded and cannot enter durable settled view state.",
-      "anchors": [
-        "be7c87b84891cc58a5b8fb7fd95a5f7618bf0ea9cbbac8fa1f4be1d9c99d0ad5",
-        "95750065d6c9931cc7d2d21deef273b0cb62228bfae6c56a6b23975863cd2d42",
-        "221e9295d546b9d3f7ccaa3172fd844eaf49584f192067f0e13c311f94c565ca",
-        "37f716954b888007db0eab81650f51cedfe60bafe689d32c827873976ebbf010"
-      ]
-    },
-    {
-      "id": "large-value-future-format-test",
-      "path": "crates/groove/src/large_values.rs",
-      "api": "postcard::to_allocvec",
-      "expectedOccurrences": 1,
-      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
-      "anchors": ["4668b70e7be7e7a68577e8f0e83f20c882229ee7606bb5337c7480cf55f50088"]
-    },
-    {
-      "id": "large-value-range-json-read",
-      "path": "crates/groove/src/db/facade.rs",
-      "api": "serde_json::from_slice",
-      "expectedOccurrences": 1,
+      "id": "serde-json-from-slice-crates-groove-src-db-facade-1791-39",
       "classification": "Parses already-authenticated JSON bytes after a requested range is materialized; the parse result is an API value, never persisted.",
-      "anchors": ["17bc50aeac56a965b35ab12d2e961b76a0980138d8be01f3e1f4600dde3edea7"]
+      "endpoints": [
+        {
+          "path": "crates/groove/src/db/facade.rs",
+          "canonicalPath": "serde_json::from_slice",
+          "location": {
+            "line": 1791,
+            "column": 39
+          },
+          "span": {
+            "start": {
+              "line": 1791,
+              "column": 39
+            },
+            "end": {
+              "line": 1791,
+              "column": 61
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn read_large_json_pointer"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-groove-src-large-values-4582-18",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 4582,
+            "column": 18
+          },
+          "span": {
+            "start": {
+              "line": 4582,
+              "column": 18
+            },
+            "end": {
+              "line": 4582,
+              "column": 35
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "enum JsonPointerPrefix"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-deserializer-from-slice-crates-groove-src-large-values-4625-26",
+      "classification": "Streaming semantic parse of already-authenticated JSON bytes while applying a user JSON operation. Its iterator result is reserialized by the explicit large-value V1 records; the serde deserializer is not a persisted container codec.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::Deserializer::from_slice",
+          "location": {
+            "line": 4625,
+            "column": 26
+          },
+          "span": {
+            "start": {
+              "line": 4625,
+              "column": 26
+            },
+            "end": {
+              "line": 4625,
+              "column": 62
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn json_pointer_prefix"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-groove-src-large-values-4626-26",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 4626,
+            "column": 26
+          },
+          "span": {
+            "start": {
+              "line": 4626,
+              "column": 26
+            },
+            "end": {
+              "line": 4626,
+              "column": 43
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn json_pointer_prefix"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-object-crates-groove-src-large-values-4639-21",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::Value::Object",
+          "location": {
+            "line": 4639,
+            "column": 21
+          },
+          "span": {
+            "start": {
+              "line": 4639,
+              "column": 21
+            },
+            "end": {
+              "line": 4639,
+              "column": 46
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn json_pointer_prefix"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-array-crates-groove-src-large-values-4640-21",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::Value::Array",
+          "location": {
+            "line": 4640,
+            "column": 21
+          },
+          "span": {
+            "start": {
+              "line": 4640,
+              "column": 21
+            },
+            "end": {
+              "line": 4640,
+              "column": 45
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn json_pointer_prefix"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-groove-src-large-values-4868-13",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 4868,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 4868,
+              "column": 13
+            },
+            "end": {
+              "line": 4868,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn validate_logical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-groove-src-large-values-4868-36",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 4868,
+            "column": 36
+          },
+          "span": {
+            "start": {
+              "line": 4868,
+              "column": 36
+            },
+            "end": {
+              "line": 4868,
+              "column": 53
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn validate_logical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-groove-src-large-values-5488-21",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 5488,
+            "column": 21
+          },
+          "span": {
+            "start": {
+              "line": 5488,
+              "column": 21
+            },
+            "end": {
+              "line": 5488,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-slice-crates-groove-src-large-values-5488-41",
+      "classification": "Parses already-authenticated JSON bytes after a requested range is materialized; the parse result is an API value, never persisted.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::from_slice",
+          "location": {
+            "line": 5488,
+            "column": 41
+          },
+          "span": {
+            "start": {
+              "line": 5488,
+              "column": 41
+            },
+            "end": {
+              "line": 5488,
+              "column": 63
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-groove-src-large-values-5489-54",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 5489,
+            "column": 54
+          },
+          "span": {
+            "start": {
+              "line": 5489,
+              "column": 54
+            },
+            "end": {
+              "line": 5489,
+              "column": 70
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-groove-src-large-values-5490-50",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 5490,
+            "column": 50
+          },
+          "span": {
+            "start": {
+              "line": 5490,
+              "column": 50
+            },
+            "end": {
+              "line": 5490,
+              "column": 66
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-groove-src-large-values-5491-48",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 5491,
+            "column": 48
+          },
+          "span": {
+            "start": {
+              "line": 5491,
+              "column": 48
+            },
+            "end": {
+              "line": 5491,
+              "column": 64
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-groove-src-large-values-5492-57",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 5492,
+            "column": 57
+          },
+          "span": {
+            "start": {
+              "line": 5492,
+              "column": 57
+            },
+            "end": {
+              "line": 5492,
+              "column": 73
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-groove-src-large-values-8003-17",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/groove/src/large_values.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 8003,
+            "column": 17
+          },
+          "span": {
+            "start": {
+              "line": 8003,
+              "column": 17
+            },
+            "end": {
+              "line": 8003,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn candidate_future_format_two_nodes_fail_closed"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-error-crates-jazz-src-db-lifecycle-1065-22",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/lifecycle.rs",
+          "canonicalPath": "postcard::Error",
+          "location": {
+            "line": 1065,
+            "column": 22
+          },
+          "span": {
+            "start": {
+              "line": 1065,
+              "column": 22
+            },
+            "end": {
+              "line": 1065,
+              "column": 37
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "struct SizeRemovedRow"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-db-lifecycle-1066-5",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/lifecycle.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 1066,
+            "column": 5
+          },
+          "span": {
+            "start": {
+              "line": 1066,
+              "column": 5
+            },
+            "end": {
+              "line": 1066,
+              "column": 26
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_relation_snapshot_for_size"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-error-crates-jazz-src-db-lifecycle-1077-22",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/lifecycle.rs",
+          "canonicalPath": "postcard::Error",
+          "location": {
+            "line": 1077,
+            "column": 22
+          },
+          "span": {
+            "start": {
+              "line": 1077,
+              "column": 22
+            },
+            "end": {
+              "line": 1077,
+              "column": 37
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_relation_snapshot_for_size"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-db-lifecycle-1078-5",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/lifecycle.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 1078,
+            "column": 5
+          },
+          "span": {
+            "start": {
+              "line": 1078,
+              "column": 5
+            },
+            "end": {
+              "line": 1078,
+              "column": 26
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_subscription_reset_frame_for_size"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-db-lifecycle-1133-5",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/lifecycle.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 1133,
+            "column": 5
+          },
+          "span": {
+            "start": {
+              "line": 1133,
+              "column": 5
+            },
+            "end": {
+              "line": 1133,
+              "column": 26
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn validation_tuple_estimate_bytes"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-db-mutations-56-16",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 56,
+            "column": 16
+          },
+          "span": {
+            "start": {
+              "line": 56,
+              "column": 16
+            },
+            "end": {
+              "line": 56,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "struct JsonSetEdit"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-db-mutations-216-17",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 216,
+            "column": 17
+          },
+          "span": {
+            "start": {
+              "line": 216,
+              "column": 17
+            },
+            "end": {
+              "line": 216,
+              "column": 34
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn checked_range"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-db-mutations-218-18",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 218,
+            "column": 18
+          },
+          "span": {
+            "start": {
+              "line": 218,
+              "column": 18
+            },
+            "end": {
+              "line": 218,
+              "column": 35
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn checked_range"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-object-crates-jazz-src-db-mutations-260-13",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value::Object",
+          "location": {
+            "line": 260,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 260,
+              "column": 13
+            },
+            "end": {
+              "line": 260,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn apply_json_set"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-array-crates-jazz-src-db-mutations-263-13",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value::Array",
+          "location": {
+            "line": 263,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 263,
+              "column": 13
+            },
+            "end": {
+              "line": 263,
+              "column": 37
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn apply_json_set"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-object-crates-jazz-src-db-mutations-278-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value::Object",
+          "location": {
+            "line": 278,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 278,
+              "column": 9
+            },
+            "end": {
+              "line": 278,
+              "column": 34
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn apply_json_set"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-array-crates-jazz-src-db-mutations-284-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value::Array",
+          "location": {
+            "line": 284,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 284,
+              "column": 9
+            },
+            "end": {
+              "line": 284,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn apply_json_set"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-db-mutations-534-24",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 534,
+            "column": 24
+          },
+          "span": {
+            "start": {
+              "line": 534,
+              "column": 24
+            },
+            "end": {
+              "line": 534,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "static <anonymous>"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-db-mutations-539-28",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 539,
+            "column": 28
+          },
+          "span": {
+            "start": {
+              "line": 539,
+              "column": 28
+            },
+            "end": {
+              "line": 539,
+              "column": 45
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn read_json_pointer"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-src-db-mutations-539-48",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 539,
+            "column": 48
+          },
+          "span": {
+            "start": {
+              "line": 539,
+              "column": 48
+            },
+            "end": {
+              "line": 539,
+              "column": 68
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn read_json_pointer"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-db-mutations-1043-23",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 1043,
+            "column": 23
+          },
+          "span": {
+            "start": {
+              "line": 1043,
+              "column": 23
+            },
+            "end": {
+              "line": 1043,
+              "column": 40
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn apply_large_value_json_set"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-slice-crates-jazz-src-db-mutations-1043-43",
+      "classification": "Parses already-authenticated JSON bytes after a requested range is materialized; the parse result is an API value, never persisted.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::from_slice",
+          "location": {
+            "line": 1043,
+            "column": 43
+          },
+          "span": {
+            "start": {
+              "line": 1043,
+              "column": 43
+            },
+            "end": {
+              "line": 1043,
+              "column": 65
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn apply_large_value_json_set"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-vec-crates-jazz-src-db-mutations-1048-27",
+      "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/mutations.rs",
+          "canonicalPath": "serde_json::to_vec",
+          "location": {
+            "line": 1048,
+            "column": 27
+          },
+          "span": {
+            "start": {
+              "line": 1048,
+              "column": 27
+            },
+            "end": {
+              "line": 1048,
+              "column": 45
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn apply_large_value_json_set"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-db-peer-connection-27-20",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/peer_connection.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 27,
+            "column": 20
+          },
+          "span": {
+            "start": {
+              "line": 27,
+              "column": 20
+            },
+            "end": {
+              "line": 27,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn relay_upstream_subscription_key"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-vec-crates-jazz-src-db-peer-connection-5026-10",
+      "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db/peer_connection.rs",
+          "canonicalPath": "serde_json::to_vec",
+          "location": {
+            "line": 5026,
+            "column": 10
+          },
+          "span": {
+            "start": {
+              "line": 5026,
+              "column": 10
+            },
+            "end": {
+              "line": 5026,
+              "column": 28
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "static <anonymous>"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-vec-crates-jazz-src-db-1468-13",
+      "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/db.rs",
+          "canonicalPath": "serde_json::to_vec",
+          "location": {
+            "line": 1468,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 1468,
+              "column": 13
+            },
+            "end": {
+              "line": 1468,
+              "column": 31
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn for_schema"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-string-crates-jazz-src-ids-258-25",
+      "classification": "The normative public AuthorSubject identity is the exact canonical JSON two-string tuple [issuer,subject]. Decode re-encodes and rejects alternate spellings; frozen receipts pin the Rust serializer spelling. The second occurrence is its reserved-issuer receipt.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/ids.rs",
+          "canonicalPath": "serde_json::to_string",
+          "location": {
+            "line": 258,
+            "column": 25
+          },
+          "span": {
+            "start": {
+              "line": 258,
+              "column": 25
+            },
+            "end": {
+              "line": 258,
+              "column": 46
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn intern"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-src-ids-292-13",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/ids.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 292,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 292,
+              "column": 13
+            },
+            "end": {
+              "line": 292,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn test_uuid"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-src-ids-302-51",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/ids.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 302,
+            "column": 51
+          },
+          "span": {
+            "start": {
+              "line": 302,
+              "column": 51
+            },
+            "end": {
+              "line": 302,
+              "column": 71
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn from_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-src-ids-325-51",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/ids.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 325,
+            "column": 51
+          },
+          "span": {
+            "start": {
+              "line": 325,
+              "column": 51
+            },
+            "end": {
+              "line": 325,
+              "column": 71
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn from_untrusted_canonical"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-string-crates-jazz-src-ids-542-29",
+      "classification": "The normative public AuthorSubject identity is the exact canonical JSON two-string tuple [issuer,subject]. Decode re-encodes and rejects alternate spellings; frozen receipts pin the Rust serializer spelling. The second occurrence is its reserved-issuer receipt.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/ids.rs",
+          "canonicalPath": "serde_json::to_string",
+          "location": {
+            "line": 542,
+            "column": 29
+          },
+          "span": {
+            "start": {
+              "line": 542,
+              "column": 29
+            },
+            "end": {
+              "line": 542,
+              "column": 50
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn untrusted_canonical_author_rejects_every_reserved_issuer"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-vec-crates-jazz-src-node-codec-883-35",
+      "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/codec.rs",
+          "canonicalPath": "serde_json::to_vec",
+          "location": {
+            "line": 883,
+            "column": 35
+          },
+          "span": {
+            "start": {
+              "line": 883,
+              "column": 35
+            },
+            "end": {
+              "line": 883,
+              "column": 53
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_catalogue_schema"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-codec-5791-18",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/codec.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5791,
+            "column": 18
+          },
+          "span": {
+            "start": {
+              "line": 5791,
+              "column": 18
+            },
+            "end": {
+              "line": 5791,
+              "column": 39
+            }
+          },
+          "enclosing": {
+            "modules": ["result_member_storage_codec_tests"],
+            "item": "fn program_fact_storage_codec_rejects_legacy_unknown_trailing_and_noncanonical_bytes"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-mod-1344-46",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/mod.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 1344,
+            "column": 46
+          },
+          "span": {
+            "start": {
+              "line": 1344,
+              "column": 46
+            },
+            "end": {
+              "line": 1344,
+              "column": 67
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn canonical_subscription_cells"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-error-crates-jazz-src-node-mod-2229-28",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/mod.rs",
+          "canonicalPath": "serde_json::Error",
+          "location": {
+            "line": 2229,
+            "column": 28
+          },
+          "span": {
+            "start": {
+              "line": 2229,
+              "column": 28
+            },
+            "end": {
+              "line": 2229,
+              "column": 45
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "enum Error"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-query-eval-maintained-views-88-17",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/maintained_views.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 88,
+            "column": 17
+          },
+          "span": {
+            "start": {
+              "line": 88,
+              "column": 17
+            },
+            "end": {
+              "line": 88,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn footprint"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-query-eval-maintained-views-98-17",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/maintained_views.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 98,
+            "column": 17
+          },
+          "span": {
+            "start": {
+              "line": 98,
+              "column": 17
+            },
+            "end": {
+              "line": 98,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn footprint"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-query-eval-maintained-views-101-23",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/maintained_views.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 101,
+            "column": 23
+          },
+          "span": {
+            "start": {
+              "line": 101,
+              "column": 23
+            },
+            "end": {
+              "line": 101,
+              "column": 44
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn footprint"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-query-eval-maintained-views-111-17",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/maintained_views.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 111,
+            "column": 17
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 17
+            },
+            "end": {
+              "line": 111,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn footprint"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-query-eval-normalization-679-17",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/normalization.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 679,
+            "column": 17
+          },
+          "span": {
+            "start": {
+              "line": 679,
+              "column": 17
+            },
+            "end": {
+              "line": 679,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn normalize_enum_payload_operand"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-query-eval-normalization-853-17",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/normalization.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 853,
+            "column": 17
+          },
+          "span": {
+            "start": {
+              "line": 853,
+              "column": 17
+            },
+            "end": {
+              "line": 853,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn normalize_operand_with_target_type_and_declared_id_and_flat_join_alias"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-node-query-eval-normalization-1922-9",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/normalization.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 1922,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 1922,
+              "column": 9
+            },
+            "end": {
+              "line": 1922,
+              "column": 30
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn literal_value_ref"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-node-query-eval-read-sources-3753-47",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/query_eval/read_sources.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 3753,
+            "column": 47
+          },
+          "span": {
+            "start": {
+              "line": 3753,
+              "column": 47
+            },
+            "end": {
+              "line": 3753,
+              "column": 67
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn normalized_bound_value"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-node-state-lifecycle-1175-24",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/node/state/lifecycle.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 1175,
+            "column": 24
+          },
+          "span": {
+            "start": {
+              "line": 1175,
+              "column": 24
+            },
+            "end": {
+              "line": 1175,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "impl <anonymous>"
+          },
+          "boundary": "test"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-vec-crates-jazz-src-protocol-3178-5",
+      "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "serde_json::to_vec",
+          "location": {
+            "line": 3178,
+            "column": 5
+          },
+          "span": {
+            "start": {
+              "line": 3178,
+              "column": 5
+            },
+            "end": {
+              "line": 3178,
+              "column": 23
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn durable_public_schema_json"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-4876-13",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 4876,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 4876,
+              "column": 13
+            },
+            "end": {
+              "line": 4876,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-4876-52",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 4876,
+            "column": 52
+          },
+          "span": {
+            "start": {
+              "line": 4876,
+              "column": 52
+            },
+            "end": {
+              "line": 4876,
+              "column": 73
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-4903-20",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 4903,
+            "column": 20
+          },
+          "span": {
+            "start": {
+              "line": 4903,
+              "column": 20
+            },
+            "end": {
+              "line": 4903,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-4905-51",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 4905,
+            "column": 51
+          },
+          "span": {
+            "start": {
+              "line": 4905,
+              "column": 51
+            },
+            "end": {
+              "line": 4905,
+              "column": 71
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-4936-13",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 4936,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 4936,
+              "column": 13
+            },
+            "end": {
+              "line": 4936,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-4937-18",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 4937,
+            "column": 18
+          },
+          "span": {
+            "start": {
+              "line": 4937,
+              "column": 18
+            },
+            "end": {
+              "line": 4937,
+              "column": 39
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-4968-13",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 4968,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 4968,
+              "column": 13
+            },
+            "end": {
+              "line": 4968,
+              "column": 34
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_rejects_oversized_blob_without_panicking"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-4969-51",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 4969,
+            "column": 51
+          },
+          "span": {
+            "start": {
+              "line": 4969,
+              "column": 51
+            },
+            "end": {
+              "line": 4969,
+              "column": 71
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn postcard_migration_lens_rejects_oversized_blob_without_panicking"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5153-22",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5153,
+            "column": 22
+          },
+          "span": {
+            "start": {
+              "line": 5153,
+              "column": 22
+            },
+            "end": {
+              "line": 5153,
+              "column": 43
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5172-22",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5172,
+            "column": 22
+          },
+          "span": {
+            "start": {
+              "line": 5172,
+              "column": 22
+            },
+            "end": {
+              "line": 5172,
+              "column": 43
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5218-22",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5218,
+            "column": 22
+          },
+          "span": {
+            "start": {
+              "line": 5218,
+              "column": 22
+            },
+            "end": {
+              "line": 5218,
+              "column": 43
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5247-26",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5247,
+            "column": 26
+          },
+          "span": {
+            "start": {
+              "line": 5247,
+              "column": 26
+            },
+            "end": {
+              "line": 5247,
+              "column": 47
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-string-crates-jazz-src-protocol-5269-22",
+      "classification": "The normative public AuthorSubject identity is the exact canonical JSON two-string tuple [issuer,subject]. Decode re-encodes and rejects alternate spellings; frozen receipts pin the Rust serializer spelling. The second occurrence is its reserved-issuer receipt.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "serde_json::to_string",
+          "location": {
+            "line": 5269,
+            "column": 22
+          },
+          "span": {
+            "start": {
+              "line": 5269,
+              "column": 22
+            },
+            "end": {
+              "line": 5269,
+              "column": 43
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-src-protocol-5272-13",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 5272,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 5272,
+              "column": 13
+            },
+            "end": {
+              "line": 5272,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-protocol-5275-28",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 5275,
+            "column": 28
+          },
+          "span": {
+            "start": {
+              "line": 5275,
+              "column": 28
+            },
+            "end": {
+              "line": 5275,
+              "column": 45
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-src-protocol-5276-13",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 5276,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 5276,
+              "column": 13
+            },
+            "end": {
+              "line": 5276,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5286-21",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5286,
+            "column": 21
+          },
+          "span": {
+            "start": {
+              "line": 5286,
+              "column": 21
+            },
+            "end": {
+              "line": 5286,
+              "column": 42
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-5288-13",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 5288,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 5288,
+              "column": 13
+            },
+            "end": {
+              "line": 5288,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5309-23",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5309,
+            "column": 23
+          },
+          "span": {
+            "start": {
+              "line": 5309,
+              "column": 23
+            },
+            "end": {
+              "line": 5309,
+              "column": 44
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-5311-38",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 5311,
+            "column": 38
+          },
+          "span": {
+            "start": {
+              "line": 5311,
+              "column": 38
+            },
+            "end": {
+              "line": 5311,
+              "column": 58
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-slice-crates-jazz-src-protocol-5332-13",
+      "classification": "Parses already-authenticated JSON bytes after a requested range is materialized; the parse result is an API value, never persisted.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "serde_json::from_slice",
+          "location": {
+            "line": 5332,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 5332,
+              "column": 13
+            },
+            "end": {
+              "line": 5332,
+              "column": 35
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-to-vec-crates-jazz-src-protocol-5332-37",
+      "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "serde_json::to_vec",
+          "location": {
+            "line": 5332,
+            "column": 37
+          },
+          "span": {
+            "start": {
+              "line": 5332,
+              "column": 37
+            },
+            "end": {
+              "line": 5332,
+              "column": 55
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5770-21",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5770,
+            "column": 21
+          },
+          "span": {
+            "start": {
+              "line": 5770,
+              "column": 21
+            },
+            "end": {
+              "line": 5770,
+              "column": 42
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn result_member_transport_preserves_typed_union_occurrence"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-5771-42",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 5771,
+            "column": 42
+          },
+          "span": {
+            "start": {
+              "line": 5771,
+              "column": 42
+            },
+            "end": {
+              "line": 5771,
+              "column": 62
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn result_member_transport_preserves_typed_union_occurrence"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-to-allocvec-crates-jazz-src-protocol-5787-20",
+      "classification": "A test-only construction of a deliberately rejected future-format byte sequence.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::to_allocvec",
+          "location": {
+            "line": 5787,
+            "column": 20
+          },
+          "span": {
+            "start": {
+              "line": 5787,
+              "column": 20
+            },
+            "end": {
+              "line": 5787,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn legacy_row_member_postcard_golden_decodes"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "postcard-from-bytes-crates-jazz-src-protocol-5788-42",
+      "classification": "Decodes the same in-memory normalized-query literal carrier; no durable value crosses this path.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/protocol.rs",
+          "canonicalPath": "postcard::from_bytes",
+          "location": {
+            "line": 5788,
+            "column": 42
+          },
+          "span": {
+            "start": {
+              "line": 5788,
+              "column": 42
+            },
+            "end": {
+              "line": 5788,
+              "column": 62
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn legacy_row_member_postcard_golden_decodes"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-slice-crates-jazz-src-tools-public-schema-convert-76-9",
+      "classification": "Parses already-authenticated JSON bytes after a requested range is materialized; the parse result is an API value, never persisted.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/tools/public_schema_convert.rs",
+          "canonicalPath": "serde_json::from_slice",
+          "location": {
+            "line": 76,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 76,
+              "column": 9
+            },
+            "end": {
+              "line": 76,
+              "column": 31
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_public_schema_json"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-src-tools-public-schema-convert-2921-21",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/tools/public_schema_convert.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 2921,
+            "column": 21
+          },
+          "span": {
+            "start": {
+              "line": 2921,
+              "column": 21
+            },
+            "end": {
+              "line": 2921,
+              "column": 38
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn policy_graph_perf_fixture_schema"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-src-tools-public-schema-convert-2922-13",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/tools/public_schema_convert.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 2922,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 2922,
+              "column": 13
+            },
+            "end": {
+              "line": 2922,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn policy_graph_perf_fixture_schema"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-value-crates-jazz-src-tools-public-schema-convert-2924-13",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/tools/public_schema_convert.rs",
+          "canonicalPath": "serde_json::from_value",
+          "location": {
+            "line": 2924,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 2924,
+              "column": 13
+            },
+            "end": {
+              "line": 2924,
+              "column": 35
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn policy_graph_perf_fixture_schema"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-jazz-src-tools-public-schema-convert-3170-46",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/tools/public_schema_convert.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 3170,
+            "column": 46
+          },
+          "span": {
+            "start": {
+              "line": 3170,
+              "column": 46
+            },
+            "end": {
+              "line": 3170,
+              "column": 62
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn rejects_schema_invalid_json_inside_payload_enum_default"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-jazz-src-tools-public-schema-convert-3365-42",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz/src/tools/public_schema_convert.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 3365,
+            "column": 42
+          },
+          "span": {
+            "start": {
+              "line": 3365,
+              "column": 42
+            },
+            "end": {
+              "line": 3365,
+              "column": 58
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn converts_public_json_as_core_string_storage"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-server-src-server-catalogue-payload-codec-753-59",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 753,
+            "column": 59
+          },
+          "span": {
+            "start": {
+              "line": 753,
+              "column": 59
+            },
+            "end": {
+              "line": 753,
+              "column": 76
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn schema_version_for_lens_payload"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-server-src-server-catalogue-payload-codec-758-64",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 758,
+            "column": 64
+          },
+          "span": {
+            "start": {
+              "line": 758,
+              "column": 64
+            },
+            "end": {
+              "line": 758,
+              "column": 81
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-null-crates-jazz-server-src-server-catalogue-payload-codec-760-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Null",
+          "location": {
+            "line": 760,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 760,
+              "column": 9
+            },
+            "end": {
+              "line": 760,
+              "column": 32
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-bool-crates-jazz-server-src-server-catalogue-payload-codec-761-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Bool",
+          "location": {
+            "line": 761,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 761,
+              "column": 9
+            },
+            "end": {
+              "line": 761,
+              "column": 32
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-bool-crates-jazz-server-src-server-catalogue-payload-codec-762-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Bool",
+          "location": {
+            "line": 762,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 762,
+              "column": 9
+            },
+            "end": {
+              "line": 762,
+              "column": 32
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-number-crates-jazz-server-src-server-catalogue-payload-codec-763-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Number",
+          "location": {
+            "line": 763,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 763,
+              "column": 9
+            },
+            "end": {
+              "line": 763,
+              "column": 34
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-string-crates-jazz-server-src-server-catalogue-payload-codec-769-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::String",
+          "location": {
+            "line": 769,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 769,
+              "column": 9
+            },
+            "end": {
+              "line": 769,
+              "column": 34
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-array-crates-jazz-server-src-server-catalogue-payload-codec-773-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Array",
+          "location": {
+            "line": 773,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 773,
+              "column": 9
+            },
+            "end": {
+              "line": 773,
+              "column": 33
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-object-crates-jazz-server-src-server-catalogue-payload-codec-780-9",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Object",
+          "location": {
+            "line": 780,
+            "column": 9
+          },
+          "span": {
+            "start": {
+              "line": 780,
+              "column": 9
+            },
+            "end": {
+              "line": 780,
+              "column": 34
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-server-src-server-catalogue-payload-codec-796-13",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 796,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 796,
+              "column": 13
+            },
+            "end": {
+              "line": 796,
+              "column": 30
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn encode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-crates-jazz-server-src-server-catalogue-payload-codec-815-13",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value",
+          "location": {
+            "line": 815,
+            "column": 13
+          },
+          "span": {
+            "start": {
+              "line": 815,
+              "column": 13
+            },
+            "end": {
+              "line": 815,
+              "column": 30
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-null-crates-jazz-server-src-server-catalogue-payload-codec-817-25",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Null",
+          "location": {
+            "line": 817,
+            "column": 25
+          },
+          "span": {
+            "start": {
+              "line": 817,
+              "column": 25
+            },
+            "end": {
+              "line": 817,
+              "column": 48
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-bool-crates-jazz-server-src-server-catalogue-payload-codec-818-26",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Bool",
+          "location": {
+            "line": 818,
+            "column": 26
+          },
+          "span": {
+            "start": {
+              "line": 818,
+              "column": 26
+            },
+            "end": {
+              "line": 818,
+              "column": 49
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-bool-crates-jazz-server-src-server-catalogue-payload-codec-819-25",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Bool",
+          "location": {
+            "line": 819,
+            "column": 25
+          },
+          "span": {
+            "start": {
+              "line": 819,
+              "column": 25
+            },
+            "end": {
+              "line": 819,
+              "column": 48
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-from-str-crates-jazz-server-src-server-catalogue-payload-codec-822-26",
+      "classification": "Semantic validation/materialization of user-declared JSON bytes. The parsed value is never its durable representation; the authenticated byte tree and its explicit V1 records are authoritative.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::from_str",
+          "location": {
+            "line": 822,
+            "column": 26
+          },
+          "span": {
+            "start": {
+              "line": 822,
+              "column": 26
+            },
+            "end": {
+              "line": 822,
+              "column": 46
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-number-crates-jazz-server-src-server-catalogue-payload-codec-822-49",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Number",
+          "location": {
+            "line": 822,
+            "column": 49
+          },
+          "span": {
+            "start": {
+              "line": 822,
+              "column": 49
+            },
+            "end": {
+              "line": 822,
+              "column": 67
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-number-crates-jazz-server-src-server-catalogue-payload-codec-832-16",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Number",
+          "location": {
+            "line": 832,
+            "column": 16
+          },
+          "span": {
+            "start": {
+              "line": 832,
+              "column": 16
+            },
+            "end": {
+              "line": 832,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-string-crates-jazz-server-src-server-catalogue-payload-codec-834-27",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::String",
+          "location": {
+            "line": 834,
+            "column": 27
+          },
+          "span": {
+            "start": {
+              "line": 834,
+              "column": 27
+            },
+            "end": {
+              "line": 834,
+              "column": 52
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-array-crates-jazz-server-src-server-catalogue-payload-codec-845-16",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Array",
+          "location": {
+            "line": 845,
+            "column": 16
+          },
+          "span": {
+            "start": {
+              "line": 845,
+              "column": 16
+            },
+            "end": {
+              "line": 845,
+              "column": 40
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-map-new-crates-jazz-server-src-server-catalogue-payload-codec-849-30",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Map::new",
+          "location": {
+            "line": 849,
+            "column": 30
+          },
+          "span": {
+            "start": {
+              "line": 849,
+              "column": 30
+            },
+            "end": {
+              "line": 849,
+              "column": 50
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-value-object-crates-jazz-server-src-server-catalogue-payload-codec-865-16",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::Value::Object",
+          "location": {
+            "line": 865,
+            "column": 16
+          },
+          "span": {
+            "start": {
+              "line": 865,
+              "column": 16
+            },
+            "end": {
+              "line": 865,
+              "column": 41
+            }
+          },
+          "enclosing": {
+            "modules": [],
+            "item": "fn decode_canonical_json_value_body"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-jazz-server-src-server-catalogue-payload-codec-2636-42",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 2636,
+            "column": 42
+          },
+          "span": {
+            "start": {
+              "line": 2636,
+              "column": 42
+            },
+            "end": {
+              "line": 2636,
+              "column": 58
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_roundtrip_with_json"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-jazz-server-src-server-catalogue-payload-codec-2652-30",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 2652,
+            "column": 30
+          },
+          "span": {
+            "start": {
+              "line": 2652,
+              "column": 30
+            },
+            "end": {
+              "line": 2652,
+              "column": 46
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn schema_roundtrip_with_json"
+          },
+          "boundary": "production"
+        }
+      ]
+    },
+    {
+      "id": "serde-json-json-crates-jazz-server-src-server-catalogue-payload-codec-2672-34",
+      "classification": "Explicit type-only or symbol reference. This is not a durable container codec; its exact token endpoint remains review-locked.",
+      "endpoints": [
+        {
+          "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+          "canonicalPath": "serde_json::json",
+          "location": {
+            "line": 2672,
+            "column": 34
+          },
+          "span": {
+            "start": {
+              "line": 2672,
+              "column": 34
+            },
+            "end": {
+              "line": 2672,
+              "column": 50
+            }
+          },
+          "enclosing": {
+            "modules": ["tests"],
+            "item": "fn nested_catalogue_payload_v1_goldens_are_exact"
+          },
+          "boundary": "production"
+        }
+      ]
+    }
+  ],
+  "directDependencySnapshots": [
+    {
+      "crate": "groove",
+      "manifest": "crates/groove/Cargo.toml",
+      "dependencies": [
+        {
+          "crate": "blake3",
+          "package": "blake3"
+        },
+        {
+          "crate": "bytes",
+          "package": "bytes"
+        },
+        {
+          "crate": "futures",
+          "package": "futures"
+        },
+        {
+          "crate": "futures_test",
+          "package": "futures-test"
+        },
+        {
+          "crate": "getrandom",
+          "package": "getrandom"
+        },
+        {
+          "crate": "hdrhistogram",
+          "package": "hdrhistogram"
+        },
+        {
+          "crate": "internment",
+          "package": "internment"
+        },
+        {
+          "crate": "paste",
+          "package": "paste"
+        },
+        {
+          "crate": "postcard",
+          "package": "postcard"
+        },
+        {
+          "crate": "rusqlite",
+          "package": "rusqlite"
+        },
+        {
+          "crate": "rustc_hash",
+          "package": "rustc-hash"
+        },
+        {
+          "crate": "serde",
+          "package": "serde"
+        },
+        {
+          "crate": "serde_json",
+          "package": "serde_json"
+        },
+        {
+          "crate": "smallvec",
+          "package": "smallvec"
+        },
+        {
+          "crate": "tempfile",
+          "package": "tempfile"
+        },
+        {
+          "crate": "thiserror",
+          "package": "thiserror"
+        },
+        {
+          "crate": "uuid",
+          "package": "uuid"
+        },
+        {
+          "crate": "web_time",
+          "package": "web-time"
+        }
+      ]
+    },
+    {
+      "crate": "idb-tree",
+      "manifest": "crates/idb-tree/Cargo.toml",
+      "dependencies": [
+        {
+          "crate": "futures",
+          "package": "futures"
+        },
+        {
+          "crate": "js_sys",
+          "package": "js-sys"
+        },
+        {
+          "crate": "thiserror",
+          "package": "thiserror"
+        },
+        {
+          "crate": "wasm_bindgen",
+          "package": "wasm-bindgen"
+        },
+        {
+          "crate": "wasm_bindgen_futures",
+          "package": "wasm-bindgen-futures"
+        },
+        {
+          "crate": "xxhash_rust",
+          "package": "xxhash-rust"
+        }
+      ]
+    },
+    {
+      "crate": "jazz",
+      "manifest": "crates/jazz/Cargo.toml",
+      "dependencies": [
+        {
+          "crate": "base64",
+          "package": "base64"
+        },
+        {
+          "crate": "blake3",
+          "package": "blake3"
+        },
+        {
+          "crate": "bytes",
+          "package": "bytes"
+        },
+        {
+          "crate": "criterion",
+          "package": "criterion"
+        },
+        {
+          "crate": "ed25519_dalek",
+          "package": "ed25519-dalek"
+        },
+        {
+          "crate": "futures",
+          "package": "futures"
+        },
+        {
+          "crate": "futures",
+          "package": "futures"
+        },
+        {
+          "crate": "futures_channel",
+          "package": "futures-channel"
+        },
+        {
+          "crate": "futures_core",
+          "package": "futures-core"
+        },
+        {
+          "crate": "futures_util",
+          "package": "futures-util"
+        },
+        {
+          "crate": "hdrhistogram",
+          "package": "hdrhistogram"
+        },
+        {
+          "crate": "hex",
+          "package": "hex"
+        },
+        {
+          "crate": "insta",
+          "package": "insta"
+        },
+        {
+          "crate": "internment",
+          "package": "internment"
+        },
+        {
+          "crate": "jsonschema",
+          "package": "jsonschema"
+        },
+        {
+          "crate": "jsonwebtoken",
+          "package": "jsonwebtoken"
+        },
+        {
+          "crate": "jsonwebtoken",
+          "package": "jsonwebtoken"
+        },
+        {
+          "crate": "libc",
+          "package": "libc"
+        },
+        {
+          "crate": "postcard",
+          "package": "postcard"
+        },
+        {
+          "crate": "rand",
+          "package": "rand"
+        },
+        {
+          "crate": "rcgen",
+          "package": "rcgen"
+        },
+        {
+          "crate": "reqwest",
+          "package": "reqwest"
+        },
+        {
+          "crate": "rustc_hash",
+          "package": "rustc-hash"
+        },
+        {
+          "crate": "serde",
+          "package": "serde"
+        },
+        {
+          "crate": "serde_bytes",
+          "package": "serde_bytes"
+        },
+        {
+          "crate": "serde_json",
+          "package": "serde_json"
+        },
+        {
+          "crate": "sha2",
+          "package": "sha2"
+        },
+        {
+          "crate": "smallvec",
+          "package": "smallvec"
+        },
+        {
+          "crate": "tempfile",
+          "package": "tempfile"
+        },
+        {
+          "crate": "thiserror",
+          "package": "thiserror"
+        },
+        {
+          "crate": "tokio",
+          "package": "tokio"
+        },
+        {
+          "crate": "tokio",
+          "package": "tokio"
+        },
+        {
+          "crate": "tower",
+          "package": "tower"
+        },
+        {
+          "crate": "tracing",
+          "package": "tracing"
+        },
+        {
+          "crate": "uuid",
+          "package": "uuid"
+        },
+        {
+          "crate": "web_time",
+          "package": "web-time"
+        }
+      ]
+    },
+    {
+      "crate": "jazz-server",
+      "manifest": "crates/jazz-server/Cargo.toml",
+      "dependencies": [
+        {
+          "crate": "axum",
+          "package": "axum"
+        },
+        {
+          "crate": "base64",
+          "package": "base64"
+        },
+        {
+          "crate": "futures",
+          "package": "futures"
+        },
+        {
+          "crate": "futures_util",
+          "package": "futures-util"
+        },
+        {
+          "crate": "hex",
+          "package": "hex"
+        },
+        {
+          "crate": "http",
+          "package": "http"
+        },
+        {
+          "crate": "jsonwebtoken",
+          "package": "jsonwebtoken"
+        },
+        {
+          "crate": "opentelemetry",
+          "package": "opentelemetry"
+        },
+        {
+          "crate": "postcard",
+          "package": "postcard"
+        },
+        {
+          "crate": "reqwest",
+          "package": "reqwest"
+        },
+        {
+          "crate": "serde",
+          "package": "serde"
+        },
+        {
+          "crate": "serde_json",
+          "package": "serde_json"
+        },
+        {
+          "crate": "sha2",
+          "package": "sha2"
+        },
+        {
+          "crate": "tempfile",
+          "package": "tempfile"
+        },
+        {
+          "crate": "tokio",
+          "package": "tokio"
+        },
+        {
+          "crate": "tokio_tungstenite",
+          "package": "tokio-tungstenite"
+        },
+        {
+          "crate": "tokio_tungstenite",
+          "package": "tokio-tungstenite"
+        },
+        {
+          "crate": "tower",
+          "package": "tower"
+        },
+        {
+          "crate": "tower_http",
+          "package": "tower-http"
+        },
+        {
+          "crate": "tracing",
+          "package": "tracing"
+        },
+        {
+          "crate": "tungstenite",
+          "package": "tungstenite"
+        },
+        {
+          "crate": "uuid",
+          "package": "uuid"
+        }
+      ]
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "manifest": "crates/jazz-storage-rocksdb/Cargo.toml",
+      "dependencies": [
+        {
+          "crate": "base64",
+          "package": "base64"
+        },
+        {
+          "crate": "flate2",
+          "package": "flate2"
+        },
+        {
+          "crate": "futures_test",
+          "package": "futures-test"
+        },
+        {
+          "crate": "rocksdb",
+          "package": "rust-rocksdb"
+        },
+        {
+          "crate": "serde",
+          "package": "serde"
+        },
+        {
+          "crate": "serde_json",
+          "package": "serde_json"
+        },
+        {
+          "crate": "sha2",
+          "package": "sha2"
+        },
+        {
+          "crate": "tar",
+          "package": "tar"
+        },
+        {
+          "crate": "tempfile",
+          "package": "tempfile"
+        }
+      ]
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "manifest": "crates/jazz-storage-sqlite/Cargo.toml",
+      "dependencies": [
+        {
+          "crate": "base64",
+          "package": "base64"
+        },
+        {
+          "crate": "futures",
+          "package": "futures"
+        },
+        {
+          "crate": "rusqlite",
+          "package": "rusqlite"
+        },
+        {
+          "crate": "sha2",
+          "package": "sha2"
+        },
+        {
+          "crate": "tempfile",
+          "package": "tempfile"
+        }
+      ]
     }
   ]
 }

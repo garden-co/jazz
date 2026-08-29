@@ -1,403 +1,244 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { describeEndpoint, rustTokens, serializerReferences } from "../rust-token-audit.mjs";
 
 const repository = path.resolve(import.meta.dirname, "../../..");
 const gate = path.join(repository, "dev/gates/default-serialization-persistence.mjs");
+const roots = new Set(["postcard", "serde_json", "ciborium", "bincode", "rmp_serde"]);
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-default-serde-gate-"));
   fs.mkdirSync(path.join(root, "dev/storage"), { recursive: true });
   fs.mkdirSync(path.join(root, "crates/jazz/src/node"), { recursive: true });
   fs.writeFileSync(
-    path.join(root, "Cargo.lock"),
-    ['name = "ciborium"', 'name = "postcard"', 'name = "serde_json"'].join("\n"),
+    path.join(root, "Cargo.toml"),
+    '[workspace]\nmembers = ["crates/jazz"]\nresolver = "2"\n',
   );
+  fs.writeFileSync(
+    path.join(root, "crates/jazz/Cargo.toml"),
+    '[package]\nname = "jazz"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\npostcard = { version = "1", features = ["alloc"] }\nserde_json = "1"\nserde = "1"\n',
+  );
+  fs.writeFileSync(path.join(root, "crates/jazz/src/lib.rs"), "pub mod node;\n");
+  fs.writeFileSync(path.join(root, "crates/jazz/src/node/mod.rs"), "pub mod codec;\n");
+  fs.writeFileSync(path.join(root, "crates/jazz/src/node/codec.rs"), "pub fn codec() {}\n");
+  writeRegistry(root, []);
+  return root;
+}
+
+function snapshots(extra = []) {
+  return [
+    {
+      crate: "jazz",
+      manifest: "crates/jazz/Cargo.toml",
+      dependencies: [
+        { crate: "postcard", package: "postcard" },
+        { crate: "serde", package: "serde" },
+        { crate: "serde_json", package: "serde_json" },
+        ...extra,
+      ].sort((left, right) => left.crate.localeCompare(right.crate)),
+    },
+  ];
+}
+
+function endpoints(source) {
+  const relative = "crates/jazz/src/node/codec.rs";
+  const tokens = rustTokens(source);
+  return serializerReferences(tokens, roots).map((reference) =>
+    describeEndpoint(tokens, reference, relative),
+  );
+}
+
+function writeRegistry(root, allowed, direct = snapshots()) {
   fs.writeFileSync(
     path.join(root, "dev/storage/default-serialization-registry.json"),
     JSON.stringify({
-      schemaVersion: 2,
-      scope: {
-        paths: ["crates/jazz/src/node"],
-        serializerCrates: ["ciborium", "postcard", "serde_json"],
-      },
-      allowances: [],
+      schemaVersion: 3,
+      scope: { paths: ["crates/jazz/src/node"], serializerCrates: ["postcard", "serde_json"] },
+      directDependencySnapshots: direct,
+      allowances: allowed.map((endpoint, index) => ({
+        id: "reviewed-" + index,
+        classification: "fixture-only exact endpoint",
+        endpoints: [endpoint],
+      })),
     }),
   );
-  fs.writeFileSync(path.join(root, "crates/jazz/src/node/codec.rs"), "fn codec() {}\n");
-  return root;
+}
+
+function writeSource(root, source, allowed = []) {
+  fs.writeFileSync(path.join(root, "crates/jazz/src/node/codec.rs"), source);
+  writeRegistry(root, allowed);
 }
 
 function run(root) {
   return spawnSync("node", [gate, "--root", root], { encoding: "utf8" });
 }
 
-function anchor(source, needle) {
-  const index = source.indexOf(needle);
-  const lines = source.split("\n");
-  const line = source.slice(0, index).split("\n").length - 1;
-  const context = lines
-    .slice(Math.max(0, line - 1), line + 2)
-    .join("\n")
-    .trim();
-  return crypto.createHash("sha256").update(context).digest("hex");
+function compile(root) {
+  return spawnSync("cargo", ["check"], { cwd: root, encoding: "utf8" });
 }
 
-test("rejects an unregistered raw serializer in a persistence-owning module", () => {
+function assertRejectedAndCompiles(root, source, pattern) {
+  writeSource(root, source);
+  const result = run(root);
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, pattern);
+  const checked = compile(root);
+  assert.equal(checked.status, 0, checked.stderr);
+}
+
+test("rejects raw, comment-separated, function-item, and macro serializer paths", () => {
   const root = fixture();
   try {
-    fs.appendFileSync(
-      path.join(root, "crates/jazz/src/node/codec.rs"),
-      "let bytes = postcard::to_allocvec(&value);\n",
+    assertRejectedAndCompiles(
+      root,
+      "pub fn f<T: serde::Serialize>(v: &T) { let _ = postcard /* comment */ :: to_allocvec(v); }\n",
+      /unregistered default serialization reference postcard::to_allocvec/,
     );
-    const result = run(root);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /unregistered default serialization postcard::to_allocvec/);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("requires an exact registry receipt for a deliberate non-durable use", () => {
-  const root = fixture();
-  try {
-    fs.writeFileSync(
-      path.join(root, "crates/jazz/src/node/codec.rs"),
-      "let bytes = postcard::to_allocvec(&value);\n",
+    assertRejectedAndCompiles(
+      root,
+      "pub fn f<T: serde::Serialize>(v: &T) { let encode = postcard::to_allocvec::<T>; let _ = encode(v); }\n",
+      /postcard::to_allocvec/,
     );
-    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
-    fs.writeFileSync(
-      registryPath,
-      JSON.stringify({
-        schemaVersion: 2,
-        scope: {
-          paths: ["crates/jazz/src/node"],
-          serializerCrates: ["ciborium", "postcard", "serde_json"],
-        },
-        allowances: [
-          {
-            id: "test-only",
-            path: "crates/jazz/src/node/codec.rs",
-            api: "postcard::to_allocvec",
-            expectedOccurrences: 1,
-            anchors: [anchor("let bytes = postcard::to_allocvec(&value);\n", "postcard")],
-            classification: "test-only temporary bytes",
-          },
-        ],
-      }),
+    assertRejectedAndCompiles(
+      root,
+      "macro_rules! encode { ($v:expr) => { postcard::to_allocvec($v) }; }\npub fn f<T: serde::Serialize>(v: &T) { let _ = encode!(v); }\n",
+      /postcard::to_allocvec/,
     );
-    const clean = run(root);
-    assert.equal(clean.status, 0, clean.stderr);
-    fs.appendFileSync(
-      path.join(root, "crates/jazz/src/node/codec.rs"),
-      "let more = postcard::to_allocvec(&other);\n",
+    assertRejectedAndCompiles(
+      root,
+      "macro_rules! encode { ($root:ident, $v:expr) => { $root::to_allocvec($v) }; }\npub fn f<T: serde::Serialize>(v: &T) { let _ = encode!(postcard, v); }\n",
+      /unregistered default serialization reference postcard/,
     );
-    const result = run(root);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /expected 1/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("rejects every registered convenience family, including to_writer", () => {
+test("rejects import and extern aliases, raw identifiers, and alternate serializers", () => {
   const root = fixture();
   try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    for (const api of [
-      "postcard::to_stdvec",
-      "postcard::to_slice",
-      "postcard::to_extend",
-      "postcard::to_io",
-      "postcard::to_allocvec_cobs",
-      "postcard::to_stdvec_cobs",
-      "postcard::to_slice_cobs",
-      "postcard::from_bytes_cobs",
-      "postcard::take_from_bytes_cobs",
-      "serde_json::to_writer",
-      "serde_json::to_writer_pretty",
-      "serde_json::to_string_pretty",
-      "serde_json::from_reader",
-      "serde_json::Serializer::new",
-      "serde_json::Serializer::pretty",
-      "serde_json::Deserializer::from_slice",
-      "serde_json::Deserializer::from_str",
-      "serde_json::Deserializer::from_reader",
-      "bincode::serialize_into",
-      "bincode::deserialize_from",
-      "rmp_serde::to_vec_named",
-      "rmp_serde::from_read",
-    ]) {
-      fs.writeFileSync(file, `fn codec() { let _ = ${api}(&value); }\n`);
-      const result = run(root);
-      assert.notEqual(result.status, 0, api);
-      assert.match(result.stderr, new RegExp(`unregistered default serialization ${api}`));
-    }
+    assertRejectedAndCompiles(
+      root,
+      "pub fn f<T: serde::Serialize>(v: &T) { let _ = r#postcard::to_allocvec(v); }\n",
+      /postcard::to_allocvec/,
+    );
+    assertRejectedAndCompiles(
+      root,
+      "extern crate postcard as serializer_audit_alias;\npub fn f<T: serde::Serialize>(v: &T) { let _ = serializer_audit_alias::to_allocvec(v); }\n",
+      /serializer extern crates are prohibited/,
+    );
+    assertRejectedAndCompiles(
+      root,
+      "use r#postcard as pc;\npub fn f<T: serde::Serialize>(v: &T) { let _ = pc::to_allocvec(v); }\n",
+      /serializer imports are prohibited/,
+    );
+    assertRejectedAndCompiles(
+      root,
+      "use serde_json::{Value as JsonValue};\npub fn f(value: JsonValue) -> JsonValue { value }\n",
+      /serializer imports are prohibited/,
+    );
+    const cargo = path.join(root, "crates/jazz/Cargo.toml");
+    fs.appendFileSync(cargo, 'bincode = "1"\n');
+    assertRejectedAndCompiles(
+      root,
+      "pub fn f<T: serde::Serialize>(v: &T) { let _ = bincode::serialize(v); }\n",
+      /directDependencySnapshots differs/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("rejects serializer imports in every alias, group, glob, and raw form", () => {
+test("requires an exact location, enclosing item, and cfg boundary for every allowance", () => {
   const root = fixture();
   try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    for (const [name, source] of [
-      ["namespace alias", "use postcard as pc; fn f() { pc::to_allocvec(&value); }"],
-      ["direct alias", "use postcard::to_allocvec as encode; fn f() { encode(&value); }"],
-      [
-        "grouped direct",
-        "use postcard::{to_allocvec as encode, from_bytes}; fn f() { encode(&value); }",
-      ],
-      [
-        "nested group",
-        "use postcard::{experimental::{serialized_size as size}}; fn f() { size(&value); }",
-      ],
-      ["nested glob", "use postcard::{experimental::*}; fn f() { serialized_size(&value); }"],
-      ["glob", "use postcard::*; fn f() { to_allocvec(&value); }"],
-      ["leading crate", "use ::postcard::to_allocvec; fn f() { to_allocvec(&value); }"],
-      ["raw crate root", "use r#postcard::to_allocvec; fn f() { to_allocvec(&value); }"],
-      ["leading raw crate root", "use ::r#postcard::to_allocvec; fn f() { to_allocvec(&value); }"],
-      [
-        "nested raw crate root",
-        "use r#postcard::{experimental::{serialized_size as size}}; fn f() { size(&value); }",
-      ],
-      ["raw alias", "use postcard::to_allocvec as r#encode; fn f() { r#encode(&value); }"],
-      [
-        "json namespace alias",
-        "use serde_json as json; fn f() { json::to_writer(&mut out, &value); }",
-      ],
-      [
-        "json deserializer type",
-        "use serde_json::Deserializer as JsonDecoder; fn f() { JsonDecoder::from_slice(&value); }",
-      ],
-    ]) {
-      fs.writeFileSync(file, `${source}\n`);
-      const result = run(root);
-      assert.notEqual(result.status, 0, name);
-      assert.match(result.stderr, /serializer imports are prohibited at the persistence boundary/);
-    }
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("rejects fully-qualified raw serializer crate identifiers", () => {
-  const root = fixture();
-  try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    for (const source of [
-      "fn f() { r#postcard::to_allocvec(&value); }",
-      "fn f() { ::r#postcard::to_slice(&value, &mut output); }",
-      "fn f() { r#serde_json::to_writer(&mut output, &value); }",
-    ]) {
-      fs.writeFileSync(file, `${source}\n`);
-      const result = run(root);
-      assert.notEqual(result.status, 0, source);
-      assert.match(result.stderr, /unregistered default serialization/);
-    }
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("rejects extern crate serializer aliases including raw roots", () => {
-  const root = fixture();
-  try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    for (const source of [
-      "extern crate postcard as serializer_audit_alias; fn f() { serializer_audit_alias::to_allocvec(&value); }",
-      "extern crate r#postcard as r#serializer_audit_alias; fn f() { r#serializer_audit_alias::to_allocvec(&value); }",
-      "pub extern crate serde_json as json; fn f() { json::to_vec(&value); }",
-      "pub(crate) extern crate serde_json as json; fn f() { json::to_vec(&value); }",
-      "extern crate ciborium as binary; fn f() { binary::ser::into_writer(&value, output); }",
-    ]) {
-      fs.writeFileSync(file, `${source}\n`);
-      const result = run(root);
-      assert.notEqual(result.status, 0, source);
-      assert.match(result.stderr, /serializer extern crates are prohibited/);
-    }
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("rejects alternate serializer families and dependency-inventory drift", () => {
-  const root = fixture();
-  try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    for (const source of [
-      "use ciborium::ser::into_writer; fn f() { into_writer(&value, output); }",
-      "use bincode as binary; fn f() { binary::serialize(&value); }",
-      "use rmp_serde::*; fn f() { to_vec(&value); }",
-      "fn f() { ciborium::de::from_reader(input); }",
-    ]) {
-      fs.writeFileSync(file, `${source}\n`);
-      const result = run(root);
-      assert.notEqual(result.status, 0, source);
-    }
-    fs.writeFileSync(
-      path.join(root, "Cargo.lock"),
-      ['name = "bincode"', 'name = "ciborium"', 'name = "postcard"', 'name = "serde_json"'].join(
-        "\n",
+    const reviewed =
+      '#[cfg(test)]\nmod tests {\n  fn semantic() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n}\n';
+    const reviewedEndpoints = endpoints(reviewed);
+    assert.ok(reviewedEndpoints.every((endpoint) => endpoint.boundary === "test"));
+    assert.ok(
+      reviewedEndpoints.every(
+        (endpoint) =>
+          endpoint.enclosing.modules.includes("tests") && endpoint.enclosing.item === "fn semantic",
       ),
     );
-    const drift = run(root);
-    assert.notEqual(drift.status, 0);
-    assert.match(drift.stderr, /scope\.serializerCrates must exactly inventory/);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+    writeSource(root, reviewed, reviewedEndpoints);
+    assert.equal(run(root).status, 0, run(root).stderr);
+    assert.equal(compile(root).status, 0);
 
-test("does not mistake locally named values for serializer imports", () => {
-  const root = fixture();
-  try {
-    fs.writeFileSync(
-      path.join(root, "crates/jazz/src/node/codec.rs"),
-      "fn f() { let postcard = (); let serde_json = (); let encode = || (); encode(); }\n",
-    );
-    assert.equal(run(root).status, 0);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("ignores serializer spellings in Rust comments and string literals", () => {
-  const root = fixture();
-  try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    fs.writeFileSync(
-      file,
-      [
-        "/* postcard::to_slice(&value); /* serde_json::to_writer(&mut out, &value); */ */",
-        "// postcard::to_allocvec(&value);",
-        'const DOC: &str = "serde_json::from_str(&value)";',
-        'const RAW: &str = r#"postcard::to_allocvec(&value)"#;',
-        "fn f() {}",
-      ].join("\n"),
-    );
-    const clean = run(root);
-    assert.equal(clean.status, 0, clean.stderr);
-    fs.appendFileSync(file, "\nfn f() { postcard::to_slice(&value, &mut output); }\n");
-    const result = run(root);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /postcard::to_slice/);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("permits an explicitly registered fully-qualified canonical endpoint", () => {
-  const root = fixture();
-  try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    fs.writeFileSync(file, "fn f() { serde_json::from_str(&value); }\n");
-    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
-    fs.writeFileSync(
-      registryPath,
-      JSON.stringify({
-        schemaVersion: 2,
-        scope: {
-          paths: ["crates/jazz/src/node"],
-          serializerCrates: ["ciborium", "postcard", "serde_json"],
-        },
-        allowances: [
-          {
-            id: "semantic-json-endpoint",
-            path: "crates/jazz/src/node/codec.rs",
-            api: "serde_json::from_str",
-            expectedOccurrences: 1,
-            anchors: [anchor("fn f() { serde_json::from_str(&value); }\n", "serde_json")],
-            classification: "explicit test endpoint",
-          },
-        ],
-      }),
-    );
-    assert.equal(run(root).status, 0);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("rejects moving a registered call elsewhere in the same source file", () => {
-  const root = fixture();
-  try {
-    const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    const reviewed = "fn reviewed_endpoint() {\n  serde_json::from_str(&value);\n}\n";
-    fs.writeFileSync(file, reviewed);
-    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
-    const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
-    registry.allowances = [
-      {
-        id: "reviewed-endpoint",
-        path: "crates/jazz/src/node/codec.rs",
-        api: "serde_json::from_str",
-        expectedOccurrences: 1,
-        anchors: [anchor(reviewed, "serde_json")],
-        classification: "reviewed fixture endpoint",
-      },
-    ];
-    fs.writeFileSync(registryPath, JSON.stringify(registry));
-    assert.equal(run(root).status, 0);
-    fs.writeFileSync(file, "fn production_write() {\n  serde_json::from_str(&value);\n}\n");
-    const moved = run(root);
-    assert.notEqual(moved.status, 0);
-    assert.match(moved.stderr, /endpoint anchor changed or call moved/);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("rejects broad registry patterns and a persistence owner added after the registry", () => {
-  const root = fixture();
-  try {
-    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
-    const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
-    registry.allowances.push({
-      id: "broad-is-not-an-api",
-      path: "crates/jazz/src/node/codec.rs",
-      api: "serde_json::.*",
-      expectedOccurrences: 1,
-      classification: "must fail schema validation",
-    });
-    fs.writeFileSync(registryPath, JSON.stringify(registry));
+    const moved =
+      '#[cfg(test)]\nmod tests {\n  fn production_name() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n}\n';
+    fs.writeFileSync(path.join(root, "crates/jazz/src/node/codec.rs"), moved);
     let result = run(root);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /invalid allowance/);
-
-    registry.allowances = [];
-    fs.writeFileSync(registryPath, JSON.stringify(registry));
-    fs.writeFileSync(
-      path.join(root, "crates/jazz/src/node/new_persistence_owner.rs"),
-      "fn write() { let _ = serde_json::to_writer(&mut output, &value); }\n",
+    assert.match(
+      result.stderr,
+      /unregistered default serialization reference|registered serializer endpoint is absent/,
     );
+    assert.equal(compile(root).status, 0);
+
+    const cfgRemoved =
+      'mod tests {\n  fn semantic() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n}\n';
+    fs.writeFileSync(path.join(root, "crates/jazz/src/node/codec.rs"), cfgRemoved);
     result = run(root);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /new_persistence_owner.rs.*serde_json::to_writer/);
+    assert.match(
+      result.stderr,
+      /unregistered default serialization reference|registered serializer endpoint is absent/,
+    );
+    assert.equal(compile(root).status, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("rejects a restored flat-join postcard digest in its persistence owner", () => {
+test("requires an explicit exact registry entry for type-only serializer paths", () => {
   const root = fixture();
   try {
-    fs.renameSync(
-      path.join(root, "crates/jazz/src/node/codec.rs"),
-      path.join(root, "crates/jazz/src/node/maintained_subscription_view.rs"),
-    );
-    fs.appendFileSync(
-      path.join(root, "crates/jazz/src/node/maintained_subscription_view.rs"),
-      "fn digest(values: Vec<u8>) { let _ = postcard::to_allocvec(&values); }\n",
+    const source = "pub fn f(value: serde_json::Value) -> serde_json::Value { value }\n";
+    writeSource(root, source);
+    let result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /serde_json::Value/);
+    writeSource(root, source, endpoints(source));
+    result = run(root);
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a new direct serializer dependency even before source mentions it", () => {
+  const root = fixture();
+  try {
+    fs.appendFileSync(path.join(root, "crates/jazz/Cargo.toml"), 'bincode = "1"\n');
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /directDependencySnapshots differs/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a renamed direct dependency before its alias can be imported", () => {
+  const root = fixture();
+  try {
+    const manifest = path.join(root, "crates/jazz/Cargo.toml");
+    fs.writeFileSync(
+      manifest,
+      fs
+        .readFileSync(manifest, "utf8")
+        .replace('serde_json = "1"', 'json_codec = { package = "serde_json", version = "1" }'),
     );
     const result = run(root);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /maintained_subscription_view.rs.*postcard::to_allocvec/);
+    assert.match(result.stderr, /directDependencySnapshots differs/);
+    const checked = compile(root);
+    assert.equal(checked.status, 0, checked.stderr);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
