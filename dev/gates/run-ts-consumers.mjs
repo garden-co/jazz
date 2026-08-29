@@ -7,13 +7,13 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { verifyCorrectnessArtifactProducer } from "../artifacts/correctness-artifact-producer.mjs";
+import { correctnessConsumerEnvironment } from "./run-correctness-consumer.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-function run(executable, args) {
+function run(executable, args, env) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(executable, args, { cwd: root, stdio: "inherit", env: process.env });
+    const child = spawn(executable, args, { cwd: root, stdio: "inherit", env });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (code === 0) resolvePromise();
@@ -23,10 +23,10 @@ function run(executable, args) {
 }
 
 try {
-  verifyCorrectnessArtifactProducer(root);
+  const env = correctnessConsumerEnvironment(root);
   console.log("ts-consumers: verified native producer manifest");
-  await run("pnpm", ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"]);
-  await run("bash", ["dev/gates/run-ts-tests.sh"]);
+  await run("pnpm", ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"], env);
+  await run("bash", ["dev/gates/run-ts-tests.sh"], env);
 } catch (error) {
   console.error(`ts-consumers: ${error.message}`);
   process.exitCode = 1;

@@ -15,6 +15,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { snapshotCorrectnessArtifacts } from "../artifacts/test-artifact-store.mjs";
 import {
+  correctnessArtifactSourceIdentity,
   verifyCorrectnessArtifactProducer,
   writeCorrectnessArtifactProducerManifest,
 } from "../artifacts/correctness-artifact-producer.mjs";
@@ -381,6 +382,15 @@ export async function buildTestArtifacts(
   snapshot = () => {},
   sealProducerManifest = () => {},
 ) {
+  // Capture before any producer starts.  A dirty checkout is acceptable only
+  // when it remains byte-for-byte the same through publication; otherwise a
+  // manifest could attest new sources while containing binaries built from old
+  // ones.
+  const sourceAtStart = correctnessArtifactSourceIdentity(root);
+  const assertUnchangedSource = () => {
+    if (JSON.stringify(sourceAtStart) !== JSON.stringify(correctnessArtifactSourceIdentity(root)))
+      throw new Error("test-artifacts: source inputs changed during native artifact production");
+  };
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
     scope
@@ -460,7 +470,9 @@ export async function buildTestArtifacts(
   // Seal the exact pair before the separate TypeScript consumer builds its
   // broker worker. Mutable package publication paths remain useful to package
   // builds, but correctness consumers must never follow a later replacement.
+  assertUnchangedSource();
   const correctnessSnapshot = snapshot(root);
+  assertUnchangedSource();
 
   // A manifest is the contract that makes a cached/generated artifact safe to
   // consume. NAPI is built release because that is the loadable Linux mode;
@@ -485,7 +497,7 @@ export async function buildTestArtifacts(
   // This is the producer/consumer boundary.  It is written only after every
   // native artifact has loaded and its provenance has been verified.  The TS
   // consumer gate validates this immutable receipt *before* it builds tools.
-  sealProducerManifest(root, correctnessSnapshot);
+  sealProducerManifest(root, correctnessSnapshot, sourceAtStart);
   // The producer itself verifies the exact receipt it just published. This
   // catches a partial/incorrect write here rather than deferring it to a TS
   // consumer job that would otherwise report an unrelated build failure.

@@ -139,7 +139,14 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "outputs": ["dist/**"],
-      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
+      "passThroughEnv": [
+        "JAZZ_TEST_SEALED_TOOLS_DIST",
+        "JAZZ_CORRECTNESS_ARTIFACT_RUN",
+        "JAZZ_CORRECTNESS_WASM_PACKAGE",
+        "JAZZ_CORRECTNESS_NAPI_BINDING",
+        "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
+        "JAZZ_CORRECTNESS_CLI"
+      ]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],
@@ -171,7 +178,14 @@
     "test": {
       "dependsOn": ["^build"],
       "cache": false,
-      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
+      "passThroughEnv": [
+        "JAZZ_TEST_SEALED_TOOLS_DIST",
+        "JAZZ_CORRECTNESS_ARTIFACT_RUN",
+        "JAZZ_CORRECTNESS_WASM_PACKAGE",
+        "JAZZ_CORRECTNESS_NAPI_BINDING",
+        "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
+        "JAZZ_CORRECTNESS_CLI"
+      ]
     }
   }
 }

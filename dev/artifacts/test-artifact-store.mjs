@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import {
   cpSync,
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -10,12 +11,13 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const pointerName = ".jazz-correctness-test-artifacts.json";
-const fingerprintPattern = /^[a-f0-9]{64}-[a-f0-9]{64}$/;
+const fingerprintPattern = /^[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}$/;
 const hashPattern = /^[a-f0-9]{64}$/;
 
 // `target` belongs to one checkout even when linked worktrees share Git data.
@@ -31,6 +33,10 @@ export function correctnessArtifactPointer(root) {
 
 function napiCorrectnessPointer(root) {
   return join(resolve(root), "crates", "jazz-napi", "correctness-native-binding.pointer.cjs");
+}
+
+function cliArtifactSource(root) {
+  return join(root, "target", "debug", `jazz-tools${process.platform === "win32" ? ".exe" : ""}`);
 }
 
 function isWithin(parent, candidate) {
@@ -147,15 +153,18 @@ function fileReceipt(destination) {
   return files;
 }
 
-function validateReceiptShape(receipt, store) {
+function validateReceiptShape(receipt, store, root) {
   if (
-    receipt?.schema !== 1 ||
+    receipt?.schema !== 2 ||
     !fingerprintPattern.test(receipt.fingerprint ?? "") ||
     !hashPattern.test(receipt.wasmFingerprint ?? "") ||
     !hashPattern.test(receipt.napiFingerprint ?? "") ||
-    receipt.fingerprint !== `${receipt.wasmFingerprint}-${receipt.napiFingerprint}` ||
+    !hashPattern.test(receipt.cliFingerprint ?? "") ||
+    receipt.fingerprint !==
+      `${receipt.wasmFingerprint}-${receipt.napiFingerprint}-${receipt.cliFingerprint}` ||
     typeof receipt.wasmPackage !== "string" ||
     typeof receipt.napiGeneration !== "string" ||
+    typeof receipt.cliArtifact !== "string" ||
     !receipt.files ||
     Array.isArray(receipt.files) ||
     typeof receipt.files !== "object"
@@ -165,7 +174,8 @@ function validateReceiptShape(receipt, store) {
   if (
     !isWithin(store, destination) ||
     resolve(receipt.wasmPackage) !== resolve(destination, "wasm") ||
-    resolve(receipt.napiGeneration) !== resolve(destination, "napi")
+    resolve(receipt.napiGeneration) !== resolve(destination, "napi") ||
+    resolve(receipt.cliArtifact) !== resolve(destination, "cli", basename(cliArtifactSource(root)))
   )
     throw new Error("correctness artifacts: snapshot pointer escapes this worktree store");
   return destination;
@@ -174,13 +184,16 @@ function validateReceiptShape(receipt, store) {
 function validateStoredSnapshot(root, receipt) {
   const store = correctnessArtifactStore(root);
   rejectSymlinkAncestors(root, store, "snapshot store");
-  const destination = validateReceiptShape(receipt, store);
+  const destination = validateReceiptShape(receipt, store, root);
   realDirectory(destination, "stored snapshot");
   const storedReceipt = parseJsonFile(join(destination, "receipt.json"), "stored receipt");
   if (JSON.stringify(storedReceipt) !== JSON.stringify(receipt))
     throw new Error("correctness artifacts: pointer and stored receipt differ");
   validateManifest(receipt.wasmPackage, "wasm", "fast", receipt.wasmFingerprint);
   validateManifest(receipt.napiGeneration, "napi", "release", receipt.napiFingerprint);
+  realFile(receipt.cliArtifact, "stored CLI artifact");
+  if (sha256(receipt.cliArtifact) !== receipt.cliFingerprint)
+    throw new Error("correctness artifacts: stored CLI artifact hash differs");
   const actualFiles = fileReceipt(destination);
   const expectedEntries = Object.entries(receipt.files);
   if (
@@ -207,39 +220,54 @@ function copyRealTree(source, destination, label) {
 /** Seal the exact fast-WASM/release-NAPI pair into an immutable checkout store. */
 export function snapshotCorrectnessArtifacts(rootInput) {
   const root = resolve(rootInput);
+  const store = correctnessArtifactStore(root);
+  // Check the destination boundary before inspecting a source below `target`:
+  // a hostile/accidental target symlink must not change which failure is
+  // reported or redirect a later mkdir/copy operation.
+  rejectSymlinkAncestors(root, store, "snapshot store");
   const wasmSource = join(root, "crates", "jazz-wasm", "pkg");
   const napiSource = activeNapiGeneration(root);
+  const cliSource = cliArtifactSource(root);
   rejectSymlinkAncestors(root, wasmSource, "WASM package");
   rejectSymlinkAncestors(root, napiSource, "NAPI generation");
   walkRealFiles(wasmSource, "WASM package");
   walkRealFiles(napiSource, "NAPI generation");
+  realFile(cliSource, "CLI correctness artifact");
   const wasm = parseJsonFile(join(wasmSource, ".jazz-artifact-manifest.json"), "WASM manifest");
   const napi = parseJsonFile(join(napiSource, ".jazz-artifact-manifest.json"), "NAPI manifest");
   validateManifest(wasmSource, "wasm", "fast", wasm.nativeArtifactFingerprint);
   validateManifest(napiSource, "napi", "release", napi.nativeArtifactFingerprint);
 
-  const fingerprint = `${wasm.nativeArtifactFingerprint}-${napi.nativeArtifactFingerprint}`;
+  const cliFingerprint = sha256(cliSource);
+  const fingerprint = `${wasm.nativeArtifactFingerprint}-${napi.nativeArtifactFingerprint}-${cliFingerprint}`;
   if (!fingerprintPattern.test(fingerprint))
     throw new Error("correctness artifacts: invalid combined native fingerprint");
-  const store = correctnessArtifactStore(root);
   const destination = join(store, fingerprint);
   if (!isWithin(store, destination))
     throw new Error("correctness artifacts: snapshot destination escapes this worktree store");
   mkdirSync(store, { recursive: true });
-  rejectSymlinkAncestors(root, store, "snapshot store");
 
   if (!existsSync(destination)) {
     const stage = mkdtempSync(join(store, ".stage-"));
     try {
       copyRealTree(wasmSource, join(stage, "wasm"), "WASM package");
       copyRealTree(napiSource, join(stage, "napi"), "NAPI generation");
+      mkdirSync(join(stage, "cli"));
+      const stagedCli = join(stage, "cli", basename(cliSource));
+      cpSync(cliSource, stagedCli, { dereference: false });
+      // Node's copy semantics are platform dependent. The snapshot must remain
+      // an executable CLI on every supported host, without trusting the mutable
+      // source path again after publication.
+      chmodSync(stagedCli, statSync(cliSource).mode);
       const receipt = {
-        schema: 1,
+        schema: 2,
         fingerprint,
         wasmFingerprint: wasm.nativeArtifactFingerprint,
         napiFingerprint: napi.nativeArtifactFingerprint,
+        cliFingerprint,
         wasmPackage: join(destination, "wasm"),
         napiGeneration: join(destination, "napi"),
+        cliArtifact: join(destination, "cli", basename(cliSource)),
         files: fileReceipt(stage),
       };
       writeFileSync(join(stage, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, {
@@ -278,5 +306,23 @@ export function readCorrectnessArtifactSnapshot(rootInput) {
   const pointer = correctnessArtifactPointer(root);
   if (!existsSync(pointer)) return null;
   const receipt = parseJsonFile(pointer, "snapshot pointer");
+  return validateStoredSnapshot(root, receipt);
+}
+
+/**
+ * Read one immutable, content-addressed generation without consulting the
+ * mutable worktree pointer.  Correctness consumers use this through the
+ * producer manifest, so a later producer cannot redirect an already admitted
+ * consumer to a different NAPI/WASM/CLI triple.
+ */
+export function readCorrectnessArtifactSnapshotByFingerprint(rootInput, fingerprint) {
+  const root = resolve(rootInput);
+  if (!fingerprintPattern.test(fingerprint))
+    throw new Error("correctness artifacts: invalid immutable snapshot fingerprint");
+  const store = correctnessArtifactStore(root);
+  rejectSymlinkAncestors(root, store, "snapshot store");
+  const receipt = parseJsonFile(join(store, fingerprint, "receipt.json"), "stored receipt");
+  if (receipt.fingerprint !== fingerprint)
+    throw new Error("correctness artifacts: stored snapshot receipt fingerprint differs");
   return validateStoredSnapshot(root, receipt);
 }

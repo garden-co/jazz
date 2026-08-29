@@ -9,7 +9,16 @@ const { join } = require("node:path");
 const correctnessPointer = join(__dirname, "correctness-native-binding.pointer.cjs");
 const pointer = join(__dirname, "native-binding.pointer.cjs");
 try {
-  if (existsSync(correctnessPointer)) module.exports = require(correctnessPointer);
+  if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1") {
+    const binding = process.env.JAZZ_CORRECTNESS_NAPI_BINDING;
+    const fingerprint = process.env.JAZZ_CORRECTNESS_NAPI_FINGERPRINT;
+    if (!binding || !fingerprint)
+      throw new Error("sealed correctness consumer is missing its immutable NAPI binding");
+    // This exact path is supplied by the producer-manifest preflight.  Do not
+    // follow a mutable worktree pointer here: another producer may publish one
+    // while this consumer is still running.
+    module.exports = { nativeBinding: require(binding), expectedNativeArtifactFingerprint: fingerprint };
+  } else if (existsSync(correctnessPointer)) module.exports = require(correctnessPointer);
   else if (existsSync(pointer)) module.exports = require(pointer);
   else {
     const nativeBinding = require("./native-loader.cjs");

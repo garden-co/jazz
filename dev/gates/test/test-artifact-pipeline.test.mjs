@@ -544,7 +544,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
     );
   assert.doesNotMatch(pipeline, /--filter=jazz-tools/);
   assert.ok(
-    consumers.indexOf("verifyCorrectnessArtifactProducer(root)") <
+    consumers.indexOf("correctnessConsumerEnvironment(root)") <
       consumers.indexOf('"--filter=jazz-tools"'),
     "TS consumers must reject a stale producer receipt before Jazz Tools can build",
   );
@@ -562,12 +562,21 @@ test("CI uses the correctness artifact path while package builds keep release WA
       expectedLease,
       `${task} must preserve the aggregate parent's selected artifact lock`,
     );
-  for (const task of ["build", "jazz-tools#build", "test"])
+  for (const task of ["build"])
     assert.deepEqual(
       turbo.tasks[task].passThroughEnv,
       ["JAZZ_TEST_SEALED_TOOLS_DIST"],
       `${task} must preserve the sealed shared test surface for child package scripts`,
     );
+  assert.deepEqual(turbo.tasks["jazz-tools#build"].passThroughEnv, [
+    "JAZZ_TEST_SEALED_TOOLS_DIST",
+    "JAZZ_CORRECTNESS_ARTIFACT_RUN",
+    "JAZZ_CORRECTNESS_WASM_PACKAGE",
+    "JAZZ_CORRECTNESS_NAPI_BINDING",
+    "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
+    "JAZZ_CORRECTNESS_CLI",
+  ]);
+  assert.deepEqual(turbo.tasks.test.passThroughEnv, turbo.tasks["jazz-tools#build"].passThroughEnv);
 });
 
 test("Turbo invalidates each native artifact only for its Cargo closure", () => {

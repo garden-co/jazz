@@ -39,10 +39,17 @@ if (!(["chromium", "firefox", "webkit"] as const).includes(browserName as never)
 }
 const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
 const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
-const correctnessSnapshot = readCorrectnessArtifactSnapshot(resolve(__dirname, "../.."));
-const jazzWasmTestEntry = correctnessSnapshot
-  ? resolve(correctnessSnapshot.wasmPackage, "jazz_wasm.js")
-  : resolve(__dirname, "../../crates/jazz-wasm");
+const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+  throw new Error("sealed correctness consumer is missing its immutable WASM package");
+const correctnessSnapshot = sealedWasmPackage
+  ? null
+  : readCorrectnessArtifactSnapshot(resolve(__dirname, "../.."));
+const jazzWasmTestEntry = sealedWasmPackage
+  ? resolve(sealedWasmPackage, "jazz_wasm.js")
+  : correctnessSnapshot
+    ? resolve(correctnessSnapshot.wasmPackage, "jazz_wasm.js")
+    : resolve(__dirname, "../../crates/jazz-wasm");
 
 export default defineConfig({
   define: {

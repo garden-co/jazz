@@ -3,9 +3,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { verifyManifest } from "./provenance.mjs";
 import { verifyWasmGlueAbi } from "./wasm-glue-abi.mjs";
-import { readCorrectnessArtifactSnapshot } from "./test-artifact-store.mjs";
+import {
+  verifyCorrectnessArtifactConsumerEnvironment,
+  verifyCorrectnessArtifactProducer,
+} from "./correctness-artifact-producer.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
@@ -92,30 +94,20 @@ function parameterCount(parameters) {
   return count;
 }
 
-export function verifyCorrectnessTestArtifacts(rootDir = root) {
+export function verifyCorrectnessTestArtifacts(rootDir = root, { allowUnsealedFixture = false } = {}) {
   const failures = [];
   let snapshot;
   try {
-    snapshot = readCorrectnessArtifactSnapshot(rootDir);
-    if (!snapshot) failures.push("missing worktree-private correctness artifact snapshot");
+    snapshot = verifyCorrectnessArtifactProducer(rootDir).snapshot;
+    if (!allowUnsealedFixture && process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1")
+      verifyCorrectnessArtifactConsumerEnvironment(rootDir);
   } catch (error) {
     failures.push(error.message);
   }
-  // The fallback keeps this verifier useful for its deliberately minimal unit
-  // fixtures. Real correctness invocation is rejected above without a sealed
-  // snapshot, but still reports every independently detectable ABI defect.
+  // Only unit fixtures opt into the mutable fallback.  Every command-line
+  // correctness consumer is admitted through the producer manifest above.
+  if (!snapshot && !allowUnsealedFixture) return failures;
   const wasmPackage = snapshot?.wasmPackage ?? resolve(rootDir, "crates/jazz-wasm/pkg");
-  for (const [kind, profile] of [
-    ["wasm", "fast"],
-    ["napi", "release"],
-  ]) {
-    try {
-      const problem = verifyManifest(rootDir, kind, profile);
-      if (problem) failures.push(`STALE ${kind} ${profile}: ${problem}`);
-    } catch (error) {
-      failures.push(`STALE ${kind} ${profile}: ${error.message}`);
-    }
-  }
   try {
     const expected = classBody(
       text("packages/jazz-tools/src/types/jazz-wasm.d.ts", rootDir),

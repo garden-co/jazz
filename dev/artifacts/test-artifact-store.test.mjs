@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -21,6 +21,8 @@ import {
   snapshotCorrectnessArtifacts,
 } from "./test-artifact-store.mjs";
 import {
+  correctnessArtifactConsumerEnvironment,
+  correctnessArtifactProducerManifest,
   verifyCorrectnessArtifactProducer,
   writeCorrectnessArtifactProducerManifest,
 } from "./correctness-artifact-producer.mjs";
@@ -75,6 +77,7 @@ function fixture(label, wasmFingerprint, napiFingerprint) {
       // compatibility loader input.
       `module.exports = { expectedNativeArtifactFingerprint: ${JSON.stringify("0".repeat(64))} };`,
     ],
+    [join(root, "target", "debug", "jazz-tools"), `cli:${label}`],
   ]) {
     mkdirSync(path.substring(0, path.lastIndexOf("/")), { recursive: true });
     writeFileSync(path, value);
@@ -126,7 +129,7 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
   }
 });
 
-test("producer manifest binds the immutable snapshot and CLI to one checkout revision", () => {
+test("producer manifest binds immutable artifacts to every relevant source input", () => {
   const root = fixture("producer", "a".repeat(64), "b".repeat(64));
   try {
     // A real commit is deliberate: the manifest must identify a checkout, not
@@ -138,28 +141,118 @@ test("producer manifest binds the immutable snapshot and CLI to one checkout rev
       { cwd: root },
     );
     const cli = join(root, "target", "debug", "jazz-tools");
-    mkdirSync(join(root, "target", "debug"), { recursive: true });
     writeFileSync(cli, "first-cli");
     const snapshot = snapshotCorrectnessArtifacts(root);
     writeCorrectnessArtifactProducerManifest(root, snapshot);
     assert.doesNotThrow(() => verifyCorrectnessArtifactProducer(root));
 
-    // Planted stale cache: a consumer must not accept the snapshot after the
-    // CLI producer artifact was replaced.
+    // A later mutable CLI build is not consumer authority: the snapshot's CLI
+    // is content-addressed and continues to be the only executable selected by
+    // a manifest already handed to a consumer.
     writeFileSync(cli, "different-cli");
-    assert.throws(() => verifyCorrectnessArtifactProducer(root), /CLI fingerprint is stale/);
+    assert.doesNotThrow(() => verifyCorrectnessArtifactProducer(root));
     writeFileSync(cli, "first-cli");
 
-    // A checkout move is likewise stale even when the artifact bytes happen
-    // to be identical; this is the false-green cache case the receipt closes.
-    writeFileSync(join(root, "README"), "next revision");
-    execFileSync("git", ["add", "README"], { cwd: root });
+    // Planted tracked and untracked source changes must both reject the
+    // hand-off even though HEAD itself is unchanged.
+    writeFileSync(join(root, "README"), "dirty tracked source");
+    assert.throws(() => verifyCorrectnessArtifactProducer(root), /different source inputs/);
+    rmSync(join(root, "README"));
+    writeFileSync(join(root, "untracked-source"), "dirty untracked source");
+    assert.throws(() => verifyCorrectnessArtifactProducer(root), /different source inputs/);
+    rmSync(join(root, "untracked-source"));
+
+    // The selected immutable CLI itself is checked on every preflight.
+    writeFileSync(snapshot.cliArtifact, "corrupt snapshot CLI");
+    assert.throws(
+      () => verifyCorrectnessArtifactProducer(root),
+      /stored CLI artifact hash differs/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a consumer pins its manifest-selected triple across pointer swaps and partial publication", async () => {
+  const root = fixture("manifest-swap", "a".repeat(64), "b".repeat(64));
+  try {
+    execFileSync("git", ["add", "."], { cwd: root });
     execFileSync(
       "git",
-      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "next"],
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
       { cwd: root },
     );
-    assert.throws(() => verifyCorrectnessArtifactProducer(root), /different checkout revision/);
+    const first = snapshotCorrectnessArtifacts(root);
+    writeCorrectnessArtifactProducerManifest(root, first);
+
+    // A later producer can replace both mutable package pointers.  The first
+    // consumer still receives only paths named by its immutable manifest.
+    const wasm = join(root, "crates", "jazz-wasm", "pkg");
+    const nextJs = 'export const label = "second";';
+    const nextBytes = "wasm-bytes:second";
+    writeFileSync(join(wasm, "jazz_wasm.js"), nextJs);
+    writeFileSync(join(wasm, "jazz_wasm_bg.wasm"), nextBytes);
+    writeFileSync(
+      join(wasm, ".jazz-artifact-manifest.json"),
+      JSON.stringify({
+        kind: "wasm",
+        profile: "fast",
+        nativeArtifactFingerprint: "c".repeat(64),
+        artifacts: [
+          { file: "jazz_wasm.js", sha256: hash(nextJs) },
+          { file: "jazz_wasm_bg.wasm", sha256: hash(nextBytes) },
+        ],
+      }),
+    );
+    const second = snapshotCorrectnessArtifacts(root);
+    assert.notEqual(second.fingerprint, first.fingerprint);
+    const environment = correctnessArtifactConsumerEnvironment(root);
+    assert.equal(environment.JAZZ_CORRECTNESS_WASM_PACKAGE, first.wasmPackage);
+    assert.equal(environment.JAZZ_CORRECTNESS_NAPI_BINDING, join(first.napiGeneration, "index.js"));
+    assert.equal(environment.JAZZ_CORRECTNESS_CLI, first.cliArtifact);
+
+    // Deliberately race a mutable pointer publisher in another process.  A
+    // consumer preflight resolves only the manifest's content address, so it
+    // must observe the first triple on every iteration regardless of which
+    // generation happens to be current at that instant.
+    const pointer = correctnessArtifactPointer(root);
+    const napiPointer = join(root, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs");
+    const swapper = spawn(
+      process.execPath,
+      [
+        "-e",
+        [
+          "const fs=require('node:fs')",
+          "const [pointer,napi,first,second]=process.argv.slice(1)",
+          "for(let i=0;i<2000;i++) { fs.writeFileSync(pointer, i%2 ? first : second); fs.writeFileSync(napi, 'module.exports = {};\\n') }",
+        ].join(";"),
+        pointer,
+        napiPointer,
+        JSON.stringify(first),
+        JSON.stringify(second),
+      ],
+      { stdio: "ignore" },
+    );
+    let exited = false;
+    let observations = 0;
+    swapper.once("exit", (code) => {
+      assert.equal(code, 0);
+      exited = true;
+    });
+    do {
+      const selected = correctnessArtifactConsumerEnvironment(root);
+      assert.equal(selected.JAZZ_CORRECTNESS_WASM_PACKAGE, first.wasmPackage);
+      assert.equal(selected.JAZZ_CORRECTNESS_NAPI_BINDING, join(first.napiGeneration, "index.js"));
+      observations++;
+      await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    } while (!exited);
+    assert.ok(observations > 1, "pointer swap did not overlap consumer preflight");
+
+    // A killed producer leaves only a private temporary manifest.  Existing
+    // readers remain on the prior atomic receipt, never a half-written one.
+    const manifest = correctnessArtifactProducerManifest(root);
+    writeFileSync(`${manifest}.interrupted.tmp`, "{");
+    assert.equal(verifyCorrectnessArtifactProducer(root).snapshot.fingerprint, first.fingerprint);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -230,6 +323,7 @@ test("source and stored symbolic links are rejected recursively", () => {
 
     const outsideStore = join(ancestorRoot, "outside-store");
     mkdirSync(outsideStore);
+    rmSync(join(ancestorRoot, "target"), { recursive: true, force: true });
     symlinkSync(outsideStore, join(ancestorRoot, "target"), "dir");
     assert.throws(
       () => snapshotCorrectnessArtifacts(ancestorRoot),

@@ -1481,14 +1481,9 @@ test("TypeScript CI runs the inspector's freshly built embedded browser receipt"
   );
   const browserCommand = inspectorPackage.scripts["test:browser"];
 
-  assert.equal(
-    browserCommand,
-    "pnpm run build:embedded && playwright test --config playwright.config.ts",
-  );
-  assert.throws(
-    () => assert.match(browserCommand.replace("pnpm run build:embedded && ", ""), /build:embedded/),
-    /build:embedded/,
-  );
+  assert.match(browserCommand, /run-correctness-consumer\.mjs --/);
+  assert.match(browserCommand, /pnpm run build:embedded/);
+  assert.match(browserCommand, /playwright test --config playwright\.config\.ts/);
 });
 
 test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {
@@ -1571,6 +1566,11 @@ test("a missing prepared native artifact prevents both TypeScript suites from st
       env: {
         ...process.env,
         PATH: `${fixture}:${process.env.PATH}`,
+        JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+        JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+        JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+        JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
+        JAZZ_CORRECTNESS_CLI: "/sealed/jazz-tools",
         JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
         JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
       },
@@ -1687,6 +1687,11 @@ test("missing public root or framework exports prevent both TypeScript suites fr
         encoding: "utf8",
         env: {
           ...process.env,
+          JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+          JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+          JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+          JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
+          JAZZ_CORRECTNESS_CLI: "/sealed/jazz-tools",
           JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
           JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
         },

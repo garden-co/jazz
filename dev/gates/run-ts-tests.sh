@@ -6,6 +6,26 @@
 # suites reuse the artifact build completed before this script starts.
 set -u
 
+# This runner is deliberately not a standalone shortcut.  Its parent performs
+# the producer-manifest admission and supplies exact snapshot paths; accepting
+# a direct invocation would reintroduce mutable NAPI/WASM pointer selection.
+if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
+  if [[ "${JAZZ_CORRECTNESS_ARTIFACT_RUN:-}" != "1" ]]; then
+    echo "run-ts-tests must be launched through pnpm test:typescript-consumers" >&2
+    exit 1
+  fi
+  for required_artifact_env in \
+    JAZZ_CORRECTNESS_WASM_PACKAGE \
+    JAZZ_CORRECTNESS_NAPI_BINDING \
+    JAZZ_CORRECTNESS_NAPI_FINGERPRINT \
+    JAZZ_CORRECTNESS_CLI; do
+    if [[ -z "${!required_artifact_env:-}" ]]; then
+      echo "run-ts-tests is missing immutable correctness artifact ${required_artifact_env}" >&2
+      exit 1
+    fi
+  done
+fi
+
 # The runner accepts small command overrides solely so its process-management
 # contract tests can use deterministic short-lived children.  The shared local
 # CI partition sets this guard, matching CI's unmodified environment: an
