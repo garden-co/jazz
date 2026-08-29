@@ -86,12 +86,14 @@ impl<F, T, E> FutureResultExpectExt<T, E> for F where F: Future<Output = Result<
 #[derive(Default)]
 struct CountingScheduler {
     calls: Cell<usize>,
+    urgencies: RefCell<Vec<TickUrgency>>,
     deadlines_ms: RefCell<Vec<u64>>,
 }
 
 impl TickScheduler for CountingScheduler {
-    fn schedule_tick(&self, _urgency: TickUrgency) {
+    fn schedule_tick(&self, urgency: TickUrgency) {
         self.calls.set(self.calls.get() + 1);
+        self.urgencies.borrow_mut().push(urgency);
     }
 
     fn schedule_tick_after(&self, delay_ms: u64) {
@@ -99,6 +101,33 @@ impl TickScheduler for CountingScheduler {
         // than converting them to an immediate callback.
         self.deadlines_ms.borrow_mut().push(delay_ms);
     }
+}
+
+impl CountingScheduler {
+    /// The raw-Db topology harness owns turns itself. Reset its observation
+    /// window immediately before the transition whose host wake is under test.
+    fn clear(&self) {
+        self.calls.set(0);
+        self.urgencies.borrow_mut().clear();
+        self.deadlines_ms.borrow_mut().clear();
+    }
+
+    fn take_urgencies(&self) -> Vec<TickUrgency> {
+        self.calls.set(0);
+        std::mem::take(&mut *self.urgencies.borrow_mut())
+    }
+}
+
+fn assert_scheduled_urgencies(
+    scheduler: &CountingScheduler,
+    expected: &[TickUrgency],
+    transition: &str,
+) {
+    assert_eq!(
+        scheduler.take_urgencies(),
+        expected,
+        "{transition} must preserve its exact owner-turn wake requests",
+    );
 }
 
 fn schema() -> JazzSchema {
@@ -495,10 +524,21 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     main_thread.tick().expect("apply worker Local ack");
     assert_eq!(global_wait.get(), None);
 
+    let worker_scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(worker_scheduler.clone()));
     core.tick().expect("accept at core");
+    worker_scheduler.clear();
     worker
         .tick()
         .expect("apply and forward core fate downstream");
+    assert_scheduled_urgencies(
+        &worker_scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "core fate ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish core fate on the scheduled worker follow-up turn");
     main_thread.tick().expect("apply core fate through worker");
 
     assert_eq!(global_wait.get(), Some(true));
@@ -566,7 +606,16 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     main_thread.tick().expect("upload update to worker");
     worker.tick().expect("persist and forward update");
     core.tick().expect("accept update at core");
+    worker_scheduler.clear();
     worker.tick().expect("forward update fate");
+    assert_scheduled_urgencies(
+        &worker_scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "update fate ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish update fate on the scheduled worker follow-up turn");
     main_thread.tick().expect("apply update fate");
     assert!(matches!(
         main_thread
@@ -617,8 +666,26 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
     assert_truthful_empty_local_opening(subscription.try_next_event());
 
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
     main_thread.tick().expect("request Local worker view");
+    scheduler.clear();
     worker.tick().expect("serve Local worker view");
+    // Subscription opening, inbound admission, and the node's subscriber
+    // dirty epoch each request the same next owner turn. All three must remain
+    // AfterCurrentTurn; a host coalesces them into the one turn driven below.
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+        ],
+        "worker Local subscription opening",
+    );
+    worker
+        .tick()
+        .expect("serve the scheduled Local worker follow-up turn");
     main_thread.tick().expect("apply Local worker view");
 
     assert_eq!(
@@ -1254,8 +1321,23 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
     assert_truthful_empty_local_opening(subscription.try_next_event());
 
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
     main_thread.tick().expect("request worker baseline");
+    scheduler.clear();
     worker.tick().expect("send worker baseline");
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+        ],
+        "worker baseline subscription opening",
+    );
+    worker
+        .tick()
+        .expect("send worker baseline on the scheduled follow-up turn");
     main_thread
         .tick()
         .expect("apply worker baseline while local hydration is suspended");
@@ -2733,8 +2815,23 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
         .expect("prepare local todos query");
     let _subscription =
         block_on(first_main.subscribe(&todos, ReadOpts::default())).expect("subscribe locally");
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
     first_main.tick().expect("request worker-local row");
+    scheduler.clear();
     worker.tick().expect("serve worker-local row");
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+            TickUrgency::AfterCurrentTurn,
+        ],
+        "initial causal parent publication",
+    );
+    worker
+        .tick()
+        .expect("serve worker-local row on the scheduled follow-up turn");
     first_main.tick().expect("hydrate accepted parent");
     assert_eq!(
         first_main.read(&todos).expect("read accepted parent").len(),
@@ -2834,8 +2931,19 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
     main_thread.tick().expect("apply worker Local ack");
     assert_eq!(global_wait_rejected.get(), None);
 
+    let worker_scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(worker_scheduler.clone()));
     core.tick().expect("reject mismatched session author");
+    worker_scheduler.clear();
     worker.tick().expect("apply and forward rejection");
+    assert_scheduled_urgencies(
+        &worker_scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "core rejection ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish rejection on the scheduled worker follow-up turn");
     main_thread.tick().expect("apply rejection through worker");
 
     assert_eq!(global_wait_rejected.get(), Some(true));
@@ -3099,8 +3207,19 @@ fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance()
     successor
         .tick()
         .expect("apply replayed Local acknowledgement");
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
     core.tick().expect("accept matching session author");
+    scheduler.clear();
     worker.tick().expect("apply accepted Global fate");
+    assert_scheduled_urgencies(
+        &scheduler,
+        &[TickUrgency::AfterCurrentTurn],
+        "recovered accepted fate ingress at the worker",
+    );
+    worker
+        .tick()
+        .expect("publish accepted Global fate on the scheduled follow-up turn");
     successor.tick().expect("apply accepted fate through relay");
 
     assert!(matches!(
