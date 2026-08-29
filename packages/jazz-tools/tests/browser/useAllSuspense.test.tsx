@@ -669,21 +669,36 @@ describe("useAllSuspense browser integration", () => {
       "expected suspense rows mount for gather query",
     );
 
-    const {
-      value: { id: rootId },
-    } = await client.db.insert(teams, {
+    const root = await client.db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const {
-      value: { id: midId },
-    } = await client.db.insert(teams, {
+    const rootId = root.value.id;
+    const mid = await client.db.insert(teams, {
       name: "mid",
       org_id: undefined,
       parent_id: rootId,
     });
-    await client.db.insert(teams, { name: "leaf", org_id: undefined, parent_id: midId });
+    const midId = mid.value.id;
+    const leaf = await client.db.insert(teams, {
+      name: "leaf",
+      org_id: undefined,
+      parent_id: midId,
+    });
+
+    // A cold recursive gather may hydrate over several owner turns. Its work
+    // must never starve unrelated local writes or their receipts.
+    const waitForLocal = (label: string, wait: Promise<void>) =>
+      Promise.race([
+        wait,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${label} local acknowledgement timed out`)), 5_000),
+        ),
+      ]);
+    await waitForLocal("root", root.wait({ tier: "local" }));
+    await waitForLocal("mid", mid.wait({ tier: "local" }));
+    await waitForLocal("leaf", leaf.wait({ tier: "local" }));
 
     await waitForCondition(
       () => {
