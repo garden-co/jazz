@@ -86,9 +86,21 @@ reusable. A failed readout, failed persistence, crash, forced shutdown, or
 lost peer is an uncertain termination: the node is retired permanently. There
 is no lease expiry, central transaction minting, fencing generation, or range
 allocation in this model. The
-An `AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
+`AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
 in-memory intern is never durable or portable. The well-known
 `AuthorSubject::SYSTEM` string passes all policies (ch. 7, `INV-DATA-3`).
+
+Hosts mediate this contract rather than making a relay mint transaction ids.
+The browser's durable SharedWorker owns the foreground-lease pool for its
+physical IndexedDB replica and gives each attached tab a separate lease over a
+dedicated port. A persistent Node foreground owner keeps its pool under the
+current working directory, namespaced by app, environment, and auth scope;
+exclusive state and per-node lock files serialize multiple processes in that
+same working directory. A dead or ambiguous lock owner retires its dirty node,
+never lends it to a later process. Explicit memory-mode runtimes deliberately
+create no filesystem lease state and receive a fresh in-memory node instead.
+Those are host adapters for the same lease contract, not alternate TxId
+formats or durability semantics.
 
 Storage may use compact local aliases without changing the wire identity model.
 Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
