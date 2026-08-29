@@ -1633,6 +1633,17 @@ impl IvmRuntime {
                 Poll::Pending => {
                     state.evaluations.insert(evaluation_id, evaluation);
                     retained_order.push_back(evaluation_id);
+                    // One owner turn advances at most one suspended
+                    // evaluation. In particular, a cold subscription
+                    // hydration must hand control back to the runtime owner
+                    // before it can drain unrelated queued work (such as
+                    // transport ingress and local write fates). The pending
+                    // storage future has just received this poll's durable
+                    // waker; cooperative in-memory yields wake it directly.
+                    retained_order.append(&mut state.order);
+                    state.order = retained_order;
+                    *slot.borrow_mut() = state;
+                    return Poll::Pending;
                 }
             }
         }

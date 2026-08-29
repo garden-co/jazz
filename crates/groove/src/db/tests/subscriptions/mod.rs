@@ -173,6 +173,95 @@ async fn cold_subscription_open_retains_the_supplied_owner_waker() {
     );
 }
 
+/// A cold hydration cannot monopolize the IVM worklist while a second
+/// subscription is being registered. The owner must return after the first
+/// pending evaluation, leaving storage to wake it before any later work is
+/// advanced.
+#[futures_test::test]
+async fn cold_hydration_yields_before_later_subscription_work() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("owner-turn album".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(1), Value::String("owner-turn artist".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let albums = database
+        .subscribe([("albums", GraphBuilder::table("albums"))])
+        .unwrap();
+    let artists = database
+        .subscribe([("artists", GraphBuilder::table("artists"))])
+        .unwrap();
+
+    // The first owner turn has a cooperative IVM yield; the second reaches
+    // the paused album scan. The artist scan must remain untouched.
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "the first cold scan yields the worklist before the later hydration can open its scan"
+    );
+    assert!(database.has_pending_progress());
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert!(albums.try_recv().is_ok(), "the cold hydration completes");
+    assert!(
+        artists.try_recv().is_ok(),
+        "later independent work also completes"
+    );
+}
+
 #[futures_test::test]
 async fn subscribe_sends_empty_hydration_snapshot_without_writes() {
     let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
