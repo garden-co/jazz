@@ -40,12 +40,15 @@ async function observeTrustedAdmissionLifecycle() {
       encode: encodeNativeForegroundCommand,
       decode: decodeNativeForegroundResponse,
     };
-    proveForegroundScopeIsolation(
-      foregroundFactory,
-      reopened.capability,
-      foregroundCodec,
-      "contains-a-row-without-write",
-    );
+    proveForegroundScopeIsolation(foregroundFactory, reopened.capability, foregroundCodec, {
+      contains: ["a"],
+      excludes: ["b"],
+    });
+    const scopeB = await switchNativeRelayAuthScope();
+    proveForegroundScopeIsolation(foregroundFactory, scopeB.capability, foregroundCodec, {
+      contains: ["b"],
+      excludes: ["a"],
+    });
     await logoutNativeRelay();
     return { phase, receipt: await deviceReceiptContext() };
   }
@@ -68,22 +71,20 @@ async function observeTrustedAdmissionLifecycle() {
     admittedNativeRelay,
   );
   const scopeA = await admittedNativeRelay();
-  proveForegroundScopeIsolation(
-    foregroundFactory,
-    scopeA.capability,
-    foregroundCodec,
-    "contains-a-row",
-  );
+  proveForegroundScopeIsolation(foregroundFactory, scopeA.capability, foregroundCodec, {
+    write: "a",
+    contains: ["a"],
+    excludes: ["b"],
+  });
   const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
   const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
   proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
   proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
-  proveForegroundScopeIsolation(
-    foregroundFactory,
-    scopeB.capability,
-    foregroundCodec,
-    "does-not-contain-a-row",
-  );
+  proveForegroundScopeIsolation(foregroundFactory, scopeB.capability, foregroundCodec, {
+    write: "b",
+    contains: ["b"],
+    excludes: ["a"],
+  });
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
   proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
@@ -95,12 +96,10 @@ async function observeTrustedAdmissionLifecycle() {
   // B's distinct native-selected path never observed it.
   await logoutNativeRelay();
   const reopenedScopeA = await admittedNativeRelay();
-  proveForegroundScopeIsolation(
-    foregroundFactory,
-    reopenedScopeA.capability,
-    foregroundCodec,
-    "contains-a-row",
-  );
+  proveForegroundScopeIsolation(foregroundFactory, reopenedScopeA.capability, foregroundCodec, {
+    contains: ["a"],
+    excludes: ["b"],
+  });
   await logoutNativeRelay();
   return { phase, receipt: await deviceReceiptContext() };
 }

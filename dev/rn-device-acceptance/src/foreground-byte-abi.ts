@@ -219,48 +219,80 @@ export function proveForegroundWriteSubscription(
  * a scope and its SQLite owner does not discard its data, while B never sees
  * A's row even though both scopes use the same application fixture.
  */
+export type ScopeIsolationReceipt = {
+  /** A fixed fixture row written through this admitted foreground, if any. */
+  write?: "a" | "b";
+  /** Fixed fixture rows that this scope must materialize. */
+  contains: readonly ("a" | "b")[];
+  /** Fixed fixture rows that this scope must never materialize. */
+  excludes: readonly ("a" | "b")[];
+};
+
+/**
+ * This deliberately accepts only the two compile-time fixture row names, not
+ * a caller-selected query, path, or payload.  Native platform code remains
+ * the sole selector of the app/storage/auth scope behind `capability`.
+ */
 export function proveForegroundScopeIsolation(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
-  expectation: "contains-a-row" | "contains-a-row-without-write" | "does-not-contain-a-row",
+  receipt: ScopeIsolationReceipt,
 ): void {
-  const foreground = factory.openAttached(capability);
-  const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
-    codec.decode(foreground.execute(codec.encode(command)));
-
-  if (expectation === "contains-a-row") {
-    const transaction = execute({ type: "beginTransaction", kind: "mergeable" });
-    if (transaction.type !== "transactionOpened")
-      throw new Error("scope A foreground transaction did not open");
-    const rowId = Uint8Array.from({ length: 16 }, () => 0x73);
-    const staged = execute({
-      type: "upsert",
-      transaction: transaction.transaction,
-      table: "todos",
-      rowId,
-      cells: fixtureCells("scope A private row"),
-    });
-    if (staged.type !== "mutationStaged")
-      throw new Error("scope A foreground upsert was not staged");
-    const committed = execute({
-      type: "commitTransaction",
-      transaction: transaction.transaction,
-    });
-    if (committed.type !== "transactionCommitted")
-      throw new Error("scope A foreground transaction did not commit");
+  if (receipt.write) {
+    // The writer and reader are deliberately separate foreground handles. A
+    // row must travel through the admitted relay/store rather than appearing
+    // only in the memory of the handle that staged it.
+    const writer = factory.openAttached(capability);
+    try {
+      const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
+        codec.decode(writer.execute(codec.encode(command)));
+      const transaction = execute({ type: "beginTransaction", kind: "mergeable" });
+      if (transaction.type !== "transactionOpened")
+        throw new Error("scope fixture foreground transaction did not open");
+      const rowId = Uint8Array.from({ length: 16 }, () => (receipt.write === "a" ? 0x73 : 0x75));
+      const staged = execute({
+        type: "upsert",
+        transaction: transaction.transaction,
+        table: "todos",
+        rowId,
+        cells: fixtureCells(receipt.write === "a" ? "scope A private row" : "scope B private row"),
+      });
+      if (staged.type !== "mutationStaged")
+        throw new Error("scope fixture foreground upsert was not staged");
+      const committed = execute({
+        type: "commitTransaction",
+        transaction: transaction.transaction,
+      });
+      if (committed.type !== "transactionCommitted")
+        throw new Error("scope fixture foreground transaction did not commit");
+    } finally {
+      writer.close();
+    }
   }
 
-  const rows = readTodos(foreground, codec);
-  const observedA = containsUtf8(rows, "scope-a-private-row");
-  if (
-    (expectation === "contains-a-row" || expectation === "contains-a-row-without-write") &&
-    !observedA
-  )
-    throw new Error("scope A did not materialize its persisted fixture row");
-  if (expectation === "does-not-contain-a-row" && observedA)
-    throw new Error("scope B observed scope A's persisted fixture row");
-  foreground.close();
+  const foreground = factory.openAttached(capability);
+  try {
+    const rows = readTodos(foreground, codec);
+    for (const scope of receipt.contains) {
+      if (!containsUtf8(rows, scopeFixtureTitle(scope)))
+        throw new Error(
+          `scope ${scope.toUpperCase()} did not materialize its persisted fixture row`,
+        );
+    }
+    for (const scope of receipt.excludes) {
+      if (containsUtf8(rows, scopeFixtureTitle(scope)))
+        throw new Error(
+          `scope ${receipt.write?.toUpperCase() ?? "read"} observed scope ${scope.toUpperCase()}'s persisted fixture row`,
+        );
+    }
+  } finally {
+    foreground.close();
+  }
+}
+
+function scopeFixtureTitle(scope: "a" | "b") {
+  return scope === "a" ? "scope-a-private-row" : "scope-b-private-row";
 }
 
 // `postcard::to_allocvec(&Query::from("todos"))` in the shared Rust binding.
@@ -352,6 +384,7 @@ function fixtureCells(
     | "upserted"
     | "rolled back"
     | "scope A private row"
+    | "scope B private row"
     | "subscription from foreground A",
 ): Uint8Array {
   const bytes = {
@@ -365,6 +398,10 @@ function fixtureCells(
     ],
     "scope A private row": [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 97, 45, 112, 114, 105,
+      118, 97, 116, 101, 45, 114, 111, 119,
+    ],
+    "scope B private row": [
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 98, 45, 112, 114, 105,
       118, 97, 116, 101, 45, 114, 111, 119,
     ],
     "subscription from foreground A": [

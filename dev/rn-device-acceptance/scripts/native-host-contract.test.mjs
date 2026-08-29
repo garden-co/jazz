@@ -127,7 +127,10 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   assert.match(androidDriver, /am", "force-stop", "dev\.jazz\.rndeviceacceptance/);
   assert.match(iosDriver, /simctl\(\["terminate", udid, "dev\.jazz\.rndeviceacceptance"\]\)/);
   assert.match(scenarios, /phase === "verify" \? scenario\.scenario === "reopen"/);
-  assert.match(app, /"contains-a-row-without-write"/);
+  assert.match(app, /\{\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
+  assert.match(app, /\{\s*contains: \["b"\],\s*excludes: \["a"\],?\s*\}/);
+  assert.match(app, /\{\s*write: "a",\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
+  assert.match(app, /\{\s*write: "b",\s*contains: \["b"\],\s*excludes: \["a"\],?\s*\}/);
   assert.match(androidFixture, /@ReactMethod fun acceptancePhase/);
   assert.match(androidFixture, /jazzDeviceAcceptancePhase/);
   assert.match(iosFixture, /RCT_REMAP_METHOD\(acceptancePhase/);
