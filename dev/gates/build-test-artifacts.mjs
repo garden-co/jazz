@@ -420,17 +420,13 @@ export async function buildTestArtifacts(
   // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
   // discarded that cache and made three cold compilers contend for the same
   // CPUs. NAPI is the long pole and benefits most from running alone. Once it
-  // is complete, CLI and fast WASM can share the remaining compile window;
-  // jazz-tools then consumes both generated prerequisites.
+  // is complete, fast WASM uses the remaining compile window; jazz-tools then
+  // consumes both runtime prerequisites. CLI builds are separate because no
+  // correctness consumer loads the binary at runtime.
   await guardedRun(
     "pnpm",
     ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only"],
     "release NAPI",
-  );
-  const cli = guardedRun(
-    "pnpm",
-    ["exec", "turbo", "run", "build:crates", "--filter=@jazz/rust", "--only"],
-    "CLI",
   );
   const wasm = guardedRun(
     "pnpm",
@@ -438,7 +434,7 @@ export async function buildTestArtifacts(
     "fast WASM",
   );
   try {
-    await Promise.all([cli, wasm]);
+    await wasm;
   } catch (error) {
     await scope.drain();
     throw firstBuildError ?? error;
@@ -450,7 +446,7 @@ export async function buildTestArtifacts(
   );
   try {
     // Validate the mutable producer generation before it can enter the
-    // immutable correctness store. A bad generation must never poison the
+    // content-addressed correctness store. A bad generation must never poison the
     // fingerprint-addressed destination that its repair needs to publish.
     await preflightNapi();
   } catch (error) {
@@ -496,7 +492,7 @@ export async function buildTestArtifacts(
   );
   // This is the producer/consumer boundary.  It is written only after every
   // native artifact has loaded and its provenance has been verified.  The TS
-  // consumer gate validates this immutable receipt *before* it builds tools.
+  // consumer gate validates this sealed receipt before and after it builds tools.
   sealProducerManifest(root, correctnessSnapshot, sourceAtStart);
   // The producer itself verifies the exact receipt it just published. This
   // catches a partial/incorrect write here rather than deferring it to a TS

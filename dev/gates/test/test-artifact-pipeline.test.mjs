@@ -255,42 +255,7 @@ test("signal during NAPI repair drains the parent scope before unlock", async ()
   }
 });
 
-test("parallel build failure drains an aborting sibling before leaving the lock", async () => {
-  const fixture = mkdtempSync(join(tmpdir(), "jazz-test-artifact-failure-drain-"));
-  const lockPath = join(fixture, "lock");
-  let siblingExited = false;
-  const started = Date.now();
-  await assert.rejects(
-    withArtifactBuildLock(
-      (scope) =>
-        buildTestArtifacts((unusedCommand, unusedArgs, label, { signal }) => {
-          if (label === "release NAPI") return Promise.resolve();
-          if (label === "CLI") return Promise.reject(new Error("expected failure"));
-          if (label === "fast WASM")
-            return new Promise((unusedResolve, reject) =>
-              signal.addEventListener(
-                "abort",
-                () =>
-                  setTimeout(() => {
-                    siblingExited = true;
-                    reject(new Error("slow sibling stopped"));
-                  }, 100),
-                { once: true },
-              ),
-            );
-          return Promise.resolve();
-        }, scope),
-      lockPath,
-    ),
-    /expected failure/,
-  );
-  assert.equal(siblingExited, true);
-  assert.ok(Date.now() - started >= 90);
-  assert.equal(existsSync(lockPath), false);
-  rmSync(fixture, { recursive: true, force: true });
-});
-
-test("test artifact pipeline overlaps independent bindings and repairs NAPI only after a failed load", async () => {
+test("test artifact pipeline builds only runtime consumers and repairs NAPI after a failed load", async () => {
   const calls = [];
   const snapshots = [];
   let releaseLoadAttempts = 0;
@@ -308,9 +273,8 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
   );
 
   const labels = calls.map((call) => call.label);
-  assert.deepEqual(labels.slice(0, 5), [
+  assert.deepEqual(labels.slice(0, 4), [
     "release NAPI",
-    "CLI",
     "fast WASM",
     "derive local artifact expectations",
     "preflight release NAPI",
@@ -329,7 +293,7 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
   assert.deepEqual(snapshots, ["preflight release NAPI"]);
   assert.ok(labels.indexOf("verify release NAPI provenance") > labels.indexOf("load release NAPI"));
   for (const call of calls.filter(({ label }) =>
-    ["CLI", "fast WASM", "release NAPI", "repair release NAPI"].includes(label),
+    ["fast WASM", "release NAPI", "repair release NAPI"].includes(label),
   ))
     assert.equal(call.options.env?.CARGO_TARGET_DIR, undefined, call.label);
 });
@@ -351,7 +315,7 @@ test("aggregate CI lock selection reaches every Turbo artifact producer", async 
       lockPath,
     );
     for (const call of calls.filter(({ label }) =>
-      ["release NAPI", "CLI", "fast WASM", "repair release NAPI"].includes(label),
+      ["release NAPI", "fast WASM", "repair release NAPI"].includes(label),
     )) {
       assert.equal(
         call.options.env.JAZZ_TEST_ARTIFACT_LOCK_PATH,
@@ -395,58 +359,8 @@ test("a strict Turbo-like child verifies the CI parent's runner-temp lease", asy
   }
 });
 
-test("a failed build aborts its still-running sibling commands", async () => {
+test("a failed runtime artifact build releases its scope", async () => {
   const aborted = [];
-  let resolveCli;
-  let resolveWasm;
-  let resolveTools;
-  const running = buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
-    if (label === "release NAPI") return Promise.resolve();
-    if (label === "CLI" || label === "fast WASM")
-      return new Promise((resolve, reject) => {
-        if (label === "CLI") resolveCli = resolve;
-        else if (label === "fast WASM") resolveWasm = resolve;
-        else resolveTools = resolve;
-        signal.addEventListener(
-          "abort",
-          () => {
-            aborted.push(label);
-            reject(new Error(`${label} aborted`));
-          },
-          { once: true },
-        );
-      });
-    return Promise.resolve();
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(typeof resolveCli, "function");
-  assert.equal(typeof resolveWasm, "function");
-  assert.equal(resolveTools, undefined);
-  resolveCli();
-  resolveWasm();
-  await running;
-
-  await assert.rejects(
-    buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
-      if (label === "release NAPI") return Promise.resolve();
-      if (label === "CLI")
-        return new Promise((unusedResolve, reject) =>
-          setImmediate(() => reject(new Error("simulated CLI failure"))),
-        );
-      return new Promise((resolve, reject) => {
-        signal.addEventListener(
-          "abort",
-          () => {
-            aborted.push(label);
-            reject(new Error(`${label} aborted`));
-          },
-          { once: true },
-        );
-      });
-    }),
-    /simulated CLI failure/,
-  );
-
   await assert.rejects(
     buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
       if (label === "release NAPI") return Promise.reject(new Error("simulated NAPI failure"));
@@ -463,7 +377,7 @@ test("a failed build aborts its still-running sibling commands", async () => {
     }),
     /simulated NAPI failure/,
   );
-  assert.deepEqual(aborted, ["fast WASM"]);
+  assert.deepEqual(aborted, []);
 });
 
 test("real subprocess inherits the caller's cache-compatible Cargo target", async () => {
@@ -536,7 +450,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
     );
   assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
   assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
-  for (const task of ["build", "build:crates", "build:fast"])
+  for (const task of ["build", "build:fast"])
     assert.match(
       pipeline,
       new RegExp(`"exec", "turbo", "run", "${task.replace(":", "\\:")}"`),
@@ -544,7 +458,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
     );
   assert.doesNotMatch(pipeline, /--filter=jazz-tools/);
   assert.ok(
-    consumers.indexOf("correctnessConsumerEnvironment(root)") <
+    consumers.indexOf("runCorrectnessConsumer(") <
       consumers.indexOf('"--filter=jazz-tools"'),
     "TS consumers must reject a stale producer receipt before Jazz Tools can build",
   );
@@ -574,7 +488,6 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "JAZZ_CORRECTNESS_WASM_PACKAGE",
     "JAZZ_CORRECTNESS_NAPI_BINDING",
     "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
-    "JAZZ_CORRECTNESS_CLI",
   ]);
   assert.deepEqual(turbo.tasks.test.passThroughEnv, turbo.tasks["jazz-tools#build"].passThroughEnv);
 });

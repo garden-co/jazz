@@ -2,15 +2,25 @@
 /**
  * Single admission point for Node/browser correctness consumers.
  *
- * It validates the producer receipt once, then gives the complete child
- * process tree immutable, content-addressed artifact paths.  Do not replace
- * this with a direct `vitest`/`pnpm test:browser` invocation: package pointers
- * are mutable producer state and are intentionally not correctness authority.
+ * It validates the producer receipt, gives the complete child process tree
+ * exact content-addressed artifact paths, then validates the same receipt
+ * again after the child exits. Do not replace this with a direct
+ * `vitest`/`pnpm test:browser` invocation: package pointers are mutable
+ * producer state and are intentionally not correctness authority.
+ *
+ * This is an accidental concurrent-build/workspace-mutation boundary. The
+ * paths remain owned by the current OS user; a hostile same-UID process can
+ * replace path-based WASM/NAPI inputs between checks. Preventing that would
+ * require different consumer APIs based on held file descriptors or content
+ * transfer rather than portable filesystem paths.
  */
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { correctnessArtifactConsumerEnvironment } from "../artifacts/correctness-artifact-producer.mjs";
+import {
+  correctnessArtifactConsumerEnvironment,
+  verifyCorrectnessArtifactConsumerEnvironment,
+} from "../artifacts/correctness-artifact-producer.mjs";
 
 export const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -28,6 +38,16 @@ export function runCorrectnessConsumer(
     const child = spawnImpl(executable, args, { cwd, env, stdio: "inherit" });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
+      try {
+        verifyCorrectnessArtifactConsumerEnvironment(rootDir, env);
+      } catch (error) {
+        reject(
+          new Error(
+            `correctness artifacts changed during consumer execution (${error.message})`,
+          ),
+        );
+        return;
+      }
       if (code === 0) resolvePromise();
       else reject(new Error(`correctness consumer failed with ${signal ?? `exit ${code ?? 1}`}`));
     });

@@ -33,6 +33,8 @@ const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
 const realisticBrowserLimitOverrides =
   process.env.JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON ?? "";
 const abstractBench = process.env.JAZZ_ABSTRACT_BENCH ?? "";
+const performanceArtifactRun =
+  abstractBench !== "" || realisticBrowserScenarios !== "" || realisticBrowserRunId !== "";
 const browserName = process.env.JAZZ_BROWSER ?? "chromium";
 if (!(["chromium", "firefox", "webkit"] as const).includes(browserName as never)) {
   throw new Error(`Unsupported JAZZ_BROWSER=${browserName}`);
@@ -41,10 +43,11 @@ const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
 const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
 if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
-  throw new Error("sealed correctness consumer is missing its immutable WASM package");
-const correctnessSnapshot = sealedWasmPackage
-  ? null
-  : readCorrectnessArtifactSnapshot(resolve(__dirname, "../.."));
+  throw new Error("sealed correctness consumer is missing its admitted WASM package");
+const correctnessSnapshot =
+  sealedWasmPackage || performanceArtifactRun
+    ? null
+    : readCorrectnessArtifactSnapshot(resolve(__dirname, "../.."));
 const jazzWasmTestEntry = sealedWasmPackage
   ? resolve(sealedWasmPackage, "jazz_wasm.js")
   : correctnessSnapshot

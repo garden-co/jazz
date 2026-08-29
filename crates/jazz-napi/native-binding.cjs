@@ -3,7 +3,7 @@
 // napi-rs's platform-aware loader when no local generation pointer exists.
 const { existsSync } = require("node:fs");
 const { join } = require("node:path");
-// Correctness builds seal a worktree-private immutable generation here. It is
+// Correctness builds select a worktree-private content-addressed generation here. It is
 // ignored and absent from packages, so ordinary local/release loading retains
 // the normal generated pointer and napi-rs fallback below.
 const correctnessPointer = join(__dirname, "correctness-native-binding.pointer.cjs");
@@ -13,7 +13,7 @@ try {
     const binding = process.env.JAZZ_CORRECTNESS_NAPI_BINDING;
     const fingerprint = process.env.JAZZ_CORRECTNESS_NAPI_FINGERPRINT;
     if (!binding || !fingerprint)
-      throw new Error("sealed correctness consumer is missing its immutable NAPI binding");
+      throw new Error("sealed correctness consumer is missing its admitted NAPI binding");
     // This exact path is supplied by the producer-manifest preflight.  Do not
     // follow a mutable worktree pointer here: another producer may publish one
     // while this consumer is still running.

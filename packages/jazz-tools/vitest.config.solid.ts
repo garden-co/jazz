@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
 if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
-  throw new Error("sealed correctness consumer is missing its immutable WASM package");
+  throw new Error("sealed correctness consumer is missing its admitted WASM package");
 
 export default defineConfig({
   plugins: [solid()],

@@ -31,6 +31,7 @@ import {
   verifyCorrectnessArtifactProducer,
   writeCorrectnessArtifactProducerManifest,
 } from "./correctness-artifact-producer.mjs";
+import { runCorrectnessConsumer } from "../gates/run-correctness-consumer.mjs";
 
 const require = createRequire(import.meta.url);
 const jazzToolsRequire = createRequire(
@@ -78,11 +79,10 @@ function fixture(label, wasmFingerprint, napiFingerprint) {
     [
       join(root, "crates", "jazz-napi", "native-artifact-fingerprint.cjs"),
       // Model an older package-staging expectation. Correctness snapshots must
-      // bind their expectation to the immutable generation, not this mutable
+      // bind their expectation to the sealed generation, not this mutable
       // compatibility loader input.
       `module.exports = { expectedNativeArtifactFingerprint: ${JSON.stringify("0".repeat(64))} };`,
     ],
-    [join(root, "target", "debug", "jazz-tools"), `cli:${label}`],
   ]) {
     mkdirSync(path.substring(0, path.lastIndexOf("/")), { recursive: true });
     writeFileSync(path, value);
@@ -112,7 +112,6 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
     for (const path of [
       join(firstSnapshot.wasmPackage, "jazz_wasm.js"),
       join(firstSnapshot.napiGeneration, "index.js"),
-      firstSnapshot.cliArtifact,
       join(firstSnapshot.wasmPackage, "..", "receipt.json"),
     ]) {
       const stat = statSync(path);
@@ -157,7 +156,25 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
   }
 });
 
-test("producer manifest binds immutable artifacts to every relevant source input", () => {
+test("a sealed publication collision accepts the winner without leaking its private stage", () => {
+  const root = fixture("collision", "f".repeat(64), "0".repeat(64));
+  try {
+    let winner;
+    const selected = snapshotCorrectnessArtifacts(root, {
+      beforePublish() {
+        winner = snapshotCorrectnessArtifacts(root);
+      },
+    });
+    assert.equal(selected.fingerprint, winner.fingerprint);
+    assert.equal(readCorrectnessArtifactSnapshot(root).fingerprint, winner.fingerprint);
+    const storeEntries = readdirSync(join(root, "target", "correctness-test-artifacts"));
+    assert.equal(storeEntries.some((entry) => entry.startsWith(".stage-")), false);
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test("producer manifest binds sealed artifacts to every relevant source input", () => {
   const root = fixture("producer", "a".repeat(64), "b".repeat(64));
   try {
     // A real commit is deliberate: the manifest must identify a checkout, not
@@ -168,18 +185,17 @@ test("producer manifest binds immutable artifacts to every relevant source input
       ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
       { cwd: root },
     );
-    const cli = join(root, "target", "debug", "jazz-tools");
-    writeFileSync(cli, "first-cli");
     const snapshot = snapshotCorrectnessArtifacts(root);
     writeCorrectnessArtifactProducerManifest(root, snapshot);
     assert.doesNotThrow(() => verifyCorrectnessArtifactProducer(root));
 
-    // A later mutable CLI build is not consumer authority: the snapshot's CLI
-    // is content-addressed and continues to be the only executable selected by
-    // a manifest already handed to a consumer.
-    writeFileSync(cli, "different-cli");
+    // A later mutable WASM package publication is not consumer authority: the
+    // content-addressed snapshot remains selected by the producer manifest.
+    const mutableWasm = join(root, "crates", "jazz-wasm", "pkg", "jazz_wasm.js");
+    const originalWasm = readFileSync(mutableWasm, "utf8");
+    writeFileSync(mutableWasm, "different mutable WASM package");
     assert.doesNotThrow(() => verifyCorrectnessArtifactProducer(root));
-    writeFileSync(cli, "first-cli");
+    writeFileSync(mutableWasm, originalWasm);
 
     // Planted tracked and untracked source changes must both reject the
     // hand-off even though HEAD itself is unchanged.
@@ -190,22 +206,21 @@ test("producer manifest binds immutable artifacts to every relevant source input
     assert.throws(() => verifyCorrectnessArtifactProducer(root), /different source inputs/);
     rmSync(join(root, "untracked-source"));
 
-    // The selected immutable CLI itself is checked on every preflight.
-    // A same-UID process can deliberately restore write permission, so every
-    // admission rechecks both mode and content.  Normal producer writes are
-    // stopped by the sealed mode in the first place.
-    chmodSync(snapshot.cliArtifact, 0o755);
-    writeFileSync(snapshot.cliArtifact, "corrupt snapshot CLI");
+    // The selected WASM itself is checked on every preflight. Read-only mode
+    // stops ordinary producer writes, and admission rechecks mode and content.
+    const storedWasm = join(snapshot.wasmPackage, "jazz_wasm.js");
+    chmodSync(storedWasm, 0o644);
+    writeFileSync(storedWasm, "corrupt snapshot WASM");
     assert.throws(
       () => verifyCorrectnessArtifactProducer(root),
-      /writable after publication|stored CLI artifact hash differs/,
+      /writable after publication|artifact hash mismatch/,
     );
   } finally {
     removeFixture(root);
   }
 });
 
-test("a consumer pins its manifest-selected triple across pointer swaps and partial publication", async () => {
+test("a consumer pins its manifest-selected pair across pointer swaps and partial publication", async () => {
   const root = fixture("manifest-swap", "a".repeat(64), "b".repeat(64));
   try {
     execFileSync("git", ["add", "."], { cwd: root });
@@ -218,7 +233,7 @@ test("a consumer pins its manifest-selected triple across pointer swaps and part
     writeCorrectnessArtifactProducerManifest(root, first);
 
     // A later producer can replace both mutable package pointers.  The first
-    // consumer still receives only paths named by its immutable manifest.
+    // consumer still receives only paths named by its content-addressed manifest.
     const wasm = join(root, "crates", "jazz-wasm", "pkg");
     const nextJs = 'export const label = "second";';
     const nextBytes = "wasm-bytes:second";
@@ -241,11 +256,10 @@ test("a consumer pins its manifest-selected triple across pointer swaps and part
     const environment = correctnessArtifactConsumerEnvironment(root);
     assert.equal(environment.JAZZ_CORRECTNESS_WASM_PACKAGE, first.wasmPackage);
     assert.equal(environment.JAZZ_CORRECTNESS_NAPI_BINDING, join(first.napiGeneration, "index.js"));
-    assert.equal(environment.JAZZ_CORRECTNESS_CLI, first.cliArtifact);
 
     // Deliberately race a mutable pointer publisher in another process.  A
     // consumer preflight resolves only the manifest's content address, so it
-    // must observe the first triple on every iteration regardless of which
+    // must observe the first pair on every iteration regardless of which
     // generation happens to be current at that instant.
     const pointer = correctnessArtifactPointer(root);
     const napiPointer = join(root, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs");
@@ -290,8 +304,8 @@ test("a consumer pins its manifest-selected triple across pointer swaps and part
   }
 });
 
-test("admission is mutation-sensitive while a same-UID process races the stored snapshot", async () => {
-  const root = fixture("snapshot-race", "d".repeat(64), "e".repeat(64));
+test("the consumer wrapper rejects snapshot mutation after preflight", async () => {
+  const root = fixture("snapshot-lifecycle", "d".repeat(64), "e".repeat(64));
   try {
     execFileSync("git", ["add", "."], { cwd: root });
     execFileSync(
@@ -301,57 +315,23 @@ test("admission is mutation-sensitive while a same-UID process races the stored 
     );
     const snapshot = snapshotCorrectnessArtifacts(root);
     writeCorrectnessArtifactProducerManifest(root, snapshot);
-    const wasmJs = join(snapshot.wasmPackage, "jazz_wasm.js");
-    const original = readFileSync(wasmJs, "utf8");
-    const mutator = spawn(
+    await assert.rejects(
+      runCorrectnessConsumer(
       process.execPath,
       [
         "-e",
         [
           "const fs=require('node:fs')",
-          "const [file,directory,original]=process.argv.slice(1)",
-          "for(let i=0;i<300;i++) {",
-          "fs.chmodSync(directory,0o755); fs.chmodSync(file,0o644)",
-          "fs.writeFileSync(file, 'export const label = \\\"mutated\\\";')",
-          "fs.chmodSync(file,0o444); fs.chmodSync(directory,0o555)",
-          "fs.chmodSync(directory,0o755); fs.chmodSync(file,0o644)",
-          "fs.writeFileSync(file, original)",
-          "fs.chmodSync(file,0o444); fs.chmodSync(directory,0o555)",
-          "}",
+          "const file=process.argv[1]",
+          "fs.chmodSync(file,0o755)",
+          "fs.writeFileSync(file,'accidental concurrent rebuild')",
         ].join(";"),
-        wasmJs,
-        snapshot.wasmPackage,
-        original,
+        join(snapshot.wasmPackage, "jazz_wasm.js"),
       ],
-      { stdio: "ignore" },
+        { cwd: root, rootDir: root },
+      ),
+      /correctness artifacts changed during consumer execution/,
     );
-    let finished = false;
-    let accepted = 0;
-    let rejected = 0;
-    mutator.once("exit", (code) => {
-      assert.equal(code, 0);
-      finished = true;
-    });
-    do {
-      try {
-        const environment = correctnessArtifactConsumerEnvironment(root);
-        assert.equal(environment.JAZZ_CORRECTNESS_WASM_PACKAGE, snapshot.wasmPackage);
-        // A second independent read makes this a mutation-sensitive receipt:
-        // a race either retains the sealed content or rejects admission.
-        assert.equal(readCorrectnessArtifactSnapshot(root).fingerprint, snapshot.fingerprint);
-        accepted++;
-      } catch (error) {
-        assert.match(
-          String(error),
-          /writable after publication|artifact hash mismatch|stored snapshot file inventory/,
-        );
-        rejected++;
-      }
-      await new Promise((resolvePromise) => setImmediate(resolvePromise));
-    } while (!finished);
-    assert.ok(accepted + rejected > 1, "mutation race did not overlap admission");
-    assert.ok(rejected > 0, "mutated snapshot was never detected");
-    assert.doesNotThrow(() => verifyCorrectnessArtifactProducer(root));
   } finally {
     removeFixture(root);
   }
@@ -405,17 +385,17 @@ test("tampered, hard-linked, or incomplete stored generations fail on read and r
   }
 });
 
-test("stored snapshot rejects a same-UID hardlink replacement before admission", () => {
+test("stored snapshot rejects a hardlink replacement before admission", () => {
   const root = fixture("hardlink", "b".repeat(64), "c".repeat(64));
   try {
     const snapshot = snapshotCorrectnessArtifacts(root);
-    const storedCli = snapshot.cliArtifact;
-    const replacement = join(root, "replacement-cli");
-    writeFileSync(replacement, readFileSync(storedCli));
-    chmodSync(join(snapshot.cliArtifact, ".."), 0o755);
-    rmSync(storedCli);
-    linkSync(replacement, storedCli);
-    chmodSync(join(snapshot.cliArtifact, ".."), 0o555);
+    const storedWasm = join(snapshot.wasmPackage, "jazz_wasm.js");
+    const replacement = join(root, "replacement-wasm");
+    writeFileSync(replacement, readFileSync(storedWasm));
+    chmodSync(snapshot.wasmPackage, 0o755);
+    rmSync(storedWasm);
+    linkSync(replacement, storedWasm);
+    chmodSync(snapshot.wasmPackage, 0o555);
     assert.throws(
       () => readCorrectnessArtifactSnapshot(root),
       /hardlink/,

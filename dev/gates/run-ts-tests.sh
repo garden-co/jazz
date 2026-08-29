@@ -17,10 +17,9 @@ if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
   for required_artifact_env in \
     JAZZ_CORRECTNESS_WASM_PACKAGE \
     JAZZ_CORRECTNESS_NAPI_BINDING \
-    JAZZ_CORRECTNESS_NAPI_FINGERPRINT \
-    JAZZ_CORRECTNESS_CLI; do
+    JAZZ_CORRECTNESS_NAPI_FINGERPRINT; do
     if [[ -z "${!required_artifact_env:-}" ]]; then
-      echo "run-ts-tests is missing immutable correctness artifact ${required_artifact_env}" >&2
+      echo "run-ts-tests is missing sealed correctness artifact ${required_artifact_env}" >&2
       exit 1
     fi
   done
@@ -52,7 +51,7 @@ node_tests_log="${log_dir}/jazz-node-tests-$$.log"
 browser_tests_log="${log_dir}/jazz-browser-tests-$$.log"
 
 # The producer receipt is checked before either suite starts. It binds the
-# immutable NAPI/WASM snapshot and CLI to this exact checkout, so a cache hit
+# sealed NAPI/WASM snapshot to this exact checkout, so a cache hit
 # from another revision cannot become a TypeScript false-green. Jazz Tools is
 # built by run-ts-consumers.mjs after that preflight; this runner only consumes
 # the prepared surface and seals it against child rebuilds.

@@ -2,8 +2,9 @@
 /**
  * The hand-off from native correctness-artifact production to TypeScript
  * consumers.  This receipt is intentionally separate from package output:
- * consumers only trust the immutable snapshot named here, never whichever
- * mutable NAPI/WASM generation happens to be present after a cache restore.
+ * consumers only trust the content-addressed snapshot named here, never
+ * whichever mutable NAPI/WASM generation happens to be present after a cache
+ * restore.
  */
 import { existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -17,7 +18,7 @@ import { checkedOutCommit, sourceIdentity } from "../gates/source-identity.mjs";
 const shaPattern = /^[a-f0-9]{40}$/;
 const hashPattern = /^[a-f0-9]{64}$/;
 const sourceTreePattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
-const snapshotFingerprintPattern = /^[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}$/;
+const snapshotFingerprintPattern = /^[a-f0-9]{64}-[a-f0-9]{64}$/;
 
 // These are producer-owned build products.  They must never make an otherwise
 // identical source checkout appear dirty merely because a producer has run.
@@ -83,7 +84,7 @@ function parseManifest(path) {
 
 function validateShape(manifest) {
   if (
-    manifest?.schema !== 2 ||
+    manifest?.schema !== 3 ||
     !shaPattern.test(manifest.source?.commit ?? "") ||
     !sourceTreePattern.test(manifest.source?.headTree ?? "") ||
     !sourceTreePattern.test(manifest.source?.indexTree ?? "") ||
@@ -95,10 +96,8 @@ function validateShape(manifest) {
     !snapshotFingerprintPattern.test(manifest.snapshotFingerprint ?? "") ||
     !hashPattern.test(manifest.wasmFingerprint ?? "") ||
     !hashPattern.test(manifest.napiFingerprint ?? "") ||
-    !hashPattern.test(manifest.cliFingerprint ?? "") ||
     typeof manifest.wasmPackage !== "string" ||
-    typeof manifest.napiGeneration !== "string" ||
-    typeof manifest.cliArtifact !== "string"
+    typeof manifest.napiGeneration !== "string"
   )
     throw new Error("correctness artifacts: producer manifest has an invalid identity");
 }
@@ -106,24 +105,20 @@ function validateShape(manifest) {
 /** Write after every native producer has completed and the pair is snapshotted. */
 export function writeCorrectnessArtifactProducerManifest(rootInput, snapshot, expectedSource) {
   const root = resolve(rootInput);
-  if (!snapshot?.cliArtifact || !snapshot?.cliFingerprint)
-    throw new Error("correctness artifacts: snapshot is missing immutable CLI artifact");
   const source = correctnessArtifactSourceIdentity(root);
   if (expectedSource && JSON.stringify(expectedSource) !== JSON.stringify(source))
     throw new Error("correctness artifacts: source inputs changed while producing artifacts");
   const manifest = {
-    schema: 2,
+    schema: 3,
     source,
     snapshotFingerprint: snapshot.fingerprint,
     wasmFingerprint: snapshot.wasmFingerprint,
     napiFingerprint: snapshot.napiFingerprint,
-    cliFingerprint: snapshot.cliFingerprint,
     // These exact content-addressed paths are the consumer contract.  The
     // mutable package pointers are compatibility inputs for ordinary builds,
     // never correctness-consumer authority.
     wasmPackage: snapshot.wasmPackage,
     napiGeneration: snapshot.napiGeneration,
-    cliArtifact: snapshot.cliArtifact,
   };
   const path = correctnessArtifactProducerManifest(root);
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -148,18 +143,17 @@ export function verifyCorrectnessArtifactProducer(rootInput) {
     manifest.snapshotFingerprint !== snapshot.fingerprint ||
     manifest.wasmFingerprint !== snapshot.wasmFingerprint ||
     manifest.napiFingerprint !== snapshot.napiFingerprint ||
-    manifest.cliFingerprint !== snapshot.cliFingerprint ||
     manifest.wasmPackage !== snapshot.wasmPackage ||
-    manifest.napiGeneration !== snapshot.napiGeneration ||
-    manifest.cliArtifact !== snapshot.cliArtifact
+    manifest.napiGeneration !== snapshot.napiGeneration
   )
-    throw new Error("correctness artifacts: producer manifest does not match immutable snapshot");
+    throw new Error("correctness artifacts: producer manifest does not match sealed snapshot");
   return { ...manifest, snapshot };
 }
 
 /**
- * Environment handed to one consumer process tree after a single sealed
- * preflight.  Each value names a snapshot file, never a generated pointer.
+ * Environment handed to one consumer process tree after sealed admission.
+ * The runner revalidates it after the process exits. Each value names a
+ * snapshot file, never a generated pointer.
  */
 export function correctnessArtifactConsumerEnvironment(rootInput) {
   const manifest = verifyCorrectnessArtifactProducer(rootInput);
@@ -168,7 +162,6 @@ export function correctnessArtifactConsumerEnvironment(rootInput) {
     JAZZ_CORRECTNESS_WASM_PACKAGE: manifest.snapshot.wasmPackage,
     JAZZ_CORRECTNESS_NAPI_BINDING: join(manifest.snapshot.napiGeneration, "index.js"),
     JAZZ_CORRECTNESS_NAPI_FINGERPRINT: manifest.snapshot.napiFingerprint,
-    JAZZ_CORRECTNESS_CLI: manifest.snapshot.cliArtifact,
   };
 }
 
@@ -188,7 +181,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1")
       verifyCorrectnessArtifactConsumerEnvironment(process.cwd());
     console.log(
-      "correctness artifacts: producer manifest matches this checkout and immutable snapshot",
+      "correctness artifacts: producer manifest matches this checkout and sealed snapshot",
     );
   } catch (error) {
     console.error(`correctness-artifacts: ${error.message}`);

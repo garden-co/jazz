@@ -1,18 +1,19 @@
 export type CorrectnessArtifactSnapshot = Readonly<{
-  schema: 2;
+  schema: 3;
   fingerprint: string;
   wasmFingerprint: string;
   napiFingerprint: string;
-  cliFingerprint: string;
   wasmPackage: string;
   napiGeneration: string;
-  cliArtifact: string;
   files: Readonly<Record<string, string>>;
 }>;
 
 export function correctnessArtifactStore(root: string): string;
 export function correctnessArtifactPointer(root: string): string;
-export function snapshotCorrectnessArtifacts(root: string): CorrectnessArtifactSnapshot;
+export function snapshotCorrectnessArtifacts(
+  root: string,
+  options?: { beforePublish?: (paths: { destination: string; stage: string }) => void },
+): CorrectnessArtifactSnapshot;
 export function readCorrectnessArtifactSnapshot(root: string): CorrectnessArtifactSnapshot | null;
 export function readCorrectnessArtifactSnapshotByFingerprint(
   root: string,

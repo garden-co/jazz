@@ -1,4 +1,4 @@
-/** Worktree-private immutable bindings consumed only by correctness tests. */
+/** Worktree-private sealed bindings consumed only by correctness tests. */
 import { createHash } from "node:crypto";
 import {
   cpSync,
@@ -17,7 +17,7 @@ import {
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const pointerName = ".jazz-correctness-test-artifacts.json";
-const fingerprintPattern = /^[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}$/;
+const fingerprintPattern = /^[a-f0-9]{64}-[a-f0-9]{64}$/;
 const hashPattern = /^[a-f0-9]{64}$/;
 
 // `target` belongs to one checkout even when linked worktrees share Git data.
@@ -33,10 +33,6 @@ export function correctnessArtifactPointer(root) {
 
 function napiCorrectnessPointer(root) {
   return join(resolve(root), "crates", "jazz-napi", "correctness-native-binding.pointer.cjs");
-}
-
-function cliArtifactSource(root) {
-  return join(root, "target", "debug", `jazz-tools${process.platform === "win32" ? ".exe" : ""}`);
 }
 
 function isWithin(parent, candidate) {
@@ -55,43 +51,42 @@ function rejectSymlinkAncestors(root, candidate, label) {
   }
 }
 
-function assertImmutableFile(stat, label) {
+function assertPublishedFile(stat, label) {
   // A content-addressed snapshot is producer-owned after publication.  Do not
   // accept a hardlink (which gives a mutable producer another name for the
   // same inode), or a writable file.  `chmod` is intentionally checked at
   // every admission as well: ordinary POSIX permissions cannot stop the file
-  // owner from deliberately changing modes, but they do make accidental
-  // producer replacement fail and turn an attempted replacement into a
-  // fail-closed integrity check before a consumer starts.
+  // owner from deliberately changing modes. They do make accidental producer
+  // replacement fail, while admission and end-of-run checks detect changes.
   if (stat.nlink !== 1)
     throw new Error(`correctness artifacts: ${label} has a hardlink`);
   if ((stat.mode & 0o222) !== 0)
     throw new Error(`correctness artifacts: ${label} is writable after publication`);
 }
 
-function assertImmutableDirectory(stat, label) {
+function assertPublishedDirectory(stat, label) {
   if ((stat.mode & 0o222) !== 0)
     throw new Error(`correctness artifacts: ${label} directory is writable after publication`);
 }
 
-function realFile(path, label, { immutable = false } = {}) {
+function realFile(path, label, { published = false } = {}) {
   if (!existsSync(path)) throw new Error(`correctness artifacts: missing ${label}`);
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink())
     throw new Error(`correctness artifacts: ${label} is not a real file`);
-  if (immutable) assertImmutableFile(stat, label);
+  if (published) assertPublishedFile(stat, label);
 }
 
-function realDirectory(path, label, { immutable = false } = {}) {
+function realDirectory(path, label, { published = false } = {}) {
   if (!existsSync(path)) throw new Error(`correctness artifacts: missing ${label}`);
   const stat = lstatSync(path);
   if (!stat.isDirectory() || stat.isSymbolicLink())
     throw new Error(`correctness artifacts: ${label} is not a real directory`);
-  if (immutable) assertImmutableDirectory(stat, label);
+  if (published) assertPublishedDirectory(stat, label);
 }
 
-function walkRealFiles(root, label, { immutable = false } = {}) {
-  realDirectory(root, label, { immutable });
+function walkRealFiles(root, label, { published = false } = {}) {
+  realDirectory(root, label, { published });
   const files = [];
   const visit = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -100,10 +95,10 @@ function walkRealFiles(root, label, { immutable = false } = {}) {
       if (stat.isSymbolicLink())
         throw new Error(`correctness artifacts: ${label} contains a symbolic link`);
       if (stat.isDirectory()) {
-        if (immutable) assertImmutableDirectory(stat, `${label} child`);
+        if (published) assertPublishedDirectory(stat, `${label} child`);
         visit(path);
       } else if (stat.isFile()) {
-        if (immutable) assertImmutableFile(stat, `${label} child`);
+        if (published) assertPublishedFile(stat, `${label} child`);
         files.push(path);
       }
       else throw new Error(`correctness artifacts: ${label} contains a non-regular entry`);
@@ -182,16 +177,13 @@ function fileReceipt(destination) {
 
 function validateReceiptShape(receipt, store, root) {
   if (
-    receipt?.schema !== 2 ||
+    receipt?.schema !== 3 ||
     !fingerprintPattern.test(receipt.fingerprint ?? "") ||
     !hashPattern.test(receipt.wasmFingerprint ?? "") ||
     !hashPattern.test(receipt.napiFingerprint ?? "") ||
-    !hashPattern.test(receipt.cliFingerprint ?? "") ||
-    receipt.fingerprint !==
-      `${receipt.wasmFingerprint}-${receipt.napiFingerprint}-${receipt.cliFingerprint}` ||
+    receipt.fingerprint !== `${receipt.wasmFingerprint}-${receipt.napiFingerprint}` ||
     typeof receipt.wasmPackage !== "string" ||
     typeof receipt.napiGeneration !== "string" ||
-    typeof receipt.cliArtifact !== "string" ||
     !receipt.files ||
     Array.isArray(receipt.files) ||
     typeof receipt.files !== "object"
@@ -201,8 +193,7 @@ function validateReceiptShape(receipt, store, root) {
   if (
     !isWithin(store, destination) ||
     resolve(receipt.wasmPackage) !== resolve(destination, "wasm") ||
-    resolve(receipt.napiGeneration) !== resolve(destination, "napi") ||
-    resolve(receipt.cliArtifact) !== resolve(destination, "cli", basename(cliArtifactSource(root)))
+    resolve(receipt.napiGeneration) !== resolve(destination, "napi")
   )
     throw new Error("correctness artifacts: snapshot pointer escapes this worktree store");
   return destination;
@@ -215,21 +206,18 @@ function validateStoredSnapshot(root, receipt) {
   // Check the entire tree before parsing any receipt/manifest from it.  This
   // catches a same-worktree chmod/replacement attempt as well as symlinks and
   // hardlinks before any consumer receives a path into the snapshot.
-  walkRealFiles(destination, "stored snapshot", { immutable: true });
+  walkRealFiles(destination, "stored snapshot", { published: true });
   const storedReceipt = parseJsonFile(join(destination, "receipt.json"), "stored receipt", {
-    immutable: true,
+    published: true,
   });
   if (JSON.stringify(storedReceipt) !== JSON.stringify(receipt))
     throw new Error("correctness artifacts: pointer and stored receipt differ");
   validateManifest(receipt.wasmPackage, "wasm", "fast", receipt.wasmFingerprint, {
-    immutable: true,
+    published: true,
   });
   validateManifest(receipt.napiGeneration, "napi", "release", receipt.napiFingerprint, {
-    immutable: true,
+    published: true,
   });
-  realFile(receipt.cliArtifact, "stored CLI artifact", { immutable: true });
-  if (sha256(receipt.cliArtifact) !== receipt.cliFingerprint)
-    throw new Error("correctness artifacts: stored CLI artifact hash differs");
   const actualFiles = fileReceipt(destination);
   const expectedEntries = Object.entries(receipt.files);
   if (
@@ -254,8 +242,8 @@ function copyRealTree(source, destination, label) {
 }
 
 function sealSnapshot(destination) {
-  // Seal leaf files before their directories.  The CLI must remain executable;
-  // all other executable bits are preserved but no snapshot entry is writable.
+  // Seal leaf files before their directories. Existing executable bits are
+  // preserved, but no snapshot entry remains writable.
   const files = walkRealFiles(destination, "staged snapshot");
   for (const path of files) {
     const mode = statSync(path).mode;
@@ -271,32 +259,45 @@ function sealSnapshot(destination) {
   };
   visit(destination);
   for (const directory of directories.reverse()) chmodSync(directory, 0o555);
-  walkRealFiles(destination, "sealed snapshot", { immutable: true });
+  walkRealFiles(destination, "sealed snapshot", { published: true });
 }
 
-/** Seal the exact fast-WASM/release-NAPI pair into an immutable checkout store. */
-export function snapshotCorrectnessArtifacts(rootInput) {
+function removeOwnedStage(stage) {
+  if (!existsSync(stage)) return;
+  // Only this mkdtemp-owned path is relaxed. Never make the winning
+  // content-addressed destination writable while resolving a publication
+  // collision.
+  const visit = (directory) => {
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error("correctness artifacts: private stage is not a real directory");
+    chmodSync(directory, 0o700);
+    for (const entry of readdirSync(directory, { withFileTypes: true }))
+      if (entry.isDirectory()) visit(join(directory, entry.name));
+  };
+  visit(stage);
+  rmSync(stage, { recursive: true, force: true });
+}
+
+/** Seal the exact fast-WASM/release-NAPI pair into a content-addressed checkout store. */
+export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) {
   const root = resolve(rootInput);
   const store = correctnessArtifactStore(root);
   // Check the destination boundary before inspecting a source below `target`:
-  // a hostile/accidental target symlink must not change which failure is
-  // reported or redirect a later mkdir/copy operation.
+  // an unexpected target symlink must not redirect a later mkdir/copy operation.
   rejectSymlinkAncestors(root, store, "snapshot store");
   const wasmSource = join(root, "crates", "jazz-wasm", "pkg");
   const napiSource = activeNapiGeneration(root);
-  const cliSource = cliArtifactSource(root);
   rejectSymlinkAncestors(root, wasmSource, "WASM package");
   rejectSymlinkAncestors(root, napiSource, "NAPI generation");
   walkRealFiles(wasmSource, "WASM package");
   walkRealFiles(napiSource, "NAPI generation");
-  realFile(cliSource, "CLI correctness artifact");
   const wasm = parseJsonFile(join(wasmSource, ".jazz-artifact-manifest.json"), "WASM manifest");
   const napi = parseJsonFile(join(napiSource, ".jazz-artifact-manifest.json"), "NAPI manifest");
   validateManifest(wasmSource, "wasm", "fast", wasm.nativeArtifactFingerprint);
   validateManifest(napiSource, "napi", "release", napi.nativeArtifactFingerprint);
 
-  const cliFingerprint = sha256(cliSource);
-  const fingerprint = `${wasm.nativeArtifactFingerprint}-${napi.nativeArtifactFingerprint}-${cliFingerprint}`;
+  const fingerprint = `${wasm.nativeArtifactFingerprint}-${napi.nativeArtifactFingerprint}`;
   if (!fingerprintPattern.test(fingerprint))
     throw new Error("correctness artifacts: invalid combined native fingerprint");
   const destination = join(store, fingerprint);
@@ -309,36 +310,28 @@ export function snapshotCorrectnessArtifacts(rootInput) {
     try {
       copyRealTree(wasmSource, join(stage, "wasm"), "WASM package");
       copyRealTree(napiSource, join(stage, "napi"), "NAPI generation");
-      mkdirSync(join(stage, "cli"));
-      const stagedCli = join(stage, "cli", basename(cliSource));
-      cpSync(cliSource, stagedCli, { dereference: false });
-      // Node's copy semantics are platform dependent. The snapshot must remain
-      // an executable CLI on every supported host, without trusting the mutable
-      // source path again after publication.
-      chmodSync(stagedCli, statSync(cliSource).mode);
       const receipt = {
-        schema: 2,
+        schema: 3,
         fingerprint,
         wasmFingerprint: wasm.nativeArtifactFingerprint,
         napiFingerprint: napi.nativeArtifactFingerprint,
-        cliFingerprint,
         wasmPackage: join(destination, "wasm"),
         napiGeneration: join(destination, "napi"),
-        cliArtifact: join(destination, "cli", basename(cliSource)),
         files: fileReceipt(stage),
       };
       writeFileSync(join(stage, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, {
         mode: 0o600,
       });
       sealSnapshot(stage);
+      beforePublish?.({ destination, stage });
       try {
         renameSync(stage, destination);
       } catch (error) {
         if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
-        rmSync(stage, { recursive: true, force: true });
+        removeOwnedStage(stage);
       }
     } finally {
-      if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });
+      removeOwnedStage(stage);
     }
   }
 
@@ -368,15 +361,15 @@ export function readCorrectnessArtifactSnapshot(rootInput) {
 }
 
 /**
- * Read one immutable, content-addressed generation without consulting the
+ * Read one sealed, content-addressed generation without consulting the
  * mutable worktree pointer.  Correctness consumers use this through the
  * producer manifest, so a later producer cannot redirect an already admitted
- * consumer to a different NAPI/WASM/CLI triple.
+ * consumer to a different WASM/NAPI pair.
  */
 export function readCorrectnessArtifactSnapshotByFingerprint(rootInput, fingerprint) {
   const root = resolve(rootInput);
   if (!fingerprintPattern.test(fingerprint))
-    throw new Error("correctness artifacts: invalid immutable snapshot fingerprint");
+    throw new Error("correctness artifacts: invalid snapshot fingerprint");
   const store = correctnessArtifactStore(root);
   rejectSymlinkAncestors(root, store, "snapshot store");
   const receipt = parseJsonFile(join(store, fingerprint, "receipt.json"), "stored receipt");

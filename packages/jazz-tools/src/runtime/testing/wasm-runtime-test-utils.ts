@@ -56,7 +56,7 @@ type JazzWasmPaths = {
 function resolveJazzWasmPaths(): JazzWasmPaths | null {
   const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
   if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
-    throw new Error("sealed correctness consumer is missing its immutable WASM package");
+    throw new Error("sealed correctness consumer is missing its admitted WASM package");
   if (sealedWasmPackage) {
     const modulePath = resolve(sealedWasmPackage, "jazz_wasm.js");
     const wasmPath = resolve(sealedWasmPackage, "jazz_wasm_bg.wasm");

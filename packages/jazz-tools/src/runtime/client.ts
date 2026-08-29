@@ -1711,7 +1711,7 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
 
   const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
   if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
-    throw new Error("sealed correctness consumer is missing its immutable WASM package");
+    throw new Error("sealed correctness consumer is missing its admitted WASM package");
   if (sealedWasmPackage) {
     const wasmPath = pathBuiltin.resolve(sealedWasmPackage, "jazz_wasm_bg.wasm");
     return existsSync(wasmPath) ? readFileSync(wasmPath) : null;

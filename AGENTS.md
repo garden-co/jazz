@@ -84,12 +84,15 @@ CI-equivalent. Use `--ci-partition <name>` only when reproducing one named CI
 job during diagnosis; it is likewise not a full CI-equivalent result.
 
 **Generated correctness bindings.** `pnpm build:correctness-artifacts` is the
-native producer: it builds the fast-WASM/release-NAPI/CLI trio, seals the
-WASM/NAPI pair into a fingerprint-addressed immutable store under this
+native producer: it builds and seals the fast-WASM/release-NAPI pair into a
+fingerprint-addressed read-only store under this
 worktree's ignored `target/`, and writes a producer manifest bound to the exact
 checkout SHA and artifact hashes. `pnpm test:typescript-consumers` is the
-consumer: it rejects a missing, stale, or mismatched manifest _before_ building
-Jazz Tools and launching TS/browser suites. Do not copy or share generated
+consumer: it rejects a missing, stale, or mismatched manifest before and after
+building Jazz Tools and launching TS/browser suites. This protects against
+accidental concurrent builds or workspace mutation, not a hostile same-UID
+process: portable path-based WASM/NAPI consumers cannot provide that security
+boundary. Do not copy or share generated
 `pkg/`, NAPI generations, snapshots, or producer manifests between lanes;
 rebuild in the checkout whose tests you are running. The boundary is deliberate
 and fail-closed: native production can succeed even when a TypeScript consumer

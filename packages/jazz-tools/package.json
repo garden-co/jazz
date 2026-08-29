@@ -139,9 +139,9 @@
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
-    "bench:abstract:node": "node ../../dev/gates/run-correctness-consumer.mjs -- bash -lc 'JAZZ_ABSTRACT_BENCH=1 pnpm exec vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts'",
-    "bench:abstract:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- bash -lc 'JAZZ_ABSTRACT_BENCH=1 pnpm exec vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts'",
-    "bench:realistic:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
+    "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
+    "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
+    "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
     "stage:local": "node scripts/stage-local-binary.mjs",
     "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
     "pack:dry-run": "npm pack --dry-run"

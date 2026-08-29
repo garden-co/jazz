@@ -17,7 +17,7 @@ const snapshot = sealedWasmPackage
   ? null
   : readCorrectnessArtifactSnapshot(fileURLToPath(new URL("../../..", import.meta.url)));
 if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
-  throw new Error("sealed correctness consumer is missing its immutable WASM package");
+  throw new Error("sealed correctness consumer is missing its admitted WASM package");
 const wasmSource = sealedWasmPackage
   ? resolve(sealedWasmPackage, "jazz_wasm_bg.wasm")
   : snapshot

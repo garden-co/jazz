@@ -37,17 +37,17 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
   assert.doesNotMatch(focused, /verify-correctness-test-artifacts\.mjs/);
 
   const aggregate = read("dev/gates/run-ts-consumers.mjs");
-  assert.match(aggregate, /correctnessConsumerEnvironment\(root\)/);
+  assert.match(aggregate, /runCorrectnessConsumer\(/);
+  assert.match(aggregate, /rootDir: root/);
   assert.doesNotMatch(aggregate, /env:\s*process\.env/);
 });
 
-test("sealed consumers select immutable artifact paths rather than worktree pointers", () => {
+test("sealed consumers select content-addressed artifact paths rather than worktree pointers", () => {
   const runner = read("dev/gates/run-correctness-consumer.mjs");
   const producer = read("dev/artifacts/correctness-artifact-producer.mjs");
   for (const variable of [
     "JAZZ_CORRECTNESS_WASM_PACKAGE",
     "JAZZ_CORRECTNESS_NAPI_BINDING",
-    "JAZZ_CORRECTNESS_CLI",
   ])
     assert.match(producer, new RegExp(variable));
   assert.match(runner, /correctnessArtifactConsumerEnvironment/);
@@ -95,13 +95,44 @@ test("every direct Jazz Tools Vitest consumer is sealed before it runs", () => {
     "test:solid",
     "test:svelte",
     "test:browser",
-    "bench:abstract:node",
-    "bench:abstract:browser",
-    "bench:realistic:browser",
   ])
     assert.match(
       pkg.scripts[name],
       /run-correctness-consumer\.mjs --/,
       `${name} bypasses the producer-manifest admission boundary`,
     );
+});
+
+test("performance benchmarks remain on their explicit release-artifact boundary", () => {
+  const pkg = JSON.parse(read("packages/jazz-tools/package.json"));
+  for (const name of [
+    "bench:abstract:node",
+    "bench:abstract:browser",
+    "bench:realistic:browser",
+  ]) {
+    assert.doesNotMatch(pkg.scripts[name], /run-correctness-consumer\.mjs/);
+    assert.match(pkg.scripts[name], /vitest run/);
+  }
+  const workflow = read(".github/workflows/benchmarks.yml");
+  assert.match(workflow, /name: Build jazz-tools server binary[\s\S]*cargo build -p jazz-cli --bin jazz-tools/);
+  assert.match(workflow, /name: Build jazz-napi package[\s\S]*pnpm --dir crates\/jazz-napi run build/);
+  assert.match(workflow, /name: Build jazz-wasm package[\s\S]*pnpm --dir crates\/jazz-wasm run build/);
+  assert.match(workflow, /name: Run browser benchmark suite/);
+  assert.ok(
+    workflow.indexOf("name: Build jazz-wasm package") <
+      workflow.indexOf("name: Run browser benchmark suite"),
+    "browser benchmarks must run after their explicit release WASM build",
+  );
+  const browserConfig = read("packages/jazz-tools/vitest.config.browser.ts");
+  assert.match(browserConfig, /performanceArtifactRun/);
+  assert.match(browserConfig, /sealedWasmPackage \|\| performanceArtifactRun/);
+});
+
+test("every correctness snapshot artifact has an actual runtime consumer", () => {
+  const producer = read("dev/artifacts/correctness-artifact-producer.mjs");
+  assert.match(producer, /JAZZ_CORRECTNESS_WASM_PACKAGE/);
+  assert.match(producer, /JAZZ_CORRECTNESS_NAPI_BINDING/);
+  assert.doesNotMatch(producer, /JAZZ_CORRECTNESS_CLI|cliArtifact|cliFingerprint/);
+  assert.match(read("packages/jazz-tools/vitest.config.ts"), /JAZZ_CORRECTNESS_WASM_PACKAGE/);
+  assert.match(read("crates/jazz-napi/native-binding.cjs"), /JAZZ_CORRECTNESS_NAPI_BINDING/);
 });

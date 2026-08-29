@@ -4,29 +4,23 @@
  * this entrypoint deliberately verifies their sealed hand-off before it asks
  * Turbo to build Jazz Tools or starts either test suite.
  */
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { correctnessConsumerEnvironment } from "./run-correctness-consumer.mjs";
+import { runCorrectnessConsumer } from "./run-correctness-consumer.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-function run(executable, args, env) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(executable, args, { cwd: root, stdio: "inherit", env });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (code === 0) resolvePromise();
-      else reject(new Error(`TypeScript consumers failed with ${signal ?? `exit ${code ?? 1}`}`));
-    });
-  });
-}
-
 try {
-  const env = correctnessConsumerEnvironment(root);
-  console.log("ts-consumers: verified native producer manifest");
-  await run("pnpm", ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"], env);
-  await run("bash", ["dev/gates/run-ts-tests.sh"], env);
+  await runCorrectnessConsumer(
+    "pnpm",
+    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
+    { cwd: root, rootDir: root },
+  );
+  console.log("ts-consumers: build retained its admitted native artifact snapshot");
+  await runCorrectnessConsumer("bash", ["dev/gates/run-ts-tests.sh"], {
+    cwd: root,
+    rootDir: root,
+  });
 } catch (error) {
   console.error(`ts-consumers: ${error.message}`);
   process.exitCode = 1;
