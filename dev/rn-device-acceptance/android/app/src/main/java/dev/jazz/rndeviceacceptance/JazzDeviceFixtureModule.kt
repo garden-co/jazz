@@ -1,0 +1,120 @@
+package dev.jazz.rndeviceacceptance
+
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+import com.jazzrn.JazzRelayTrustedAdmission
+import com.jazzrn.TrustedRelayScopeConfig
+import android.util.Base64
+import android.os.Build
+import java.io.FileInputStream
+import java.security.MessageDigest
+
+/**
+ * Test-app-only trusted fixture. It is compiled into the development build,
+ * not sourced from Metro, an intent, or an OTA update. JavaScript receives
+ * only the random capability; identity, claims, SQLite path, and schema stay
+ * native. JAZZ_DEVICE_* values are build-time CI test fixtures only.
+ */
+class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
+  private var capability: ByteArray? = null
+  override fun getName() = "JazzDeviceFixture"
+
+  private fun scopeConfig(authScope: String): TrustedRelayScopeConfig {
+    val userB = authScope == "fixture-user-b"
+    val node = if (userB) "22222222-2222-4222-8222-222222222222" else "11111111-1111-4111-8111-111111111111"
+    return TrustedRelayScopeConfig(
+      appNamespace = BuildConfig.JAZZ_DEVICE_APP_NAMESPACE,
+      storageNamespace = BuildConfig.JAZZ_DEVICE_STORAGE_NAMESPACE,
+      authScope = authScope,
+      // Scope-specific files make a switch physically as well as logically
+      // distinct. JavaScript cannot select either path.
+      sqlitePath = reactApplicationContext.filesDir.resolve("jazz-device-$authScope.sqlite").absolutePath,
+      schemaJson = BuildConfig.JAZZ_DEVICE_SCHEMA_JSON,
+      identityJson = "{\"node\":\"$node\",\"author\":\"[\\\"https://jazz.device.test\\\",\\\"$authScope\\\"]\"}",
+      claimsJson = BuildConfig.JAZZ_DEVICE_VERIFIED_CLAIMS_JSON,
+    )
+  }
+
+  @ReactMethod fun admittedCapability(promise: Promise) {
+    try {
+      capability ?: JazzRelayTrustedAdmission.admit(scopeConfig(BuildConfig.JAZZ_DEVICE_AUTH_SCOPE))
+        .also { capability = it }
+      promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
+  }
+
+  @ReactMethod fun logout(promise: Promise) {
+    capability?.let(JazzRelayTrustedAdmission::revoke)
+    capability = null
+    promise.resolve(null)
+  }
+
+  /** Scope B is selected solely by trusted fixture code. Replacing it revokes
+   * A before B can be admitted, so stale JS capability bytes cannot cross it. */
+  @ReactMethod fun switchAuthScope(promise: Promise) {
+    try {
+      JazzRelayTrustedAdmission.replace(capability, scopeConfig("fixture-user-b"))
+        .also { capability = it }
+      promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
+  }
+
+  @ReactMethod fun receiptContext(promise: Promise) {
+    try {
+      val activity = reactApplicationContext.currentActivity
+        ?: error("acceptance activity is unavailable")
+      val nonce = activity.intent.getStringExtra("jazzDeviceRunNonce")
+        ?: error("acceptance launch did not include a run nonce")
+      // Hash the installed package itself, rather than echoing an adb extra.
+      val buildFingerprint = sha256File(reactApplicationContext.applicationInfo.sourceDir)
+      val deviceIdentifier = Build.FINGERPRINT.takeIf(String::isNotBlank)
+        ?: error("Android build fingerprint is unavailable")
+      promise.resolve(Arguments.createMap().apply {
+        putString("platform", "android")
+        putString("deviceIdentifier", deviceIdentifier)
+        putString("buildFingerprint", buildFingerprint)
+        putString("runNonce", nonce)
+      })
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
+  }
+
+  /** Only the host's bounded acceptance phase crosses this boundary.  It
+   * cannot select a relay scope, identity, or filesystem path. */
+  @ReactMethod fun acceptancePhase(promise: Promise) {
+    try {
+      val phase = reactApplicationContext.currentActivity
+        ?.intent?.getStringExtra("jazzDeviceAcceptancePhase") ?: "seed"
+      require(phase == "seed" || phase == "verify") { "invalid acceptance phase" }
+      promise.resolve(phase)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
+  }
+
+  private fun sha256File(path: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    FileInputStream(path).use { input ->
+      val buffer = ByteArray(32 * 1024)
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+  }
+
+  /** See the matching iOS fixture: JavaScript supplies the verified protocol
+   * line after its relay proof; this method only persists that line. */
+  @ReactMethod fun recordReceipt(receipt: String, promise: Promise) {
+    try {
+      require(receipt.startsWith("JAZZ_DEVICE_RESULT ") && receipt.length <= 16_384) {
+        "invalid device receipt"
+      }
+      reactApplicationContext.cacheDir.resolve("jazz-device-receipt.ndjson")
+        .writeText("$receipt\n")
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT", error) }
+  }
+}

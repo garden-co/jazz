@@ -7,6 +7,7 @@
  * match this checkout's C ABI and source revision.
  */
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
@@ -31,6 +32,40 @@ if (!/^[0-9a-f]{40}$/i.test(sourceRevision ?? ""))
 const abiSource = readFileSync(join(relaySource, "src/lib.rs"), "utf8");
 const abi = Number(/pub const NATIVE_RELAY_ABI_VERSION: u16 = (\d+);/.exec(abiSource)?.[1]);
 if (!Number.isSafeInteger(abi)) throw new Error("could not read native relay ABI from Rust source");
+const tsAbiSource = readFileSync(join(root, "crates/jazz-rn/src/native-relay-abi.ts"), "utf8");
+const tsAbi = Number(
+  /export const NATIVE_RELAY_ABI_VERSION = (\d+) as const;/.exec(tsAbiSource)?.[1],
+);
+if (tsAbi !== abi)
+  throw new Error(
+    `TypeScript native relay ABI ${Number.isSafeInteger(tsAbi) ? tsAbi : "is invalid"} differs from Rust ABI ${abi}; regenerate crates/jazz-rn/src/native-relay-abi.ts`,
+  );
+const nativeSourceFingerprint = createHash("sha256")
+  .update(
+    execFileSync(
+      "git",
+      [
+        "-C",
+        root,
+        "ls-tree",
+        "-r",
+        "--full-tree",
+        "HEAD",
+        "--",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/groove",
+        "crates/idb-tree",
+        "crates/jazz",
+        "crates/jazz-compression",
+        "crates/jazz-native-relay",
+        "crates/jazz-storage-sqlite",
+        "crates/jazz-rn/scripts/build-relay-artifacts.sh",
+      ],
+      { encoding: "utf8" },
+    ),
+  )
+  .digest("hex");
 
 const targets = {
   android: {
@@ -205,12 +240,13 @@ for (const requested of requestedTargets) {
     throw new Error(`usage: verify-relay-artifacts.mjs <android|ios>... (unknown ${requested})`);
   const manifest = JSON.parse(readFileSync(target.manifest, "utf8"));
   if (
-    manifest.format !== 1 ||
+    manifest.format !== 2 ||
     manifest.nativeRelayAbi !== abi ||
-    manifest.sourceRevision !== sourceRevision
+    manifest.sourceRevision !== sourceRevision ||
+    manifest.nativeSourceFingerprint !== nativeSourceFingerprint
   )
     throw new Error(
-      `${requested} relay manifest does not match source revision ${sourceRevision} and ABI ${abi}`,
+      `${requested} relay manifest does not match source revision ${sourceRevision}, native source fingerprint ${nativeSourceFingerprint}, and ABI ${abi}`,
     );
   if (
     requested === "android" &&

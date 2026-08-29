@@ -652,6 +652,20 @@ impl Clock {
     }
 }
 
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    pub(crate) fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
+        self.clock.tx_time = self.clock.tx_time.max(high_water.tick_after()?);
+        Ok(())
+    }
+
+    pub(crate) fn tx_time_high_water(&self) -> TxTime {
+        self.clock.tx_time
+    }
+}
+
 #[cfg(test)]
 impl<S> NodeState<S>
 where

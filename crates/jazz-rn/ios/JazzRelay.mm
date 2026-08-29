@@ -1,6 +1,11 @@
+#import "JazzRelayModule.h"
 #import "JazzRelay.h"
+#import <React/RCTBridgeModule.h>
 
-#if __has_include("jazz_native_relay.h")
+#if __has_include(<JazzNativeRelay/jazz_native_relay.h>)
+#import <JazzNativeRelay/jazz_native_relay.h>
+#define JAZZ_RELAY_ARTIFACT_AVAILABLE 1
+#elif __has_include("jazz_native_relay.h")
 #import "jazz_native_relay.h"
 #define JAZZ_RELAY_ARTIFACT_AVAILABLE 1
 #else
@@ -8,16 +13,41 @@
 #endif
 
 #ifdef RCT_NEW_ARCH_ENABLED
-#import <React/RCTBridgeModule.h>
 #import <ReactCommon/RCTTurboModule.h>
 #endif
 
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+#include "../native/foreground-runtime.h"
+#include <unordered_map>
+#endif
+
+@interface JazzRelay ()
+@property(nonatomic, assign) uint64_t foregroundRuntimeToken;
+@end
+
 @implementation JazzRelay
+
+// New-Architecture modules still require this registration hook: it binds the
+// generated `JazzRelay` spec to the Objective-C implementation that supplies
+// `getTurboModule:` below. Without it TurboModuleRegistry.get("JazzRelay")
+// returns null in a release host even though the pod and XCFramework linked.
+RCT_EXPORT_MODULE()
 
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
 static jazz_native_relay_host *relayHost = NULL;
 static NSUInteger relayRuntimeReferences = 0;
 static NSMutableSet<NSData *> *trustedCapabilities = nil;
+static uint64_t nextForegroundRuntimeToken = 1;
+// Each module instance owns one JSI runtime lease. A process may host several
+// React Native bridges against the same durable relay; invalidating A must not
+// make B's factory or foregrounds uncallable.
+struct ForegroundRuntimeInstallation {
+  uint64_t runtimeToken;
+  facebook::jsi::Runtime *runtime;
+  std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
+};
+static std::unordered_map<JazzRelay *, ForegroundRuntimeInstallation>
+    foregroundRuntimeLeases;
 
 static jazz_native_relay_host *EnsureRelayHost(void) {
   if (relayHost == NULL) relayHost = jazz_native_relay_host_new();
@@ -37,14 +67,14 @@ static NSError *RelayLifecycleError(NSString *message) {
 }
 #endif
 
-RCT_EXPORT_MODULE(JazzRelay)
-
 - (instancetype)init {
   self = [super init];
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   if (self != nil) {
     @synchronized([JazzRelay class]) {
       EnsureRelayHost();
+      if (nextForegroundRuntimeToken == 0) return nil;
+      self.foregroundRuntimeToken = nextForegroundRuntimeToken++;
       relayRuntimeReferences += 1;
     }
   }
@@ -82,9 +112,56 @@ RCT_EXPORT_MODULE(JazzRelay)
 #endif
 }
 
+- (void)installForegroundRuntime {
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+  @synchronized([JazzRelay class]) {
+    const auto found = foregroundRuntimeLeases.find(self);
+    if (found == foregroundRuntimeLeases.end() || found->second.runtime == nullptr ||
+        !found->second.lease->active()) {
+      // The JS wrapper validates that native code installed a fresh factory
+      // immediately after this method returns, yielding its normal actionable
+      // development-build diagnostic if React Native has not handed us a live
+      // JSI runtime yet.
+      return;
+    }
+    // The factory was installed by `installJSIBindingsWithRuntime:` for this
+    // exact module/runtime. A later JS call only reinserts into that same JSI
+    // runtime; it cannot select or overwrite a sibling bridge's lease.
+    jazz::rn::installForegroundRuntime(*found->second.runtime, found->second.lease);
+  }
+#endif
+}
+
+- (void)installJSIBindingsWithRuntime:(facebook::jsi::Runtime &)runtime
+                          callInvoker:(const std::shared_ptr<facebook::react::CallInvoker> &)callInvoker {
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+  @synchronized([JazzRelay class]) {
+    if (const auto previous = foregroundRuntimeLeases.find(self);
+        previous != foregroundRuntimeLeases.end()) {
+      previous->second.lease->invalidate();
+      foregroundRuntimeLeases.erase(previous);
+    }
+    auto lease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
+        EnsureRelayHost(), self.foregroundRuntimeToken, callInvoker);
+    foregroundRuntimeLeases.emplace(
+        self, ForegroundRuntimeInstallation{self.foregroundRuntimeToken, &runtime, lease});
+    jazz::rn::installForegroundRuntime(runtime, lease);
+  }
+#else
+  (void)runtime;
+  (void)callInvoker;
+#endif
+}
+
 - (void)invalidate {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
+    if (const auto found = foregroundRuntimeLeases.find(self);
+      found != foregroundRuntimeLeases.end()) {
+      found->second.lease->invalidate();
+      foregroundRuntimeLeases.erase(found);
+    }
+    self.foregroundRuntimeToken = 0;
     if (relayRuntimeReferences > 0) relayRuntimeReferences -= 1;
     DestroyRelayHostIfUnused();
   }

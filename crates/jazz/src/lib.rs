@@ -448,6 +448,8 @@ pub mod binding_codec;
 pub mod cold_settle_attribution;
 /// High-level thread-affine database facade.
 pub mod db;
+/// Safe foreground runtime node-identity leasing for native hosts.
+pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
 /// Wire-stable identifiers.

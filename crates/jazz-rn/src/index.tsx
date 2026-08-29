@@ -1,6 +1,23 @@
 /**
- * React Native does not receive a second Jazz runtime. This package exposes
- * only the thin native-relay command transport; `jazz-tools` will gain its
- * runtime adapter after a matching Rust relay artifact is embedded.
+ * React Native does not receive a second JavaScript/WASM Jazz runtime. This
+ * package exposes the thin native-relay command transport and the source-tested
+ * private JSI foreground-runtime installer; `jazz-tools` will consume that
+ * installer only after a matching Rust foreground engine is embedded.
  */
-export * from './relay';
+// Deliberately list the public relay ABI rather than forwarding every future
+// relay export through this package entry point.
+export {
+  NATIVE_RELAY_ABI,
+  NATIVE_RELAY_ABI_VERSION,
+  decodeNativeForegroundResponse,
+  encodeNativeForegroundCommand,
+  executeNativeRelayCommand,
+  installNativeForegroundRuntime,
+} from './relay';
+export type {
+  NativeForegroundCommand,
+  NativeForegroundResponse,
+  NativeForegroundRuntime,
+  NativeForegroundRuntimeFactory,
+  NativeRelayAbiRange,
+} from './relay';

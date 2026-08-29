@@ -1,12 +1,14 @@
 package com.jazzrn
 
 import android.util.Base64
+import com.facebook.react.turbomodule.core.interfaces.BindingsInstallerHolder
 import org.json.JSONObject
 
 /** Opaque JNI carrier for the shared C ABI; it owns no Jazz semantics. */
 internal object JazzRelayBridge {
   private var host: Long = 0
-  private var runtimeReferences = 0
+  private var nextRuntimeToken = 1L
+  private val activeRuntimeTokens = mutableSetOf<Long>()
   private val trustedCapabilities = mutableSetOf<String>()
 
   private fun ensureHost(): Long {
@@ -18,15 +20,21 @@ internal object JazzRelayBridge {
   }
 
   @Synchronized
-  fun acquireRuntime() {
+  fun acquireRuntime(): Long {
     ensureHost()
-    runtimeReferences += 1
+    check(nextRuntimeToken > 0) { "Jazz native relay runtime token space exhausted" }
+    val token = nextRuntimeToken
+    nextRuntimeToken += 1
+    check(activeRuntimeTokens.add(token)) { "Jazz native relay duplicated a runtime token" }
+    return token
   }
 
   @Synchronized
-  fun releaseRuntime() {
-    check(runtimeReferences > 0) { "Jazz native relay runtime lease underflow" }
-    runtimeReferences -= 1
+  fun releaseRuntime(runtimeToken: Long) {
+    check(activeRuntimeTokens.remove(runtimeToken)) {
+      "Jazz native relay runtime lease is already released"
+    }
+    nativeInvalidateForegroundRuntime(host, runtimeToken)
     destroyIfUnused()
   }
 
@@ -41,6 +49,29 @@ internal object JazzRelayBridge {
     nativeExecute(ensureHost(), Base64.decode(commandBase64, Base64.NO_WRAP)),
     Base64.NO_WRAP
   )
+
+  /**
+   * React Native invokes this installer while it owns a live JSI runtime. The
+   * shared C++ factory closes over only this runtime token's host liveness
+   * lease; it never receives trusted scope configuration from JavaScript.
+   */
+  @Synchronized
+  fun foregroundBindingsInstaller(runtimeToken: Long): BindingsInstallerHolder {
+    check(activeRuntimeTokens.contains(runtimeToken)) {
+      "Jazz native foreground runtime is unavailable for this bridge"
+    }
+    return nativeForegroundBindingsInstaller(ensureHost(), runtimeToken)
+  }
+
+  /** Reinstall a fresh factory after the JS wrapper deliberately removes any
+   * stale global left by an earlier bridge/runtime. */
+  @Synchronized
+  fun installForegroundRuntime(runtimeToken: Long) {
+    check(activeRuntimeTokens.contains(runtimeToken)) {
+      "Jazz native foreground runtime is unavailable for this bridge"
+    }
+    nativeInstallForegroundRuntime(ensureHost(), runtimeToken)
+  }
 
   /**
    * The only Android entry for trusted scope configuration. It is deliberately
@@ -75,7 +106,7 @@ internal object JazzRelayBridge {
   }
 
   private fun destroyIfUnused() {
-    if (host != 0L && runtimeReferences == 0 && trustedCapabilities.isEmpty()) {
+    if (host != 0L && activeRuntimeTokens.isEmpty() && trustedCapabilities.isEmpty()) {
       nativeDestroy(host)
       host = 0
     }
@@ -87,6 +118,12 @@ internal object JazzRelayBridge {
   @JvmStatic private external fun nativeExecute(host: Long, command: ByteArray): ByteArray
   @JvmStatic private external fun nativeAdmitTrustedScopeJson(host: Long, admissionJson: ByteArray): ByteArray
   @JvmStatic private external fun nativeRevokeTrustedScope(host: Long, capability: ByteArray)
+  @JvmStatic private external fun nativeForegroundBindingsInstaller(
+    host: Long,
+    runtimeToken: Long,
+  ): BindingsInstallerHolder
+  @JvmStatic private external fun nativeInstallForegroundRuntime(host: Long, runtimeToken: Long)
+  @JvmStatic private external fun nativeInvalidateForegroundRuntime(host: Long, runtimeToken: Long)
 }
 
 /**
