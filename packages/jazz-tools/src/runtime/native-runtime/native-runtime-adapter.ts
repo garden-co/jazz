@@ -704,6 +704,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpAgain = false;
   private serverConnectionGeneration = 0;
   private closed = false;
+  // A foreground lease handoff closes mutation admission before it snapshots
+  // the native HLC, but physical native disposal still happens through the
+  // ordinary client shutdown path.
+  private foregroundLeaseQuiesced = false;
+  private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -886,6 +891,25 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not expose foreground transaction high-water");
     }
     return this.db.foregroundTxTimeHighWater();
+  }
+
+  /**
+   * Close mutation admission, drain already-started native work, then return
+   * the final HLC high-water. No synchronous or async write can mint after
+   * this resolves. The ordinary `close()` call remains responsible for final
+   * native disposal after the lease owner has durably recorded this value.
+   * @internal
+   */
+  async quiesceForegroundTxTimeHighWater(): Promise<bigint> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.quiesceForegroundTxTimeHighWater();
+    }
+    if (this.closed) throw new Error("Native runtime is already closed");
+    this.closed = true;
+    this.foregroundLeaseQuiesced = true;
+    await Promise.all(this.pendingLocalSettlements);
+    await this.coreTickCompletion?.catch(() => undefined);
+    return this.foregroundTxTimeHighWater();
   }
 
   /** @internal Seed a foreground lease high-water before the first local write. */
@@ -1087,14 +1111,15 @@ export class NativeRuntimeAdapter implements Runtime {
       this.closeRuntimeState();
       return;
     }
-    if (this.closed) return;
-    if (this.pendingLocalSettlements.size > 0) {
-      await Promise.all(this.pendingLocalSettlements);
-    }
-    if (this.closed) return;
+    if (this.physicalCloseStarted) return;
+    if (this.closed && !this.foregroundLeaseQuiesced) return;
+    this.physicalCloseStarted = true;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    if (this.pendingLocalSettlements.size > 0) {
+      await Promise.all(this.pendingLocalSettlements);
+    }
     await this.coreTickCompletion?.catch(() => undefined);
     this.closeRuntimeState(true);
     await this.db.close?.();
@@ -1682,6 +1707,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
     }
+    if (this.closed) {
+      throw new Error("Begin transaction failed: native runtime is closed");
+    }
     if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
@@ -1717,6 +1745,9 @@ export class NativeRuntimeAdapter implements Runtime {
 
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
     if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openTransactionId);
+    if (this.closed) {
+      throw new Error("Commit transaction failed: native runtime is closed");
+    }
     const pending = this.pendingTxs.get(openTransactionId);
     if (!pending) {
       throw new Error(commitTransactionMessage(openTransactionId, this.completedTxs));

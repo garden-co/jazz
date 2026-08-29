@@ -33,6 +33,7 @@ export const INDEXEDDB_REPLICA_NODE_BYTES = 16;
 /** Durable worker-owned pool for browser foreground TxId node leases. */
 export const INDEXEDDB_FOREGROUND_NODE_LEASES_KEY = "foreground-node-leases-v1";
 export const INDEXEDDB_FOREGROUND_NODE_LEASES_FORMAT = "jazz-foreground-node-leases-v1";
+const MAX_TX_TIME = (1n << 64n) - 1n;
 const CURRENT_METADATA_KEY = "current";
 const MIN_PAGE_SIZE = 1024;
 const MAX_PAGE_SIZE = 0x8000_0000;
@@ -254,7 +255,7 @@ export class IndexedDbPageStore {
    * foreground node reusable. An unknown lease is rejected fail-closed.
    */
   async returnForegroundNodeLease(leaseId: string, confirmedTxTime: bigint): Promise<void> {
-    if (!isLeaseId(leaseId) || confirmedTxTime < 0n) {
+    if (!isLeaseId(leaseId) || !isTxTime(confirmedTxTime)) {
       throw new Error("Invalid IndexedDB foreground node lease handoff");
     }
     await this.updateForegroundNodeLeasePool((pool) => {
@@ -262,9 +263,11 @@ export class IndexedDbPageStore {
       if (index < 0) throw new Error("Unknown IndexedDB foreground node lease");
       const [lease] = pool.active.splice(index, 1);
       if (!lease) throw new Error("Unknown IndexedDB foreground node lease");
+      const previous = BigInt(lease.confirmedTxTime);
       pool.reusable.push({
         ...lease,
-        confirmedTxTime: confirmedTxTime.toString(),
+        // An old caller or a wall-clock rollback cannot lower a durable floor.
+        confirmedTxTime: (confirmedTxTime > previous ? confirmedTxTime : previous).toString(),
       });
     });
   }
@@ -646,7 +649,8 @@ function assertStoredForegroundNodeLease(
   if (
     !isLeaseId(lease.leaseId) ||
     !isNodeBuffer(lease.node) ||
-    !isCanonicalNonNegativeBigintString(lease.confirmedTxTime)
+    !isCanonicalNonNegativeBigintString(lease.confirmedTxTime) ||
+    !isTxTime(BigInt(lease.confirmedTxTime))
   ) {
     throw new Error("Invalid IndexedDB foreground node lease");
   }
@@ -665,6 +669,10 @@ function isLeaseId(value: unknown): value is string {
 
 function isCanonicalNonNegativeBigintString(value: unknown): value is string {
   return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value);
+}
+
+function isTxTime(value: bigint): boolean {
+  return value >= 0n && value <= MAX_TX_TIME;
 }
 
 function bytesKey(bytes: ArrayBuffer): string {

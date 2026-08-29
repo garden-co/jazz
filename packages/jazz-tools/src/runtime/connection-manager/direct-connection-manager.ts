@@ -40,7 +40,7 @@ export class DirectConnectionManager extends ConnectionManager {
         } else if (!(runtime instanceof NativeRuntimeAdapter)) {
           await lease.retire();
         } else {
-          await lease.returnWithHighWater(runtime.foregroundTxTimeHighWater());
+          await lease.returnWithHighWater(await runtime.quiesceForegroundTxTimeHighWater());
         }
       }
     } catch {
