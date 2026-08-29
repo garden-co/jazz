@@ -364,6 +364,141 @@ async fn deep_resident_hydration_yields_without_changing_its_snapshot() {
     );
 }
 
+/// Cold storage is permitted to self-wake after its first poll. That wake is
+/// not an IVM CPU continuation: a direct opening must leave the request
+/// pending, and only a later owner turn may attach and receive its durable
+/// wake route.
+#[futures_test::test]
+async fn direct_cold_self_wake_waits_for_a_later_owner_turn() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("cold wake".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_all();
+    control.take_observed();
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "the direct opening polls the cold scan once but must not consume its self-wake"
+    );
+    assert!(
+        subscription.try_recv().is_err(),
+        "a self-woken cold scan must not publish during the direct opening"
+    );
+
+    // The direct call has returned. Install a real owner waker before letting
+    // the retained storage operation become ready.
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert_eq!(wakes.0.load(Ordering::Acquire), 0);
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        1,
+        "the resumed cold operation wakes the owner that actually retained it"
+    );
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        vec![(
+            vec![Value::U64(1), Value::String("cold wake".to_owned())],
+            1
+        )]
+    );
+}
+
+/// A later direct write may create resident work, but it cannot use that call
+/// to poll an earlier cold subscription past its self-wake.
+#[futures_test::test]
+async fn direct_write_does_not_consume_an_earlier_cold_subscription() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("seed".to_owned())],
+    );
+    database.commit_batch(seed).await.unwrap();
+    storage.evict_all();
+    control.take_observed();
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert!(subscription.try_recv().is_err());
+
+    let mut write = database.open_batch();
+    write.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("later write".to_owned())],
+    );
+    let applied = database.apply_batch(write).await.unwrap();
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "the write must not repoll the self-woken cold scan synchronously"
+    );
+    assert!(database.has_pending_progress());
+    assert!(
+        subscription.try_recv().is_err(),
+        "the cold subscription cannot publish as a side effect of an unrelated direct write"
+    );
+    drop(applied);
+}
+
 #[futures_test::test]
 async fn subscribe_sends_empty_hydration_snapshot_without_writes() {
     let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");

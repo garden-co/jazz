@@ -273,9 +273,9 @@ impl Database {
         // a bounded recursive evaluation may yield after making resident
         // progress and self-wake for another slice.  Finish those slices
         // before returning the publication so its subscription output is
-        // observable in the same direct write turn.  A genuinely cold input
-        // never self-wakes here, so it remains pending for an external owner
-        // rather than making a write wait on storage.
+        // observable in the same direct write turn. A genuinely cold input
+        // remains pending for an external owner even if its storage future
+        // eagerly wakes, rather than making a write wait on storage.
         self.drain_self_scheduled_resident_progress()?;
         let ivm_tick_time = tick_start.elapsed();
         // The IVM's resident observer uses the staged overlay. It takes the

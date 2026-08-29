@@ -16,7 +16,7 @@ use crate::storage::OwnedStorage;
 /// Hydration can discover a large resident graph in one poll. Keep every
 /// owner turn bounded so a browser worker returns to transport ingress between
 /// CPU-only graph slices. Cold storage takes the separate request-pending path
-/// below and intentionally does not self-wake.
+/// below; its waker is intentionally not used to classify the pending reason.
 const MAX_HYDRATION_RUNNABLE_NODES_PER_POLL: usize = 32;
 
 /// Owned preparation state for one interruptible evaluation.
@@ -117,6 +117,16 @@ struct PendingIncrementalState {
     order: VecDeque<u64>,
     waiters_by_node: HashMap<NodeId, VecDeque<u64>>,
     next_id: u64,
+    /// Why the current queue head yielded. This is runtime state rather than
+    /// an inference from a caller's waker: storage futures may wake eagerly
+    /// while they are still cold.
+    pending_progress: Option<PendingProgress>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingProgress {
+    ResidentContinuation,
+    Storage,
 }
 
 enum PendingEvaluation {
@@ -171,6 +181,10 @@ impl std::fmt::Debug for PendingIncrementalEvaluation {
 impl PendingIncrementalEvaluation {
     pub(super) fn is_pending(&self) -> bool {
         !self.0.borrow().order.is_empty()
+    }
+
+    fn has_resident_continuation(&self) -> bool {
+        self.0.borrow().pending_progress == Some(PendingProgress::ResidentContinuation)
     }
 }
 
@@ -383,6 +397,13 @@ impl EvaluationWorkQueue {
     fn requeue_yielded(&mut self, node: NodeId) {
         self.entries.insert(node, EvaluationEntry::Runnable);
         self.runnable.push_front(node);
+    }
+
+    /// A runnable node is an explicit in-memory evaluator continuation.
+    /// Requests are represented separately as `Waiting`, so an eager cold
+    /// storage wake cannot be mistaken for CPU work.
+    fn has_resident_continuation(&self) -> bool {
+        !self.runnable.is_empty()
     }
 
     fn is_root(&self, node: NodeId) -> bool {
@@ -602,17 +623,11 @@ impl IncrementalEvaluation<'_> {
                 }
             }
         }
-        let mut immediately_ready = if registered_requests {
+        let immediately_ready = if registered_requests {
             self.requests.poll(cx)
         } else {
             0
         };
-        if registered_requests && immediately_ready == 0 {
-            // Test and memory providers may deliberately yield once on a cold
-            // resident lookup. Match terminal materialization by advancing
-            // that retained request future once more before detaching the tick.
-            immediately_ready = self.requests.poll(cx);
-        }
         if immediately_ready > 0 {
             // Resident requests completed synchronously. Install their results
             // and resume the queue within this same public poll so resident
@@ -1532,8 +1547,10 @@ impl IvmRuntime {
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
         if state.order.is_empty() {
+            state.pending_progress = None;
             return Poll::Ready(Ok(()));
         }
+        state.pending_progress = None;
         let mut retained_order = VecDeque::new();
         while let Some(evaluation_id) = state.order.pop_front() {
             let mut evaluation = state
@@ -1649,6 +1666,11 @@ impl IvmRuntime {
                     }
                 }
                 Poll::Pending => {
+                    let pending_progress = if evaluation.work_queue().has_resident_continuation() {
+                        PendingProgress::ResidentContinuation
+                    } else {
+                        PendingProgress::Storage
+                    };
                     state.evaluations.insert(evaluation_id, evaluation);
                     retained_order.push_back(evaluation_id);
                     // One owner turn advances at most one suspended
@@ -1660,6 +1682,7 @@ impl IvmRuntime {
                     // waker; cooperative in-memory yields wake it directly.
                     retained_order.append(&mut state.order);
                     state.order = retained_order;
+                    state.pending_progress = Some(pending_progress);
                     *slot.borrow_mut() = state;
                     return Poll::Pending;
                 }
@@ -1667,6 +1690,7 @@ impl IvmRuntime {
         }
         let done = retained_order.is_empty();
         state.order = retained_order;
+        state.pending_progress = None;
         *slot.borrow_mut() = state;
         if done {
             Poll::Ready(Ok(()))
@@ -1677,6 +1701,12 @@ impl IvmRuntime {
 
     pub(crate) fn has_pending_incremental(&self) -> bool {
         self.pending_incremental.is_pending()
+    }
+
+    /// Whether the last suspended owner turn retained a cooperative CPU
+    /// continuation rather than a cold storage request.
+    pub(crate) fn has_resident_continuation(&self) -> bool {
+        self.pending_incremental.has_resident_continuation()
     }
 
     /// Drop an uninstalled hydration when its subscription is cancelled.

@@ -1,20 +1,4 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use futures::task::{ArcWake, waker};
-
 use super::*;
-
-/// Counts immediate, in-memory continuation requests while a direct Database
-/// API call owns progress.  This deliberately does not retain an executor
-/// wake: cold storage must stay pending for a real runtime owner instead.
-struct DirectProgressWake(AtomicUsize);
-
-impl ArcWake for DirectProgressWake {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.0.fetch_add(1, Ordering::AcqRel);
-    }
-}
 
 impl Database {
     /// Drain continuation turns which the IVM itself has explicitly scheduled
@@ -22,21 +6,25 @@ impl Database {
     /// genuinely pending: this direct API has no durable owner waker to retain
     /// for external readiness, and callers may install one with
     /// [`Self::drive_ready_progress_with_waker`] or [`Self::poll_subscription`].
-    pub(super) fn drive_resident_progress_now(
-        &mut self,
-        progress_waker: &std::task::Waker,
-        wake_count: &AtomicUsize,
-    ) -> Result<(), Error> {
+    pub(super) fn drive_resident_progress_now(&mut self) -> Result<(), Error> {
+        // Never use a new direct call as an excuse to poll an already-cold
+        // evaluation again. A storage future is permitted to self-wake before
+        // it is ready; only the owner that installed its durable waker may
+        // resume it.
+        if self.ivm_runtime.has_pending_incremental()
+            && !self.ivm_runtime.has_resident_continuation()
+        {
+            return Ok(());
+        }
         loop {
-            let before = wake_count.load(Ordering::Acquire);
-            let mut cx = std::task::Context::from_waker(progress_waker);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
             match self.poll_progress(&mut cx) {
                 std::task::Poll::Ready(result) => return result,
-                // Cooperative resident work explicitly self-wakes before it
-                // yields, so keep draining it synchronously. A real cold
-                // request does not wake until external readiness and remains
-                // pending for the caller's actual runtime owner.
-                std::task::Poll::Pending if wake_count.load(Ordering::Acquire) != before => {}
+                // The runtime records an explicit resident continuation when
+                // a bounded CPU slice yields. Storage may self-wake before it
+                // is ready, so it remains pending even if it woke this no-op
+                // waker.
+                std::task::Poll::Pending if self.ivm_runtime.has_resident_continuation() => {}
                 std::task::Poll::Pending => return Ok(()),
             }
         }
@@ -47,14 +35,7 @@ impl Database {
     /// turn a cold storage request into a blocking call without a runtime
     /// owner to resume it later.
     pub(super) fn drain_self_scheduled_resident_progress(&mut self) -> Result<(), Error> {
-        let (wake_count, progress_waker) = Self::direct_progress_waker();
-        self.drive_resident_progress_now(&progress_waker, &wake_count.0)
-    }
-
-    fn direct_progress_waker() -> (Arc<DirectProgressWake>, std::task::Waker) {
-        let wake_count = Arc::new(DirectProgressWake(AtomicUsize::new(0)));
-        let progress_waker = waker(Arc::clone(&wake_count));
-        (wake_count, progress_waker)
+        self.drive_resident_progress_now()
     }
 
     /// Whether a suspended IVM evaluation still needs a future owner turn.
@@ -311,17 +292,15 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let wake_count = Arc::new(DirectProgressWake(AtomicUsize::new(0)));
-        let progress_waker = waker(Arc::clone(&wake_count));
         let subscription = self
             .ivm_runtime
-            .subscribe_one_sink_with_waker(graph, &storage, Some(&progress_waker))
+            .subscribe_one_sink_with_waker(graph, &storage, None)
             .await
             .map_err(Error::IvmRuntime)?;
         // A direct async opening owns the immediately-resident continuation
         // chain, but it must not await a cold read with no durable owner to
         // resume it. Drain only self-scheduled cooperative slices here.
-        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        self.drive_resident_progress_now()?;
         Ok(subscription)
     }
 
@@ -334,9 +313,8 @@ impl Database {
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
-        let (wake_count, progress_waker) = Self::direct_progress_waker();
-        let subscription = self.subscribe_with_waker(sinks, Some(&progress_waker))?;
-        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        let subscription = self.subscribe_with_waker(sinks, None)?;
+        self.drive_resident_progress_now()?;
         Ok(subscription)
     }
 
@@ -546,7 +524,6 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let (wake_count, progress_waker) = Self::direct_progress_waker();
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -554,10 +531,10 @@ impl Database {
                 &values,
                 prepared.output,
                 &storage,
-                Some(&progress_waker),
+                None,
             )
             .map_err(Error::IvmRuntime)?;
-        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        self.drive_resident_progress_now()?;
         Ok(subscription)
     }
 
@@ -702,12 +679,11 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let (wake_count, progress_waker) = Self::direct_progress_waker();
         let subscription = self
             .ivm_runtime
-            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, Some(&progress_waker))
+            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None)
             .map_err(Error::IvmRuntime)?;
-        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        self.drive_resident_progress_now()?;
         Ok(subscription)
     }
 
@@ -733,7 +709,6 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let (wake_count, progress_waker) = Self::direct_progress_waker();
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -741,10 +716,10 @@ impl Database {
                 binding_values,
                 public_output,
                 &storage,
-                Some(&progress_waker),
+                None,
             )
             .map_err(Error::IvmRuntime)?;
-        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        self.drive_resident_progress_now()?;
         Ok(subscription)
     }
 
@@ -754,11 +729,10 @@ impl Database {
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
-        let (wake_count, progress_waker) = Self::direct_progress_waker();
         let subscription = self
-            .bind_shape_with_waker(shape, binding_values, Some(&progress_waker))
+            .bind_shape_with_waker(shape, binding_values, None)
             .await?;
-        self.drive_resident_progress_now(&progress_waker, &wake_count.0)?;
+        self.drive_resident_progress_now()?;
         Ok(subscription)
     }
 
