@@ -12,7 +12,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { publishExpectedFingerprint, publishNapiGeneration, validateNapiStage } from "./build.mjs";
+import {
+  publishExpectedFingerprint,
+  publishNapiGeneration,
+  validateNapiBindingRuntimeSurface,
+  validateNapiStage,
+} from "./build.mjs";
 
 const build = readFileSync(new URL("./build.mjs", import.meta.url), "utf8");
 const wrapper = readFileSync(
@@ -66,6 +71,32 @@ test("all NAPI entrypoints use one target-aware fail-closed staged build path", 
   assert.match(build, /validateNapiStage/);
   assert.match(build, /publishNapiGeneration/);
   assert.match(build, /JAZZ_NAPI_BUILD_FAULT/);
+});
+
+test("a staged NAPI binding without its compiled wire mask fails before activation", () => {
+  class MissingWireFeatures {
+    tick() {}
+  }
+  const binding = {
+    nativeArtifactFingerprint: () => "expected",
+    NapiDb: MissingWireFeatures,
+  };
+  assert.throws(
+    () => validateNapiBindingRuntimeSurface(binding, "expected"),
+    /NapiDb\.wireFeatures/,
+  );
+
+  class CompleteNapiDb extends MissingWireFeatures {
+    wireFeatures() {
+      return 0;
+    }
+  }
+  assert.doesNotThrow(() =>
+    validateNapiBindingRuntimeSurface(
+      { nativeArtifactFingerprint: () => "expected", NapiDb: CompleteNapiDb },
+      "expected",
+    ),
+  );
 });
 
 test("NAPI pointer publication gives CJS and real ESM named imports the same guarded binding", () => {

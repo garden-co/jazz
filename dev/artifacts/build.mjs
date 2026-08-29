@@ -405,9 +405,11 @@ export function validateNapiStage(
   const receipt = spawnSync(
     process.execPath,
     [
+      "--input-type=module",
       "-e",
-      `const binding=require(process.argv[1]); const expected=process.argv[2]; if (typeof binding.nativeArtifactFingerprint !== 'function' || binding.nativeArtifactFingerprint() !== expected || typeof binding.NapiDb !== 'function' || typeof binding.NapiDb.prototype.tick !== 'function') process.exit(23);`,
+      `import { createRequire } from "node:module"; const require=createRequire(import.meta.url); const binding=require(process.argv[1]); const { validateNapiBindingRuntimeSurface }=await import(process.argv[2]); validateNapiBindingRuntimeSurface(binding, process.argv[3]);`,
       loader,
+      import.meta.url,
       fingerprint,
     ],
     { stdio: "inherit" },
@@ -415,6 +417,26 @@ export function validateNapiStage(
   if ((receipt.status ?? 1) !== 0)
     throw new Error(
       "NAPI build produced an unloadable or incompatible staged host generation; refusing to publish",
+    );
+}
+
+/**
+ * Runtime methods used by jazz-tools before a staged NAPI generation can
+ * become the active package binding. Keep this separate from declaration
+ * parity: generated type declarations can name a method that the binary does
+ * not actually export.
+ */
+export function validateNapiBindingRuntimeSurface(binding, expectedFingerprint) {
+  if (
+    !binding ||
+    typeof binding.nativeArtifactFingerprint !== "function" ||
+    binding.nativeArtifactFingerprint() !== expectedFingerprint ||
+    typeof binding.NapiDb !== "function" ||
+    typeof binding.NapiDb.prototype.tick !== "function" ||
+    typeof binding.NapiDb.prototype.wireFeatures !== "function"
+  )
+    throw new Error(
+      "NAPI build is missing a required runtime surface (nativeArtifactFingerprint, NapiDb.tick, or NapiDb.wireFeatures)",
     );
 }
 export function buildArtifact(kind, profile = "release", extraArgs = []) {
