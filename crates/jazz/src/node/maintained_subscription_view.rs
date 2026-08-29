@@ -16,7 +16,7 @@ use super::codec::{
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
     ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
-    ResultMembershipSchema, ResultMembershipVersionSchema, VersionWitnessSchema,
+    ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
     VersionedRowRefSchema, logical_user_column,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
@@ -1211,13 +1211,7 @@ fn decode_typed_terminal_record(
                                 .map_err(super::Error::from)
                         })
                         .collect::<Result<Vec<_>, _>>()
-                        .and_then(|values| {
-                            postcard::to_allocvec(&values).map_err(|_| {
-                                super::Error::InvalidStoredValue(
-                                    "flat joined result revision encoding failed",
-                                )
-                            })
-                        })
+                        .and_then(|values| flat_join_row_digest(&schema.payload_fields, &values))
                 })
                 .transpose()?;
             let branch_or_prefix = schema
@@ -1353,6 +1347,58 @@ fn decode_typed_terminal_record(
             })
         }
     }
+}
+
+/// Domain separation for the durable flat-join result revision.
+///
+/// `ResultMemberEntry::row_digest` is persisted as part of settled result and
+/// program-fact state, so this must not inherit Rust/postcard layout. The
+/// preimage is a V1 envelope containing a canonical Groove descriptor with
+/// engine-owned ordinal field names and one canonical record under that exact
+/// descriptor. The descriptor carries every declared field type (including
+/// nested enum registry identity); ordinal names make user aliases irrelevant.
+const FLAT_JOIN_ROW_DIGEST_DOMAIN: &str = "jazz.flat-join-row-digest.v1";
+const FLAT_JOIN_ROW_DIGEST_MAGIC: &[u8; 4] = b"JFRD";
+const FLAT_JOIN_ROW_DIGEST_VERSION: u8 = 1;
+
+fn flat_join_row_digest(
+    fields: &[TypedOutputField],
+    values: &[Value],
+) -> Result<Vec<u8>, super::Error> {
+    let bytes = flat_join_row_digest_preimage(fields, values)?;
+    Ok(blake3::derive_key(FLAT_JOIN_ROW_DIGEST_DOMAIN, &bytes).to_vec())
+}
+
+fn flat_join_row_digest_preimage(
+    fields: &[TypedOutputField],
+    values: &[Value],
+) -> Result<Vec<u8>, super::Error> {
+    let descriptor = RecordDescriptor::new(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| (format!("flat_join_payload_{index}"), field.ty.clone())),
+    );
+    let descriptor_bytes = encode_record_descriptor(&descriptor)?;
+    let record_bytes = descriptor.create(values)?;
+    let field_count = u32::try_from(fields.len()).map_err(|_| {
+        super::Error::InvalidStoredValue("flat joined result revision has too many fields")
+    })?;
+    let descriptor_len = u32::try_from(descriptor_bytes.len()).map_err(|_| {
+        super::Error::InvalidStoredValue("flat joined result revision descriptor is too large")
+    })?;
+    let record_len = u32::try_from(record_bytes.len()).map_err(|_| {
+        super::Error::InvalidStoredValue("flat joined result revision record is too large")
+    })?;
+    let mut bytes = Vec::with_capacity(4 + 1 + 12 + descriptor_bytes.len() + record_bytes.len());
+    bytes.extend_from_slice(FLAT_JOIN_ROW_DIGEST_MAGIC);
+    bytes.push(FLAT_JOIN_ROW_DIGEST_VERSION);
+    bytes.extend_from_slice(&field_count.to_be_bytes());
+    bytes.extend_from_slice(&descriptor_len.to_be_bytes());
+    bytes.extend_from_slice(&descriptor_bytes);
+    bytes.extend_from_slice(&record_len.to_be_bytes());
+    bytes.extend_from_slice(&record_bytes);
+    Ok(bytes)
 }
 
 fn decode_typed_relation_edge(
@@ -2091,6 +2137,53 @@ mod tests {
 
     fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
         BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    }
+
+    // Internal receipt: `row_digest` is a durable settled-result identity, so
+    // its exact bytes cannot be asserted through the public query API alone.
+    #[test]
+    fn flat_join_row_digest_uses_the_v1_groove_record_envelope() {
+        let fields = vec![
+            TypedOutputField {
+                name: "ignored_alias".to_owned(),
+                ty: ValueType::U64,
+            },
+            TypedOutputField {
+                name: "title".to_owned(),
+                ty: ValueType::String,
+            },
+        ];
+        let values = vec![Value::U64(7), Value::String("blue".to_owned())];
+        let preimage = flat_join_row_digest_preimage(&fields, &values).unwrap();
+        let digest = flat_join_row_digest(&fields, &values).unwrap();
+
+        // Frozen JFRD v1 receipt: magic/version, count, Groove descriptor,
+        // then the record. Any source-alias rename leaves these bytes intact.
+        assert_eq!(
+            hex::encode(&preimage),
+            "4a4652440100000002000000a8050000002a00000053000000690000009200000000000000000000000002000000120000000000000000010000000000000000010000002500000001666c61745f6a6f696e5f7061796c6f61645f300000000005000000000000000000000000120000000000000000010000000000000000010000002500000001666c61745f6a6f696e5f7061796c6f61645f31000000000a0000000000000000000000001200000000000000000000000d070000000000000002626c7565"
+        );
+        assert_eq!(
+            hex::encode(&digest),
+            "d4bacd5d453e647a4da1c55842ddbf8e39a263ceb1ddb07f3f8fac090ff9480b"
+        );
+
+        let renamed = vec![
+            TypedOutputField {
+                name: "different_alias".to_owned(),
+                ty: ValueType::U64,
+            },
+            TypedOutputField {
+                name: "different_title".to_owned(),
+                ty: ValueType::String,
+            },
+        ];
+        assert_eq!(flat_join_row_digest(&renamed, &values).unwrap(), digest);
+        assert_ne!(
+            flat_join_row_digest(&fields, &[Value::U64(7), Value::String("red".to_owned())],)
+                .unwrap(),
+            digest
+        );
     }
 
     /// Production-shaped typed relation facts retain branch identity through

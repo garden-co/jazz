@@ -15,7 +15,7 @@ function fixture() {
   fs.writeFileSync(
     path.join(root, "dev/storage/default-serialization-registry.json"),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       scope: { paths: ["crates/jazz/src/node"] },
       allowances: [],
     }),
@@ -54,13 +54,13 @@ test("requires an exact registry receipt for a deliberate non-durable use", () =
     fs.writeFileSync(
       registryPath,
       JSON.stringify({
-        schemaVersion: 1,
+      schemaVersion: 2,
         scope: { paths: ["crates/jazz/src/node"] },
         allowances: [
           {
             id: "test-only",
             path: "crates/jazz/src/node/codec.rs",
-            pattern: "postcard::to_allocvec",
+            api: "postcard::to_allocvec",
             expectedOccurrences: 1,
             classification: "test-only temporary bytes",
           },
@@ -75,6 +75,83 @@ test("requires an exact registry receipt for a deliberate non-durable use", () =
     const result = run(root);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /expected 1/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects every registered convenience family, including to_writer", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    for (const api of [
+      "postcard::to_stdvec",
+      "postcard::to_extend",
+      "postcard::to_io",
+      "serde_json::to_writer",
+      "serde_json::to_writer_pretty",
+      "serde_json::to_string_pretty",
+      "serde_json::from_reader",
+      "bincode::serialize_into",
+      "bincode::deserialize_from",
+      "rmp_serde::to_vec_named",
+      "rmp_serde::from_read",
+    ]) {
+      fs.writeFileSync(file, `fn codec() { let _ = ${api}(&value); }\n`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, api);
+      assert.match(result.stderr, new RegExp(`unregistered default serialization ${api}`));
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects broad registry patterns and a persistence owner added after the registry", () => {
+  const root = fixture();
+  try {
+    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
+    const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+    registry.allowances.push({
+      id: "broad-is-not-an-api",
+      path: "crates/jazz/src/node/codec.rs",
+      api: "serde_json::.*",
+      expectedOccurrences: 1,
+      classification: "must fail schema validation",
+    });
+    fs.writeFileSync(registryPath, JSON.stringify(registry));
+    let result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /invalid allowance/);
+
+    registry.allowances = [];
+    fs.writeFileSync(registryPath, JSON.stringify(registry));
+    fs.writeFileSync(
+      path.join(root, "crates/jazz/src/node/new_persistence_owner.rs"),
+      "fn write() { let _ = serde_json::to_writer(&mut output, &value); }\n",
+    );
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /new_persistence_owner.rs.*serde_json::to_writer/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a restored flat-join postcard digest in its persistence owner", () => {
+  const root = fixture();
+  try {
+    fs.renameSync(
+      path.join(root, "crates/jazz/src/node/codec.rs"),
+      path.join(root, "crates/jazz/src/node/maintained_subscription_view.rs"),
+    );
+    fs.appendFileSync(
+      path.join(root, "crates/jazz/src/node/maintained_subscription_view.rs"),
+      "fn digest(values: Vec<u8>) { let _ = postcard::to_allocvec(&values); }\n",
+    );
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /maintained_subscription_view.rs.*postcard::to_allocvec/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
