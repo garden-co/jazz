@@ -54,7 +54,7 @@ test("requires an exact registry receipt for a deliberate non-durable use", () =
     fs.writeFileSync(
       registryPath,
       JSON.stringify({
-      schemaVersion: 2,
+        schemaVersion: 2,
         scope: { paths: ["crates/jazz/src/node"] },
         allowances: [
           {
@@ -86,12 +86,23 @@ test("rejects every registered convenience family, including to_writer", () => {
     const file = path.join(root, "crates/jazz/src/node/codec.rs");
     for (const api of [
       "postcard::to_stdvec",
+      "postcard::to_slice",
       "postcard::to_extend",
       "postcard::to_io",
+      "postcard::to_allocvec_cobs",
+      "postcard::to_stdvec_cobs",
+      "postcard::to_slice_cobs",
+      "postcard::from_bytes_cobs",
+      "postcard::take_from_bytes_cobs",
       "serde_json::to_writer",
       "serde_json::to_writer_pretty",
       "serde_json::to_string_pretty",
       "serde_json::from_reader",
+      "serde_json::Serializer::new",
+      "serde_json::Serializer::pretty",
+      "serde_json::Deserializer::from_slice",
+      "serde_json::Deserializer::from_str",
+      "serde_json::Deserializer::from_reader",
       "bincode::serialize_into",
       "bincode::deserialize_from",
       "rmp_serde::to_vec_named",
@@ -102,6 +113,79 @@ test("rejects every registered convenience family, including to_writer", () => {
       assert.notEqual(result.status, 0, api);
       assert.match(result.stderr, new RegExp(`unregistered default serialization ${api}`));
     }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolves aliases, direct imports, groups, globs, and leading crate paths", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    for (const [name, source] of [
+      ["namespace alias", "use postcard as pc; fn f() { pc::to_allocvec(&value); }"],
+      ["direct alias", "use postcard::to_allocvec as encode; fn f() { encode(&value); }"],
+      [
+        "grouped direct",
+        "use postcard::{to_allocvec as encode, from_bytes}; fn f() { encode(&value); }",
+      ],
+      ["glob", "use postcard::*; fn f() { to_allocvec(&value); }"],
+      ["leading crate", "fn f() { ::postcard::to_allocvec(&value); }"],
+      [
+        "json namespace alias",
+        "use serde_json as json; fn f() { json::to_writer(&mut out, &value); }",
+      ],
+      [
+        "json deserializer type",
+        "use serde_json::Deserializer as JsonDecoder; fn f() { JsonDecoder::from_slice(&value); }",
+      ],
+    ]) {
+      fs.writeFileSync(file, `${source}\n`);
+      const result = run(root);
+      assert.notEqual(result.status, 0, name);
+      assert.match(result.stderr, /unregistered default serialization/);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("does not mistake a locally shadowed imported serializer name for a codec call", () => {
+  const root = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(root, "crates/jazz/src/node/codec.rs"),
+      "use postcard::to_allocvec as encode; fn f() { let encode = || (); encode(); }\n",
+    );
+    assert.equal(run(root).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("permits an explicitly registered canonical endpoint through a renamed import", () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, "crates/jazz/src/node/codec.rs");
+    fs.writeFileSync(file, "use serde_json::from_str as parse; fn f() { parse(&value); }\n");
+    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
+    fs.writeFileSync(
+      registryPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        scope: { paths: ["crates/jazz/src/node"] },
+        allowances: [
+          {
+            id: "semantic-json-endpoint",
+            path: "crates/jazz/src/node/codec.rs",
+            api: "serde_json::from_str",
+            expectedOccurrences: 1,
+            classification: "explicit test endpoint",
+          },
+        ],
+      }),
+    );
+    assert.equal(run(root).status, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
