@@ -9,6 +9,14 @@ Architecture docs live in `crates/jazz/SPEC/` and `crates/groove/SPEC/`
 top-level `specs/` directory anymore. Private-side strategy/infra specs live
 in the `jazz-private` repo.
 
+## Durable encoding review
+
+Whenever storage or wire formats are touched, explicitly review the change for
+unspecified or default serializer encodings. Every authoritative encoding must
+be named and versioned where appropriate, specified, and pinned by byte-level
+corpus fixtures or receipts; do not treat a serializer's incidental layout as
+a durable contract.
+
 ## Work style
 
 ### Durable follow-up and WIP visibility

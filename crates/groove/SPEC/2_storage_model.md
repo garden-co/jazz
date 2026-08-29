@@ -175,60 +175,6 @@ the committed page-v1 fixture by raw IndexedDB transaction, opens it read-only,
 writes current data, reopens it, and proves corrupt/unknown manifests fail
 without changing pages.
 
-### Default-serialization boundary
-
-Authoritative storage code must not acquire a private Rust serialization
-spelling by accident. `dev/gates/default-serialization-persistence.mjs` scans
-every production source tree that owns an authoritative storage ingress, egress,
-or value carried across one. Such a source cannot import, re-export, or declare
-an `extern crate` for a general-purpose serializer. A reviewed exception must
-instead use a fully qualified canonical path recorded in
-`dev/storage/default-serialization-registry.json`. The registry records each
-token endpoint's canonical path, exact line/column, full enclosing structural
-stack (modules, implementation target/trait, nested lexical items, and a
-declaration or field identity), and the source-derived `cfg(test)` versus
-production boundary. Semicolon declarations—including type aliases,
-constants/statics, imports, tuple/unit structs, and associated items—have that
-same explicit identity and boundary; they are not treated as unowned text
-between brace scopes. Moving an otherwise verbatim call, changing its enclosing
-item or field, or removing its test boundary therefore requires renewed review
-rather than silently transferring an allowance to a new endpoint. Type-only
-serializer paths are explicit endpoint entries too.
-
-The gate lexes Rust tokens before applying that rule: comments and literals do
-not count, while raw identifiers, comment-separated paths, macro token trees,
-function-item references, and type paths do. Imports, re-exports, and `extern
-crate` aliases remain prohibited, so a reviewed endpoint cannot be hidden
-behind a local spelling.
-
-The registry snapshots every direct external dependency for each
-persistence-owning Cargo crate, including Rust rename-to-package mapping,
-requirement, resolved version/source, registry/path, features/default-features,
-optional/target/kind flags, and observable workspace inheritance. It reads the
-resolved `cargo metadata` graph, but intentionally does not mistake transitive
-`Cargo.lock` packages for dependencies that the owner can name. Every exact
-direct dependency entry is centrally classified as either a governed serializer
-(with its exact crate-root aliases) or a reviewed non-serializer. Known
-general-purpose serializer families (postcard, JSON, CBOR, bincode, MessagePack,
-RON, YAML, and TOML) must be governed whenever directly introduced; a new or
-unclassified entry fails closed. Registry edits are therefore sensitive policy
-changes requiring review. The gate detects accidental drift and endpoint
-transfer; it is not presented as a defense against a reviewer deliberately
-misclassifying a serializer. Thus adding a default serializer at the persistence
-boundary is a reviewable storage-format change, not an invisible implementation
-detail.
-
-The registry does not bless a serializer as an engine-owned durable codec. Its
-current exceptions are semantic JSON parsing for already-authenticated large
-values, temporary in-memory query/fingerprint/measurement helpers, deliberately
-malformed test construction, the public JSON edit transformation, and Jazz's
-explicit versioned catalogue public-schema JSON envelope. That `CATS` v1
-envelope length-delimits the JSON, validates its schema identity, and requires
-decode/re-encode byte equality; it is a named canonical contract rather than an
-inferred serde layout. New authoritative structured state must instead use the
-codec profile's normative record/scalar or order-preserving-key codec, with
-permanent IDs, exact fixtures, and fail-closed decode rules.
-
 The only ordering property groove requires from the backing store is unsigned
 lexicographic byte order: bytes compare as `0x00 < ... < 0xff`, never as signed
 integers, locale text, or a backend-native collation. A range `ScanRequest` returns keys in that order and
