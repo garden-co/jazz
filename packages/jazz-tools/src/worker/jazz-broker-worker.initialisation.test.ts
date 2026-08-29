@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => {
   const openBrowserWithSelfSignedProof = vi.fn();
   const fromDb = vi.fn();
   const encodeSchema = vi.fn(() => new Uint8Array());
-  const openConfig = vi.fn(() => new Uint8Array());
+  const openConfig = vi.fn((_node: Uint8Array, ..._rest: unknown[]) => new Uint8Array());
   const telemetryDisposers: Mock[] = [];
   const pageStores: Array<{
     close: Mock;
