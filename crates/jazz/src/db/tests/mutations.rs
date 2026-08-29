@@ -715,6 +715,13 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     let mut event = block_on(subscription.next_raw()).unwrap();
+    // Storage-backed maintained roots retain only an exact `(table, row, tx)`
+    // identity internally and may therefore carry an indirect descriptor in
+    // this raw event. Bindings always cross the explicit hydration boundary
+    // before exposing it to application code; keep the public assertion below
+    // on that boundary rather than requiring opening to synchronously fetch a
+    // cold chunk (which would deadlock an edge before its I/O pump starts).
+    block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
     let (descriptor, title_index, terminal_value) = {
         let SubscriptionEvent::Delta { added, .. } = &mut event else {
             panic!("expected opening subscription delta");
