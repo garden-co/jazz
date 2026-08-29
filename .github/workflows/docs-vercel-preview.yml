@@ -4,7 +4,7 @@ on:
   pull_request:
     # An unlabeled event starts a no-op run in the same concurrency group,
     # cancelling a preview that is no longer explicitly requested.
-    types: [labeled, unlabeled, synchronize, reopened]
+    types: [labeled, unlabeled, synchronize, reopened, closed]
 
 permissions:
   contents: read
@@ -24,16 +24,29 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
         && contains(github.event.pull_request.labels.*.name, 'docs')
+        && github.event.action != 'closed'
       }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     permissions:
       contents: read
-    env:
-      VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
-      VERCEL_TOKEN: ${{ secrets.VERCEL_DOCS_TOKEN }}
     steps:
+      # Check provisioning before evaluating checked-out PR code. This command
+      # intentionally reports only variable names, never their values.
+      - name: Guard Vercel preview configuration
+        env:
+          VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_DOCS_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing ${name}. Configure the Jazz docs Vercel project before applying the docs label."
+              exit 1
+            fi
+          done
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -48,47 +61,29 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
-      - name: Guard Vercel preview configuration
-        run: |
-          set -euo pipefail
-          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing ${name}. Configure the Jazz docs Vercel project before applying the docs label."
-              exit 1
-            fi
-          done
-
       - run: pnpm install --frozen-lockfile
-
-      # Pull only preview environment configuration. The project must have its
-      # Root Directory set to docs; this keeps Vercel's prebuilt artifact and
-      # deployment separate from the rest of the monorepo.
-      - name: Link the docs project
-        run: >-
-          pnpm dlx vercel@latest pull --yes --environment=preview --cwd docs
-          --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}"
 
       - name: Build homepage and docs
         run: pnpm build:vercel-docs
 
-      - name: Prepare the Vercel artifact
-        run: >-
-          pnpm dlx vercel@latest build --cwd docs
-          --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}"
-
+      # This is deliberately the only credentialed Vercel command. It performs
+      # Vercel's preview build remotely; checkout, install, and the local docs
+      # build above remain tokenless PR-code execution.
       - name: Deploy preview
         id: deploy
+        env:
+          VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_DOCS_TOKEN }}
         run: |
           set -euo pipefail
           deployment_url="$(
-            pnpm dlx vercel@latest deploy --prebuilt --yes --cwd docs \
+            pnpm --filter docs exec vercel deploy --yes \
               --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}" \
               -m git_pr="${{ github.event.pull_request.number }}" \
               -m git_sha="${{ github.event.pull_request.head.sha }}" \
               | tail -n1
           )"
-          pnpm dlx vercel@latest inspect "${deployment_url}" --wait --timeout 5m \
-            --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}" >/dev/null
           echo "url=${deployment_url}" >> "$GITHUB_OUTPUT"
 
       - name: Publish preview URL

@@ -49,18 +49,24 @@ resources:
 GitHub owns deployments so a preview is an explicit review choice rather than
 an automatic side effect of every branch. The `Docs preview (Vercel)` workflow
 deploys only a trusted, same-repository pull request carrying the `docs` label.
-It rebuilds this app and deploys Vercel's resulting prebuilt artifact. Label
-removal cancels an in-flight preview; forks never receive Vercel credentials.
+It builds this app locally without credentials, then performs one credentialed
+remote Vercel preview deployment. Label removal or closing the PR cancels an
+in-flight preview; forks never receive Vercel credentials.
 
-Before using the label, create/link a Vercel project with `docs` as its Root
-Directory, disable Vercel's automatic Git deployments, then configure these
-repository settings:
+Before using the label, perform this external Vercel setup: create/link a
+project whose Root Directory is `docs`, then disable or disconnect its automatic
+Git deployments. This workflow is the sole deployment authority. Configure
+these repository settings:
 
 - Variables: `VERCEL_DOCS_ORG_ID`, `VERCEL_DOCS_PROJECT_ID`
 - Secret: `VERCEL_DOCS_TOKEN`, scoped only to the docs project/team operations
   required to create preview deployments
 
+The Vercel project's **Preview** environment must contain no sensitive values:
+the labeled PR's code is built remotely. Put production-only secrets only in
+Vercel's Production environment when production deployment is enabled.
+
 Production deployment is deliberately disabled in the workflow: it has no
 `main` push trigger and its production job is permanently false. At release
-time, enable the documented main-only job and use `vercel deploy --prod
---prebuilt`; do not enable Vercel's automatic Git deployment as a substitute.
+time, enable the documented main-only job deliberately. Do not enable Vercel's
+automatic Git deployment as a substitute.
