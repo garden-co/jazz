@@ -2,18 +2,29 @@ import { useEffect, useState } from "react";
 import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-native";
 import { encodeResult } from "./src/protocol";
 import { scenarioPlan } from "./src/scenarios";
-import { proveForegroundByteAbi, proveForegroundWriteAbi } from "./src/foreground-byte-abi";
+import {
+  proveForegroundByteAbi,
+  proveForegroundRevoked,
+  proveForegroundScopeIsolation,
+  proveForegroundWriteAbi,
+} from "./src/foreground-byte-abi";
 import {
   admittedNativeRelay,
   deviceReceiptContext,
+  logoutNativeRelay,
   recordDeviceReceipt,
+  switchNativeRelayAuthScope,
 } from "./src/native-fixture";
 import {
   decodeNativeForegroundResponse,
   encodeNativeForegroundCommand,
   installNativeForegroundRuntime,
 } from "jazz-rn";
-import { proveAdmittedRelay } from "./src/relay-admission";
+import {
+  proveAdmittedRelay,
+  proveAuthScopeSwitch,
+  proveLogoutRevocation,
+} from "./src/relay-admission";
 
 async function observeTrustedAdmissionLifecycle() {
   const admitted = await admittedNativeRelay();
@@ -25,9 +36,47 @@ async function observeTrustedAdmissionLifecycle() {
     decode: decodeNativeForegroundResponse,
   };
   proveForegroundByteAbi(foregroundFactory, capability, foregroundCodec);
+  const revocableForeground = foregroundFactory.openAttached(capability);
+  await proveLogoutRevocation(
+    admitted,
+    async () => {
+      await logoutNativeRelay();
+      proveForegroundRevoked(revocableForeground, foregroundCodec.encode);
+    },
+    admittedNativeRelay,
+  );
+  const scopeA = await admittedNativeRelay();
+  proveForegroundScopeIsolation(
+    foregroundFactory,
+    scopeA.capability,
+    foregroundCodec,
+    "contains-a-row",
+  );
+  const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
+  const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
+  proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
+  proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  proveForegroundScopeIsolation(
+    foregroundFactory,
+    scopeB.capability,
+    foregroundCodec,
+    "does-not-contain-a-row",
+  );
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
-  proveForegroundWriteAbi(foregroundFactory, capability, foregroundCodec);
+  proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  // Closing B's trusted relay before re-admitting A forces its scope owner and
+  // SQLite handle to be recreated. A's row must survive that lifecycle while
+  // B's distinct native-selected path never observed it.
+  await logoutNativeRelay();
+  const reopenedScopeA = await admittedNativeRelay();
+  proveForegroundScopeIsolation(
+    foregroundFactory,
+    reopenedScopeA.capability,
+    foregroundCodec,
+    "contains-a-row",
+  );
+  await logoutNativeRelay();
   return await deviceReceiptContext();
 }
 

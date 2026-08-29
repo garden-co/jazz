@@ -129,7 +129,132 @@ export function proveForegroundWriteAbi(
   foreground.close();
 }
 
-function fixtureCells(title: "mergeable" | "updated" | "upserted" | "rolled back"): Uint8Array {
+/**
+ * Prove the device fixture's trusted A -> B path selection is data-plane
+ * isolation, not just control-plane capability revocation. The foreground
+ * command surface stays byte-only: the fixed query bytes below are the
+ * canonical postcard encoding of Rust's `Query::from("todos")`, and the
+ * receipt only searches returned binding bytes for the fixed fixture title.
+ * It deliberately does not grow a React-Native-shaped row/query API.
+ *
+ * The caller performs the native A -> B replacement between the two phases,
+ * then later revokes B and re-admits A. That final A read proves that closing
+ * a scope and its SQLite owner does not discard its data, while B never sees
+ * A's row even though both scopes use the same application fixture.
+ */
+export function proveForegroundScopeIsolation(
+  factory: NativeForegroundRuntimeFactory,
+  capability: Uint8Array,
+  codec: ForegroundByteCodec,
+  expectation: "contains-a-row" | "does-not-contain-a-row",
+): void {
+  const foreground = factory.openAttached(capability);
+  const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
+    codec.decode(foreground.execute(codec.encode(command)));
+
+  if (expectation === "contains-a-row") {
+    const transaction = execute({ type: "beginTransaction", kind: "mergeable" });
+    if (transaction.type !== "transactionOpened")
+      throw new Error("scope A foreground transaction did not open");
+    const rowId = Uint8Array.from({ length: 16 }, () => 0x73);
+    const staged = execute({
+      type: "upsert",
+      transaction: transaction.transaction,
+      table: "todos",
+      rowId,
+      cells: fixtureCells("scope A private row"),
+    });
+    if (staged.type !== "mutationStaged")
+      throw new Error("scope A foreground upsert was not staged");
+    const committed = execute({
+      type: "commitTransaction",
+      transaction: transaction.transaction,
+    });
+    if (committed.type !== "transactionCommitted")
+      throw new Error("scope A foreground transaction did not commit");
+  }
+
+  const rows = readTodos(foreground, codec);
+  const observedA = containsUtf8(rows, "scope-a-private-row");
+  if (expectation === "contains-a-row" && !observedA)
+    throw new Error("scope A did not materialize its persisted fixture row");
+  if (expectation === "does-not-contain-a-row" && observedA)
+    throw new Error("scope B observed scope A's persisted fixture row");
+  foreground.close();
+}
+
+// `postcard::to_allocvec(&Query::from("todos"))` in the shared Rust binding.
+// This is intentionally a fixed fixture byte sequence rather than a second
+// TypeScript query encoder.
+const TODOS_QUERY = Uint8Array.of(
+  5,
+  116,
+  111,
+  100,
+  111,
+  115,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+);
+
+function readTodos(foreground: NativeForegroundRuntime, codec: ForegroundByteCodec): Uint8Array {
+  const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
+    codec.decode(foreground.execute(codec.encode(command)));
+  const prepared = execute({ type: "prepareQuery", query: TODOS_QUERY });
+  if (prepared.type !== "preparedQuery")
+    throw new Error("scope isolation fixture could not prepare the todos query");
+  for (let attempts = 0; attempts < 64; attempts += 1) {
+    foreground.tick();
+    const response = execute({ type: "all", query: prepared.query });
+    if (response.type === "rows") return response.rows;
+    if (response.type === "pending") {
+      foreground.tick();
+      const settled = execute({ type: "poll", operation: response.operation });
+      if (settled.type === "rows") return settled.rows;
+      if (settled.type === "pending") continue;
+    }
+    throw new Error("scope isolation fixture read returned an unexpected response");
+  }
+  throw new Error("scope isolation fixture read did not settle after bounded ticks");
+}
+
+function containsUtf8(bytes: Uint8Array, value: string): boolean {
+  const needle = utf8(value);
+  return bytes.some(
+    (_, offset) =>
+      offset + needle.byteLength <= bytes.byteLength &&
+      needle.every((byte, index) => bytes[offset + index] === byte),
+  );
+}
+
+function utf8(value: string): Uint8Array {
+  const encoded = encodeURIComponent(value);
+  const bytes: number[] = [];
+  for (let index = 0; index < encoded.length; index += 1) {
+    if (encoded[index] === "%") {
+      bytes.push(Number.parseInt(encoded.slice(index + 1, index + 3), 16));
+      index += 2;
+    } else {
+      bytes.push(encoded.charCodeAt(index));
+    }
+  }
+  return Uint8Array.from(bytes);
+}
+
+function fixtureCells(
+  title: "mergeable" | "updated" | "upserted" | "rolled back" | "scope A private row",
+): Uint8Array {
   const bytes = {
     mergeable: [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 10, 2, 109, 101, 114, 103, 101, 97, 98, 108, 101,
@@ -138,6 +263,10 @@ function fixtureCells(title: "mergeable" | "updated" | "upserted" | "rolled back
     upserted: [1, 1, 5, 116, 105, 116, 108, 101, 8, 9, 2, 117, 112, 115, 101, 114, 116, 101, 100],
     "rolled back": [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 12, 2, 114, 111, 108, 108, 101, 100, 32, 98, 97, 99, 107,
+    ],
+    "scope A private row": [
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 97, 45, 112, 114, 105,
+      118, 97, 116, 101, 45, 114, 111, 119,
     ],
   } as const;
   return Uint8Array.from(bytes[title]);
