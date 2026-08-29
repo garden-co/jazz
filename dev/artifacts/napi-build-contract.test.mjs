@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { publishNapiGeneration, validateNapiStage } from "./build.mjs";
+import { publishExpectedFingerprint, publishNapiGeneration, validateNapiStage } from "./build.mjs";
 
 const build = readFileSync(new URL("./build.mjs", import.meta.url), "utf8");
 const wrapper = readFileSync(
@@ -207,6 +207,35 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
   } finally {
     delete process.env.JAZZ_NAPI_BUILD_FAULT;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pointer failure after fallback-marker publication restores the complete prior reader state", () => {
+  for (const priorMarker of ["prior marker\n", undefined]) {
+    const root = fixture();
+    const prior = "prior";
+    const markerPath = join(root, "native-artifact-fingerprint.cjs");
+    try {
+      publishNapiGeneration(stage(root, ".napi-stage-good", prior), root, prior);
+      const pointer = readFileSync(join(root, "native-binding.pointer.cjs"), "utf8");
+      const generations = readdirSync(join(root, ".native-artifacts")).sort();
+      if (priorMarker !== undefined) writeFileSync(markerPath, priorMarker);
+      process.env.JAZZ_NAPI_BUILD_FAULT = "pointer-write";
+      assert.throws(
+        () =>
+          publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next", {
+            beforePointerCommit: () => publishExpectedFingerprint("napi", "next", root),
+          }),
+        /final-pointer failure/,
+      );
+      assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
+      assert.deepEqual(readdirSync(join(root, ".native-artifacts")).sort(), generations);
+      assert.equal(existsSync(markerPath), priorMarker !== undefined);
+      if (priorMarker !== undefined) assert.equal(readFileSync(markerPath, "utf8"), priorMarker);
+    } finally {
+      delete process.env.JAZZ_NAPI_BUILD_FAULT;
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
