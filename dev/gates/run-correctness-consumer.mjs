@@ -29,10 +29,21 @@ export const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const capabilityPathEnv = "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY";
 const capabilityTokenEnv = "JAZZ_CORRECTNESS_CONSUMER_TOKEN";
 
+export function processStartIdentityFromStat(stat) {
+  const commandEnd = stat.lastIndexOf(")");
+  if (commandEnd < 0) return undefined;
+  const fieldsFromState = stat
+    .slice(commandEnd + 1)
+    .trim()
+    .split(/\s+/);
+  // /proc/<pid>/stat field 3 is state, so field 22 (starttime) is index 19.
+  return fieldsFromState[19] || undefined;
+}
+
 function processStartIdentity(pid) {
   if (process.platform !== "linux") return undefined;
   try {
-    return readFileSync(`/proc/${pid}/stat`, "utf8").trim().split(" ")[21];
+    return processStartIdentityFromStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
   } catch {
     return undefined;
   }

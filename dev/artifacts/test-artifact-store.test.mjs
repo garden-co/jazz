@@ -31,7 +31,10 @@ import {
   verifyCorrectnessArtifactProducer,
   writeCorrectnessArtifactProducerManifest,
 } from "./correctness-artifact-producer.mjs";
-import { runCorrectnessConsumer } from "../gates/run-correctness-consumer.mjs";
+import {
+  processStartIdentityFromStat,
+  runCorrectnessConsumer,
+} from "../gates/run-correctness-consumer.mjs";
 
 const require = createRequire(import.meta.url);
 const jazzToolsRequire = createRequire(
@@ -39,6 +42,13 @@ const jazzToolsRequire = createRequire(
 );
 const { createServer } = await import(pathToFileURL(jazzToolsRequire.resolve("vite")).href);
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+
+test("Linux process identity parsing ignores spaces and parentheses in comm", () => {
+  const fieldsFromStateThroughStartTime = ["S", ...Array(18).fill("0"), "987654321"];
+  const stat = `123 (worker name (nested) suffix) ${fieldsFromStateThroughStartTime.join(" ")} 0`;
+  assert.equal(processStartIdentityFromStat(stat), "987654321");
+  assert.equal(processStartIdentityFromStat("malformed"), undefined);
+});
 
 function fixture(label, wasmFingerprint, napiFingerprint) {
   const root = mkdtempSync(join(tmpdir(), `jazz-artifact-store-${label}-`));
