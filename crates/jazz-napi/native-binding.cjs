@@ -3,10 +3,6 @@
 // napi-rs's platform-aware loader when no local generation pointer exists.
 const { existsSync } = require("node:fs");
 const { join } = require("node:path");
-// Correctness builds select a worktree-private content-addressed generation here. It is
-// ignored and absent from packages, so ordinary local/release loading retains
-// the normal generated pointer and napi-rs fallback below.
-const correctnessPointer = join(__dirname, "correctness-native-binding.pointer.cjs");
 const pointer = join(__dirname, "native-binding.pointer.cjs");
 try {
   if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1") {
@@ -21,8 +17,11 @@ try {
       nativeBinding: require(binding),
       expectedNativeArtifactFingerprint: fingerprint,
     };
-  } else if (existsSync(correctnessPointer)) module.exports = require(correctnessPointer);
-  else if (existsSync(pointer)) module.exports = require(pointer);
+    // A correctness snapshot is selected only by the explicit, manifest-admitted
+    // environment above.  In particular, never let a leftover ignored test
+    // pointer override a normal local/package generation: after sources are
+    // restored, that snapshot may carry a binary from the prior source state.
+  } else if (existsSync(pointer)) module.exports = require(pointer);
   else {
     const nativeBinding = require("./native-loader.cjs");
     const { expectedNativeArtifactFingerprint } = require("./native-artifact-fingerprint.cjs");

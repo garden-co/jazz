@@ -51,8 +51,13 @@ test("sealed consumers select content-addressed artifact paths rather than workt
   assert.match(binding, /JAZZ_CORRECTNESS_ARTIFACT_RUN/);
   assert.ok(
     binding.indexOf('if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1")') <
-      binding.indexOf("else if (existsSync(correctnessPointer))"),
-    "sealed binding selection must precede every mutable pointer fallback",
+      binding.indexOf("else if (existsSync(pointer))"),
+    "sealed binding selection must precede the ordinary generated-pointer fallback",
+  );
+  assert.doesNotMatch(
+    binding,
+    /correctness-native-binding\.pointer\.cjs/,
+    "a residual correctness pointer must never steer an ordinary local/package load",
   );
 
   const worker = read("packages/jazz-tools/scripts/bundle-broker-worker.mjs");

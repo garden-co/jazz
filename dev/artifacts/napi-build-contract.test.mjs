@@ -89,6 +89,53 @@ test("NAPI pointer publication gives CJS and real ESM named imports the same gua
   }
 });
 
+test("a stale correctness pointer cannot override the active normal NAPI generation", () => {
+  const root = fixture();
+  try {
+    const current = "current";
+    const currentGeneration = publishNapiGeneration(
+      stage(root, ".napi-stage-current", current),
+      root,
+      current,
+    );
+    const stale = stage(root, ".native-artifacts/stale-correctness", "stale", { actual: "stale" });
+    // Model the failure mode from a prior correctness run: the ignored
+    // pointer names an old binary yet claims the currently restored tracked
+    // expectation.  A non-correctness require must use the active ordinary
+    // pointer, not let this stale test artifact reach Vite/Node.
+    writeFileSync(
+      join(root, "correctness-native-binding.pointer.cjs"),
+      `const nativeBinding=require(${JSON.stringify(join(stale, "index.js"))}); module.exports={nativeBinding,expectedNativeArtifactFingerprint:${JSON.stringify(current)}};\n`,
+    );
+    const ordinary = receipt(
+      root,
+      "const b=require(process.argv[1]); if (b.nativeArtifactFingerprint() !== 'current') process.exit(24)",
+    );
+    assert.equal(ordinary.status, 0, ordinary.stderr);
+
+    const sealed = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "const b=require(process.argv[1]); if (b.nativeArtifactFingerprint() !== 'current') process.exit(25)",
+        root,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+          JAZZ_CORRECTNESS_NAPI_BINDING: join(currentGeneration, "index.js"),
+          JAZZ_CORRECTNESS_NAPI_FINGERPRINT: current,
+        },
+      },
+    );
+    assert.equal(sealed.status, 0, sealed.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("missing, stale, mismatch, and partial staged generations fail closed without replacing a working reader pointer", () => {
   const root = fixture();
   try {

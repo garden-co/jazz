@@ -145,11 +145,13 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
     assert.equal(readCorrectnessArtifactSnapshot(first).fingerprint, firstSnapshot.fingerprint);
     assert.equal(readCorrectnessArtifactSnapshot(second).fingerprint, secondSnapshot.fingerprint);
     assert.equal(existsSync(correctnessArtifactPointer(first)), true);
-    const firstNapi = require(
-      join(first, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs"),
+    const firstNapi = require(join(firstSnapshot.napiGeneration, "index.js"));
+    assert.equal(firstNapi.label, "first");
+    assert.equal(
+      existsSync(join(first, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs")),
+      false,
+      "snapshot publication must not leave a fallback NAPI selector behind",
     );
-    assert.equal(firstNapi.nativeBinding.label, "first");
-    assert.equal(firstNapi.expectedNativeArtifactFingerprint, "b".repeat(64));
   } finally {
     removeFixture(first);
     removeFixture(second);
@@ -265,18 +267,16 @@ test("a consumer pins its manifest-selected pair across pointer swaps and partia
     // must observe the first pair on every iteration regardless of which
     // generation happens to be current at that instant.
     const pointer = correctnessArtifactPointer(root);
-    const napiPointer = join(root, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs");
     const swapper = spawn(
       process.execPath,
       [
         "-e",
         [
           "const fs=require('node:fs')",
-          "const [pointer,napi,first,second]=process.argv.slice(1)",
-          "for(let i=0;i<2000;i++) { fs.writeFileSync(pointer, i%2 ? first : second); fs.writeFileSync(napi, 'module.exports = {};\\n') }",
+          "const [pointer,first,second]=process.argv.slice(1)",
+          "for(let i=0;i<2000;i++) fs.writeFileSync(pointer, i%2 ? first : second)",
         ].join(";"),
         pointer,
-        napiPointer,
         JSON.stringify(first),
         JSON.stringify(second),
       ],
