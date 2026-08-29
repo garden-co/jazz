@@ -3,7 +3,7 @@ import type { WasmSchema } from "../../drivers/types.js";
 import type { DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
 import type { Session } from "../context.js";
 import type { DbConfig } from "../db.js";
-import type { BrowserForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
+import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
@@ -63,7 +63,7 @@ export abstract class ConnectionManager {
   private disposeRuntimeTelemetry: (() => void) | null = null;
 
   /** Browser managers set this during their asynchronous bootstrap. */
-  protected foregroundNodeLease: BrowserForegroundNodeLease | undefined;
+  protected foregroundNodeLease: ForegroundNodeLease | undefined;
 
   protected constructor(protected readonly host: DbForConnection) {}
 

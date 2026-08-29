@@ -4,7 +4,7 @@ import {
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
 import type {
-  BrowserForegroundNodeLease,
+  ForegroundNodeLease,
   BrowserWorkerConnection,
   BrowserWorkerConnectionContext,
 } from "../runtime-source.js";
@@ -30,7 +30,7 @@ export type BrowserForegroundNodeLeaseOptions = Pick<
  * exists. Its port stays open as the durable owner's liveness witness until
  * explicit clean return or retirement.
  */
-export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLease {
+export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
   private worker: SharedWorker | null = null;
   private port: MessagePort | null = null;
   private closed = false;

@@ -18,11 +18,11 @@ export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig>
    * Browser-only identity leased by the durable SharedWorker before the
    * synchronous foreground client is constructed.
    */
-  foregroundNodeLease?: BrowserForegroundNodeLease;
+  foregroundNodeLease?: ForegroundNodeLease;
 }
 
-/** Internal browser foreground TxId lease, never exposed as application API. */
-export interface BrowserForegroundNodeLease {
+/** Internal foreground TxId lease, never exposed as application API. */
+export interface ForegroundNodeLease {
   readonly node: Uint8Array;
   readonly confirmedTxTime: bigint;
   /** Atomically persists runtime high-water and makes this node reusable. */
@@ -108,7 +108,17 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
 
   abstract createClient(context: RuntimeClientContext<RuntimeConfig>): JazzClient;
 
-  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<BrowserForegroundNodeLease> {
+  /**
+   * Optional pre-runtime foreground identity lease for non-browser hosts.
+   * Browser persistence uses the dedicated SharedWorker variant below.
+   */
+  async acquireForegroundNodeLease(
+    _config: RuntimeConfig,
+  ): Promise<ForegroundNodeLease | undefined> {
+    return undefined;
+  }
+
+  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<ForegroundNodeLease> {
     return Promise.reject(
       new Error("Db runtime source does not support browser foreground leases"),
     );
