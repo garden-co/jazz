@@ -7,6 +7,7 @@ import {
   boundedDiagnostic,
   parseLaunchProcessId,
   relevantAppLogs,
+  safeDeviceDiagnostic,
   sanitizedCommandFailure,
 } from "./ios-diagnostics.mjs";
 import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
@@ -34,10 +35,16 @@ const appDataContainer = () =>
   simctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"]).trim();
 const receiptFilePath = () =>
   join(appDataContainer(), "Library", "Caches", "jazz-device-receipt.ndjson");
+const diagnosticFilePath = () =>
+  join(appDataContainer(), "Library", "Caches", "jazz-device-diagnostic.txt");
 // Reinstalling preserves the simulator data container. A former launch's valid
 // receipt must not become a confusing stale candidate for this fresh nonce.
 const receiptFile = () => {
   const file = receiptFilePath();
+  return existsSync(file) ? readFileSync(file, "utf8") : "";
+};
+const diagnosticFile = () => {
+  const file = diagnosticFilePath();
   return existsSync(file) ? readFileSync(file, "utf8") : "";
 };
 const diagnostics = (launchPid) =>
@@ -45,6 +52,7 @@ const diagnostics = (launchPid) =>
     `simctl launch PID: ${launchPid}`,
     `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
     `app receipt file:\n${boundedDiagnostic(receiptFile())}`,
+    `app JavaScript/native diagnostic:\n${safeDeviceDiagnostic(diagnosticFile())}`,
     `launchd app state:\n${trySimctl(["spawn", udid, "launchctl", "print", "gui/501"])}`,
     `recent app logs (capped):\n${relevantAppLogs(
       trySimctl([
@@ -64,6 +72,7 @@ const diagnostics = (launchPid) =>
   ].join("\n\n");
 async function launchAndAssert(phase) {
   rmSync(receiptFilePath(), { force: true });
+  rmSync(diagnosticFilePath(), { force: true });
   const phaseStartedAt = Date.now();
   const launchPid = parseLaunchProcessId(
     simctl([

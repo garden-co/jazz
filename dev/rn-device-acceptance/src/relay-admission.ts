@@ -1,3 +1,5 @@
+import { decodeBase64, encodeBase64 } from "./base64.ts";
+
 type NativeRelayCapability = Uint8Array;
 type NativeRelayExecutor = { execute(commandBase64: string): Promise<string> };
 
@@ -17,9 +19,7 @@ export async function proveAdmittedRelay(
   try {
     openedRelay = decodeOpened(await executor.execute(encodeOpen(capability)));
     attachedClient = decodeAttached(await executor.execute(encodeAttach(openedRelay)));
-    const response = Uint8Array.from(globalThis.atob(await executor.execute("AA==")), (byte) =>
-      byte.charCodeAt(0),
-    );
+    const response = decodeBase64(await executor.execute("AA=="));
     if (response.length !== 2 || response[0] !== 0 || response[1] !== 3)
       throw new Error("installed Jazz relay returned an unexpected ABI probe response");
   } catch (error) {
@@ -126,7 +126,7 @@ function encodeCloseClient(client: bigint): string {
   return encode([3, ...varint(client)]);
 }
 function encode(bytes: number[]): string {
-  return globalThis.btoa(String.fromCharCode(...bytes));
+  return encodeBase64(Uint8Array.from(bytes));
 }
 function varint(value: bigint): number[] {
   const bytes: number[] = [];
@@ -168,7 +168,7 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
 }
 function bytesOf(encoded: string): Uint8Array {
-  return Uint8Array.from(globalThis.atob(encoded), (byte) => byte.charCodeAt(0));
+  return decodeBase64(encoded);
 }
 function readVarint(bytes: Uint8Array, start: number): [bigint, number] {
   let value = 0n,

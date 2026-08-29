@@ -9,7 +9,11 @@ import com.jazzrn.JazzRelayTrustedAdmission
 import com.jazzrn.TrustedRelayScopeConfig
 import android.util.Base64
 import android.os.Build
+import android.system.Os
+import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
 import java.security.MessageDigest
 
 /**
@@ -116,5 +120,36 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
         .writeText("$receipt\n")
       promise.resolve(null)
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT", error) }
+  }
+
+  /** Only fixed, non-secret categories may cross from JS into CI diagnostics. */
+  @ReactMethod fun recordDiagnostic(code: String, promise: Promise) {
+    try {
+      require(code == "linked-abi-admission-failed") { "invalid device diagnostic" }
+      writeAtomicDiagnostic(code)
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
+  /**
+   * A receipt timeout can race process teardown. Never leave a partially
+   * written diagnostic for the host to inspect: flush the private temporary
+   * file, then rename it within its own cache directory (POSIX-atomic).
+   */
+  private fun writeAtomicDiagnostic(code: String) {
+    val target = reactApplicationContext.cacheDir.resolve("jazz-device-diagnostic.txt")
+    val parent = target.parentFile ?: error("device diagnostic has no parent directory")
+    val temporary = File.createTempFile(".${target.name}.", ".tmp", parent)
+    try {
+      FileOutputStream(temporary).use { output ->
+        output.write(code.toByteArray(Charsets.UTF_8))
+        output.fd.sync()
+      }
+      Os.rename(temporary.absolutePath, target.absolutePath)
+    } catch (failure: Throwable) {
+      if (temporary.exists() && !temporary.delete())
+        failure.addSuppressed(IOException("failed to remove incomplete device diagnostic"))
+      throw failure
+    }
   }
 }

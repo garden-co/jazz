@@ -1,5 +1,6 @@
 import { NativeModules } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
+import { decodeBase64 } from "./base64.ts";
 import type { Platform } from "./protocol";
 import type { AdmittedRelay } from "./relay-admission";
 
@@ -16,8 +17,12 @@ type FixtureModule = {
   switchAuthScope(): Promise<string>;
   receiptContext(): Promise<DeviceReceiptContext>;
   recordReceipt(receipt: string): Promise<void>;
+  recordDiagnostic(code: DeviceDiagnosticCode): Promise<void>;
   acceptancePhase(): Promise<"seed" | "verify">;
 };
+
+/** Public, non-secret categories the host is allowed to print from the app sandbox. */
+export type DeviceDiagnosticCode = "linked-abi-admission-failed";
 
 /**
  * The native fixture is an adapter for the public command function, not part of
@@ -48,8 +53,7 @@ export async function nativeAcceptancePhase(): Promise<"seed" | "verify"> {
 }
 
 function decodeCapability(value: string): Uint8Array {
-  const bytes = globalThis.atob(value);
-  return Uint8Array.from(bytes, (byte) => byte.charCodeAt(0));
+  return decodeBase64(value);
 }
 
 /** The only fixture material that crosses to JS is the opaque 32-byte lease. */
@@ -99,4 +103,9 @@ export async function deviceReceiptContext(): Promise<DeviceReceiptContext> {
  */
 export async function recordDeviceReceipt(receipt: string): Promise<void> {
   await fixtureModule().recordReceipt(receipt);
+}
+
+/** Persist only an allowlisted, non-secret pre-receipt failure for the host driver. */
+export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promise<void> {
+  await fixtureModule().recordDiagnostic(code);
 }

@@ -5,8 +5,8 @@ import {
   proveAuthScopeSwitch,
   proveLogoutRevocation,
 } from "./relay-admission.ts";
+import { decodeBase64 as bytes, encodeBase64 } from "./base64.ts";
 
-const bytes = (encoded: string) => Uint8Array.from(atob(encoded), (value) => value.charCodeAt(0));
 const admitted = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 
 test("Probe follows a successful Open carrying the exact admitted capability", async () => {
@@ -45,11 +45,11 @@ test("a substituted admitted relay handle is rejected by the strict executor", a
   };
   await proveAdmittedRelay({ execute }, admitted);
   await assert.rejects(
-    () => execute(btoa(String.fromCharCode(2, 8))),
+    () => execute(encodeBase64(Uint8Array.of(2, 8))),
     /unknown client or relay handle/,
   );
   await assert.rejects(
-    () => execute(btoa(String.fromCharCode(4, 8))),
+    () => execute(encodeBase64(Uint8Array.of(4, 8))),
     /unknown client or relay handle/,
   );
 });

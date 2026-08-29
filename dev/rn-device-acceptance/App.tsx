@@ -18,6 +18,7 @@ import {
   deviceReceiptContext,
   logoutNativeRelay,
   nativeAcceptancePhase,
+  recordDeviceDiagnostic,
   recordDeviceReceipt,
   switchNativeRelayAuthScope,
 } from "./src/native-fixture";
@@ -146,10 +147,12 @@ export default function App() {
       .then(() => {
         setShown(true);
       })
-      .catch((reason: unknown) => {
-        const detail = reason instanceof Error ? reason.message : String(reason);
-        console.error("linked-abi-admission failed", detail);
-        setError(detail);
+      .catch(() => {
+        // This is deliberately a fixed code, not an exception message: both
+        // the app-private file and a failing CI job may expose it. The native
+        // fixtures accept only this small allowlist, too.
+        void recordDeviceDiagnostic("linked-abi-admission-failed").catch(() => {});
+        setError("The device acceptance proof failed.");
       });
   }, []);
   return (

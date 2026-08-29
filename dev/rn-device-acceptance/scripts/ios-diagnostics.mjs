@@ -1,5 +1,12 @@
 const MAX_DIAGNOSTIC_BYTES = 16 * 1024;
 const MAX_DIAGNOSTIC_LINES = 120;
+const DEVICE_DIAGNOSTIC_CODES = new Set(["linked-abi-admission-failed"]);
+
+/** Never echo arbitrary app-sandbox contents into CI output. */
+export const safeDeviceDiagnostic = (value) => {
+  const code = String(value).trim();
+  return DEVICE_DIAGNOSTIC_CODES.has(code) ? code : "[no recognized device diagnostic]";
+};
 
 export const boundedDiagnostic = (value, { tail = false } = {}) => {
   const allLines = String(value).split("\n");

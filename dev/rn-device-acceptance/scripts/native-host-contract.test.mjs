@@ -78,6 +78,20 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
 }
 
+function assertAtomicAndroidDiagnostic(fixture) {
+  assert.match(fixture, /private fun writeAtomicDiagnostic\(code: String\)/);
+  assert.match(fixture, /File\.createTempFile\("\.\$\{target\.name\}\."/);
+  assert.match(fixture, /FileOutputStream\(temporary\)\.use/);
+  assert.match(fixture, /output\.fd\.sync\(\)/);
+  assert.match(fixture, /Os\.rename\(temporary\.absolutePath, target\.absolutePath\)/);
+  assert.match(fixture, /temporary\.exists\(\) && !temporary\.delete\(\)/);
+  assert.doesNotMatch(
+    fixture,
+    /resolve\("jazz-device-diagnostic\.txt"\)\.writeText\(code\)/,
+    "the host must never inspect a torn direct diagnostic write",
+  );
+}
+
 test("Android fixture BuildConfig fields and package registration remain compile-shaped", () => {
   const gradle = read("android/app/build.gradle");
   const fixture = read(
@@ -116,6 +130,23 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /MessageDigest\.getInstance\("SHA-256"\)/);
   assert.match(fixture, /@ReactMethod fun recordReceipt/);
   assert.match(fixture, /jazz-device-receipt\.ndjson/);
+  assert.match(fixture, /@ReactMethod fun recordDiagnostic/);
+  assert.match(fixture, /require\(code == "linked-abi-admission-failed"\)/);
+  assert.match(fixture, /jazz-device-diagnostic\.txt/);
+  assertAtomicAndroidDiagnostic(fixture);
+  // A tempting direct write makes a timeout expose torn bytes. This plant
+  // proves the contract rejects it even though the rest of the fixture stays
+  // compile-shaped.
+  assert.throws(
+    () =>
+      assertAtomicAndroidDiagnostic(
+        fixture.replace(
+          "writeAtomicDiagnostic(code)",
+          'reactApplicationContext.cacheDir.resolve("jazz-device-diagnostic.txt").writeText(code)',
+        ),
+      ),
+    /torn direct diagnostic write/,
+  );
   assert.doesNotMatch(fixture, /jazzDeviceBuildFingerprint/);
 });
 
@@ -653,6 +684,10 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   assert.match(fixture, /CC_SHA256\(data\.bytes, \(CC_LONG\)data\.length, digest\)/);
   assert.doesNotMatch(fixture, /JazzDeviceBuildFingerprint/);
   assert.match(fixture, /RCT_REMAP_METHOD\(recordReceipt/);
+  assert.match(fixture, /RCT_REMAP_METHOD\(recordDiagnostic/);
+  assert.match(fixture, /jazz-device-diagnostic\.txt/);
+  assert.match(fixture, /isEqualToString:JazzDeviceDiagnosticLinkedAbiAdmissionFailed/);
+  assert.match(fixture, /@"linked-abi-admission-failed"/);
   assert.match(fixture, /JAZZ_DEVICE_RESULT/);
   assert.match(fixture, /NSDataWritingAtomic/);
   assert.doesNotMatch(fixture, /recordReceipt[\s\S]*JazzRelayTrustedAdmission/);
@@ -670,6 +705,8 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
     "parseLaunchProcessId",
     "get_app_container",
     "jazz-device-receipt.ndjson",
+    "jazz-device-diagnostic.txt",
+    "app JavaScript/native diagnostic",
     "receiptFile",
     "rmSync\\(receiptFilePath\\(\\)",
     "launchctl",
@@ -701,6 +738,8 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
     /proveForegroundByteAbi\(foregroundFactory, scopeB\.capability, foregroundCodec\)/,
   );
   assert.match(app, /await recordDeviceReceipt\(results\.join\("\\n"\)\)/);
+  assert.match(app, /recordDeviceDiagnostic\("linked-abi-admission-failed"\)/);
+  assert.doesNotMatch(app, /reason instanceof Error|String\(reason\)|\.message/);
   assert.ok(
     app.indexOf("await observeTrustedAdmissionLifecycle()") <
       app.indexOf("await recordDeviceReceipt"),

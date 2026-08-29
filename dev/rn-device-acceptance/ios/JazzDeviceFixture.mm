@@ -18,6 +18,14 @@ static NSURL *JazzDeviceReceiptURL(void) {
   return [caches URLByAppendingPathComponent:@"jazz-device-receipt.ndjson"];
 }
 
+static NSURL *JazzDeviceDiagnosticURL(void) {
+  NSURL *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
+                                                         inDomains:NSUserDomainMask].firstObject;
+  return [caches URLByAppendingPathComponent:@"jazz-device-diagnostic.txt"];
+}
+
+static NSString * const JazzDeviceDiagnosticLinkedAbiAdmissionFailed = @"linked-abi-admission-failed";
+
 /** Hash the executable selected by the installed app bundle. The host driver
  * compares this to the artifact it installed; JavaScript and launch arguments
  * never get to choose the build identity placed in a receipt. */
@@ -117,6 +125,20 @@ RCT_REMAP_METHOD(recordReceipt, recordReceipt:(NSString *)receipt resolver:(RCTP
   NSData *data = [[receipt stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
   if (![data writeToURL:JazzDeviceReceiptURL() options:NSDataWritingAtomic error:&error]) {
     reject(@"E_JAZZ_DEVICE_RECEIPT", error.localizedDescription, error);
+    return;
+  }
+  resolve(nil);
+}
+
+RCT_REMAP_METHOD(recordDiagnostic, recordDiagnostic:(NSString *)detail resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  if (![detail isEqualToString:JazzDeviceDiagnosticLinkedAbiAdmissionFailed]) {
+    reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", @"Invalid device diagnostic", nil);
+    return;
+  }
+  NSError *error = nil;
+  NSData *data = [detail dataUsingEncoding:NSUTF8StringEncoding];
+  if (![data writeToURL:JazzDeviceDiagnosticURL() options:NSDataWritingAtomic error:&error]) {
+    reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", error.localizedDescription, error);
     return;
   }
   resolve(nil);

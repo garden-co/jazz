@@ -4,6 +4,7 @@ import {
   boundedDiagnostic,
   parseLaunchProcessId,
   relevantAppLogs,
+  safeDeviceDiagnostic,
   sanitizedCommandFailure,
 } from "./ios-diagnostics.mjs";
 
@@ -34,6 +35,14 @@ test("iOS diagnostics do not echo raw command errors", () => {
   const diagnostic = sanitizedCommandFailure({ status: 70, message: "secret simulator output" });
   assert.equal(diagnostic, "command failed (exit 70)");
   assert.doesNotMatch(diagnostic, /secret/);
+});
+
+test("device diagnostic printing is an allowlist, not bounded arbitrary text", () => {
+  assert.equal(safeDeviceDiagnostic("linked-abi-admission-failed\n"), "linked-abi-admission-failed");
+  const plantedSecret = "capability=secret-device-token";
+  const printed = safeDeviceDiagnostic(plantedSecret);
+  assert.equal(printed, "[no recognized device diagnostic]");
+  assert.doesNotMatch(printed, /secret-device-token/);
 });
 
 test("iOS launch parser accepts only the expected bundle and positive sole PID", () => {
