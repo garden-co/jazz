@@ -576,9 +576,11 @@ export class IndexedDbPageStore {
 
   private readonly handleVersionChange = (): void => {
     // An upgrade and a deletion both replace the storage epoch underneath the
-    // cached B-tree. Close promptly so the external operation is not blocked.
-    this.invalidate();
+    // cached B-tree. Close the browser handle *before* notifying higher layers:
+    // invalidation cleanup may await durable epoch work, while the pending IDB
+    // delete/upgrade cannot progress until every old-version handle is closed.
     this.db.close();
+    this.invalidate();
   };
 
   private readonly handleUnexpectedClose = (): void => {

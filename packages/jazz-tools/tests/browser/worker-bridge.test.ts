@@ -338,10 +338,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
       // Planted lifecycle transition: this is not a clean worker handoff.
       // IDB versionchange/delete invalidates the live worker handle, so the
       // successor must be admitted after that handle releases its Web Lock.
-      await IndexedDbPageStore.destroy(dbName);
+      await withTimeout(
+        IndexedDbPageStore.destroy(dbName),
+        5_000,
+        "External IndexedDB invalidation remained blocked by the lease-only worker handle",
+      );
       await sleep(100);
 
-      const successor = await SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner });
+      const successor = await withTimeout(
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+        5_000,
+        "Successor generation did not acquire the invalidated physical root",
+      );
       try {
         expect(successor.node).not.toEqual(first.node);
       } finally {
@@ -350,7 +358,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     } finally {
       await first.retire().catch(() => undefined);
     }
-  });
+  }, 15_000);
 
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
