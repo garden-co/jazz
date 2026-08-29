@@ -125,9 +125,9 @@ it("ships a zstd-capable NAPI receiver and rejects an uncompiled negotiated feat
       db.connectUpstreamWithSession(
         1,
         features | (1 << 30),
-        deterministicBytes("napi-wire-capability:remote"),
+        Buffer.from(deterministicBytes("napi-wire-capability:remote")),
         1n,
-        deterministicBytes("napi-wire-capability:local"),
+        Buffer.from(deterministicBytes("napi-wire-capability:local")),
         1n,
       ),
     ).toThrow(/native binding was not compiled with 0x40000000/);
