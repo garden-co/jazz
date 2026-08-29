@@ -5164,7 +5164,12 @@ fn handle_write_state_update<S>(
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let handled_by_waiter = notify_write_state_waiters(waiters, tx_id);
-    if let Some(rejected) = node.borrow().rejected_transaction(tx_id) {
+    // Extract the owned rejection before deciding how to report it. Keeping a
+    // `LocalMutex` guard in an `if let` scrutinee spans the entire body, which
+    // used to reenter the suspended node when an acknowledged rejection was
+    // discarded below.
+    let rejected = node.borrow().rejected_transaction(tx_id);
+    if let Some(rejected) = rejected {
         if handled_by_waiter {
             mutation_errors.borrow_mut().pending.remove(&tx_id);
             if let Err(error) = crate::db::block_on(node.borrow_mut().discard_rejection(tx_id)) {
