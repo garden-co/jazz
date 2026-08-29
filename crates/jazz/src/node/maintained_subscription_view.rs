@@ -58,6 +58,10 @@ pub(crate) struct MaintainedSubscriptionView {
     /// witness terminal, so raw membership alone is not publishable.
     published_result_members: BTreeSet<ResultMemberEntry>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    /// Payloads paired with memberships already exposed to a consumer. Keep
+    /// this separate from `result_payloads`: the latter records the raw
+    /// result-terminal state while a membership waits for its content witness.
+    published_result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     /// Incrementally maintained collector output. The key is the root row and
     /// the encoded tree so a -/+ replacement for one root never requires
     /// touching the rendered trees for other roots.
@@ -77,6 +81,7 @@ impl Default for MaintainedSubscriptionView {
             result_weights: BTreeMap::new(),
             published_result_members: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
+            published_result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
@@ -330,6 +335,15 @@ impl MaintainedSubscriptionView {
             transitions.requires_authoritative_membership_reconcile |=
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
+        self.finalize_multisink_transitions(&mut transitions, node_aliases);
+        Ok(transitions)
+    }
+
+    fn finalize_multisink_transitions(
+        &mut self,
+        transitions: &mut ResultTransitions,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) {
         // A multisink delta need not contain every terminal that participates
         // in one maintained result. In particular, a current-membership row
         // can arrive before its content witness while a cold source finishes
@@ -338,10 +352,21 @@ impl MaintainedSubscriptionView {
         // present. A later content-only delta revisits all pending members and
         // promotes the now-complete one without requiring another membership
         // edge.
-        let (adds, removes) = self.reconcile_publishable_result_members(node_aliases);
+        // Synthetic/path payloads are self-contained. Row-digest payloads,
+        // however, are the Stream-A half of a real-row membership and must
+        // cross the same witness boundary as that membership.
+        transitions
+            .result_payload_adds
+            .retain(|(member, _)| member.as_row().is_none());
+        transitions
+            .result_payload_removes
+            .retain(|member| member.as_row().is_none());
+        let (adds, removes, payload_adds, payload_removes) =
+            self.reconcile_publishable_result_members(node_aliases);
         transitions.adds = adds;
         transitions.removes = removes;
-        Ok(transitions)
+        transitions.result_payload_adds.extend(payload_adds);
+        transitions.result_payload_removes.extend(payload_removes);
     }
 
     pub(crate) fn apply_decoded_deltas(
@@ -493,6 +518,14 @@ impl MaintainedSubscriptionView {
         let result_payloads_bytes = btree_map_bytes(self.result_payloads.len())
             + self
                 .result_payloads
+                .iter()
+                .map(|(member, payload)| {
+                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
+                })
+                .sum::<usize>()
+            + btree_map_bytes(self.published_result_payloads.len())
+            + self
+                .published_result_payloads
                 .iter()
                 .map(|(member, payload)| {
                     result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
@@ -659,7 +692,12 @@ impl MaintainedSubscriptionView {
     fn reconcile_publishable_result_members(
         &mut self,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-    ) -> (Vec<ResultMemberEntry>, Vec<ResultMemberEntry>) {
+    ) -> (
+        Vec<ResultMemberEntry>,
+        Vec<ResultMemberEntry>,
+        Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
+        Vec<ResultMemberEntry>,
+    ) {
         let publishable = self
             .result_weights
             .iter()
@@ -671,14 +709,35 @@ impl MaintainedSubscriptionView {
         let adds = publishable
             .difference(&self.published_result_members)
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
         let removes = self
             .published_result_members
             .difference(&publishable)
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
+        let payload_removes = removes
+            .iter()
+            .filter(|member| self.published_result_payloads.contains_key(*member))
+            .cloned()
+            .collect::<Vec<_>>();
+        let payload_adds = adds
+            .iter()
+            .filter_map(|member| {
+                self.result_payloads
+                    .get(member)
+                    .cloned()
+                    .map(|payload| (member.clone(), payload))
+            })
+            .collect::<Vec<_>>();
         self.published_result_members = publishable;
-        (adds, removes)
+        for member in &payload_removes {
+            self.published_result_payloads.remove(member);
+        }
+        for (member, payload) in &payload_adds {
+            self.published_result_payloads
+                .insert(member.clone(), payload.clone());
+        }
+        (adds, removes, payload_adds, payload_removes)
     }
 
     fn result_member_has_bundle_witness(
@@ -2850,17 +2909,19 @@ mod tests {
         let member = ResultMemberEntry::from(result(row(1), 10));
         let mut maintained = MaintainedSubscriptionView::default();
 
-        maintained
+        let mut first = maintained
             .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
             .unwrap();
-        let (adds, removes) = maintained.reconcile_publishable_result_members(&aliases);
+        maintained.finalize_multisink_transitions(&mut first, &aliases);
         assert!(
-            adds.is_empty(),
+            first.adds.is_empty(),
             "Stream A must remain pending without Stream B"
         );
-        assert!(removes.is_empty());
+        assert!(first.removes.is_empty());
+        assert!(first.result_payload_adds.is_empty());
+        assert!(first.result_payload_removes.is_empty());
 
-        maintained
+        let mut second = maintained
             .apply_decoded_deltas(
                 [(
                     DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
@@ -2869,16 +2930,159 @@ mod tests {
                 &aliases,
             )
             .unwrap();
-        let (adds, removes) = maintained.reconcile_publishable_result_members(&aliases);
-        assert_eq!(adds, vec![member.clone()]);
-        assert!(removes.is_empty());
+        maintained.finalize_multisink_transitions(&mut second, &aliases);
+        assert_eq!(second.adds, vec![member.clone()]);
+        assert!(second.removes.is_empty());
+        assert!(second.result_payload_adds.is_empty());
+        assert!(second.result_payload_removes.is_empty());
 
-        maintained
+        let mut third = maintained
             .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
             .unwrap();
-        let (adds, removes) = maintained.reconcile_publishable_result_members(&aliases);
-        assert!(adds.is_empty());
-        assert_eq!(removes, vec![member]);
+        maintained.finalize_multisink_transitions(&mut third, &aliases);
+        assert!(third.adds.is_empty());
+        assert_eq!(third.removes, vec![member]);
+        assert!(third.result_payload_adds.is_empty());
+        assert!(third.result_payload_removes.is_empty());
+    }
+
+    #[test]
+    fn row_digest_payload_waits_for_its_membership_witness_boundary() {
+        let aliases = aliases();
+        let member = ResultMemberEntry::from(
+            RealRowMemberEntry::current_content(result(row(1), 10))
+                .with_row_digest(vec![0xd1, 0x6e]),
+        );
+        let payload = ResultMemberPayloadEntry {
+            member: member.clone(),
+            descriptor: vec![0x01],
+            record: vec![0x02],
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        // The raw result terminal carries both Stream-A fields, but neither
+        // may be published before Stream B proves the content row.
+        let mut raw = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::ResultCurrent {
+                        member: member.clone(),
+                        payload: payload.clone(),
+                    },
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        assert_eq!(
+            raw.result_payload_adds,
+            vec![(member.clone(), payload.clone())]
+        );
+        maintained.finalize_multisink_transitions(&mut raw, &aliases);
+        assert!(raw.adds.is_empty());
+        assert!(raw.removes.is_empty());
+        assert!(raw.result_payload_adds.is_empty());
+        assert!(raw.result_payload_removes.is_empty());
+
+        // A pending membership may disappear and re-enter with a replacement
+        // payload before its witness arrives. Neither half becomes visible,
+        // and the later promotion must use the replacement payload only.
+        let mut pending_remove = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut pending_remove, &aliases);
+        assert!(pending_remove.adds.is_empty());
+        assert!(pending_remove.removes.is_empty());
+        assert!(pending_remove.result_payload_adds.is_empty());
+        assert!(pending_remove.result_payload_removes.is_empty());
+
+        let replacement_payload = ResultMemberPayloadEntry {
+            member: member.clone(),
+            descriptor: vec![0x03],
+            record: vec![0x04],
+        };
+        let mut pending_readd = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::ResultCurrent {
+                        member: member.clone(),
+                        payload: replacement_payload.clone(),
+                    },
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut pending_readd, &aliases);
+        assert!(pending_readd.adds.is_empty());
+        assert!(pending_readd.removes.is_empty());
+        assert!(pending_readd.result_payload_adds.is_empty());
+        assert!(pending_readd.result_payload_removes.is_empty());
+
+        let mut content = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut content, &aliases);
+        assert_eq!(content.adds, vec![member.clone()]);
+        assert!(content.removes.is_empty());
+        assert_eq!(
+            content.result_payload_adds,
+            vec![(member.clone(), replacement_payload.clone())]
+        );
+        assert!(content.result_payload_removes.is_empty());
+
+        // Losing an already-published content witness must withdraw both
+        // stream halves; restoring that witness emits the current pair again.
+        let mut content_retraction = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    -1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut content_retraction, &aliases);
+        assert!(content_retraction.adds.is_empty());
+        assert_eq!(content_retraction.removes, vec![member.clone()]);
+        assert!(content_retraction.result_payload_adds.is_empty());
+        assert_eq!(
+            content_retraction.result_payload_removes,
+            vec![member.clone()]
+        );
+
+        let mut content_restore = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut content_restore, &aliases);
+        assert_eq!(content_restore.adds, vec![member.clone()]);
+        assert!(content_restore.removes.is_empty());
+        assert_eq!(
+            content_restore.result_payload_adds,
+            vec![(member.clone(), replacement_payload)]
+        );
+        assert!(content_restore.result_payload_removes.is_empty());
+
+        let mut removal = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut removal, &aliases);
+        assert!(removal.adds.is_empty());
+        assert_eq!(removal.removes, vec![member.clone()]);
+        assert!(removal.result_payload_adds.is_empty());
+        assert_eq!(removal.result_payload_removes, vec![member]);
     }
 
     #[test]
