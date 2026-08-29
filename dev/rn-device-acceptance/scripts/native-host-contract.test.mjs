@@ -229,6 +229,25 @@ test("device fixture does not import internal jazz-tools relay-frame types", () 
   assert.match(fixture, /executor: \{ execute: executeNativeRelayCommand \}/);
 });
 
+test("protocol receipt builds its workspace API prerequisites from clean outputs", () => {
+  const acceptancePackage = JSON.parse(read("package.json"));
+  const protocol = acceptancePackage.scripts["test:protocol"];
+  const prerequisites = "pnpm --filter jazz-tools build && pnpm --filter jazz-rn build";
+
+  // `jazz-tools/react-native` is a generated public entrypoint. The receipt
+  // must create it itself rather than accidentally relying on artifacts left
+  // by another root Turbo task or an earlier CI step.
+  assert.match(protocol, new RegExp(`^${prerequisites.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} && `));
+
+  // Plant the previous clean-checkout failure: building only jazz-rn must not
+  // satisfy the contract because it leaves jazz-tools' generated entrypoint
+  // absent.
+  assert.throws(
+    () => assert.match(protocol.replace("pnpm --filter jazz-tools build && ", ""), /jazz-tools build/),
+    /jazz-tools build/,
+  );
+});
+
 test("process-restart acceptance has two disjoint, host-terminated phases", () => {
   const androidDriver = read("scripts/run-android.mjs");
   const iosDriver = read("scripts/run-ios.mjs");
