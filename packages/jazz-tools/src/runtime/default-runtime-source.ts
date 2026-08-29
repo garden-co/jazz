@@ -253,7 +253,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     return await SharedBrowserForegroundNodeLease.acquire({
       runtimeSources: browserWorkerRuntimeSources(config),
       dbName,
-      authSessionKey: createBrowserAuthSessionKey(config),
+      storageOwner: createBrowserStorageOwner(config),
     });
   }
 

@@ -32,6 +32,8 @@ export interface BrowserSharedWorkerConnectRequest {
 export interface BrowserForegroundNodeLeaseAcquireRequest {
   type: "acquire-foreground-node-lease";
   dbName: string;
+  /** Exact durable owner that must admit the physical root before lease issue. */
+  storageOwner: string;
 }
 
 export type BrowserForegroundNodeLeaseAcquireResponse =

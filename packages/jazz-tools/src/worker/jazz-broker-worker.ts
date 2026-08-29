@@ -78,6 +78,7 @@ type RuntimeContext = {
 
 type ForegroundLeaseOwner = {
   pageStore: IndexedDbPageStore;
+  storageOwner: string;
   activeLeaseIds: Set<string>;
 };
 
@@ -123,10 +124,20 @@ async function acquireForegroundNodeLease(
     let owner = foregroundLeaseOwners.get(request.dbName);
     if (!owner) {
       owner = {
-        pageStore: await IndexedDbPageStore.open(request.dbName),
+        // Lease bootstrap occurs before a foreground runtime is materialized,
+        // but it still opens the physical root. Admit its exact durable owner
+        // here, before the request can observe or mutate the lease pool.
+        pageStore: await IndexedDbPageStore.open(request.dbName, {
+          owner: request.storageOwner,
+        }),
+        storageOwner: request.storageOwner,
         activeLeaseIds: new Set(),
       };
       foregroundLeaseOwners.set(request.dbName, owner);
+    } else if (owner.storageOwner !== request.storageOwner) {
+      throw new Error(
+        `IndexedDB database ${request.dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
+      );
     }
     const lease = await owner.pageStore.acquireForegroundNodeLease(owner.activeLeaseIds.size === 0);
     owner.activeLeaseIds.add(lease.leaseId);

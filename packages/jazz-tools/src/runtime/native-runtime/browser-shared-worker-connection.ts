@@ -22,8 +22,24 @@ import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
   BrowserWorkerInitOptions,
-  "runtimeSources" | "dbName" | "authSessionKey"
+  "runtimeSources" | "dbName" | "storageOwner"
 >;
+
+/**
+ * The one physical SharedWorker realm that may own a browser persistence root.
+ *
+ * Authentication is intentionally not a part of this name. An explicitly
+ * named IndexedDB root is durably bound to its owner at open time; putting the
+ * owner in the worker name would instead make two workers race to own the same
+ * root. Foreground lease acquisition happens before the complete runtime
+ * configuration exists, so it must use precisely this same name.
+ */
+export function createBrowserSharedWorkerBaseName(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  dbName: string,
+): string {
+  return ["jazz-runtime", dbName, createBrowserWorkerAssetScope(runtimeSources)].join(":");
+}
 
 /**
  * Lease-only worker connection established before a foreground schema/runtime
@@ -45,12 +61,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
     options: BrowserForegroundNodeLeaseOptions,
   ): Promise<SharedBrowserForegroundNodeLease> {
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
-    const workerName = [
-      "jazz-runtime",
-      options.authSessionKey,
-      options.dbName,
-      createBrowserWorkerAssetScope(runtimeSources),
-    ].join(":");
+    const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     const createWorker =
       runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
         ? (name: string) =>
@@ -60,10 +71,10 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
               type: "module",
               name,
             });
-    // Lease acquisition and the schema/runtime connection must enter the same
-    // physical SharedWorker realm. Runtime connections generation-qualify the
-    // base name so a realm that has begun closing can be retired; omitting the
-    // suffix here would create a second durable owner for the same IndexedDB.
+    // Lease acquisition and the schema/runtime connection enter this exact
+    // physical SharedWorker realm. Both generation-qualify the base name so a
+    // realm that has begun closing can be retired without creating a second
+    // durable owner for the same IndexedDB.
     const worker = createWorker(`${workerName}:generation-${readWorkerGeneration(workerName)}`);
     const port = worker.port;
     port.start();
@@ -112,6 +123,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
       port.postMessage({
         type: "acquire-foreground-node-lease",
         dbName: options.dbName,
+        storageOwner: options.storageOwner,
       });
     });
     return lease;
@@ -189,11 +201,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     // app/environment/auth scope, so different accounts intentionally reach
     // separate workers and caches while same-scope tabs share one realm.
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
-    const workerName = [
-      "jazz-runtime",
-      options.dbName,
-      createBrowserWorkerAssetScope(runtimeSources),
-    ].join(":");
+    const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     const createWorker =
       runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
         ? (name: string) =>
