@@ -37,17 +37,17 @@ const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "fe81ca9b7b7cefdded25f2f6657578abdb0d4ebfef31191e6328e2225b3b55a3";
+    "c085228978da30355c822e77a725be4fe5b2ee3ef815886fc512da79733760d0";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "4c713b250eec00b8a6774e33869f5e1ed16e88624424bcb11675c5030ddbc9f9";
+    "57b2df3cc4bf0c16702ae388a2892b49b735943b982fcf70a31804c2556e0d18";
 const EPOCH_1_NATIVE_SQLITE_SHA256: &str =
-    "4ba479e28c13f3c6233ab0acf65285bb503c6446083966cf72cc5ccba20f23f9";
+    "c466f29dfca1725cc1f41383d924f706ea6cb5d83b21bdcdaa469fe92fab586c";
 const EPOCH_1_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-rocksdb.tar.gz.base64");
 const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
-    "1477e75cb48aa05e347a354b4b4d0edd4d31fde455f7b589390ade2605b0c1f3";
+    "8125fcb0f5089ac96589808a85d9b142ad6b4680c1a170ea237698c1e761424a";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -1585,7 +1585,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     }
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "e28546f6a4d9c4c3ef1d857f976e0d094a76906c86f56306c8f2349bab959d92",
+        "6f1d6396d88b5e5c9dc0c9b87c29d58a61a1c7fad8a0a440fbe5814a39c7a323",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
     assert_eq!(
