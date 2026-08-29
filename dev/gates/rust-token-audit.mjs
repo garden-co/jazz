@@ -192,8 +192,9 @@ export function serializerImports(tokens, roots) {
 /**
  * `include!` and `#[path] mod` can make a source file outside the reviewed
  * persistence-owner tree part of a compiled module. The caller permits only
- * literal includes whose target is already collected; every path module and
- * unresolvable include remains a source escape.
+ * literal includes whose target is already collected and physically contained
+ * by the same owner scope; every path module and unresolvable include remains
+ * a source escape.
  */
 export function persistenceSourceEscapes(tokens) {
   const escapes = [];

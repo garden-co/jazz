@@ -154,8 +154,13 @@ if (
       uniqueSerializerRoots.join(", "),
   );
 
+// Keep a physical ownership receipt alongside the logical source spelling.
+// A logical path alone is not a boundary: a symlink can make an apparently
+// in-scope `foo.rs` resolve to arbitrary source outside the persistence owner.
 const files = new Map();
-for (const scoped of registry.scope.paths) collectRust(path.join(root, scoped), files);
+const fileOwnership = new Map();
+for (const scoped of registry.scope.paths)
+  collectRust(path.join(root, scoped), files, fileOwnership, ownerScope(path.join(root, scoped)));
 if (refreshEndpoints) {
   const stale = new Map();
   for (const allowance of registry.allowances) {
@@ -212,7 +217,11 @@ for (const [relative, source] of files) {
     // to another source file already collected by this audit. A computed,
     // absolute, parent-traversing, or otherwise uncollected include is a source
     // escape and fails closed. `#[path] mod` has no such contained form here.
-    if (escape.kind === "include!" && includedSourceIsCollected(relative, escape.literal, files)) continue;
+    if (
+      escape.kind === "include!" &&
+      includedSourceIsCollected(relative, escape.literal, files, fileOwnership)
+    )
+      continue;
     fail(
       relative +
         ":" +
@@ -256,13 +265,27 @@ for (const [relative, source] of files) {
   }
 }
 
-function includedSourceIsCollected(relative, literal, files) {
+function includedSourceIsCollected(relative, literal, files, fileOwnership) {
   const value = rustStringLiteral(literal);
   if (value === undefined) return false;
-  const target = path.posix
-    .normalize(path.posix.join(path.posix.dirname(relative), value))
-    .replace(/^\.\//, "");
-  return files.has(target);
+  if (path.isAbsolute(value)) return false;
+  const owner = fileOwnership.get(relative);
+  if (!owner) return false;
+  const absolute = path.resolve(root, path.dirname(relative), value);
+  let realpath;
+  try {
+    realpath = fs.realpathSync(absolute);
+  } catch {
+    return false;
+  }
+  if (!isWithin(owner.scope, realpath)) return false;
+  const target = path.relative(root, absolute).replaceAll(path.sep, "/");
+  const collected = fileOwnership.get(target);
+  return (
+    files.has(target) &&
+    collected?.realpath === realpath &&
+    collected.scope === owner.scope
+  );
 }
 
 function rustStringLiteral(literal) {
@@ -465,18 +488,49 @@ function explicitPublicSerializerReexports(tokens, serializerRoots) {
   const reexports = [];
   for (let index = 0; index + 3 < tokens.length; index += 1) {
     if (tokens[index].text !== "pub" || tokens[index + 1]?.text !== "use") continue;
-    const root = tokens[index + 2];
+    let cursor = index + 2;
+    // `pub use ::serde_json::...` is an equivalent public root spelling.
+    if (tokens[cursor]?.text === "::") cursor += 1;
+    const root = tokens[cursor];
     if (root?.kind !== "ident" || !serializerRoots.has(root.text)) continue;
     let alias = root.text;
-    let cursor = index + 3;
+    cursor += 1;
     if (tokens[cursor]?.text === "as" && tokens[cursor + 1]?.kind === "ident") {
       alias = tokens[cursor + 1].text;
       cursor += 2;
     }
-    if (tokens[cursor]?.text !== ";") continue;
-    reexports.push({ root: root.text, alias });
+    if (tokens[cursor]?.text === ";") {
+      reexports.push({ root: root.text, alias });
+      continue;
+    }
+    // A grouped `self` is the only member which re-exports the serializer
+    // crate root itself.  The other members are values/types, not a new root
+    // spelling an owner can use for generic serialization.  Track every
+    // top-level `self` alias, including `self` without `as`.
+    if (tokens[cursor]?.text !== "::" || tokens[cursor + 1]?.text !== "{") continue;
+    let depth = 1;
+    for (cursor += 2; cursor < tokens.length && depth; cursor += 1) {
+      const token = tokens[cursor];
+      if (token.text === "{") {
+        depth += 1;
+        continue;
+      }
+      if (token.text === "}") {
+        depth -= 1;
+        continue;
+      }
+      if (depth !== 1 || token.text !== "self") continue;
+      let selfAlias = root.text;
+      if (tokens[cursor + 1]?.text === "as" && tokens[cursor + 2]?.kind === "ident") {
+        selfAlias = tokens[cursor + 2].text;
+        cursor += 2;
+      }
+      reexports.push({ root: root.text, alias: selfAlias });
+    }
   }
-  return reexports.sort((left, right) => left.alias.localeCompare(right.alias) || left.root.localeCompare(right.root));
+  return reexports.sort(
+    (left, right) => left.alias.localeCompare(right.alias) || left.root.localeCompare(right.root),
+  );
 }
 function manifestUsesWorkspaceDependency(manifestPath, crate, packageName) {
   const source = fs.readFileSync(manifestPath, "utf8");
@@ -490,23 +544,48 @@ function manifestUsesWorkspaceDependency(manifestPath, crate, packageName) {
     "m",
   ).test(source);
 }
-function collectRust(absolute, files) {
+function ownerScope(absolute) {
   if (!fs.existsSync(absolute)) fail("scope path is absent: " + path.relative(root, absolute));
-  const stat = fs.statSync(absolute);
+  const stat = fs.lstatSync(absolute);
+  if (stat.isSymbolicLink())
+    fail("audited persistence scope is a symbolic link: " + path.relative(root, absolute));
+  const realpath = fs.realpathSync(absolute);
+  return stat.isDirectory() ? realpath : path.dirname(realpath);
+}
+
+function collectRust(absolute, files, fileOwnership, scope) {
+  if (!fs.existsSync(absolute)) fail("scope path is absent: " + path.relative(root, absolute));
+  const stat = fs.lstatSync(absolute);
+  if (stat.isSymbolicLink())
+    fail("audited persistence entry is a symbolic link: " + path.relative(root, absolute));
+  const realpath = fs.realpathSync(absolute);
+  if (!isWithin(scope, realpath))
+    fail(
+      "audited persistence entry resolves outside its owner scope: " +
+        path.relative(root, absolute),
+    );
   if (stat.isFile()) {
-    if (absolute.endsWith(".rs"))
-      files.set(
-        path.relative(root, absolute).replaceAll(path.sep, "/"),
-        fs.readFileSync(absolute, "utf8"),
-      );
+    if (absolute.endsWith(".rs")) {
+      const relative = path.relative(root, absolute).replaceAll(path.sep, "/");
+      const previous = fileOwnership.get(relative);
+      if (previous && (previous.realpath !== realpath || previous.scope !== scope))
+        fail("audited persistence source has ambiguous ownership: " + relative);
+      files.set(relative, fs.readFileSync(absolute, "utf8"));
+      fileOwnership.set(relative, { realpath, scope });
+    }
     return;
   }
   for (const entry of fs.readdirSync(absolute, { withFileTypes: true })) {
     // External test trees construct malformed/historical bytes. Inline tests
     // remain governed because their owning source is scanned.
     if (entry.isDirectory() && entry.name === "tests") continue;
-    collectRust(path.join(absolute, entry.name), files);
+    collectRust(path.join(absolute, entry.name), files, fileOwnership, scope);
   }
+}
+
+function isWithin(scope, candidate) {
+  const relative = path.relative(scope, candidate);
+  return relative === "" || (!relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative));
 }
 function fail(message) {
   console.error("default-serialization-persistence: ERROR: " + message);
