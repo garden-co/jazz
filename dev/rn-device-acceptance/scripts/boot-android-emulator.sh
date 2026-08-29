@@ -20,7 +20,7 @@ adb=${JAZZ_DEVICE_ADB:-adb}
 # black-box receipt run on macOS, where `setsid` is not available.
 session_launcher=${JAZZ_ANDROID_SESSION_LAUNCHER:-setsid}
 session_process_group=${JAZZ_ANDROID_SESSION_PROCESS_GROUP:-1}
-timeout_command=${JAZZ_ANDROID_TIMEOUT_COMMAND:-timeout}
+timeout_command=${JAZZ_ANDROID_TIMEOUT_COMMAND:-}
 boot_timeout=${JAZZ_ANDROID_BOOT_TIMEOUT_SECONDS:-180}
 poll_interval=${JAZZ_ANDROID_BOOT_POLL_SECONDS:-2}
 
@@ -44,6 +44,25 @@ bounded_file() {
     tail -n 120 "$file" | tail -c 16384 >&2 || true
   else
     echo "<unavailable: $file>" >&2
+  fi
+}
+
+# GNU `timeout` is available on the Linux acceptance runner, but not on the
+# macOS runner that verifies the source receipt. Keep the production command
+# injectable and use Perl's portable alarm/exec pair when GNU coreutils is not
+# present. Each probe remains independently bounded in either case.
+run_bounded() {
+  local duration=$1
+  shift
+  if [[ -n "$timeout_command" ]]; then
+    "$timeout_command" --signal=KILL "${duration}s" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout --signal=KILL "${duration}s" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$duration" "$@"
+  else
+    echo "Android boot receipt requires GNU timeout or perl for bounded probes" >&2
+    return 127
   fi
 }
 
@@ -107,7 +126,7 @@ while :; do
   # Both commands are independently bounded so a wedged adb server cannot
   # consume the workflow's full deadline. A missing device is an ordinary
   # polling state, not a fatal command error.
-  state=$("$timeout_command" --signal=KILL "${probe_timeout}s" "$adb" get-state 2>/dev/null || true)
+  state=$(run_bounded "$probe_timeout" "$adb" get-state 2>/dev/null || true)
   if [[ "$state" == device ]]; then
     # `get-state` may have consumed nearly all of the remaining time. Do not
     # begin a second adb probe using its stale budget.
@@ -117,7 +136,7 @@ while :; do
     fi
     probe_timeout=$remaining
     if ((probe_timeout > 5)); then probe_timeout=5; fi
-    boot_completed=$("$timeout_command" --signal=KILL "${probe_timeout}s" "$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+    boot_completed=$(run_bounded "$probe_timeout" "$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
     if [[ "$boot_completed" == 1 ]]; then
       echo "Android acceptance emulator booted (pid $emulator_pid)."
       # The next workflow commands install and exercise the app on this same
@@ -133,5 +152,5 @@ while :; do
   if ((remaining <= 0)); then
     fail_boot "no adb device reached sys.boot_completed=1 within ${boot_timeout}s"
   fi
-  "$timeout_command" --signal=KILL "${remaining}s" sleep "$poll_interval" || true
+  run_bounded "$remaining" sleep "$poll_interval" || true
 done

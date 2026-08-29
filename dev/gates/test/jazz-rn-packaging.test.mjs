@@ -566,23 +566,24 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
 });
 
 test("React Native installation docs advertise only the currently proven package boundary", async () => {
-  const [readme, installGuide, clientSetupGuide, durabilityGuide, exampleReadme, previewWorkflow] = await Promise.all([
-    readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
-    readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
-    readFile(
-      new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
-      "utf8",
-    ),
-    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
-  ]);
+  const [readme, installGuide, clientSetupGuide, durabilityGuide, exampleReadme, previewWorkflow] =
+    await Promise.all([
+      readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
+      readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
+      readFile(
+        new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+    ]);
 
   assert.match(readme, /pnpm add jazz-rn@alpha/);
   assert.match(readme, /"plugins": \["jazz-rn"\]/);
@@ -609,7 +610,7 @@ test("React Native installation docs advertise only the currently proven package
   ]) {
     assert.doesNotMatch(
       guide,
-    /<Tab value="Expo">|jazz-tools\/expo|todo-client-localfirst-expo/,
+      /<Tab value="Expo">|jazz-tools\/expo|todo-client-localfirst-expo/,
       `${name} must not retain runnable-looking Expo tabs or RN runtime snippets`,
     );
   }
@@ -980,7 +981,9 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     );
     assert.match(
       directBareJazzRn.platforms.android.sourceDir,
-      new RegExp(`${bareAppNodeModules.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\/]jazz-rn[\\/]android$`),
+      new RegExp(
+        `${bareAppNodeModules.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\/]jazz-rn[\\/]android$`,
+      ),
       "a direct bare host must retain the Android source from its packed installation",
     );
     assert.equal(
@@ -1428,11 +1431,17 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
       "utf8",
     ),
     readFile(
-      new URL("../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayBridge.kt", import.meta.url),
+      new URL(
+        "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayBridge.kt",
+        import.meta.url,
+      ),
       "utf8",
     ),
     readFile(
-      new URL("../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayModule.java", import.meta.url),
+      new URL(
+        "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayModule.java",
+        import.meta.url,
+      ),
       "utf8",
     ),
     readFile(new URL("../../../crates/jazz-rn/android/cpp-relay.cpp", import.meta.url), "utf8"),
@@ -1485,7 +1494,10 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
     /unordered_map<uint64_t, std::shared_ptr<ForegroundRuntimeInstallation>>/,
     "iOS must keep separate foreground leases for separately invalidated runtimes",
   );
-  assert.match(iosRelay, /InvalidateForegroundInstallation\(EnsureRelayHost\(\), self\.foregroundRuntimeToken\)/);
+  assert.match(
+    iosRelay,
+    /InvalidateForegroundInstallation\(EnsureRelayHost\(\), self\.foregroundRuntimeToken\)/,
+  );
   assert.match(
     iosRelay,
     /ownsForegroundRuntimeLease = NO;[\s\S]*?foregroundRuntimeToken = 0;[\s\S]*?InvalidateForegroundInstallation\(EnsureRelayHost\(\), releasedToken\)/,
@@ -1586,10 +1598,20 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
 });
 
 test("relay artifact staging targets every Android ABI and iOS framework slice", async () => {
-  const script = await readFile(
-    new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
-    "utf8",
-  );
+  const [script, stagedHeader, sourceHeader] = await Promise.all([
+    readFile(
+      new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-rn/native/include/jazz_native_relay.h", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-native-relay/include/jazz_native_relay.h", import.meta.url),
+      "utf8",
+    ),
+  ]);
 
   assert.equal(
     packageJson.scripts["build:relay:android"],
@@ -1605,6 +1627,12 @@ test("relay artifact staging targets every Android ABI and iOS framework slice",
   assert.match(script, /simulator_stage=.*simulator/);
   assert.match(script, /\$simulator_stage\/libjazz_native_relay\.a/);
   assert.match(script, /nativeRelayAbi/);
+  assert.match(script, /cp "\$root\/crates\/jazz-native-relay\/include\/jazz_native_relay\.h"/);
+  assert.equal(
+    stagedHeader,
+    sourceHeader,
+    "the checked-in package header is a byte-for-byte copy of the authoritative relay ABI header",
+  );
 });
 
 test("a dry package includes every staged native relay artifact class", async () => {

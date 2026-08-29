@@ -65,11 +65,9 @@ jazz_native_relay_status jazz_native_relay_host_execute(
     size_t request_len,
     jazz_native_relay_bytes *out);
 
-/* Admit strict JSON from trusted Kotlin/Swift platform code. Its absolute
- * storage_root is the only filesystem input; Rust derives an opaque V1
- * per-scope SQLite filename. This is not a JavaScript command: unknown fields,
- * malformed config, SYSTEM identity, and bearer-token claims are rejected by
- * Rust. On success `out` is exactly the
+/* Admit strict JSON from trusted Kotlin/Swift platform code. This is not a
+ * JavaScript command: unknown fields, malformed config, SYSTEM identity, and
+ * bearer-token claims are rejected by Rust. On success `out` is exactly the
  * opaque 32-byte admission capability, never a config or claim echo. */
 jazz_native_relay_status jazz_native_relay_host_admit_scope_json(
     jazz_native_relay_host *host,
