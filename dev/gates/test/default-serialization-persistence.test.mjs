@@ -226,6 +226,23 @@ test("does not leak cfg(test) through every semicolon item kind into production 
   }
 });
 
+test("retains cfg(test) across ordinary nested blocks without leaking it afterward", () => {
+  const root = fixture();
+  try {
+    const source =
+      '#[cfg(test)] fn receipt() { if true { let _ = 1; } let _ = serde_json::from_str::<serde_json::Value>("null"); }\npub fn production() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n';
+    const reviewed = endpoints(source);
+    assert.equal(reviewed.length, 4);
+    assert.ok(reviewed.slice(0, 2).every((endpoint) => endpoint.boundary === "test"));
+    assert.ok(reviewed.slice(2).every((endpoint) => endpoint.boundary === "production"));
+    writeSource(root, source, reviewed);
+    assert.equal(run(root).status, 0, run(root).stderr);
+    assert.equal(compile(root).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("endpoint identity contains the full impl stack, not only a function name", () => {
   const root = fixture();
   try {

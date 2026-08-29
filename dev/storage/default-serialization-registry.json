@@ -349,7 +349,7 @@
             ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -381,7 +381,7 @@
             ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -413,7 +413,7 @@
             ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -445,7 +445,7 @@
             ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -477,7 +477,7 @@
             ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -509,7 +509,7 @@
             ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -539,7 +539,7 @@
             "items": ["fn candidate_future_format_two_nodes_fail_closed"],
             "item": "fn candidate_future_format_two_nodes_fail_closed"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1319,7 +1319,7 @@
             "items": ["fn untrusted_canonical_author_rejects_every_reserved_issuer"],
             "item": "fn untrusted_canonical_author_rejects_every_reserved_issuer"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1381,7 +1381,7 @@
             ],
             "item": "fn program_fact_storage_codec_rejects_legacy_unknown_trailing_and_noncanonical_bytes"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1715,7 +1715,7 @@
             "items": ["impl < S > NodeState < S > where S : OrderedKvStorage ,"],
             "item": "impl < S > NodeState < S > where S : OrderedKvStorage ,"
           },
-          "boundary": "test"
+          "boundary": "production"
         }
       ]
     },
@@ -1775,7 +1775,7 @@
             "items": ["fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"],
             "item": "fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1805,7 +1805,7 @@
             "items": ["fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"],
             "item": "fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1837,7 +1837,7 @@
             ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1869,7 +1869,7 @@
             ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1901,7 +1901,7 @@
             ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1933,7 +1933,7 @@
             ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1963,7 +1963,7 @@
             "items": ["fn postcard_migration_lens_rejects_oversized_blob_without_panicking"],
             "item": "fn postcard_migration_lens_rejects_oversized_blob_without_panicking"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -1993,7 +1993,7 @@
             "items": ["fn postcard_migration_lens_rejects_oversized_blob_without_panicking"],
             "item": "fn postcard_migration_lens_rejects_oversized_blob_without_panicking"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2023,7 +2023,7 @@
             "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2053,7 +2053,7 @@
             "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2083,7 +2083,7 @@
             "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2113,7 +2113,7 @@
             "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2143,7 +2143,7 @@
             "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2173,7 +2173,7 @@
             "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2203,7 +2203,7 @@
             "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2233,7 +2233,7 @@
             "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2263,7 +2263,7 @@
             "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2293,7 +2293,7 @@
             "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2325,7 +2325,7 @@
             ],
             "item": "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2357,7 +2357,7 @@
             ],
             "item": "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2389,7 +2389,7 @@
             ],
             "item": "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2421,7 +2421,7 @@
             ],
             "item": "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2451,7 +2451,7 @@
             "items": ["fn result_member_transport_preserves_typed_union_occurrence"],
             "item": "fn result_member_transport_preserves_typed_union_occurrence"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2481,7 +2481,7 @@
             "items": ["fn result_member_transport_preserves_typed_union_occurrence"],
             "item": "fn result_member_transport_preserves_typed_union_occurrence"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2511,7 +2511,7 @@
             "items": ["fn legacy_row_member_postcard_golden_decodes"],
             "item": "fn legacy_row_member_postcard_golden_decodes"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2541,7 +2541,7 @@
             "items": ["fn legacy_row_member_postcard_golden_decodes"],
             "item": "fn legacy_row_member_postcard_golden_decodes"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2601,7 +2601,7 @@
             "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2631,7 +2631,7 @@
             "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2661,7 +2661,7 @@
             "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2691,7 +2691,7 @@
             "items": ["fn rejects_schema_invalid_json_inside_payload_enum_default"],
             "item": "fn rejects_schema_invalid_json_inside_payload_enum_default"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -2721,7 +2721,7 @@
             "items": ["fn converts_public_json_as_core_string_storage"],
             "item": "fn converts_public_json_as_core_string_storage"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -3381,7 +3381,7 @@
             "items": ["fn schema_roundtrip_with_json"],
             "item": "fn schema_roundtrip_with_json"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -3411,7 +3411,7 @@
             "items": ["fn schema_roundtrip_with_json"],
             "item": "fn schema_roundtrip_with_json"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     },
@@ -3441,7 +3441,7 @@
             "items": ["fn nested_catalogue_payload_v1_goldens_are_exact"],
             "item": "fn nested_catalogue_payload_v1_goldens_are_exact"
           },
-          "boundary": "production"
+          "boundary": "test"
         }
       ]
     }
