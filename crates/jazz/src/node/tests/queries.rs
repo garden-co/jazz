@@ -327,27 +327,31 @@ fn indexed_conjunctive_read_policy_retains_the_final_policy_predicate() {
     }
 
     let query = Query::from("docs");
-    let (global, global_metrics) = query_rows_by_uuid_for_identity(
+    let (global, global_metrics) = maintained_rows_by_uuid_for_identity(
         &mut core,
         query.clone(),
         DurabilityTier::Global,
         owner,
     );
     let (local, _) =
-        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
+        maintained_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
 
     assert_eq!(global, local);
     assert_eq!(global, vec![owned_open]);
     assert!(!global.contains(&owned_closed));
     assert!(!global.contains(&foreign_open));
-    assert!(
-        global_metrics.source_index_probes >= 1,
-        "the conjunctive policy must narrow its Global source through owner"
-    );
+    // The cached authorization graph is deliberately identity-neutral.  The
+    // maintained root applies the owner's claim at its terminal instead of
+    // baking a concrete owner-index probe into a reusable policy dependency.
+    // The identity-neutral policy graph therefore deliberately scans its
+    // dependency, while the maintained root remains selective. Retaining the
+    // final literal predicate must not cause a secondary index probe.
+    assert_eq!(global_metrics.source_index_probes, 0);
+    assert!(global_metrics.source_full_scans >= 1);
 }
 
 #[test]
-fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
+fn policy_access_path_receipt_is_reused_across_claim_bindings_without_leaking_visibility() {
     let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "tenant"));
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
@@ -370,7 +374,7 @@ fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
         reader,
         BTreeMap::from([("tenant".to_owned(), Value::Uuid(first_owner.test_uuid()))]),
     );
-    let (first_rows, first_metrics) = query_rows_by_uuid_for_identity(
+    let (first_rows, first_metrics) = maintained_rows_by_uuid_for_identity(
         &mut core,
         query.clone(),
         DurabilityTier::Global,
@@ -381,12 +385,19 @@ fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
         BTreeMap::from([("tenant".to_owned(), Value::Uuid(second_owner.test_uuid()))]),
     );
     let (second_rows, second_metrics) =
-        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Global, reader);
+        maintained_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Global, reader);
 
     assert_eq!(first_rows, vec![first]);
     assert_eq!(second_rows, vec![second]);
-    assert!(first_metrics.source_index_probes >= 1);
-    assert!(second_metrics.source_index_probes >= 1);
+    // Changing the claim must change the visible rows, but not mutate the
+    // shared policy dependency into a claim-specialized source program.
+    // Both reads reuse the identity-neutral graph: it deliberately falls back
+    // to its complete policy source, but must never probe a claim-derived
+    // secondary index.
+    assert_eq!(first_metrics.source_index_probes, 0);
+    assert!(first_metrics.source_full_scans >= 1);
+    assert_eq!(second_metrics.source_index_probes, 0);
+    assert!(second_metrics.source_full_scans >= 1);
 }
 
 #[test]
