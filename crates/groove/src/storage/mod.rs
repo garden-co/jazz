@@ -321,6 +321,15 @@ pub type ScanVisitor<'visitor> =
 /// reflected by those resident reads. A backend may evict retained data; after
 /// eviction, a later read may become pending again.
 pub trait OrderedKvStorage {
+    /// Whether a read that yields once may be immediately re-polled by the
+    /// caller without turning an external storage wait into a synchronous
+    /// drain. Backends return `true` only for executor-local storage whose
+    /// reads cannot require an external readiness event; the conservative
+    /// default keeps self-woken cold backends pending for their runtime owner.
+    fn permits_eager_read_retry(&self) -> bool {
+        false
+    }
+
     /// Begin an encoded storage transaction over this backend.
     ///
     /// The transaction buffers already-encoded key/value writes and presents
@@ -484,6 +493,10 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.as_ref().permits_eager_read_retry()
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.as_ref().scan(request)
     }
@@ -574,6 +587,10 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        S::permits_eager_read_retry(*self)
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         S::scan(*self, request)
     }
@@ -1815,6 +1832,10 @@ impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.base.permits_eager_read_retry()
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,

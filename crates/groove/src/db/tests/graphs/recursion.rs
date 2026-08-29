@@ -94,6 +94,203 @@ async fn direct_recursive_write_drains_resident_continuations() {
     );
 }
 
+/// Direct work scans every pending evaluation for an explicitly runnable CPU
+/// continuation. Older cold subscriptions stay parked, including more than
+/// one cold queue head, but they must not prevent a later independent
+/// recursive write from publishing its resident result.
+#[futures_test::test]
+async fn direct_recursive_write_drains_behind_multiple_cold_hydrations() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let schema = DatabaseSchema::new([
+        TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("team", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "notes",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("team", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]);
+    let (storage, control) = TestStorage::controlled(&["edges", "docs", "notes"]);
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    let mut seed = database.open_batch();
+    insert_edge(&mut seed, 1, 1, 2);
+    seed.insert("docs", vec![Value::U64(1), Value::U64(7)]);
+    seed.insert("notes", vec![Value::U64(1), Value::U64(8)]);
+    database.commit_batch(seed).await.unwrap();
+
+    let deep_recursive_graph = || {
+        let seed = GraphBuilder::table("edges").project(["src", "dst"]);
+        let frontier = GraphBuilder::frontier_source(
+            "frontier",
+            RecordDescriptor::new([
+                ("src", ColumnType::U64.clone()),
+                ("dst", ColumnType::U64.clone()),
+            ]),
+        );
+        let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+        let mut step = GraphBuilder::join(frontier, edge_pairs, ["dst"], ["src"]).project_fields([
+            ProjectField::renamed("left.src", "src"),
+            ProjectField::renamed("right.dst", "dst"),
+        ]);
+        for _ in 0..48 {
+            step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
+        }
+        GraphBuilder::recursive(seed, step, "frontier", 16)
+    };
+    let edges = database
+        .subscribe_one_sink(deep_recursive_graph())
+        .await
+        .unwrap();
+    for _ in 0..32 {
+        database.drive_ready_progress().await.unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_recv_vals(&edges),
+        vec![(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+
+    control.take_observed();
+    let first_docs = database
+        .subscribe_one_sink(GraphBuilder::table("docs"))
+        .await
+        .unwrap();
+    let second_notes = database
+        .subscribe_one_sink(GraphBuilder::table("notes"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "the older docs hydration owns the first cold turn; the later notes hydration remains queued behind it"
+    );
+    assert!(first_docs.try_recv().is_err());
+    assert!(second_notes.try_recv().is_err());
+
+    // The edges scan is already resident. Its no-owner direct opening is
+    // queued behind the older cold requests, so this receipt fails if direct
+    // progress looks only at the queue head instead of every evaluation.
+    let resident_tail = database
+        .subscribe_one_sink(deep_recursive_graph())
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_try_recv_vals(&resident_tail),
+        vec![(vec![Value::U64(1), Value::U64(2)], 1)],
+        "a resident direct opening drains behind older cold queue entries"
+    );
+
+    let mut write = database.open_batch();
+    insert_edge(&mut write, 2, 2, 3);
+    let applied = database.apply_batch(write).await.unwrap();
+    assert_eq!(
+        edges.recv().unwrap().to_values().unwrap(),
+        vec![
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ],
+        "the later resident recursive write publishes despite older cold queue entries"
+    );
+    assert_eq!(
+        resident_tail.recv().unwrap().to_values().unwrap(),
+        vec![
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ]
+    );
+    assert!(database.has_pending_progress());
+    assert!(first_docs.try_recv().is_err());
+    assert!(second_notes.try_recv().is_err());
+
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    let mut wakes_before_paused_poll = wakes.0.load(Ordering::Acquire);
+    let mut paused = false;
+    for _ in 0..8 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        let wakes_now = wakes.0.load(Ordering::Acquire);
+        if wakes_now == wakes_before_paused_poll {
+            paused = true;
+            break;
+        }
+        wakes_before_paused_poll = wakes_now;
+    }
+    assert!(
+        paused,
+        "each queued cold opening may self-wake once, but the owner eventually retains the paused request"
+    );
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert!(
+        wakes.0.load(Ordering::Acquire) > wakes_before_paused_poll,
+        "the owner that observed the cold request receives its later readiness wake"
+    );
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_recv_vals(&first_docs),
+        vec![(vec![Value::U64(1), Value::U64(7)], 1)]
+    );
+    assert_eq!(
+        expect_recv_vals(&second_notes),
+        vec![(vec![Value::U64(1), Value::U64(8)], 1)]
+    );
+    drop(applied);
+}
+
 /// A resident recursive subscription can contain a much deeper graph than the
 /// outer IVM work queue sees: the recursive snapshot walks its seed/step graph
 /// privately. That walk must yield through the runtime owner while retaining

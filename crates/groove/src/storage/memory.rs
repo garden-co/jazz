@@ -350,6 +350,10 @@ impl MemoryStorage {
 }
 
 impl OrderedKvStorage for MemoryStorage {
+    fn permits_eager_read_retry(&self) -> bool {
+        true
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move { self.with_cf(&cf, |values| values.get(&key).cloned()) })
     }

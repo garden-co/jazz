@@ -181,8 +181,13 @@ impl EvaluationInputs {
     }
 }
 
-type PendingRequest<'a> =
+type PendingRequestFuture<'a> =
     StorageFuture<'a, Result<EvaluationRequestOutput, EvaluationRequestFailure>>;
+
+struct PendingRequest<'a> {
+    future: PendingRequestFuture<'a>,
+    eager_retry_safe: bool,
+}
 
 #[derive(Debug)]
 pub(super) struct EvaluationRequestFailure {
@@ -233,6 +238,8 @@ impl<'a> EvaluationRequests<'a> {
         if self.pending.contains_key(&key) || self.ready.contains_key(&key) {
             return false;
         }
+        let eager_retry_safe = matches!(key, EvaluationRequestKey::Storage(_))
+            && storage.as_ref().permits_eager_read_retry();
         let future = match &key {
             EvaluationRequestKey::Storage(StorageRequestKey::Get { family, key }) => {
                 let future = storage.get(family.clone(), key.clone());
@@ -242,7 +249,7 @@ impl<'a> EvaluationRequests<'a> {
                         .map(StorageRequestOutput::Value)
                         .map(EvaluationRequestOutput::Storage)
                         .map_err(Into::into)
-                }) as PendingRequest<'a>
+                }) as PendingRequestFuture<'a>
             }
             EvaluationRequestKey::Storage(StorageRequestKey::ScanRange { family, start, end }) => {
                 let future = storage.scan(ScanRequest::range(
@@ -256,7 +263,7 @@ impl<'a> EvaluationRequests<'a> {
                         .map(StorageRequestOutput::Rows)
                         .map(EvaluationRequestOutput::Storage)
                         .map_err(Into::into)
-                }) as PendingRequest<'a>
+                }) as PendingRequestFuture<'a>
             }
             EvaluationRequestKey::Storage(StorageRequestKey::ScanPrefix { family, prefix }) => {
                 let future = storage.scan(ScanRequest::prefix(family.clone(), prefix.clone()));
@@ -266,7 +273,7 @@ impl<'a> EvaluationRequests<'a> {
                         .map(StorageRequestOutput::Rows)
                         .map(EvaluationRequestOutput::Storage)
                         .map_err(Into::into)
-                }) as PendingRequest<'a>
+                }) as PendingRequestFuture<'a>
             }
             EvaluationRequestKey::Storage(StorageRequestKey::ScanPrefixLimit {
                 family,
@@ -282,7 +289,7 @@ impl<'a> EvaluationRequests<'a> {
                         .map(StorageRequestOutput::Rows)
                         .map(EvaluationRequestOutput::Storage)
                         .map_err(Into::into)
-                }) as PendingRequest<'a>
+                }) as PendingRequestFuture<'a>
             }
             EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsPrefix {
                 table,
@@ -451,17 +458,23 @@ impl<'a> EvaluationRequests<'a> {
                                     })
                                 }
                             }
-                        }) as PendingRequest<'a>
+                        }) as PendingRequestFuture<'a>
                     }
                     None => Box::pin(async {
                         Err(EvaluationRequestFailure::from(
                             super::IvmRuntimeError::Chunk(crate::chunks::ChunkError::Unavailable),
                         ))
-                    }) as PendingRequest<'a>,
+                    }) as PendingRequestFuture<'a>,
                 }
             }
         };
-        self.pending.insert(key, future);
+        self.pending.insert(
+            key,
+            PendingRequest {
+                future,
+                eager_retry_safe,
+            },
+        );
         true
     }
 
@@ -470,8 +483,30 @@ impl<'a> EvaluationRequests<'a> {
     pub(super) fn poll(&mut self, cx: &mut Context<'_>) -> usize {
         let mut completed = Vec::new();
         for (key, request) in &mut self.pending {
-            if let Poll::Ready(result) = Pin::new(request).poll(cx) {
+            if let Poll::Ready(result) = Pin::new(&mut request.future).poll(cx) {
                 completed.push((key.clone(), result));
+            }
+        }
+        let count = completed.len();
+        for (key, result) in completed {
+            self.pending.remove(&key);
+            self.ready.insert(key, result);
+        }
+        count
+    }
+
+    /// Re-poll only requests whose storage backend explicitly guarantees that
+    /// an eager retry cannot wait for external I/O. A self-woken cold request
+    /// remains pending for its owner rather than being mistaken for resident
+    /// work.
+    pub(super) fn poll_eager_retry(&mut self, cx: &mut Context<'_>) -> usize {
+        let mut completed = Vec::new();
+        for (key, request) in &mut self.pending {
+            if request.eager_retry_safe {
+                let result = Pin::new(&mut request.future).poll(cx);
+                if let Poll::Ready(result) = result {
+                    completed.push((key.clone(), result));
+                }
             }
         }
         let count = completed.len();

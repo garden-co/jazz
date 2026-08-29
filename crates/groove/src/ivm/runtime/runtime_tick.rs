@@ -117,16 +117,6 @@ struct PendingIncrementalState {
     order: VecDeque<u64>,
     waiters_by_node: HashMap<NodeId, VecDeque<u64>>,
     next_id: u64,
-    /// Why the current queue head yielded. This is runtime state rather than
-    /// an inference from a caller's waker: storage futures may wake eagerly
-    /// while they are still cold.
-    pending_progress: Option<PendingProgress>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PendingProgress {
-    ResidentContinuation,
-    Storage,
 }
 
 enum PendingEvaluation {
@@ -158,6 +148,10 @@ impl PendingEvaluation {
             Self::SubscriptionHydration(evaluation) => &evaluation.session.work_queue,
         }
     }
+
+    fn has_resident_continuation(&self) -> bool {
+        self.work_queue().has_resident_continuation()
+    }
 }
 
 #[derive(Default)]
@@ -184,7 +178,11 @@ impl PendingIncrementalEvaluation {
     }
 
     fn has_resident_continuation(&self) -> bool {
-        self.0.borrow().pending_progress == Some(PendingProgress::ResidentContinuation)
+        self.0
+            .borrow()
+            .evaluations
+            .values()
+            .any(PendingEvaluation::has_resident_continuation)
     }
 }
 
@@ -539,7 +537,10 @@ impl IncrementalEvaluation<'_> {
         runtime: &mut IvmRuntime,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), EvaluationFailure>> {
-        self.requests.poll(cx);
+        let ready = self.requests.poll(cx);
+        if ready == 0 {
+            self.requests.poll_eager_retry(cx);
+        }
         let ready = match self.requests.drain_ready() {
             Ok(ready) => ready,
             Err(error) => {
@@ -623,11 +624,18 @@ impl IncrementalEvaluation<'_> {
                 }
             }
         }
-        let immediately_ready = if registered_requests {
+        let mut immediately_ready = if registered_requests {
             self.requests.poll(cx)
         } else {
             0
         };
+        if registered_requests && immediately_ready == 0 {
+            // A backend may explicitly attest that a yielded read is still
+            // executor-local (for example, the in-memory cursor path). Retry
+            // only those requests; opaque cold storage keeps ownership of its
+            // self-wake and remains pending for the real runtime owner.
+            immediately_ready = self.requests.poll_eager_retry(cx);
+        }
         if immediately_ready > 0 {
             // Resident requests completed synchronously. Install their results
             // and resume the queue within this same public poll so resident
@@ -731,10 +739,10 @@ impl IncrementalEvaluation<'_> {
                         drop(evaluator);
                         let mut ready = self.requests.poll(cx);
                         if ready == 0 {
-                            // A provider may deliberately yield once on a cold
-                            // resident request. Advance that retained future a
-                            // second time before yielding the whole commit.
-                            ready = self.requests.poll(cx);
+                            // Retry only a backend that explicitly attests its
+                            // reads are executor-local. A cold self-wake is
+                            // not a resident continuation.
+                            ready = self.requests.poll_eager_retry(cx);
                         }
                         if ready > 0 {
                             return self.poll(runtime, cx);
@@ -1042,7 +1050,10 @@ impl<'a> EvaluationSession<'a> {
     ) -> Poll<Result<(), IvmRuntimeError>> {
         let mut remaining_runnable_nodes = MAX_HYDRATION_RUNNABLE_NODES_PER_POLL;
         'owner_turn: loop {
-            self.requests.poll(cx);
+            let ready = self.requests.poll(cx);
+            if ready == 0 {
+                self.requests.poll_eager_retry(cx);
+            }
             let ready = match self.requests.drain_ready() {
                 Ok(ready) => ready,
                 Err(error) => return Poll::Ready(Err(error.1.error)),
@@ -1138,7 +1149,10 @@ impl<'a> EvaluationSession<'a> {
                                 // Every newly retained future must be polled once
                                 // before returning Pending so it can install the
                                 // caller's waker.
-                                if self.requests.poll(cx) > 0 {
+                                let ready = self.requests.poll(cx);
+                                if ready > 0
+                                    || (ready == 0 && self.requests.poll_eager_retry(cx) > 0)
+                                {
                                     continue 'owner_turn;
                                 }
                                 if self.requests.has_pending() {
@@ -1169,9 +1183,11 @@ impl<'a> EvaluationSession<'a> {
                             );
                         }
                         self.work_queue.wait_for_requests(node, requests);
-                        if (registered || self.requests.has_pending()) && self.requests.poll(cx) > 0
-                        {
-                            continue 'owner_turn;
+                        if registered || self.requests.has_pending() {
+                            let ready = self.requests.poll(cx);
+                            if ready > 0 || (ready == 0 && self.requests.poll_eager_retry(cx) > 0) {
+                                continue 'owner_turn;
+                            }
                         }
                         if self.requests.has_pending() {
                             // A request was polled with this owner's durable
@@ -1544,19 +1560,41 @@ impl IvmRuntime {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
+        self.poll_incremental(cx, false)
+    }
+
+    /// Poll only evaluations that have retained an explicit in-memory
+    /// continuation. Cold evaluations are left entirely untouched: their
+    /// storage futures may have self-woken, but only a runtime owner may poll
+    /// them again with a durable waker.
+    pub(crate) fn poll_resident_incremental(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        self.poll_incremental(cx, true)
+    }
+
+    fn poll_incremental(
+        &mut self,
+        cx: &mut Context<'_>,
+        resident_only: bool,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
         if state.order.is_empty() {
-            state.pending_progress = None;
             return Poll::Ready(Ok(()));
         }
-        state.pending_progress = None;
         let mut retained_order = VecDeque::new();
         while let Some(evaluation_id) = state.order.pop_front() {
             let mut evaluation = state
                 .evaluations
                 .remove(&evaluation_id)
                 .expect("pending evaluation order references a live session");
+            if resident_only && !evaluation.has_resident_continuation() {
+                state.evaluations.insert(evaluation_id, evaluation);
+                retained_order.push_back(evaluation_id);
+                continue;
+            }
             let progress = match &mut evaluation {
                 PendingEvaluation::Incremental(incremental) => incremental.poll(self, cx),
                 PendingEvaluation::SubscriptionHydration(hydration) => hydration
@@ -1666,13 +1704,15 @@ impl IvmRuntime {
                     }
                 }
                 Poll::Pending => {
-                    let pending_progress = if evaluation.work_queue().has_resident_continuation() {
-                        PendingProgress::ResidentContinuation
-                    } else {
-                        PendingProgress::Storage
-                    };
                     state.evaluations.insert(evaluation_id, evaluation);
                     retained_order.push_back(evaluation_id);
+                    if resident_only {
+                        // A resident slice can discover cold storage. It has
+                        // installed only this direct call's no-op waker, so
+                        // leave it parked and continue looking for unrelated
+                        // resident work later in the queue.
+                        continue;
+                    }
                     // One owner turn advances at most one suspended
                     // evaluation. In particular, a cold subscription
                     // hydration must hand control back to the runtime owner
@@ -1682,7 +1722,6 @@ impl IvmRuntime {
                     // waker; cooperative in-memory yields wake it directly.
                     retained_order.append(&mut state.order);
                     state.order = retained_order;
-                    state.pending_progress = Some(pending_progress);
                     *slot.borrow_mut() = state;
                     return Poll::Pending;
                 }
@@ -1690,7 +1729,6 @@ impl IvmRuntime {
         }
         let done = retained_order.is_empty();
         state.order = retained_order;
-        state.pending_progress = None;
         *slot.borrow_mut() = state;
         if done {
             Poll::Ready(Ok(()))

@@ -2550,7 +2550,21 @@ impl IvmRuntime {
         let mut cx = Context::from_waker(progress_waker.unwrap_or(Waker::noop()));
         match self.poll_pending_incremental(&mut cx) {
             Poll::Ready(result) => result,
-            Poll::Pending => Ok(()),
+            Poll::Pending if progress_waker.is_some() => Ok(()),
+            Poll::Pending => {
+                // A direct opening owns every explicitly retained CPU slice,
+                // including one queued behind an older cold hydration. Do not
+                // infer that ownership from a wake: scan the runtime's
+                // per-evaluation continuation state and leave all storage
+                // requests untouched for a later owner.
+                while self.has_resident_continuation() {
+                    match self.poll_resident_incremental(&mut cx) {
+                        Poll::Ready(result) => return result,
+                        Poll::Pending => {}
+                    }
+                }
+                Ok(())
+            }
         }
     }
 

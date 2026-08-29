@@ -7,18 +7,15 @@ impl Database {
     /// for external readiness, and callers may install one with
     /// [`Self::drive_ready_progress_with_waker`] or [`Self::poll_subscription`].
     pub(super) fn drive_resident_progress_now(&mut self) -> Result<(), Error> {
-        // Never use a new direct call as an excuse to poll an already-cold
-        // evaluation again. A storage future is permitted to self-wake before
-        // it is ready; only the owner that installed its durable waker may
-        // resume it.
-        if self.ivm_runtime.has_pending_incremental()
-            && !self.ivm_runtime.has_resident_continuation()
-        {
-            return Ok(());
-        }
         loop {
+            // Never use a new direct call as an excuse to poll a cold
+            // evaluation again. Scan the runtime's per-evaluation signals so
+            // an older cold hydration cannot hide later resident work.
+            if !self.ivm_runtime.has_resident_continuation() {
+                return Ok(());
+            }
             let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-            match self.poll_progress(&mut cx) {
+            match self.poll_resident_progress(&mut cx) {
                 std::task::Poll::Ready(result) => return result,
                 // The runtime records an explicit resident continuation when
                 // a bounded CPU slice yields. Storage may self-wake before it
@@ -63,6 +60,29 @@ impl Database {
             return std::task::Poll::Ready(Err(error));
         }
         let progress = self.ivm_runtime.poll_pending_incremental(cx);
+        self.refresh_resident_writes();
+        match progress {
+            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
+            std::task::Poll::Ready(Err(error)) => {
+                self.poisoned = true;
+                std::task::Poll::Ready(Err(Error::IvmRuntime(error)))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    /// Poll only explicitly runnable CPU continuations. This is the direct
+    /// API counterpart to [`Self::poll_progress`]: it must never repoll a
+    /// storage-pending evaluation merely because another direct operation
+    /// started later.
+    fn poll_resident_progress(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        if let Err(error) = self.ensure_not_poisoned() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        let progress = self.ivm_runtime.poll_resident_incremental(cx);
         self.refresh_resident_writes();
         match progress {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
