@@ -36,17 +36,17 @@ const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "f61811d6750867017e67786ccafd092b965594b06165cc3252fcc1d79c340441";
+    "32f1c10bb767fa5d24e5a1cf2d8fb5cc6cf7ef596a6b0a83250f84c7c28cf2df";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "07edc6ac52ff31118ae8ce90390ad942f5fd406187a0f17b2592ee963c8a59d4";
+    "047e161f88160edde3d9362ab0704f1b8ae4f2d92eedb22645fbafba14962e41";
 const EPOCH_1_NATIVE_SQLITE_SHA256: &str =
-    "c972bf4b036c2d12cd72637f931f60f784b1e33f2d31ef654c7d9e44f69fbd4c";
+    "8d07832629559d30b30e2e075b6c4cf8b410c26f5d888bf360e7f100bb02450b";
 const EPOCH_1_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-rocksdb.tar.gz.base64");
 const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
-    "03f12e133bab81896db6cc1ee56be720c6c09e3c0d2bfa0c2d9396f155bc106a";
+    "876f60de7c6fd2242d6065462f1453574287ab33ad1b1c84e79a3492bba9cfdc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -270,6 +270,56 @@ where
         publication: Box::new(publication),
     })
     .expect("publish native corpus lineage");
+}
+
+fn seed_native_corpus_settled_query_state<S>(node: &mut NodeState<S>)
+where
+    S: ReopenableStorage,
+{
+    let (shape, binding) = node
+        .whole_table_shape_binding("notes")
+        .expect("native corpus prepares a notes query shape");
+    register_shape_binding(node, &shape, &binding);
+    let subscription = node
+        .whole_table_subscription_key("notes")
+        .expect("native corpus registers its notes subscription");
+    let notes_version = node
+        .query_table_versions("notes")
+        .expect("native corpus reads notes history")
+        .into_iter()
+        .find(|version| version.row_uuid() == row(0xc3))
+        .expect("native corpus note version exists");
+    let notes_tx = node
+        .version_tx_id(&notes_version)
+        .expect("native corpus note has a transaction id");
+    let fact = crate::protocol::ProgramFactEntry::PathCorrelationCoverage(
+        crate::protocol::PathCorrelationCoverageEntry {
+            path: "native-corpus".to_owned(),
+            source_table: "notes".to_owned().into(),
+            source_row: row(0xc3),
+            correlation_key: vec![0xc3],
+            complete: true,
+        },
+    );
+    node.apply_sync_message_settled(SyncMessage::ViewUpdate(
+        crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: vec![crate::protocol::ResultMemberEntry::row((
+                "notes".to_owned().into(),
+                row(0xc3),
+                notes_tx,
+            ))],
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: vec![fact],
+            program_fact_removes: Vec::new(),
+        },
+    ))
+    .expect("native corpus persists settled result and program facts");
 }
 
 fn native_corpus_branch(byte: u8) -> BranchSelector {
@@ -612,6 +662,7 @@ where
         "independent table",
     );
     publish_native_corpus_lineage(&mut producer, snapshot);
+    seed_native_corpus_settled_query_state(&mut producer);
     let before_close = native_corpus_receipt(&producer, &schema);
     assert_native_corpus_has_required_families(&before_close);
     drop(producer);
@@ -841,7 +892,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     }
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "2de7abdde4b6a7c84bcb8de01e4cfa674883b94c1aaf94096c0646f8178ddf20",
+        "3a76fc5eb548bce90b16ac3a3c77daef32463b8290497f84e500226434a9d2d1",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
     assert_eq!(
