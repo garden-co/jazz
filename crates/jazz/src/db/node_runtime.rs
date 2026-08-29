@@ -274,9 +274,10 @@ where
         let pending = node.pending_transaction_ids_for_author(author);
         let pending = crate::db::block_on(pending)?;
         drop(node);
-        let mut restored = self.browser_relay_recovered_tx_ids.borrow_mut();
+        self.browser_relay_recovered_tx_ids
+            .borrow_mut()
+            .extend(pending.iter().copied());
         for tx_id in pending {
-            restored.insert(tx_id);
             self.queue_pending_upload(tx_id, None);
         }
         Ok(())
