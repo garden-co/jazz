@@ -56,6 +56,9 @@ function writeRegistry(root, allowed, direct = snapshots()) {
   fs.writeFileSync(
     path.join(root, "dev/storage/default-serialization-registry.json"),
     JSON.stringify({
+      // The gate's explicit refresh command is the only mechanical migration
+      // helper. The resulting policy still needs review; fixtures use it so
+      // their Cargo-resolved dependency snapshot matches this machine.
       schemaVersion: 3,
       scope: { paths: ["crates/jazz/src/node"], serializerCrates: ["postcard", "serde_json"] },
       directDependencySnapshots: direct,
@@ -66,6 +69,12 @@ function writeRegistry(root, allowed, direct = snapshots()) {
       })),
     }),
   );
+  const refreshed = spawnSync(
+    "node",
+    [gate, "--root", root, "--refresh-registry-snapshot"],
+    { encoding: "utf8" },
+  );
+  assert.equal(refreshed.status, 0, refreshed.stderr);
 }
 
 function writeSource(root, source, allowed = []) {
@@ -113,6 +122,11 @@ test("rejects raw, comment-separated, function-item, and macro serializer paths"
       "macro_rules! encode { ($root:ident, $v:expr) => { $root::to_allocvec($v) }; }\npub fn f<T: serde::Serialize>(v: &T) { let _ = encode!(postcard, v); }\n",
       /unregistered default serialization reference postcard/,
     );
+    assertRejectedAndCompiles(
+      root,
+      "macro_rules! nested { ($group:tt) => {}; }\nmacro_rules! outer { ($group:tt) => {}; }\npub fn f() { outer!({ nested!([postcard]) }); }\n",
+      /unregistered default serialization reference postcard/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -146,7 +160,7 @@ test("rejects import and extern aliases, raw identifiers, and alternate serializ
     assertRejectedAndCompiles(
       root,
       "pub fn f<T: serde::Serialize>(v: &T) { let _ = bincode::serialize(v); }\n",
-      /directDependencySnapshots differs/,
+      /unregistered default serialization reference bincode::serialize/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -196,6 +210,42 @@ test("requires an exact location, enclosing item, and cfg boundary for every all
   }
 });
 
+test("does not leak cfg(test) through every semicolon item kind into production endpoints", () => {
+  const root = fixture();
+  try {
+    const source =
+      '#[cfg(test)] const TEST_CONST: usize = 1;\n#[cfg(test)] static TEST_STATIC: usize = 1;\n#[cfg(test)] type TestAlias = usize;\n#[cfg(test)] use std::fmt::Debug;\n#[cfg(test)] extern "C" { fn fixture_only(); }\n#[cfg(test)] macro_rules! fixture_only { () => {}; }\npub fn semantic() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n';
+    const reviewed = endpoints(source);
+    assert.equal(reviewed.length, 2);
+    assert.ok(reviewed.every((endpoint) => endpoint.boundary === "production"));
+    writeSource(root, source, reviewed);
+    assert.equal(run(root).status, 0, run(root).stderr);
+    assert.equal(compile(root).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("endpoint identity contains the full impl stack, not only a function name", () => {
+  const root = fixture();
+  try {
+    const source =
+      'struct First; struct Second; struct Other;\nimpl First { fn encode() { let _ = serde_json::from_str::<serde_json::Value>("null"); } }\nimpl Second { fn encode() { let _ = serde_json::from_str::<serde_json::Value>("null"); } }\n';
+    const reviewed = endpoints(source);
+    assert.ok(reviewed.some((endpoint) => endpoint.enclosing.items.length === 2));
+    writeSource(root, source, reviewed);
+    assert.equal(run(root).status, 0, run(root).stderr);
+    const swapped = source.replace("impl First", "impl Other");
+    fs.writeFileSync(path.join(root, "crates/jazz/src/node/codec.rs"), swapped);
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unregistered default serialization reference|registered serializer endpoint is absent/);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("requires an explicit exact registry entry for type-only serializer paths", () => {
   const root = fixture();
   try {
@@ -224,6 +274,24 @@ test("rejects a new direct serializer dependency even before source mentions it"
   }
 });
 
+test("dependency feature, requirement, source, and resolved-version snapshot drift fails before scanning source", () => {
+  const root = fixture();
+  try {
+    const manifest = path.join(root, "crates/jazz/Cargo.toml");
+    fs.writeFileSync(
+      manifest,
+      fs
+        .readFileSync(manifest, "utf8")
+        .replace('postcard = { version = "1", features = ["alloc"] }', 'postcard = { version = "1", default-features = false, features = ["alloc", "use-std"] }'),
+    );
+    const result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /directDependencySnapshots differs/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects a renamed direct dependency before its alias can be imported", () => {
   const root = fixture();
   try {
@@ -239,6 +307,43 @@ test("rejects a renamed direct dependency before its alias can be imported", () 
     assert.match(result.stderr, /directDependencySnapshots differs/);
     const checked = compile(root);
     assert.equal(checked.status, 0, checked.stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("accepted renamed serializer aliases remain governed and unclassified dependency drift fails closed", () => {
+  const root = fixture();
+  try {
+    const manifest = path.join(root, "crates/jazz/Cargo.toml");
+    fs.writeFileSync(
+      manifest,
+      fs
+        .readFileSync(manifest, "utf8")
+        .replace('serde_json = "1"', 'json_codec = { package = "serde_json", version = "1" }')
+        .replace('serde = "1"', 'serde = "1"\nron = "0.8"'),
+    );
+    // Accept the dependency snapshot first, then demonstrate that a renamed
+    // root is still a governed serializer and that removing any direct-entry
+    // classification fails closed.
+    writeRegistry(root, []);
+    fs.writeFileSync(
+      path.join(root, "crates/jazz/src/node/codec.rs"),
+      "pub fn f() { let _ = json_codec::to_string(&42); }\n",
+    );
+    let result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /json_codec::to_string/);
+    const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
+    const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+    registry.dependencyClassifications = registry.dependencyClassifications.filter(
+      (entry) => !entry.dependency.includes("ron|ron|"),
+    );
+    fs.writeFileSync(registryPath, JSON.stringify(registry));
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /every direct external dependency|unclassified direct dependency/);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
