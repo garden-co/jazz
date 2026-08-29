@@ -1,7 +1,7 @@
 {
   "schemaVersion": 4,
   "scope": {
-    "description": "Every production source location that owns an authoritative persistence ingress, egress, or value carried across one. Test and benchmark directories are deliberately out of scope: they may construct historical or malformed bytes, but cannot define a production storage spelling. Endpoint allowances and direct-dependency classifications are sensitive reviewed policy, not an automatic serializer safety proof: this gate detects accidental dependency/endpoint drift rather than malicious misclassification.",
+    "description": "Every production source location that owns an authoritative persistence ingress, egress, or value carried across one. Test and benchmark directories are deliberately out of scope: they may construct historical or malformed bytes, but cannot define a production storage spelling. Every endpoint binds its declaration/field structural identity and cfg-derived test-versus-production boundary, including semicolon declarations. Endpoint allowances and direct-dependency classifications are sensitive reviewed policy, not an automatic serializer safety proof: this gate detects accidental dependency/endpoint drift rather than malicious misclassification.",
     "serializerCrates": ["postcard", "serde_json"],
     "paths": [
       "crates/groove/src/db",
@@ -44,8 +44,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["impl Database"],
-            "item": "impl Database"
+            "items": ["impl Database", "fn read_large_json_pointer"],
+            "item": "fn read_large_json_pointer"
           },
           "boundary": "production"
         }
@@ -134,8 +134,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["enum JsonPointerPrefix"],
-            "item": "enum JsonPointerPrefix"
+            "items": ["enum JsonPointerPrefix", "field #0"],
+            "item": "field #0"
           },
           "boundary": "production"
         }
@@ -566,8 +566,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn encode_relation_snapshot_for_size"],
+            "item": "fn encode_relation_snapshot_for_size"
           },
           "boundary": "production"
         }
@@ -626,8 +626,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn encode_subscription_reset_frame_for_size"],
+            "item": "fn encode_subscription_reset_frame_for_size"
           },
           "boundary": "production"
         }
@@ -716,8 +716,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["struct JsonSetEdit"],
-            "item": "struct JsonSetEdit"
+            "items": ["struct JsonSetEdit", "field value"],
+            "item": "field value"
           },
           "boundary": "production"
         }
@@ -746,8 +746,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn apply_json_set"],
+            "item": "fn apply_json_set"
           },
           "boundary": "production"
         }
@@ -776,8 +776,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn apply_json_set"],
+            "item": "fn apply_json_set"
           },
           "boundary": "production"
         }
@@ -926,8 +926,12 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["static <anonymous>"],
-            "item": "static <anonymous>"
+            "items": [
+              "impl < S > Db < S > where S : OrderedKvStorage + ReopenableStorage + ' static ,",
+              "static pub",
+              "fn read_json_pointer"
+            ],
+            "item": "fn read_json_pointer"
           },
           "boundary": "production"
         }
@@ -956,7 +960,11 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["static <anonymous>", "fn read_json_pointer"],
+            "items": [
+              "impl < S > Db < S > where S : OrderedKvStorage + ReopenableStorage + ' static ,",
+              "static pub",
+              "fn read_json_pointer"
+            ],
             "item": "fn read_json_pointer"
           },
           "boundary": "production"
@@ -986,7 +994,11 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["static <anonymous>", "fn read_json_pointer"],
+            "items": [
+              "impl < S > Db < S > where S : OrderedKvStorage + ReopenableStorage + ' static ,",
+              "static pub",
+              "fn read_json_pointer"
+            ],
             "item": "fn read_json_pointer"
           },
           "boundary": "production"
@@ -1016,7 +1028,11 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["static <anonymous>", "fn apply_large_value_json_set"],
+            "items": [
+              "impl < S > Db < S > where S : OrderedKvStorage + ReopenableStorage + ' static ,",
+              "static pub",
+              "fn apply_large_value_json_set"
+            ],
             "item": "fn apply_large_value_json_set"
           },
           "boundary": "production"
@@ -1046,7 +1062,11 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["static <anonymous>", "fn apply_large_value_json_set"],
+            "items": [
+              "impl < S > Db < S > where S : OrderedKvStorage + ReopenableStorage + ' static ,",
+              "static pub",
+              "fn apply_large_value_json_set"
+            ],
             "item": "fn apply_large_value_json_set"
           },
           "boundary": "production"
@@ -1076,7 +1096,11 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["static <anonymous>", "fn apply_large_value_json_set"],
+            "items": [
+              "impl < S > Db < S > where S : OrderedKvStorage + ReopenableStorage + ' static ,",
+              "static pub",
+              "fn apply_large_value_json_set"
+            ],
             "item": "fn apply_large_value_json_set"
           },
           "boundary": "production"
@@ -1136,8 +1160,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["static <anonymous>"],
-            "item": "static <anonymous>"
+            "items": ["fn send_catalogue_snapshot_if_needed", "static let"],
+            "item": "static let"
           },
           "boundary": "production"
         }
@@ -1438,8 +1462,19 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["enum Error"],
-            "item": "enum Error"
+            "items": [
+              "enum Error",
+              "static str",
+              "static str",
+              "static str",
+              "static str",
+              "static str",
+              "static str",
+              "static str",
+              "static str",
+              "field #37"
+            ],
+            "item": "field #37"
           },
           "boundary": "production"
         }
@@ -1468,8 +1503,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
-            "item": "closure <closure>"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint"],
+            "item": "fn footprint"
           },
           "boundary": "production"
         }
@@ -1498,8 +1533,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
-            "item": "closure <closure>"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint"],
+            "item": "fn footprint"
           },
           "boundary": "production"
         }
@@ -1528,8 +1563,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
-            "item": "closure <closure>"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint"],
+            "item": "fn footprint"
           },
           "boundary": "production"
         }
@@ -1558,8 +1593,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
-            "item": "closure <closure>"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint"],
+            "item": "fn footprint"
           },
           "boundary": "production"
         }
@@ -1678,11 +1713,7 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [
-              "impl < S > JazzSourceGraphPreparer < ' _ , S > where S : OrderedKvStorage ,",
-              "fn projected_deletion_register_current_source_graph",
-              "fn normalized_bound_value"
-            ],
+            "items": ["fn normalized_bound_value"],
             "item": "fn normalized_bound_value"
           },
           "boundary": "production"
@@ -1712,8 +1743,11 @@
           },
           "enclosing": {
             "modules": [],
-            "items": ["impl < S > NodeState < S > where S : OrderedKvStorage ,"],
-            "item": "impl < S > NodeState < S > where S : OrderedKvStorage ,"
+            "items": [
+              "impl < S > NodeState < S > where S : OrderedKvStorage ,",
+              "fn read_large_json_pointer"
+            ],
+            "item": "fn read_large_json_pointer"
           },
           "boundary": "production"
         }
@@ -2597,11 +2631,11 @@
             }
           },
           "enclosing": {
-            "modules": ["tests"],
+            "modules": [],
             "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
-          "boundary": "test"
+          "boundary": "production"
         }
       ]
     },
@@ -2627,11 +2661,11 @@
             }
           },
           "enclosing": {
-            "modules": ["tests"],
+            "modules": [],
             "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
-          "boundary": "test"
+          "boundary": "production"
         }
       ]
     },
@@ -2657,11 +2691,11 @@
             }
           },
           "enclosing": {
-            "modules": ["tests"],
+            "modules": [],
             "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
-          "boundary": "test"
+          "boundary": "production"
         }
       ]
     },
@@ -2687,11 +2721,11 @@
             }
           },
           "enclosing": {
-            "modules": ["tests"],
+            "modules": [],
             "items": ["fn rejects_schema_invalid_json_inside_payload_enum_default"],
             "item": "fn rejects_schema_invalid_json_inside_payload_enum_default"
           },
-          "boundary": "test"
+          "boundary": "production"
         }
       ]
     },
@@ -2717,11 +2751,11 @@
             }
           },
           "enclosing": {
-            "modules": ["tests"],
+            "modules": [],
             "items": ["fn converts_public_json_as_core_string_storage"],
             "item": "fn converts_public_json_as_core_string_storage"
           },
-          "boundary": "test"
+          "boundary": "production"
         }
       ]
     },
@@ -2748,8 +2782,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn encode_canonical_json_value"],
+            "item": "fn encode_canonical_json_value"
           },
           "boundary": "production"
         }
@@ -2778,8 +2812,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn encode_canonical_json_value_body"],
+            "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
         }
@@ -3018,8 +3052,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn decode_canonical_json_value"],
+            "item": "fn decode_canonical_json_value"
           },
           "boundary": "production"
         }
@@ -3048,8 +3082,8 @@
           },
           "enclosing": {
             "modules": [],
-            "items": [],
-            "item": "<module>"
+            "items": ["fn decode_canonical_json_value_body"],
+            "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
         }

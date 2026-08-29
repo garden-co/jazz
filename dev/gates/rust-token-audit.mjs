@@ -194,55 +194,8 @@ export function describeEndpoint(tokens, reference, relative) {
       start: { line: token.line, column: token.column },
       end: { line: end.endLine, column: end.endColumn },
     },
-    enclosing: enclosing(tokens, reference.index),
-    boundary: boundary(tokens, reference.index),
+    ...structuralContext(tokens, reference.index),
   };
-}
-
-function enclosing(tokens, target) {
-  const modules = [];
-  const braces = [];
-  let pending = null;
-  let closurePipes = 0;
-  const itemKeywords = new Set([
-    "mod", "fn", "impl", "trait", "struct", "enum", "union", "const", "static", "type", "use",
-    "extern", "macro", "macro_rules",
-  ]);
-  for (let index = 0; index < target; index += 1) {
-    const token = tokens[index];
-    if (itemKeywords.has(token.text)) {
-      let name = tokens[index + 1]?.kind === "ident" ? tokens[index + 1].text : "<anonymous>";
-      if (token.text === "impl") {
-        // The implementation target (and optional trait) is part of the
-        // endpoint identity: moving a serializer call between impls must not
-        // preserve its allowance.
-        const parts = [];
-        for (let cursor = index + 1; cursor < target; cursor += 1) {
-          if (["{", ";"].includes(tokens[cursor].text)) break;
-          parts.push(tokens[cursor].text);
-        }
-        name = parts.join(" ") || "<anonymous>";
-      }
-      pending = { kind: token.text, name };
-    }
-    if (token.text === "|") closurePipes += 1;
-    if (token.text === "{") {
-      if (!pending && closurePipes % 2 === 0 && index > 0 && tokens[index - 1]?.text === "|")
-        pending = { kind: "closure", name: "<closure>" };
-      braces.push(pending);
-      if (pending?.kind === "mod") modules.push(pending.name);
-      pending = null;
-    }
-    if (token.text === "}") {
-      const closed = braces.pop();
-      if (closed?.kind === "mod") modules.pop();
-    }
-    if (pending && token.text === ";") pending = null;
-  }
-  const items = braces
-    .filter((entry) => entry && entry.kind !== "mod")
-    .map((entry) => entry.kind + " " + entry.name);
-  return { modules, items, item: items.at(-1) ?? "<module>" };
 }
 
 function attributeText(tokens, start) {
@@ -256,47 +209,170 @@ function attributeText(tokens, start) {
   return text;
 }
 
-function boundary(tokens, target) {
-  const braces = [];
-  let pendingAttributes = [];
-  const plannedBlocks = new Map();
-  for (let index = 0; index < target; index += 1) {
-    if (tokens[index].text === "#" && tokens[index + 1]?.text === "[") {
-      pendingAttributes.push(attributeText(tokens, index));
-      continue;
-    }
-    // An attribute belongs to the next Rust item, including semicolon items
-    // (`use`, `const`, `static`, `type`, macro declarations). Do not leave it
-    // pending until a later block: that accidentally classified production
-    // code after `#[cfg(test)] use ...;` as test-only.
-    if (
-      [
-        "mod", "fn", "impl", "trait", "struct", "enum", "union", "const", "static", "type", "use",
-        "extern", "macro", "macro_rules",
-      ].includes(tokens[index].text)
-    ) {
-      const attributes = pendingAttributes;
-      pendingAttributes = [];
-      let cursor = index + 1;
-      while (cursor < tokens.length && tokens[cursor].text !== "{" && tokens[cursor].text !== ";")
-        cursor += 1;
-      if (tokens[cursor]?.text === "{")
-        plannedBlocks.set(
-          cursor,
-          attributes.some((attribute) => /cfg\(test\)/.test(attribute)),
-        );
-      // A semicolon item consumed the attributes even though it introduces no
-      // lexical scope. This explicit branch is deliberately boring: it keeps
-      // the state machine correct for all item kinds rather than relying on
-      // the next brace to reset it.
-      continue;
-    }
-    if (tokens[index].text === "{")
-      // Track ordinary expression/closure blocks too. Otherwise their `}`
-      // would pop a surrounding cfg(test) item scope that was the only scope
-      // we had recorded.
-      braces.push(plannedBlocks.get(index) ?? braces.at(-1) ?? false);
-    if (tokens[index].text === "}") braces.pop();
+const itemKeywords = new Set([
+  "mod", "fn", "impl", "trait", "struct", "enum", "union", "const", "static", "type", "use",
+  "extern", "macro", "macro_rules",
+]);
+
+/**
+ * Return the complete declaration context for a serializer root.  This is
+ * intentionally a small structural Rust parser rather than a brace-only
+ * heuristic: `type`, `const`, `static`, `use`, tuple/unit structs, and
+ * associated items end at `;`, yet still own both an identity and attributes.
+ * A registry allowance consequently cannot cross a cfg(test) declaration
+ * boundary while preserving its path line/column.
+ */
+function structuralContext(tokens, target) {
+  const items = itemSpans(tokens);
+  const parents = items
+    .filter((item) => item.start <= target && target <= item.end)
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  const modules = parents.filter((item) => item.kind === "mod").map((item) => item.name);
+  const enclosingItems = parents
+    .filter((item) => item.kind !== "mod")
+    .map((item) => item.kind + " " + item.name);
+  const field = fieldContext(tokens, target, parents);
+  if (field) enclosingItems.push(field.identity);
+  const test = parents.some((item) => item.cfgTest) || field?.cfgTest;
+  return {
+    enclosing: {
+      modules,
+      items: enclosingItems,
+      item: enclosingItems.at(-1) ?? "<module>",
+    },
+    boundary: test ? "test" : "production",
+  };
+}
+
+function itemSpans(tokens) {
+  const spans = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (!itemKeywords.has(tokens[index].text)) continue;
+    const end = declarationEnd(tokens, index);
+    if (end === undefined) continue;
+    const attributes = itemAttributes(tokens, index);
+    spans.push({
+      start: index,
+      end,
+      kind: tokens[index].text,
+      name: itemName(tokens, index, end),
+      cfgTest: attributes.some((attribute) => /cfg\s*\(\s*test\s*\)/.test(attribute.text)),
+      openBrace: declarationOpenBrace(tokens, index, end),
+    });
   }
-  return braces.some(Boolean) ? "test" : "production";
+  return spans;
+}
+
+function declarationOpenBrace(tokens, start, end) {
+  const stack = [];
+  for (let cursor = start + 1; cursor <= end; cursor += 1) {
+    const text = tokens[cursor].text;
+    if (["(", "["].includes(text)) stack.push({ "(": ")", "[": "]" }[text]);
+    else if (stack.length && text === stack.at(-1)) stack.pop();
+    else if (!stack.length && text === "{") return cursor;
+  }
+  return undefined;
+}
+
+function declarationEnd(tokens, start) {
+  // Item headers have nested parameter/type delimiters.  A top-level `{` or
+  // `;` closes the header; a braced item extends through its matching `}`.
+  const stack = [];
+  for (let cursor = start + 1; cursor < tokens.length; cursor += 1) {
+    const text = tokens[cursor].text;
+    if (["(", "["].includes(text)) stack.push({ "(": ")", "[": "]" }[text]);
+    else if (stack.length && text === stack.at(-1)) stack.pop();
+    else if (!stack.length && text === ";") return cursor;
+    else if (!stack.length && text === "{") {
+      let depth = 1;
+      for (let close = cursor + 1; close < tokens.length; close += 1) {
+        if (tokens[close].text === "{") depth += 1;
+        if (tokens[close].text === "}" && --depth === 0) return close;
+      }
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function itemAttributes(tokens, itemStart) {
+  // Attributes may be separated from an item keyword by visibility, `unsafe`,
+  // or ABI tokens.  A declaration/field separator is a hard ownership fence.
+  const attributes = [];
+  for (let cursor = itemStart - 1; cursor >= 1; cursor -= 1) {
+    if ([";", "{", "}", ","].includes(tokens[cursor].text)) break;
+    if (tokens[cursor].text !== "]") continue;
+    let depth = 0;
+    for (let open = cursor; open >= 1; open -= 1) {
+      if (tokens[open].text === "]") depth += 1;
+      if (tokens[open].text === "[" && --depth === 0 && tokens[open - 1]?.text === "#") {
+        attributes.push({ start: open - 1, end: cursor, text: attributeText(tokens, open - 1) });
+        cursor = open - 1;
+        break;
+      }
+    }
+  }
+  return attributes;
+}
+
+function itemName(tokens, start, end) {
+  const kind = tokens[start].text;
+  if (kind === "impl") {
+    const parts = [];
+    for (let cursor = start + 1; cursor <= end; cursor += 1) {
+      if (["{", ";"].includes(tokens[cursor]?.text)) break;
+      parts.push(tokens[cursor].text);
+    }
+    return parts.join(" ") || "<anonymous>";
+  }
+  if (kind === "macro_rules") {
+    const bang = tokens.findIndex((token, index) => index > start && token.text === "!");
+    return tokens[bang + 1]?.kind === "ident" ? tokens[bang + 1].text : "<anonymous>";
+  }
+  // `extern crate foo`, `extern "C" { ... }`, and ordinary declarations.
+  for (let cursor = start + 1; cursor <= end; cursor += 1) {
+    if (tokens[cursor]?.kind !== "ident") continue;
+    if (kind === "extern" && tokens[cursor].text === "crate") continue;
+    return tokens[cursor].text;
+  }
+  return "<anonymous>";
+}
+
+function fieldContext(tokens, target, parents) {
+  const owner = [...parents]
+    .reverse()
+    .find((item) => ["struct", "union", "enum"].includes(item.kind) && item.openBrace !== undefined);
+  if (!owner || target <= owner.openBrace || target >= owner.end) return undefined;
+  let start = owner.openBrace + 1;
+  let depth = 0;
+  for (let cursor = owner.openBrace + 1; cursor < target; cursor += 1) {
+    const text = tokens[cursor].text;
+    if (["(", "[", "{"].includes(text)) depth += 1;
+    else if ([")", "]", "}"].includes(text)) depth -= 1;
+    else if (text === "," && depth === 0) start = cursor + 1;
+  }
+  const segment = tokens.slice(start, target);
+  // A `name: Type` field gets a stable field identity. Tuple fields receive a
+  // positional identity; both retain a local cfg boundary when present.
+  const colon = segment.findIndex((token) => token.text === ":");
+  const name =
+    colon === -1
+      ? "#" + countTupleFields(tokens, owner.openBrace + 1, start)
+      : [...segment.slice(0, colon)].reverse().find((token) => token.kind === "ident")?.text ?? "<anonymous>";
+  const cfgTest = segment.some(
+    (token, index) => token.text === "#" && /cfg\s*\(\s*test\s*\)/.test(attributeText(segment, index)),
+  );
+  return { identity: "field " + name, cfgTest };
+}
+
+function countTupleFields(tokens, bodyStart, segmentStart) {
+  let count = 0;
+  let depth = 0;
+  for (let cursor = bodyStart; cursor < segmentStart; cursor += 1) {
+    const text = tokens[cursor].text;
+    if (["(", "[", "{"].includes(text)) depth += 1;
+    else if ([")", "]", "}"].includes(text)) depth -= 1;
+    else if (text === "," && depth === 0) count += 1;
+  }
+  return count;
 }
