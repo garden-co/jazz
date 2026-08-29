@@ -2486,6 +2486,33 @@ impl WasmDb {
         Ok(())
     }
 
+    /// Internal foreground-lease handoff boundary. Values cross the JS ABI as
+    /// BigInt, never lossy IEEE-754 numbers.
+    #[wasm_bindgen(js_name = foregroundTxTimeHighWater)]
+    pub fn foreground_tx_time_high_water(&self) -> Result<u64, JsValue> {
+        match &self.inner {
+            WasmDbInner::Memory(db) => Ok(block_on(db.foreground_tx_time_high_water()).0),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => Ok(block_on(db.foreground_tx_time_high_water()).0),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    /// Internal foreground-lease bootstrap boundary. The worker-owned lease
+    /// metadata has already validated this HLC value; this simply merges it
+    /// into the native runtime before the first local transaction is minted.
+    #[wasm_bindgen(js_name = seedForegroundTxTimeHighWater)]
+    pub fn seed_foreground_tx_time_high_water(&self, high_water: u64) -> Result<(), JsValue> {
+        let high_water = jazz::time::TxTime(high_water);
+        match &self.inner {
+            WasmDbInner::Memory(db) => block_on(db.seed_foreground_tx_time_high_water(high_water)),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => block_on(db.seed_foreground_tx_time_high_water(high_water)),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = setRelayAuthoritySessionOwner)]
     pub fn set_relay_authority_session_owner(&self) -> Result<(), JsValue> {
         match &self.inner {

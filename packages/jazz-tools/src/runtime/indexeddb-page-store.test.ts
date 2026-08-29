@@ -323,6 +323,37 @@ describe("IndexedDbPageStore", () => {
     }
   });
 
+  it("leases distinct foreground nodes concurrently and reuses only a clean handoff", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    const [first, second] = await Promise.all([
+      store.acquireForegroundNodeLease(),
+      store.acquireForegroundNodeLease(),
+    ]);
+    expect(first.node).not.toEqual(second.node);
+
+    await store.returnForegroundNodeLease(first.leaseId, 123456789n);
+    const reused = await store.acquireForegroundNodeLease();
+    expect(reused.node).toEqual(first.node);
+    expect(reused.confirmedTxTime).toBe(123456789n);
+    await store.retireForegroundNodeLease(second.leaseId);
+    await store.retireForegroundNodeLease(reused.leaseId);
+    store.close();
+  });
+
+  it("retires an abandoned foreground lease on worker restart", async () => {
+    const name = databaseName();
+    let store = await IndexedDbPageStore.open(name);
+    const abandoned = await store.acquireForegroundNodeLease();
+    store.close();
+
+    store = await IndexedDbPageStore.open(name);
+    const replacement = await store.acquireForegroundNodeLease(true);
+    expect(replacement.node).not.toEqual(abandoned.node);
+    await store.retireForegroundNodeLease(replacement.leaseId);
+    store.close();
+  });
+
   it("rejects a missing or malformed physical replica node before touching pages", async () => {
     for (const replicaNode of [null, new Uint8Array(INDEXEDDB_REPLICA_NODE_BYTES - 1)]) {
       const name = databaseName();

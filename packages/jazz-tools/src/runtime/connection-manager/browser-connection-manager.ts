@@ -5,6 +5,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "../db-inte
 import type { BrowserWorkerConnection } from "../runtime-source.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -32,7 +33,14 @@ export class BrowserConnectionManager extends ConnectionManager {
     super(host);
   }
 
-  async start(): Promise<void> {}
+  async start(): Promise<void> {
+    // This resolves before public Db construction returns, preserving the
+    // synchronous application mutation API while leasing the TxId node before
+    // the foreground runtime can exist or mint a transaction.
+    this.foregroundNodeLease = await this.host.runtimeSource.acquireBrowserForegroundNodeLease(
+      this.host.config,
+    );
+  }
 
   protected override onClientCreated({ schema, client }: ConnectionManagerClientInput): void {
     const workerConfig = { ...this.host.config };
@@ -213,12 +221,31 @@ export class BrowserConnectionManager extends ConnectionManager {
     const unregisterInspectorControl = this.unregisterInspectorControl;
     this.unregisterInspectorControl = null;
 
+    const lease = this.foregroundNodeLease;
+    this.foregroundNodeLease = undefined;
+    const client = this.getCurrentClient();
     await runCleanupSteps([
       () => unregisterInspectorControl?.(),
       // A rejected physical-root admission created no follower and therefore
       // has nothing to flush. Shutdown remains idempotent after a caller has
       // already received that operation-level error.
       () => (admissionFailed ? undefined : connection?.flushLocal()),
+      async () => {
+        if (!lease) return;
+        // The native value includes identities minted for rolled-back and
+        // unsubmitted writes. Any failure in this readout or its atomic worker
+        // persistence retires the node rather than risking reuse.
+        try {
+          const runtime = client?.getRuntime();
+          if (!runtime || !(runtime instanceof NativeRuntimeAdapter)) {
+            await lease.retire();
+            return;
+          }
+          await lease.returnWithHighWater(runtime.foregroundTxTimeHighWater());
+        } catch {
+          await lease.retire().catch(() => undefined);
+        }
+      },
       () => {
         // The tab runtime is explicitly non-durable; once its worker peer has
         // flushed, graceful evaluator teardown cannot add durability and may wait

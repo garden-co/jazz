@@ -7,6 +7,10 @@ import {
   transferableFrames,
 } from "../runtime/native-runtime/browser-worker-transport.js";
 import type {
+  BrowserForegroundNodeLeaseAcquireRequest,
+  BrowserForegroundNodeLeaseAcquireResponse,
+  BrowserForegroundNodeLeasePortEvent,
+  BrowserForegroundNodeLeasePortRequest,
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
   BrowserInspectorControlEvent,
@@ -72,9 +76,15 @@ type RuntimeContext = {
   transportStateWaiters: Set<() => void>;
 };
 
+type ForegroundLeaseOwner = {
+  pageStore: IndexedDbPageStore;
+  activeLeaseIds: Set<string>;
+};
+
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const workerRealmId = crypto.randomUUID();
 const contexts = new Map<string, RuntimeContext>();
+const foregroundLeaseOwners = new Map<string, ForegroundLeaseOwner>();
 const inspectorControlPorts = new Set<MessagePort>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
 let wasmModuleSource: string | null = null;
@@ -84,16 +94,118 @@ let nextResetId = 1;
 workerGlobal.onconnect = (event) => {
   const port = event.ports[0];
   if (!port) return;
-  const onBootstrapMessage = (messageEvent: MessageEvent<BrowserSharedWorkerConnectRequest>) => {
+  const onBootstrapMessage = (
+    messageEvent: MessageEvent<
+      BrowserSharedWorkerConnectRequest | BrowserForegroundNodeLeaseAcquireRequest
+    >,
+  ) => {
     const message = messageEvent.data;
-    if (message?.type !== "connect-runtime") return;
+    if (message?.type !== "connect-runtime" && message?.type !== "acquire-foreground-node-lease") {
+      return;
+    }
     port.removeEventListener("message", onBootstrapMessage);
-    post(port, { type: "worker-alive" });
-    void connectTab(port, message);
+    if (message.type === "connect-runtime") {
+      post(port, { type: "worker-alive" });
+      void connectTab(port, message);
+    } else {
+      void acquireForegroundNodeLease(port, message);
+    }
   };
   port.addEventListener("message", onBootstrapMessage);
   port.start();
 };
+
+async function acquireForegroundNodeLease(
+  port: MessagePort,
+  request: BrowserForegroundNodeLeaseAcquireRequest,
+): Promise<void> {
+  try {
+    let owner = foregroundLeaseOwners.get(request.dbName);
+    if (!owner) {
+      owner = {
+        pageStore: await IndexedDbPageStore.open(request.dbName),
+        activeLeaseIds: new Set(),
+      };
+      foregroundLeaseOwners.set(request.dbName, owner);
+    }
+    const lease = await owner.pageStore.acquireForegroundNodeLease(owner.activeLeaseIds.size === 0);
+    owner.activeLeaseIds.add(lease.leaseId);
+    post(port, {
+      type: "foreground-node-lease-ready",
+      leaseId: lease.leaseId,
+      node: lease.node,
+      confirmedTxTime: lease.confirmedTxTime.toString(),
+    } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+
+    let settled = false;
+    const retire = async (): Promise<void> => {
+      if (settled) return;
+      settled = true;
+      owner!.activeLeaseIds.delete(lease.leaseId);
+      await owner!.pageStore.retireForegroundNodeLease(lease.leaseId);
+      maybeCloseWorker();
+    };
+    const onMessage = (event: MessageEvent<BrowserForegroundNodeLeasePortRequest>) => {
+      void (async () => {
+        const message = event.data;
+        try {
+          if (settled) return;
+          if (message?.type === "return-foreground-node-lease") {
+            if (!/^(0|[1-9][0-9]*)$/.test(message.confirmedTxTime)) {
+              throw new Error("Invalid foreground node lease high-water");
+            }
+            const highWater = BigInt(message.confirmedTxTime);
+            settled = true;
+            await owner!.pageStore.returnForegroundNodeLease(lease.leaseId, highWater);
+            owner!.activeLeaseIds.delete(lease.leaseId);
+            post(port, {
+              type: "foreground-node-lease-result",
+            } satisfies BrowserForegroundNodeLeasePortEvent);
+            cleanup();
+            port.close();
+            maybeCloseWorker();
+            return;
+          }
+          if (message?.type === "retire-foreground-node-lease") {
+            await retire();
+            post(port, {
+              type: "foreground-node-lease-result",
+            } satisfies BrowserForegroundNodeLeasePortEvent);
+            cleanup();
+            port.close();
+          }
+        } catch (error) {
+          // A failed clean handoff is indistinguishable from an interrupted
+          // one. Failed retirement leaves the active record for a later worker
+          // bootstrap to retire instead of making it reusable.
+          await retire().catch(() => undefined);
+          post(port, {
+            type: "foreground-node-lease-result",
+            error: asError(error).message,
+          } satisfies BrowserForegroundNodeLeasePortEvent);
+          cleanup();
+          port.close();
+        }
+      })();
+    };
+    const onMessageError = () => {
+      void retire().catch(() => undefined);
+      cleanup();
+    };
+    const cleanup = () => {
+      port.removeEventListener("message", onMessage);
+      port.removeEventListener("messageerror", onMessageError);
+    };
+    port.addEventListener("message", onMessage);
+    port.addEventListener("messageerror", onMessageError);
+  } catch (error) {
+    post(port, {
+      type: "foreground-node-lease-error",
+      message: asError(error).message,
+    } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    port.close();
+  }
+}
 
 async function connectTab(
   port: MessagePort,
@@ -789,7 +901,14 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
 }
 
 function maybeCloseWorker(): void {
-  if (contexts.size === 0 && inspectorControlPorts.size === 0) workerGlobal.close();
+  const hasActiveForegroundLease = [...foregroundLeaseOwners.values()].some(
+    (owner) => owner.activeLeaseIds.size > 0,
+  );
+  if (contexts.size === 0 && inspectorControlPorts.size === 0 && !hasActiveForegroundLease) {
+    for (const owner of foregroundLeaseOwners.values()) owner.pageStore.close();
+    foregroundLeaseOwners.clear();
+    workerGlobal.close();
+  }
 }
 
 function closeContextPeers(context: RuntimeContext): void {
@@ -884,7 +1003,11 @@ function runtimeKey(options: BrowserWorkerInitOptions): string {
 
 function post(
   port: MessagePort,
-  event: BrowserFollowerPortEvent | BrowserSharedWorkerConnectResponse,
+  event:
+    | BrowserFollowerPortEvent
+    | BrowserSharedWorkerConnectResponse
+    | BrowserForegroundNodeLeaseAcquireResponse
+    | BrowserForegroundNodeLeasePortEvent,
 ): void {
   port.postMessage(event);
 }

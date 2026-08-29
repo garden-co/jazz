@@ -701,6 +701,21 @@ where
         self.node_uuid
     }
 
+    /// Highest HLC value this runtime has observed or minted.
+    ///
+    /// A foreground lease owner persists this value before returning a node
+    /// identity to its pool.  It intentionally includes identities allocated
+    /// for transactions that were later rolled back or never submitted.
+    pub(crate) fn tx_time_high_water(&self) -> TxTime {
+        self.clock.tx_time
+    }
+
+    /// Establish a durable-owner supplied lower bound before this runtime can
+    /// mint its first transaction identity.
+    pub(crate) fn seed_tx_time_high_water(&mut self, high_water: TxTime) {
+        self.merge_tx_time(high_water);
+    }
+
     pub(crate) fn authored_commit_durability(&self) -> DurabilityTier {
         self.authored_commit_durability
     }

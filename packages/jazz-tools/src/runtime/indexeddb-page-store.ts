@@ -30,6 +30,9 @@ export const INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY = "browser-runtime-owner";
  */
 export const INDEXEDDB_REPLICA_NODE_KEY = "replica-node-v1";
 export const INDEXEDDB_REPLICA_NODE_BYTES = 16;
+/** Durable worker-owned pool for browser foreground TxId node leases. */
+export const INDEXEDDB_FOREGROUND_NODE_LEASES_KEY = "foreground-node-leases-v1";
+export const INDEXEDDB_FOREGROUND_NODE_LEASES_FORMAT = "jazz-foreground-node-leases-v1";
 const CURRENT_METADATA_KEY = "current";
 const MIN_PAGE_SIZE = 1024;
 const MAX_PAGE_SIZE = 0x8000_0000;
@@ -103,6 +106,28 @@ export interface IndexedDbPageCommit {
   pages: ReadonlyMap<number, Uint8Array>;
   deletedPageIds?: readonly number[];
 }
+
+export interface ForegroundNodeLease {
+  /** Opaque CSPRNG lease token, valid only while its port remains attached. */
+  leaseId: string;
+  /** NodeUuid leased exclusively to this foreground runtime. */
+  node: Uint8Array;
+  /** HLC high-water persisted by the preceding clean lease holder. */
+  confirmedTxTime: bigint;
+}
+
+type StoredForegroundNodeLease = {
+  leaseId: string;
+  node: ArrayBuffer;
+  confirmedTxTime: string;
+};
+
+type StoredForegroundNodeLeasePool = {
+  format: typeof INDEXEDDB_FOREGROUND_NODE_LEASES_FORMAT;
+  active: StoredForegroundNodeLease[];
+  reusable: StoredForegroundNodeLease[];
+  retired: ArrayBuffer[];
+};
 
 export class IndexedDbStorageInvalidatedError extends Error {
   constructor(readonly databaseName: string) {
@@ -198,6 +223,63 @@ export class IndexedDbPageStore {
     return this.replicaNodeBytes.slice();
   }
 
+  /**
+   * Atomically acquire a foreground TxId node lease.
+   *
+   * An `active` record left behind by an earlier worker process is never
+   * reused: its holder may have minted identities after its last persistence
+   * point. A fresh worker retires it before allocating a new or cleanly
+   * returned identity. The current SharedWorker keeps live leases in memory,
+   * so this recovery rule only applies during worker bootstrap.
+   */
+  async acquireForegroundNodeLease(recoverAbandoned = false): Promise<ForegroundNodeLease> {
+    return await this.updateForegroundNodeLeasePool((pool) => {
+      if (recoverAbandoned) {
+        for (const active of pool.active) pool.retired.push(active.node);
+        pool.active = [];
+      }
+      const reusable = pool.reusable.pop();
+      const lease: StoredForegroundNodeLease = {
+        leaseId: crypto.randomUUID(),
+        node: reusable?.node ?? nodeBytesToBuffer(randomReplicaNodeBytes()),
+        confirmedTxTime: reusable?.confirmedTxTime ?? "0",
+      };
+      pool.active.push(lease);
+      return storedForegroundNodeLeaseToPublic(lease);
+    });
+  }
+
+  /**
+   * Atomically persist the runtime-observed HLC high-water before making a
+   * foreground node reusable. An unknown lease is rejected fail-closed.
+   */
+  async returnForegroundNodeLease(leaseId: string, confirmedTxTime: bigint): Promise<void> {
+    if (!isLeaseId(leaseId) || confirmedTxTime < 0n) {
+      throw new Error("Invalid IndexedDB foreground node lease handoff");
+    }
+    await this.updateForegroundNodeLeasePool((pool) => {
+      const index = pool.active.findIndex((lease) => lease.leaseId === leaseId);
+      if (index < 0) throw new Error("Unknown IndexedDB foreground node lease");
+      const [lease] = pool.active.splice(index, 1);
+      if (!lease) throw new Error("Unknown IndexedDB foreground node lease");
+      pool.reusable.push({
+        ...lease,
+        confirmedTxTime: confirmedTxTime.toString(),
+      });
+    });
+  }
+
+  /** Permanently retire a lease whose owner did not complete clean handoff. */
+  async retireForegroundNodeLease(leaseId: string): Promise<void> {
+    if (!isLeaseId(leaseId)) throw new Error("Invalid IndexedDB foreground node lease");
+    await this.updateForegroundNodeLeasePool((pool) => {
+      const index = pool.active.findIndex((lease) => lease.leaseId === leaseId);
+      if (index < 0) return;
+      const [lease] = pool.active.splice(index, 1);
+      if (lease) pool.retired.push(lease.node);
+    });
+  }
+
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
     this.assertValid();
     const tx = this.db.transaction(INDEXEDDB_BTREE_METADATA_STORE, "readonly");
@@ -275,6 +357,33 @@ export class IndexedDbPageStore {
       throw new Error("Missing or invalid IndexedDB replica node identity");
     }
     return bytes.slice();
+  }
+
+  private async updateForegroundNodeLeasePool<T>(
+    update: (pool: StoredForegroundNodeLeasePool) => T,
+  ): Promise<T> {
+    this.assertValid();
+    const tx = relaxedReadWriteTransaction(this.db, [INDEXEDDB_STORAGE_MANIFEST_STORE]);
+    const done = transactionDone(tx);
+    const store = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    try {
+      const value = await requestResult(store.get(INDEXEDDB_FOREGROUND_NODE_LEASES_KEY));
+      const pool =
+        value === undefined ? emptyForegroundNodeLeasePool() : decodeForegroundNodeLeasePool(value);
+      const result = update(pool);
+      assertForegroundNodeLeasePool(pool);
+      store.put(pool, INDEXEDDB_FOREGROUND_NODE_LEASES_KEY);
+      await done;
+      return result;
+    } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+        // The transaction may already have completed/aborted after a request failure.
+      }
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   async readPage(pageId: number): Promise<Uint8Array | null> {
@@ -449,6 +558,117 @@ function randomReplicaNodeBytes(): Uint8Array {
   }
   globalThis.crypto.getRandomValues(bytes);
   return bytes;
+}
+
+function nodeBytesToBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.slice().buffer as ArrayBuffer;
+}
+
+function emptyForegroundNodeLeasePool(): StoredForegroundNodeLeasePool {
+  return {
+    format: INDEXEDDB_FOREGROUND_NODE_LEASES_FORMAT,
+    active: [],
+    reusable: [],
+    retired: [],
+  };
+}
+
+function storedForegroundNodeLeaseToPublic(lease: StoredForegroundNodeLease): ForegroundNodeLease {
+  return {
+    leaseId: lease.leaseId,
+    node: new Uint8Array(lease.node).slice(),
+    confirmedTxTime: BigInt(lease.confirmedTxTime),
+  };
+}
+
+function decodeForegroundNodeLeasePool(value: unknown): StoredForegroundNodeLeasePool {
+  assertForegroundNodeLeasePool(value);
+  return {
+    format: value.format,
+    active: value.active.map(copyStoredForegroundNodeLease),
+    reusable: value.reusable.map(copyStoredForegroundNodeLease),
+    retired: value.retired.map((node) => node.slice(0)),
+  };
+}
+
+function copyStoredForegroundNodeLease(
+  lease: StoredForegroundNodeLease,
+): StoredForegroundNodeLease {
+  return {
+    leaseId: lease.leaseId,
+    node: lease.node.slice(0),
+    confirmedTxTime: lease.confirmedTxTime,
+  };
+}
+
+function assertForegroundNodeLeasePool(
+  value: unknown,
+): asserts value is StoredForegroundNodeLeasePool {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid IndexedDB foreground node lease pool");
+  }
+  const pool = value as Partial<StoredForegroundNodeLeasePool>;
+  if (
+    pool.format !== INDEXEDDB_FOREGROUND_NODE_LEASES_FORMAT ||
+    !Array.isArray(pool.active) ||
+    !Array.isArray(pool.reusable) ||
+    !Array.isArray(pool.retired)
+  ) {
+    throw new Error("Invalid IndexedDB foreground node lease pool");
+  }
+  const nodes = new Set<string>();
+  const leaseIds = new Set<string>();
+  for (const lease of [...pool.active, ...pool.reusable]) {
+    assertStoredForegroundNodeLease(lease);
+    const nodeKey = bytesKey(lease.node);
+    if (leaseIds.has(lease.leaseId) || nodes.has(nodeKey)) {
+      throw new Error("Invalid IndexedDB foreground node lease pool");
+    }
+    leaseIds.add(lease.leaseId);
+    nodes.add(nodeKey);
+  }
+  for (const node of pool.retired) {
+    const nodeKey = isNodeBuffer(node) ? bytesKey(node) : null;
+    if (!nodeKey || nodes.has(nodeKey)) {
+      throw new Error("Invalid IndexedDB foreground node lease pool");
+    }
+    nodes.add(nodeKey);
+  }
+}
+
+function assertStoredForegroundNodeLease(
+  value: unknown,
+): asserts value is StoredForegroundNodeLease {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid IndexedDB foreground node lease");
+  }
+  const lease = value as Partial<StoredForegroundNodeLease>;
+  if (
+    !isLeaseId(lease.leaseId) ||
+    !isNodeBuffer(lease.node) ||
+    !isCanonicalNonNegativeBigintString(lease.confirmedTxTime)
+  ) {
+    throw new Error("Invalid IndexedDB foreground node lease");
+  }
+}
+
+function isNodeBuffer(value: unknown): value is ArrayBuffer {
+  return value instanceof ArrayBuffer && value.byteLength === INDEXEDDB_REPLICA_NODE_BYTES;
+}
+
+function isLeaseId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+function isCanonicalNonNegativeBigintString(value: unknown): value is string {
+  return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value);
+}
+
+function bytesKey(bytes: ArrayBuffer): string {
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {

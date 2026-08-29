@@ -189,6 +189,8 @@ type NativeDb = {
     opts: unknown,
   ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
+  foregroundTxTimeHighWater?(): bigint;
+  seedForegroundTxTimeHighWater?(highWater: bigint): void;
   setRelayAuthoritySessionOwner?(): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -876,6 +878,26 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setNonDurableClient();
     this.nonDurableClient = true;
+  }
+
+  /** @internal Return the native HLC high-water for a foreground lease handoff. */
+  foregroundTxTimeHighWater(): bigint {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.foregroundTxTimeHighWater();
+    if (!this.db.foregroundTxTimeHighWater) {
+      throw new Error("Native runtime does not expose foreground transaction high-water");
+    }
+    return this.db.foregroundTxTimeHighWater();
+  }
+
+  /** @internal Seed a foreground lease high-water before the first local write. */
+  seedForegroundTxTimeHighWater(highWater: bigint): void {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.seedForegroundTxTimeHighWater(highWater);
+    }
+    if (!this.db.seedForegroundTxTimeHighWater) {
+      throw new Error("Native runtime does not expose foreground transaction high-water seeding");
+    }
+    this.db.seedForegroundTxTimeHighWater(highWater);
   }
 
   /** Configure Jazz-owned upload rate and unpublished-tree expiry policy. */
