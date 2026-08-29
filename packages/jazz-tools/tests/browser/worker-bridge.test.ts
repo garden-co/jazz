@@ -12,6 +12,8 @@ import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
+  INDEXEDDB_BTREE_METADATA_STORE,
+  INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
@@ -300,10 +302,18 @@ describe("SharedWorker bridge with IndexedDB", () => {
   });
 
   it("keeps createDb schema-lazy but rejects the first local read when durable storage cannot open", async () => {
+    const ambientErrors: string[] = [];
+    const recordAmbientError = (event: ErrorEvent) => {
+      ambientErrors.push(event.error instanceof Error ? event.error.message : event.message);
+    };
+    globalThis.addEventListener("error", recordAmbientError);
+    errorListeners.add(recordAmbientError);
     const dbName = uniqueDbName("corrupt-storage-open");
+    const secret = generateAuthSecret();
     const initial = track(
       await createDb({
         appId: "test-app",
+        secret,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -319,10 +329,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       ...INDEXEDDB_STORAGE_MANIFEST,
       storageEpoch: 2,
     });
+    const recordsBeforeRead = await rawStorageRecords(dbName);
 
     const reopened = track(
       await createDb({
         appId: "test-app",
+        secret,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -335,6 +347,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
         "corrupt storage read did not settle",
       ),
     ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+    await sleep(0);
+    expect(ambientErrors).toEqual([]);
+    expect(await rawStorageRecords(dbName)).toEqual(recordsBeforeRead);
+    globalThis.removeEventListener("error", recordAmbientError);
+    errorListeners.delete(recordAmbientError);
   });
 
   // -------------------------------------------------------------------------
@@ -2818,6 +2835,27 @@ async function replaceStorageManifest(name: string, manifest: unknown): Promise<
     .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
   await transactionDone(transaction);
   database.close();
+}
+
+async function rawStorageRecords(name: string): Promise<Record<string, unknown>> {
+  const database = await requestResult(indexedDB.open(name));
+  const storeNames = [
+    INDEXEDDB_BTREE_PAGES_STORE,
+    INDEXEDDB_BTREE_METADATA_STORE,
+    INDEXEDDB_STORAGE_MANIFEST_STORE,
+  ];
+  const transaction = database.transaction(storeNames, "readonly");
+  const records = Object.fromEntries(
+    await Promise.all(
+      storeNames.map(async (storeName) => {
+        const store = transaction.objectStore(storeName);
+        return [storeName, await requestResult(store.getAll())] as const;
+      }),
+    ),
+  );
+  await transactionDone(transaction);
+  database.close();
+  return records;
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
