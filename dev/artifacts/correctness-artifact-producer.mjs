@@ -130,12 +130,19 @@ export function writeCorrectnessArtifactProducerManifest(rootInput, snapshot, ex
 /** Fail closed before a TS build/test can consume cached or mutable artifacts. */
 export function verifyCorrectnessArtifactProducer(rootInput) {
   const root = resolve(rootInput);
-  const manifestPath = correctnessArtifactProducerManifest(root);
-  const manifest = parseManifest(manifestPath);
-  validateShape(manifest);
+  const manifest = verifyCorrectnessArtifactSnapshot(root);
   const source = correctnessArtifactSourceIdentity(root);
   if (JSON.stringify(manifest.source) !== JSON.stringify(source))
     throw new Error("correctness artifacts: producer manifest belongs to different source inputs");
+  return manifest;
+}
+
+/** Verify the immutable producer receipt and selected bytes, without re-admitting source. */
+export function verifyCorrectnessArtifactSnapshot(rootInput) {
+  const root = resolve(rootInput);
+  const manifestPath = correctnessArtifactProducerManifest(root);
+  const manifest = parseManifest(manifestPath);
+  validateShape(manifest);
   const snapshot = readCorrectnessArtifactSnapshotByFingerprint(root, manifest.snapshotFingerprint);
   if (
     manifest.snapshotFingerprint !== snapshot.fingerprint ||
@@ -165,7 +172,17 @@ export function correctnessArtifactConsumerEnvironment(rootInput) {
 
 /** Refuse a direct caller that supplied mutable or mismatched sealed paths. */
 export function verifyCorrectnessArtifactConsumerEnvironment(rootInput, env = process.env) {
-  const expected = correctnessArtifactConsumerEnvironment(rootInput);
+  // Source is admitted exactly once by correctnessArtifactConsumerEnvironment
+  // before the outer consumer process starts. Nested consumers and the outer
+  // postflight must keep checking the immutable receipt and bytes, but test
+  // processes are allowed to create or remove ordinary workspace outputs.
+  const manifest = verifyCorrectnessArtifactSnapshot(rootInput);
+  const expected = {
+    JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+    JAZZ_CORRECTNESS_WASM_PACKAGE: manifest.snapshot.wasmPackage,
+    JAZZ_CORRECTNESS_NAPI_BINDING: join(manifest.snapshot.napiGeneration, "index.js"),
+    JAZZ_CORRECTNESS_NAPI_FINGERPRINT: manifest.snapshot.napiFingerprint,
+  };
   for (const [name, value] of Object.entries(expected)) {
     if (env[name] !== value)
       throw new Error(

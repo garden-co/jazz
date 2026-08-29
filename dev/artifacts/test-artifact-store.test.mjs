@@ -340,6 +340,44 @@ test("the consumer wrapper rejects snapshot mutation after preflight", async () 
   }
 });
 
+test("one source admission covers nested consumers while snapshot checks continue", async () => {
+  const root = fixture("nested-admission", "1".repeat(64), "2".repeat(64));
+  try {
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
+      { cwd: root },
+    );
+    const snapshot = snapshotCorrectnessArtifacts(root);
+    writeCorrectnessArtifactProducerManifest(root, snapshot);
+    const runner = new URL("../gates/run-correctness-consumer.mjs", import.meta.url).href;
+    await runCorrectnessConsumer(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        [
+          "import fs from 'node:fs'",
+          `import { runCorrectnessConsumer } from ${JSON.stringify(runner)}`,
+          "fs.writeFileSync(process.argv[1], 'test-owned output')",
+          "await runCorrectnessConsumer(process.execPath, ['-e', ''], { rootDir: process.argv[2] })",
+        ].join(";"),
+        join(root, "test-output"),
+        root,
+      ],
+      { cwd: root, rootDir: root },
+    );
+    assert.throws(() => verifyCorrectnessArtifactProducer(root), /different source inputs/);
+    assert.throws(
+      () => runCorrectnessConsumer(process.execPath, ["-e", ""], { cwd: root, rootDir: root }),
+      /different source inputs/,
+    );
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test("snapshot pointers reject malformed fingerprints and path traversal", () => {
   const root = fixture("traversal", "e".repeat(64), "f".repeat(64));
   try {

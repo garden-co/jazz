@@ -25,6 +25,10 @@ import {
 export const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
 export function correctnessConsumerEnvironment(rootDir = root) {
+  if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1") {
+    verifyCorrectnessArtifactConsumerEnvironment(rootDir, process.env);
+    return { ...process.env };
+  }
   return { ...process.env, ...correctnessArtifactConsumerEnvironment(rootDir) };
 }
 
