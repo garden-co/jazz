@@ -16,8 +16,9 @@ import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js"
 
 /**
  * Every persistent browser tab is an in-memory client of one SharedWorker
- * runtime. There are no tab roles, elections, ownership locks, or follower
- * handoffs; SharedWorker identity supplies the namespace-wide singleton.
+ * runtime. There are no tab roles, elections, or follower handoffs. SharedWorker
+ * identity supplies the normal namespace-wide singleton, while a physical-root
+ * Web Lock fences retry generations and separately loaded worker assets.
  */
 export class BrowserConnectionManager extends ConnectionManager {
   private connection: BrowserWorkerConnection | null = null;

@@ -223,8 +223,11 @@ server over the core WebSocket protocol.
 
 With `driver: { type: "persistent" }`, Jazz opens one directly durable SharedWorker runtime per
 database namespace. The worker owns the IndexedDB page store and the server connection; each tab
-communicates with that runtime through a message port. There is no tab-leader election, Web Locks
-dependency, or per-tab durable database.
+communicates with that runtime through a message port. There is no tab-leader election, follower
+handoff, or per-tab durable database. Jazz does use one origin-wide Web Lock per physical database
+namespace to prevent retry generations or separately loaded worker assets from concurrently opening
+the same IndexedDB root. If that lock is unavailable or already held by another worker realm, the
+new realm fails closed instead of risking two durable owners.
 
 `driver.dbName` (and `dbName`) selects a **logical base**, not a physical IndexedDB namespace.
 Jazz derives the physical IndexedDB and SharedWorker namespace from that base plus app,
