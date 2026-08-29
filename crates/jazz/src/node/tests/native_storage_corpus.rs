@@ -505,6 +505,10 @@ fn assert_native_corpus_has_required_families(receipt: &NativeCorpusReceipt) {
         "jazz_transactions",
         "jazz_merge_heads",
         "jazz_global_changes",
+        "jazz_deletion_history",
+        "jazz_known_state_facts",
+        "jazz_settled_result_members",
+        "jazz_settled_program_facts",
     ] {
         assert!(
             !receipt.stores[store].is_empty(),
@@ -734,6 +738,7 @@ where
     let mut reader = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
         .expect("current Jazz opens committed native corpus");
     let before_write = native_corpus_receipt(&reader, &schema);
+    assert_native_corpus_has_required_families(&before_write);
     assert_eq!(
         native_corpus_pack(&before_write),
         epoch_1_native_corpus_pack(),
