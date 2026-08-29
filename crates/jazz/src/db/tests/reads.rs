@@ -187,6 +187,65 @@ fn maintained_local_index_snapshot_is_complete() {
     assert!(metrics.source_index_probes >= 1);
 }
 
+/// A Global subscription starts empty until its authority has settled the
+/// indexed source, then installs the same complete indexed snapshot that its
+/// Local counterpart would observe. This exercises the asynchronous delivery
+/// boundary that previously made the direct maintained index experiment lose
+/// fresh snapshots on worker-backed storage.
+#[test]
+fn maintained_global_index_snapshot_waits_for_settled_source() {
+    let schema = indexed_documents_schema();
+    let client_author = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let server = open_core(0xd4, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xd5, client_author, &schema);
+    let team = row(0xa4);
+    let matching = seed(
+        &server,
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("matching".to_owned())),
+        ]),
+    );
+    seed(
+        &server,
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(row(0xb4).0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("unrelated".to_owned())),
+        ]),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    server.node().borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(
+        opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty(),
+        "Global must not claim a snapshot before the authority settles it"
+    );
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&snapshot.rows), vec![matching]);
+    assert!(
+        server
+            .node()
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 1,
+        "the authority must hydrate the settled Global source through its equality index"
+    );
+}
+
 #[test]
 fn negated_membership_uses_two_valued_null_semantics() {
     let schema = build_public_db_test_schema(
