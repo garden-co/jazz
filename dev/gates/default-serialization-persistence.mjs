@@ -127,7 +127,7 @@ function serializerCalls(source) {
   const code = rustCodeMask(source);
   const calls = [];
   for (const api of forbiddenApis) {
-    const direct = new RegExp(`(?<![A-Za-z0-9_])(?:::)?${escapeRegex(api)}\\b`, "g");
+    const direct = new RegExp(`(?<![A-Za-z0-9_])(?:::)?${rawRootApiPattern(api)}\\b`, "g");
     for (const match of code.matchAll(direct)) {
       if (isCallAt(code, match.index + match[0].length)) {
         calls.push({ api, index: match.index });
@@ -141,7 +141,7 @@ function forbiddenPersistenceImports(source) {
   const code = rustCodeMask(source);
   const imports = [];
   for (const match of code.matchAll(/(?:^|\n)\s*(?:pub\s*(?:\([^)]*\)\s*)?)?use\s+([^;]+);/g)) {
-    const root = match[1].match(/(?:^|::)(postcard|serde_json)(?=::|\s|\{|$)/)?.[1];
+    const root = match[1].match(/(?:^|::)(?:r#)?(postcard|serde_json)(?=::|\s|\{|$)/)?.[1];
     if (root) imports.push({ root, index: match.index });
   }
   return imports;
@@ -228,6 +228,11 @@ function isCallAt(source, index) {
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function rawRootApiPattern(api) {
+  const [root, ...suffix] = api.split("::");
+  return `(?:r#)?${escapeRegex(root)}::${suffix.map(escapeRegex).join("::")}`;
 }
 
 console.log(
