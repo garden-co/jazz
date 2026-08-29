@@ -94,6 +94,22 @@ fn native_corpus_storage_tables(schema: &JazzSchema) -> (Vec<String>, Vec<String
     (tables, direct_stores)
 }
 
+/// The authority mints permanent physical identities exactly once.  A native
+/// compatibility corpus must replay that one authority snapshot into every
+/// backend: independently calling `NodeState::new` would correctly allocate
+/// different UUID identities, but would make the purportedly backend-neutral
+/// historical pack meaningless.
+fn native_corpus_authority_snapshot(schema: &JazzSchema) -> crate::protocol::CatalogueSnapshot {
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = MemoryStorage::new(&refs).expect("open authority corpus storage");
+    let authority = crate::db::block_on(NodeState::new(node(0xbf), schema.clone(), storage))
+        .expect("open corpus authority");
+    authority
+        .catalogue_snapshot()
+        .expect("authority emits a durable catalogue snapshot")
+}
+
 fn native_corpus_receipt<S>(node: &NodeState<S>, schema: &JazzSchema) -> NativeCorpusReceipt
 where
     S: OrderedKvStorage,
@@ -264,14 +280,22 @@ where
 
 fn exercise_native_corpus<S>(
     schema: JazzSchema,
+    snapshot: &crate::protocol::CatalogueSnapshot,
     open: impl Fn() -> S,
     open_with_incomplete_profile: impl Fn() -> Result<S, groove::storage::Error>,
 ) -> NativeCorpusReceipt
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let mut producer = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
-        .expect("open settlement-baseline producer");
+    // The physical manifest is authority-owned state.  Installing the same
+    // published snapshot into the independent SQLite and RocksDB roots makes
+    // their logical packs comparable without pretending local integer aliases
+    // or freshly minted UUIDs are an interchange format.
+    let mut producer = crate::db::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), open()))
+        .expect("open uninitialized settlement-baseline producer");
+    producer
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .expect("install the one authority snapshot before corpus writes");
     let (row_uuid, latest) = seed_native_corpus(
         &mut producer,
         "settlement baseline",
@@ -363,6 +387,7 @@ fn in_memory_native_corpus_receipt(first_title: &str, note_body: &str) -> Native
 #[test]
 fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let schema = native_corpus_schema();
+    let snapshot = native_corpus_authority_snapshot(&schema);
     let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
 
     let rocks_directory = tempfile::tempdir().expect("create RocksDB corpus directory");
@@ -371,7 +396,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let rocks_profile = profile.clone();
     let rocks_wrong_path = rocks_path.clone();
     let rocks_wrong_schema = rocks_schema.clone();
-    let rocks_receipt = exercise_native_corpus(rocks_schema.clone(), move || {
+    let rocks_receipt = exercise_native_corpus(rocks_schema.clone(), &snapshot, move || {
         let families = rocks_schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(
@@ -400,7 +425,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let sqlite_schema = schema;
     let sqlite_wrong_path = sqlite_path.clone();
     let sqlite_wrong_schema = sqlite_schema.clone();
-    let sqlite_receipt = exercise_native_corpus(sqlite_schema.clone(), move || {
+    let sqlite_receipt = exercise_native_corpus(sqlite_schema.clone(), &snapshot, move || {
         let families = sqlite_schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         YieldingStorage::wrap(
@@ -430,7 +455,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     );
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "fd05bb7c4d1fe89a5eb35cb7031e7af18f150eb6377166e858e135eaee35cbc7",
+        "f22130961052b8d9dc2c549ee2d48246d908c4044f3808037af933667ad8a88f",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
 }
