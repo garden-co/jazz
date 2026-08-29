@@ -584,6 +584,11 @@ impl RuntimeSchema {
     }
 
     fn with_jazz_direct_record_stores(&self, schema: GrooveDatabaseSchema) -> GrooveDatabaseSchema {
+        // Ordered direct-store key audit (storage format V1): known-state keys
+        // are three UUIDs; settled member/fact identities are fixed 32-byte
+        // digests; clean-close and consistency markers are fixed internal
+        // strings. Application-shaped bytes therefore occur only in values,
+        // never in a direct-store key.
         schema
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 KNOWN_STATE_FACTS_STORE,
