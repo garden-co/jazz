@@ -9,7 +9,7 @@ native adapters under the closed `epoch_1_storage_codec_profile`.
 Its settlement-baseline logical-receipt SHA-256 is:
 
 ```text
-9ad43563145a771423c5bbfabd7d38b7b69c2a8e935c7d5d581d5744231755c4
+e28546f6a4d9c4c3ef1d857f976e0d094a76906c86f56306c8f2349bab959d92
 ```
 
 The digest is over sorted system and physical application store names and, for
@@ -18,7 +18,14 @@ application closure includes each permanent table identity's history,
 register, global-current, ahead-current, and rejected-version stores.
 Direct-record stores use their typed semantic key/value fixture because Groove
 intentionally does not expose their raw adapter keys through the public
-direct-store facade. The test proves
+direct-store facade. The receipt also includes the canonical metadata records
+from Groove's `__groove_large_values` family: the seeded indirect attachment's
+exact root and node identities, their nonempty lifecycle/reference records,
+and the reclaim lifecycle entry. It rejects an unclassified metadata key and
+proves a completed local seed leaves no unfinished `install/` recovery marker.
+The raw `chunk/` byte-plane entry deliberately remains outside the
+backend-neutral pack: it is an adapter-owned installation receipt/blob plane;
+the separate physical SQLite and RocksDB fixtures retain and reopen it. The test proves
 both adapters produce the same pack, rejects an incomplete stored-codec
 profile before touching it, reopens without application writes, writes a new
 current-format row, and reopens a third time while preserving the older
@@ -42,7 +49,7 @@ fixtures that supply corruption detail beyond this whole-root receipt.
 The producer's exact logical pack is committed as
 `epoch-1-native-jazz-corpus.pack.base64`; it is base64 only to keep its
 canonical binary values safe in a text repository. Its SHA-256 is
-`1f9cc421ea72a0066c4305ac38916c3b605b352ce4b6f205bb28f5ba0967e361`.
+`fe81ca9b7b7cefdded25f2f6657578abdb0d4ebfef31191e6328e2225b3b55a3`.
 It explicitly lists empty authoritative families as well as entries, so an
 omitted opened family cannot look the same as an empty one.
 
@@ -54,6 +61,11 @@ The same pinned producer has two backend-specific physical receipts:
   `4ba479e28c13f3c6233ab0acf65285bb503c6446083966cf72cc5ccba20f23f9`.
 - `epoch-1-native-jazz-rocksdb.tar.gz.base64` — archive SHA-256
   `1477e75cb48aa05e347a354b4b4d0edd4d31fde455f7b589390ade2605b0c1f3`.
+
+The logical receipt was expanded to cover the already-present Groove metadata
+ledger; fresh-root reopening verified both pinned physical artifacts unchanged,
+so this coverage-only update intentionally does not replace their backend-owned
+SQLite/RocksDB bytes or checksums.
 
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`
 checks each payload before materializing it, inspects SQLite and RocksDB using
@@ -111,5 +123,9 @@ opening a fresh materialized SQLite copy and freshly unpacked RocksDB root with
 the full historical receipt. Each requested output must be a fresh path: the
 publisher refuses to overwrite an existing artifact. Encode the pack and Rocks archive with base64;
 gzip the SQLite file deterministically (`gzip -n -9`) before base64. Then
-update all three physical checksums and the logical-pack checksum together with
-the executable constants. Pre-settlement alpha stores remain intentionally unsupported.
+update the logical-pack checksum and any physical checksums whose reviewed
+candidate actually changes, together with the executable constants. A
+logical-pack coverage change may leave physical checksums unchanged when the
+existing artifacts already contain the newly audited bytes; record that
+fresh-root verification explicitly. Pre-settlement alpha stores remain
+intentionally unsupported.

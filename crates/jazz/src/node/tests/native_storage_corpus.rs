@@ -31,12 +31,13 @@ const NATIVE_CORPUS_REQUIRED_STORES: &[&str] = &[
     "jazz_known_state_facts",
     "jazz_settled_result_members",
     "jazz_settled_program_facts",
+    groove::db::LARGE_VALUE_METADATA_CF,
 ];
 const NATIVE_CORPUS_PACK_HEADER: &str = "JAZZ-NATIVE-STORAGE-CORPUS-1";
 const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
-    "1f9cc421ea72a0066c4305ac38916c3b605b352ce4b6f205bb28f5ba0967e361";
+    "fe81ca9b7b7cefdded25f2f6657578abdb0d4ebfef31191e6328e2225b3b55a3";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -519,6 +520,48 @@ fn assert_same_native_corpus(
     );
 }
 
+/// Return the engine-owned metadata ledger from Groove's shared large-value
+/// class. `chunk/` entries are the backing chunk plane's bytes and its local
+/// installation receipt; their physical representation is backend-owned.
+/// Every other key prefix is a canonical Groove metadata/lifecycle record and
+/// is therefore part of the backend-neutral historical pack. Unknown keys
+/// fail closed rather than disappearing from the corpus when that ledger
+/// grows.
+fn native_corpus_large_value_metadata_entries<S>(node: &NodeState<S>) -> Vec<(Vec<u8>, Vec<u8>)>
+where
+    S: OrderedKvStorage,
+{
+    let entries = crate::db::block_on(
+        node.database
+            .large_value_metadata_entries_for_compatibility(),
+    )
+    .expect("scan Groove large-value metadata corpus family");
+    let metadata_prefixes: &[&[u8]] = &[
+        b"root/",
+        b"node/",
+        b"reclaim/",
+        b"staged/",
+        b"upload/",
+        b"completed-upload/",
+        b"completed-receipt/",
+        b"install/",
+    ];
+    entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            if key.starts_with(b"chunk/") {
+                return None;
+            }
+            assert!(
+                metadata_prefixes.iter().any(|prefix| key.starts_with(prefix)),
+                "unknown key in Groove large-value metadata family must be explicitly classified before corpus publication: {}",
+                hex::encode(&key),
+            );
+            Some((key, value))
+        })
+        .collect()
+}
+
 fn native_corpus_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
@@ -840,6 +883,24 @@ where
         stores.insert(store_name, rows);
     }
 
+    // Groove's large-value metadata plane is deliberately neither an
+    // application table nor a direct record store: its key namespace selects
+    // several engine-owned canonical record shapes (root refcounts, node
+    // edges/refcounts, staging/upload lifecycle journals, and install/reclaim
+    // markers).  Freeze its exact ordered bytes alongside Jazz's physical row
+    // families rather than accidentally treating the row descriptor as the
+    // whole indirect-value persistence contract.
+    let large_value_entries = native_corpus_large_value_metadata_entries(node);
+    assert!(
+        stores
+            .insert(
+                groove::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_entries,
+            )
+            .is_none(),
+        "the engine-owned large-value metadata family is not an application direct store"
+    );
+
     // Application rows do not live in the authored logical table declarations.
     // They are lowered into permanent physical table identities, with separate
     // immutable-history, register, current-winner, and rejected families. A
@@ -861,7 +922,7 @@ where
     NativeCorpusReceipt { stores }
 }
 
-fn assert_native_corpus_has_required_families<S>(node: &NodeState<S>, receipt: &NativeCorpusReceipt)
+fn assert_native_corpus_has_required_families<S>(node: &mut NodeState<S>, receipt: &NativeCorpusReceipt)
 where
     S: OrderedKvStorage,
 {
@@ -882,6 +943,7 @@ where
         "jazz_known_state_facts",
         "jazz_settled_result_members",
         "jazz_settled_program_facts",
+        groove::db::LARGE_VALUE_METADATA_CF,
     ] {
         assert!(
             !receipt.stores[store].is_empty(),
@@ -905,6 +967,44 @@ where
                 && !receipt.stores[store].is_empty()
         }),
         "the authority-derived physical application closure must contain current row projections"
+    );
+
+    // The seeded descriptor must be tied to real metadata, not merely present
+    // in a transaction/version byte.  Root and node keys are each the exact
+    // canonical NodeRef selected by that descriptor; their non-empty values
+    // carry the durable/reference-count and child-edge state.  A healthy
+    // local finalize has no remaining `install/` marker: that marker is an
+    // interrupted remote-hydration recovery obligation, not durable ownership.
+    let versions = node
+        .query_table_versions("todos")
+        .expect("read native corpus attachment history");
+    let table = node.table("todos").expect("native corpus todos table");
+    let attachment = versions
+        .iter()
+        .find(|version| version.row_uuid() == row(0xc1))
+        .and_then(|version| version.cell(table, "attachment").expect("decode corpus attachment"))
+        .expect("seeded corpus row retains an attachment");
+    let Value::Large(value_ref) = attachment else {
+        panic!("seeded corpus attachment must be an indirect large value");
+    };
+    let encoded_root = groove::large_values::encode_node_ref(&value_ref.root)
+        .expect("seeded large-value root has a canonical NodeRef");
+    let mut root_key = b"root/".to_vec();
+    root_key.extend_from_slice(&encoded_root);
+    let mut node_key = b"node/".to_vec();
+    node_key.extend_from_slice(&encoded_root);
+    let metadata = &receipt.stores[groove::db::LARGE_VALUE_METADATA_CF];
+    assert!(
+        metadata.iter().any(|(key, value)| key == &root_key && !value.is_empty()),
+        "the seeded descriptor's exact root key retains nonempty durable lifecycle/refcount metadata"
+    );
+    assert!(
+        metadata.iter().any(|(key, value)| key == &node_key && !value.is_empty()),
+        "the seeded descriptor's exact root node retains nonempty child/reference metadata"
+    );
+    assert!(
+        metadata.iter().all(|(key, _)| !key.starts_with(b"install/")),
+        "a completed local seed leaves no unfinished remote-install journal"
     );
 }
 
@@ -1138,7 +1238,7 @@ where
     publish_native_corpus_lineage(&mut producer, snapshot);
     seed_native_corpus_settled_query_state(&mut producer);
     let before_close = native_corpus_receipt(&producer, &schema);
-    assert_native_corpus_has_required_families(&producer, &before_close);
+    assert_native_corpus_has_required_families(&mut producer, &before_close);
     drop(producer);
     archive_historical();
     // Do not let the live producer root stand in for a checked-in physical
@@ -1214,7 +1314,7 @@ where
     let mut reader = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
         .expect("current Jazz opens committed native corpus");
     let before_write = native_corpus_receipt(&reader, &schema);
-    assert_native_corpus_has_required_families(&reader, &before_write);
+    assert_native_corpus_has_required_families(&mut reader, &before_write);
     assert_eq!(
         native_corpus_pack(&before_write),
         epoch_1_native_corpus_pack(),
@@ -1462,6 +1562,11 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
         }
     });
 
+    assert_eq!(
+        rocks_receipt.stores.get(groove::db::LARGE_VALUE_METADATA_CF),
+        sqlite_receipt.stores.get(groove::db::LARGE_VALUE_METADATA_CF),
+        "SQLite and RocksDB agree on the canonical indirect-tree and lifecycle metadata; raw chunk-plane bytes remain backend-owned physical fixture data"
+    );
     assert_same_native_corpus(
         &rocks_receipt,
         &sqlite_receipt,
@@ -1480,7 +1585,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     }
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "9ad43563145a771423c5bbfabd7d38b7b69c2a8e935c7d5d581d5744231755c4",
+        "e28546f6a4d9c4c3ef1d857f976e0d094a76906c86f56306c8f2349bab959d92",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
     assert_eq!(
@@ -1947,17 +2052,18 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
     publish_native_corpus_lineage(&mut node, &snapshot);
     seed_native_corpus_settled_query_state(&mut node);
     let receipt = native_corpus_receipt(&node, &schema);
-    assert_native_corpus_has_required_families(&node, &receipt);
+    assert_native_corpus_has_required_families(&mut node, &receipt);
 
     let mut omitted = receipt.clone();
     for store in native_corpus_required_application_stores(&node) {
         omitted.stores.remove(&store);
     }
+    omitted.stores.remove(groove::db::LARGE_VALUE_METADATA_CF);
     let omission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        assert_native_corpus_has_required_families(&node, &omitted);
+        assert_native_corpus_has_required_families(&mut node, &omitted);
     }));
     assert!(
         omission.is_err(),
-        "removing every physical application family must fail even though transaction records remain"
+        "removing every physical application family and the engine-owned large-value metadata plane must fail even though transaction records remain"
     );
 }
