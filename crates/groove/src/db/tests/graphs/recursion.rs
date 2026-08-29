@@ -84,6 +84,150 @@ async fn deep_recursive_step_evaluates_with_constant_stack() {
     );
 }
 
+/// A resident recursive subscription can contain a much deeper graph than the
+/// outer IVM work queue sees: the recursive snapshot walks its seed/step graph
+/// privately. That walk must yield through the runtime owner while retaining
+/// its postorder continuation, so it neither blocks unrelated runtime work nor
+/// replays already-evaluated shared children on every turn.
+#[futures_test::test]
+async fn deep_recursive_hydration_yields_and_preserves_its_snapshot() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    database.commit_batch(batch).await.unwrap();
+
+    let seed = GraphBuilder::table("edges").project(["src", "dst"]);
+    let frontier = GraphBuilder::frontier_source(
+        "frontier",
+        RecordDescriptor::new([
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
+        ]),
+    );
+    let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+    let mut step = GraphBuilder::join(frontier, edge_pairs, ["dst"], ["src"]).project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    for _ in 0..48 {
+        step = step.filter(PredicateExpr::gt("src", Value::U64(0)));
+    }
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::recursive(seed, step, "frontier", 16))
+        .await
+        .unwrap();
+
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let mut previous_wakes = 0;
+    let mut yielded = false;
+    for _ in 0..128 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+        yielded = true;
+        let wakes_now = wakes.0.load(Ordering::Acquire);
+        assert!(
+            wakes_now > previous_wakes,
+            "each bounded recursive owner turn schedules exactly one continuation"
+        );
+        previous_wakes = wakes_now;
+    }
+
+    assert!(
+        yielded,
+        "the deep private recursion must not complete in one turn"
+    );
+    assert!(
+        !database.has_pending_progress(),
+        "the retained traversal converges without a hot-loop"
+    );
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        vec![(vec![Value::U64(1), Value::U64(2)], 1)]
+    );
+}
+
+#[futures_test::test]
+async fn recursive_hydration_retains_frontiers_until_the_full_closure_is_ready() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 3, 4);
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    for _ in 0..128 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(
+        !database.has_pending_progress(),
+        "all retained recursive frontiers eventually settle"
+    );
+    assert!(
+        wakes.0.load(Ordering::Acquire) > 0,
+        "frontier phases hand their continuation back to the runtime owner"
+    );
+
+    let mut values = expect_recv_vals(&subscription);
+    sort_pairs_by_value(&mut values);
+    assert_eq!(
+        values,
+        [
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(1), Value::U64(4)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(4)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
+        ]
+    );
+}
+
 #[futures_test::test]
 async fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
     let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");

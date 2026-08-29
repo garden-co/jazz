@@ -38,6 +38,77 @@ pub(super) struct RecursiveState {
     /// not capture same-tick binding changes made while installing a prepared
     /// subscription.
     hydrated_input_generation: Option<u64>,
+    /// A retained, inputs-backed snapshot recomputation. Subscription opening
+    /// owns a disposable operator future, so recursive hydration must keep its
+    /// postorder traversal and frontier outside that future when it yields.
+    pending_hydration: Option<Box<PendingHydrationRecompute>>,
+}
+
+const MAX_HYDRATION_TRAVERSAL_NODES_PER_POLL: usize = 32;
+
+#[derive(Clone, Debug)]
+struct PendingHydrationRecompute {
+    /// A pending snapshot is tied to the exact input generation that started
+    /// it. A later binding/table generation must restart from a coherent
+    /// snapshot rather than blend old memoized subgraphs into new inputs.
+    input_generation: u64,
+    accumulated: HashMap<Bytes, i64>,
+    phase: PendingHydrationPhase,
+    traversal: Option<HydrationTraversal>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingHydrationPhase {
+    Seed,
+    Step {
+        frontier: RecordDeltas,
+        sub_tick: usize,
+    },
+    ReadyForArrangementHydration,
+}
+
+/// A postorder walk over one immutable graph/context snapshot. Discovering and
+/// evaluating are both explicitly bounded; `memo` makes a hash-consed child
+/// run once even when several parents reference it.
+#[derive(Clone, Debug)]
+struct HydrationTraversal {
+    root: NodeId,
+    context: EvalContext,
+    discovery: Vec<HydrationTraversalFrame>,
+    discovered: HashSet<NodeId>,
+    visiting: HashSet<NodeId>,
+    order: Vec<NodeId>,
+    next_evaluation: usize,
+    memo: HashMap<NodeId, RecordDeltas>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HydrationTraversalFrame {
+    Visit(NodeId),
+    Evaluate(NodeId),
+}
+
+#[derive(Clone, Debug)]
+enum HydrationTraversalProgress {
+    Yield,
+    Ready(RecordDeltas),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HydrationRecomputeProgress {
+    Yield,
+    ReadyForArrangementHydration,
+}
+
+pub(super) struct HydrationRecomputeContext<'a> {
+    pub(super) schema: &'a crate::schema::DatabaseSchema,
+    pub(super) graph: &'a IvmGraph,
+    pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
+    pub(super) inputs: &'a mut EvaluationInputs,
+    pub(super) storage: &'a dyn OrderedKvStorage,
+    pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
+    pub(super) scope: ScopeId,
+    pub(super) input_generation: u64,
 }
 
 impl RecursiveState {
@@ -70,6 +141,61 @@ impl RecursiveState {
 
     pub(super) fn mark_hydrated_input_generation(&mut self, generation: u64) {
         self.hydrated_input_generation = Some(generation);
+    }
+
+    pub(super) fn has_pending_hydration(&self) -> bool {
+        self.pending_hydration.is_some()
+    }
+
+    fn begin_hydration_recompute(&mut self, input_generation: u64) {
+        self.pending_hydration = Some(Box::new(PendingHydrationRecompute {
+            input_generation,
+            accumulated: HashMap::default(),
+            phase: PendingHydrationPhase::Seed,
+            traversal: None,
+        }));
+    }
+
+    fn pending_hydration_mut(&mut self) -> &mut PendingHydrationRecompute {
+        self.pending_hydration
+            .as_mut()
+            .expect("hydration recompute was initialized")
+    }
+
+    pub(super) fn pending_hydration_accumulated_deltas(
+        &self,
+        descriptor: RecordDescriptor,
+    ) -> RecordDeltas {
+        let pending = self
+            .pending_hydration
+            .as_ref()
+            .expect("hydration recompute was initialized");
+        RecordDeltas {
+            descriptor,
+            deltas: pending
+                .accumulated
+                .iter()
+                .filter_map(|(record, weight)| {
+                    (*weight > 0).then_some(RecordDelta {
+                        record: record.clone(),
+                        weight: *weight,
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn finish_hydration_recompute(&mut self) -> HashMap<Bytes, i64> {
+        let pending = self
+            .pending_hydration
+            .take()
+            .expect("hydration recompute was initialized");
+        debug_assert!(matches!(
+            pending.phase,
+            PendingHydrationPhase::ReadyForArrangementHydration
+        ));
+        debug_assert!(pending.traversal.is_none());
+        pending.accumulated
     }
 
     pub(super) fn accumulated_deltas(&self) -> Vec<RecordDelta> {
@@ -132,7 +258,239 @@ impl RecursiveState {
         }
         self.accumulated = Rc::new(next);
         self.step_arrangements_hydrated = false;
+        self.pending_hydration = None;
         consolidate_deltas(deltas)
+    }
+}
+
+impl HydrationTraversal {
+    fn new(root: NodeId, context: EvalContext) -> Self {
+        Self {
+            root,
+            context,
+            discovery: vec![HydrationTraversalFrame::Visit(root)],
+            discovered: HashSet::default(),
+            visiting: HashSet::default(),
+            order: Vec::new(),
+            next_evaluation: 0,
+            memo: HashMap::default(),
+        }
+    }
+
+    async fn poll(
+        &mut self,
+        schema: &crate::schema::DatabaseSchema,
+        graph: &IvmGraph,
+        variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
+        inputs: &mut EvaluationInputs,
+        storage: &dyn OrderedKvStorage,
+        binding_snapshots: &HashMap<String, RecordDeltas>,
+    ) -> Result<HydrationTraversalProgress, IvmRuntimeError> {
+        let mut remaining = MAX_HYDRATION_TRAVERSAL_NODES_PER_POLL;
+        while remaining > 0 {
+            if let Some(frame) = self.discovery.pop() {
+                remaining -= 1;
+                match frame {
+                    HydrationTraversalFrame::Visit(node) => {
+                        if !self.discovered.insert(node) {
+                            if self.visiting.contains(&node) {
+                                return Err(IvmRuntimeError::GraphCycle(node));
+                            }
+                            continue;
+                        }
+                        self.visiting.insert(node);
+                        let graph_node = graph
+                            .node(node)
+                            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+                        self.discovery.push(HydrationTraversalFrame::Evaluate(node));
+                        for input in graph_node.descriptor.inputs.iter().rev() {
+                            self.discovery.push(HydrationTraversalFrame::Visit(*input));
+                        }
+                    }
+                    HydrationTraversalFrame::Evaluate(node) => {
+                        debug_assert!(self.visiting.remove(&node));
+                        self.order.push(node);
+                    }
+                }
+                continue;
+            }
+
+            let Some(node) = self.order.get(self.next_evaluation).copied() else {
+                return self
+                    .memo
+                    .get(&self.root)
+                    .cloned()
+                    .map(HydrationTraversalProgress::Ready)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(self.root));
+            };
+            remaining -= 1;
+            let mut evaluator = HydrationEvaluator {
+                schema,
+                graph,
+                variant_projections,
+                table_deltas: Some(&[]),
+                evaluation_inputs: Some(inputs),
+                storage,
+                binding_snapshots,
+                context: self.context.clone(),
+                memo: std::mem::take(&mut self.memo),
+            };
+            let result = evaluator.eval_node(node).await;
+            self.memo = evaluator.memo;
+            let result = result?;
+            self.memo.insert(node, result);
+            self.next_evaluation += 1;
+        }
+        Ok(HydrationTraversalProgress::Yield)
+    }
+}
+
+/// Resume one bounded phase of an inputs-backed recursive snapshot. The caller
+/// owns the operator-state save/yield boundary; this helper only advances the
+/// retained postorder traversal or moves the fixpoint frontier forward.
+pub(super) async fn resume_inputs_hydration_recompute(
+    recursive_state: &mut RecursiveState,
+    context: HydrationRecomputeContext<'_>,
+    node: NodeId,
+    recursive: &RecursiveOp,
+    output_desc: RecordDescriptor,
+    seed: NodeId,
+    step: NodeId,
+) -> Result<HydrationRecomputeProgress, IvmRuntimeError> {
+    if recursive_state
+        .pending_hydration
+        .as_ref()
+        .is_none_or(|pending| pending.input_generation != context.input_generation)
+    {
+        recursive_state.begin_hydration_recompute(context.input_generation);
+    }
+    let phase = recursive_state.pending_hydration_mut().phase.clone();
+    match phase {
+        PendingHydrationPhase::Seed => {
+            let traversal = recursive_state
+                .pending_hydration_mut()
+                .traversal
+                .take()
+                .unwrap_or_else(|| HydrationTraversal::new(seed, EvalContext::root()));
+            let mut traversal = traversal;
+            let progress = match traversal
+                .poll(
+                    context.schema,
+                    context.graph,
+                    context.variant_projections,
+                    context.inputs,
+                    context.storage,
+                    context.binding_snapshots,
+                )
+                .await
+            {
+                Ok(progress) => progress,
+                // The session owns request registration, but this operator
+                // owns traversal continuation. Keep the exact postorder
+                // stack/memo across a cold source instead of replaying every
+                // resident ancestor once the request is ready.
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    return Err(IvmRuntimeError::EvaluationBlocked);
+                }
+                Err(error) => return Err(error),
+            };
+            match progress {
+                HydrationTraversalProgress::Yield => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+                HydrationTraversalProgress::Ready(frontier) => {
+                    if frontier.descriptor != output_desc {
+                        return Err(IvmRuntimeError::GraphOutputMismatch);
+                    }
+                    let accepted = accept_positive_into_set(
+                        &mut recursive_state.pending_hydration_mut().accumulated,
+                        frontier.deltas,
+                    )?;
+                    recursive_state.pending_hydration_mut().phase = if accepted.is_empty() {
+                        PendingHydrationPhase::ReadyForArrangementHydration
+                    } else {
+                        PendingHydrationPhase::Step {
+                            frontier: RecordDeltas {
+                                descriptor: output_desc,
+                                deltas: accepted,
+                            },
+                            sub_tick: 1,
+                        }
+                    };
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+            }
+        }
+        PendingHydrationPhase::Step { frontier, sub_tick } => {
+            if sub_tick > recursive.max_iters {
+                return Err(IvmRuntimeError::RecursiveIterationLimit {
+                    node,
+                    max_iters: recursive.max_iters,
+                });
+            }
+            let eval_context = EvalContext::with_binding(
+                context.scope,
+                sub_tick as u64,
+                recursive.frontier.clone(),
+                frontier,
+            );
+            let traversal = recursive_state
+                .pending_hydration_mut()
+                .traversal
+                .take()
+                .unwrap_or_else(|| HydrationTraversal::new(step, eval_context));
+            let mut traversal = traversal;
+            let progress = match traversal
+                .poll(
+                    context.schema,
+                    context.graph,
+                    context.variant_projections,
+                    context.inputs,
+                    context.storage,
+                    context.binding_snapshots,
+                )
+                .await
+            {
+                Ok(progress) => progress,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    return Err(IvmRuntimeError::EvaluationBlocked);
+                }
+                Err(error) => return Err(error),
+            };
+            match progress {
+                HydrationTraversalProgress::Yield => {
+                    recursive_state.pending_hydration_mut().traversal = Some(traversal);
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+                HydrationTraversalProgress::Ready(step_delta) => {
+                    if step_delta.descriptor != output_desc {
+                        return Err(IvmRuntimeError::GraphOutputMismatch);
+                    }
+                    let accepted = accept_positive_into_set(
+                        &mut recursive_state.pending_hydration_mut().accumulated,
+                        step_delta.deltas,
+                    )?;
+                    recursive_state.pending_hydration_mut().phase = if accepted.is_empty() {
+                        PendingHydrationPhase::ReadyForArrangementHydration
+                    } else {
+                        PendingHydrationPhase::Step {
+                            frontier: RecordDeltas {
+                                descriptor: output_desc,
+                                deltas: accepted,
+                            },
+                            sub_tick: sub_tick + 1,
+                        }
+                    };
+                    Ok(HydrationRecomputeProgress::Yield)
+                }
+            }
+        }
+        PendingHydrationPhase::ReadyForArrangementHydration => {
+            Ok(HydrationRecomputeProgress::ReadyForArrangementHydration)
+        }
     }
 }
 
@@ -721,6 +1079,7 @@ pub(super) async fn recompute_recursive(
         storage,
         binding_snapshots,
         context: EvalContext::root(),
+        memo: HashMap::default(),
     };
     let mut accumulated = HashMap::<Bytes, i64>::default();
     let mut frontier = snapshot.eval_node(*seed).await?;
@@ -748,6 +1107,7 @@ pub(super) async fn recompute_recursive(
             storage,
             binding_snapshots,
             context,
+            memo: HashMap::default(),
         };
         frontier = snapshot.eval_node(step).await?;
         if frontier.descriptor != output_desc {
@@ -801,6 +1161,7 @@ struct HydrationEvaluator<'a> {
     storage: &'a dyn OrderedKvStorage,
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
     context: EvalContext,
+    memo: HashMap<NodeId, RecordDeltas>,
 }
 
 impl HydrationEvaluator<'_> {
@@ -809,6 +1170,9 @@ impl HydrationEvaluator<'_> {
         node: NodeId,
     ) -> StorageFuture<'_, Result<RecordDeltas, IvmRuntimeError>> {
         Box::pin(async move {
+            if let Some(records) = self.memo.get(&node) {
+                return Ok(records.clone());
+            }
             let graph_node = self
                 .graph
                 .node(node)
