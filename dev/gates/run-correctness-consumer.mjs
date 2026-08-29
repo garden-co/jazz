@@ -14,22 +14,136 @@
  * require different consumer APIs based on held file descriptors or content
  * transfer rather than portable filesystem paths.
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   correctnessArtifactConsumerEnvironment,
   verifyCorrectnessArtifactConsumerEnvironment,
 } from "../artifacts/correctness-artifact-producer.mjs";
 
 export const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const capabilityPathEnv = "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY";
+const capabilityTokenEnv = "JAZZ_CORRECTNESS_CONSUMER_TOKEN";
 
-export function correctnessConsumerEnvironment(rootDir = root) {
-  if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1") {
-    verifyCorrectnessArtifactConsumerEnvironment(rootDir, process.env);
-    return { ...process.env };
+function processStartIdentity(pid) {
+  if (process.platform !== "linux") return undefined;
+  try {
+    return readFileSync(`/proc/${pid}/stat`, "utf8").trim().split(" ")[21];
+  } catch {
+    return undefined;
   }
-  return { ...process.env, ...correctnessArtifactConsumerEnvironment(rootDir) };
+}
+
+function parentPid(pid) {
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8").trim();
+      const afterCommand = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      return Number(afterCommand[1]);
+    } catch {
+      return undefined;
+    }
+  }
+  if (process.platform !== "win32") {
+    try {
+      return Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }));
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    const output = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').ParentProcessId`,
+      ],
+      { encoding: "utf8" },
+    );
+    return Number(output.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+function isDescendantOf(ownerPid) {
+  let candidate = parentPid(process.pid);
+  const visited = new Set();
+  while (Number.isInteger(candidate) && candidate > 0 && !visited.has(candidate)) {
+    if (candidate === ownerPid) return true;
+    visited.add(candidate);
+    candidate = parentPid(candidate);
+  }
+  return false;
+}
+
+function inheritedCapability(rootDir, env) {
+  const path = env[capabilityPathEnv];
+  const token = env[capabilityTokenEnv];
+  if (!path || !token) return false;
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const capability = JSON.parse(readFileSync(path, "utf8"));
+    return (
+      capability.token === token &&
+      capability.root === resolve(rootDir) &&
+      Number.isInteger(capability.ownerPid) &&
+      capability.ownerPid > 0 &&
+      capability.ownerStart === processStartIdentity(capability.ownerPid) &&
+      isDescendantOf(capability.ownerPid)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function withoutCapability(env) {
+  const clean = { ...env };
+  delete clean[capabilityPathEnv];
+  delete clean[capabilityTokenEnv];
+  return clean;
+}
+
+function prepareCorrectnessConsumerEnvironment(rootDir = root) {
+  if (inheritedCapability(rootDir, process.env)) {
+    verifyCorrectnessArtifactConsumerEnvironment(rootDir, process.env);
+    return { env: { ...process.env }, release() {} };
+  }
+
+  // A fresh invocation always source-admits before it can mint a descendant
+  // capability. Ambient public artifact variables alone never select the
+  // inherited path.
+  const sealedEnvironment = correctnessArtifactConsumerEnvironment(rootDir);
+  const token = randomBytes(32).toString("hex");
+  const path = join(tmpdir(), `jazz-correctness-consumer-${process.pid}-${token}`);
+  const capability = {
+    token,
+    root: resolve(rootDir),
+    ownerPid: process.pid,
+    ownerStart: processStartIdentity(process.pid),
+  };
+  writeFileSync(path, `${JSON.stringify(capability)}\n`, { flag: "wx", mode: 0o600 });
+  let released = false;
+  return {
+    env: {
+      ...withoutCapability(process.env),
+      ...sealedEnvironment,
+      [capabilityPathEnv]: path,
+      [capabilityTokenEnv]: token,
+    },
+    release() {
+      if (released) return;
+      released = true;
+      rmSync(path, { force: true });
+    },
+  };
 }
 
 export function runCorrectnessConsumer(
@@ -37,19 +151,25 @@ export function runCorrectnessConsumer(
   args,
   { cwd = process.cwd(), spawnImpl = spawn, rootDir = root } = {},
 ) {
-  const env = correctnessConsumerEnvironment(rootDir);
+  const admission = prepareCorrectnessConsumerEnvironment(rootDir);
+  const { env } = admission;
   return new Promise((resolvePromise, reject) => {
     const child = spawnImpl(executable, args, { cwd, env, stdio: "inherit" });
-    child.once("error", reject);
+    child.once("error", (error) => {
+      admission.release();
+      reject(error);
+    });
     child.once("exit", (code, signal) => {
       try {
         verifyCorrectnessArtifactConsumerEnvironment(rootDir, env);
       } catch (error) {
+        admission.release();
         reject(
           new Error(`correctness artifacts changed during consumer execution (${error.message})`),
         );
         return;
       }
+      admission.release();
       if (code === 0) resolvePromise();
       else reject(new Error(`correctness consumer failed with ${signal ?? `exit ${code ?? 1}`}`));
     });

@@ -351,6 +351,7 @@ test("one source admission covers nested consumers while snapshot checks continu
     );
     const snapshot = snapshotCorrectnessArtifacts(root);
     writeCorrectnessArtifactProducerManifest(root, snapshot);
+    const publicEnvironment = correctnessArtifactConsumerEnvironment(root);
     const runner = new URL("../gates/run-correctness-consumer.mjs", import.meta.url).href;
     await runCorrectnessConsumer(
       process.execPath,
@@ -373,6 +374,21 @@ test("one source admission covers nested consumers while snapshot checks continu
       () => runCorrectnessConsumer(process.execPath, ["-e", ""], { cwd: root, rootDir: root }),
       /different source inputs/,
     );
+    const priorEnvironment = Object.fromEntries(
+      Object.keys(publicEnvironment).map((name) => [name, process.env[name]]),
+    );
+    try {
+      Object.assign(process.env, publicEnvironment);
+      assert.throws(
+        () => runCorrectnessConsumer(process.execPath, ["-e", ""], { cwd: root, rootDir: root }),
+        /different source inputs/,
+      );
+    } finally {
+      for (const [name, value] of Object.entries(priorEnvironment)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   } finally {
     removeFixture(root);
   }
