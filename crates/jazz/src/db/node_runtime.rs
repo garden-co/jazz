@@ -163,6 +163,17 @@ where
         self.node.borrow().rejected_transaction(tx_id).is_some()
     }
 
+    /// Test-only inspection of the process-local browser-relay recovery
+    /// marker. It is not durable retry ownership: every terminal fate must
+    /// consume it, including an accepted Global fate.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
+        self.browser_relay_recovered_tx_ids
+            .borrow()
+            .contains(&tx_id)
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large
     /// values. Groove persists timestamps and performs eviction, but does not
     /// choose these product limits.

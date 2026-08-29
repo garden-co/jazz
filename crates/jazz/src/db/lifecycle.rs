@@ -16,6 +16,15 @@ where
         self.node.has_retained_rejection_for_test(tx_id)
     }
 
+    /// Internal test inspection for browser-relay recovered foreground
+    /// transactions. The marker is process-local and must be consumed by
+    /// either terminal fate, not only rejection.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
+        self.node.has_recovered_browser_relay_tx_for_test(tx_id)
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
     pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
         self.node.set_large_value_staging_policy(policy);

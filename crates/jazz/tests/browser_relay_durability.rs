@@ -3040,6 +3040,123 @@ fn reopened_worker_notifies_attached_successor_of_foreground_rejection() {
     );
 }
 
+/// A recovered browser-relay marker is a one-live-terminal-fate routing aid,
+/// not a rejection queue. An Accepted/Global fate must consume it just as a
+/// rejection does, publish normal settled state, and leave no later callback
+/// backlog.
+#[test]
+fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xad; 16]);
+    let storage = tempfile::tempdir().expect("worker temp dir");
+
+    let first_main = open_db(0x1f, alice, &schema);
+    first_main.set_non_durable_client();
+    let first_worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    let (first_main_transport, first_worker_transport) = duplex();
+    let first_main_connection = block_on(first_main.connect_upstream(first_main_transport));
+    let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
+    let write = first_main
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("accept after worker restart".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("insert pending todo");
+    let tx_id = write.mergeable_tx_id();
+    first_main.tick().expect("upload to first worker");
+    first_worker.tick().expect("persist in first worker");
+    first_main.tick().expect("apply first Local ack");
+    drop(first_worker_connection);
+    drop(first_main_connection);
+    drop(first_worker);
+    drop(first_main);
+
+    let successor = open_db(0x20, alice, &schema);
+    successor.set_non_durable_client();
+    let worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    assert!(
+        worker.has_recovered_browser_relay_tx_for_test(tx_id),
+        "worker restart must mark the recovered unresolved foreground transaction"
+    );
+    let mutation_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_errors = Rc::clone(&mutation_errors);
+    worker.on_mutation_error(Rc::new(move |event| {
+        observed_errors.borrow_mut().push(event.clone());
+    }));
+    let core = open_core(0x3f, &schema);
+    let (successor_transport, worker_subscriber_transport) = duplex();
+    let successor_connection = block_on(successor.connect_upstream(successor_transport));
+    let worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    worker.tick().expect("replay recovered foreground write");
+    successor
+        .tick()
+        .expect("apply replayed Local acknowledgement");
+    core.tick().expect("accept matching session author");
+    worker.tick().expect("apply accepted Global fate");
+    successor.tick().expect("apply accepted fate through relay");
+
+    assert!(matches!(
+        worker.write_state(tx_id).expect("worker accepted state"),
+        jazz::db::WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            global_time: Some(_),
+        }
+    ));
+    assert!(matches!(
+        successor
+            .write_state(tx_id)
+            .expect("successor accepted state"),
+        jazz::db::WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            global_time: Some(_),
+        }
+    ));
+    assert!(
+        !worker.has_recovered_browser_relay_tx_for_test(tx_id),
+        "Accepted/Global must consume the process-local recovered marker"
+    );
+    worker
+        .tick()
+        .expect("drive any erroneous fallback delivery");
+    assert!(
+        mutation_errors.borrow().is_empty(),
+        "accepted recovery must never report a mutation rejection"
+    );
+
+    drop(successor_connection);
+    drop(worker_subscriber);
+    drop(worker_upstream);
+    drop(core_subscriber);
+    drop(successor);
+    drop(worker);
+
+    let later_worker = open_persistent_browser_worker(storage.path(), 0x2f, alice, &schema);
+    assert!(
+        !later_worker.has_recovered_browser_relay_tx_for_test(tx_id),
+        "accepted terminal state must leave no recovered-marker backlog"
+    );
+    let later_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_later_errors = Rc::clone(&later_errors);
+    later_worker.on_mutation_error(Rc::new(move |event| {
+        observed_later_errors.borrow_mut().push(event.clone());
+    }));
+    later_worker.tick().expect("drive later worker opening");
+    assert!(
+        later_errors.borrow().is_empty(),
+        "a late attachment must not receive a stale recovery callback"
+    );
+}
+
 /// A browser relay may have an active programmatic wait for a transaction it
 /// restored from a former foreground runtime. That wait consumes the same live
 /// rejection instead of allowing a duplicate fallback callback.
