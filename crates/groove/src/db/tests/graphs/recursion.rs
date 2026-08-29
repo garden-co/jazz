@@ -228,6 +228,48 @@ async fn recursive_hydration_retains_frontiers_until_the_full_closure_is_ready()
     );
 }
 
+/// Retractions force a full recursive snapshot during a live tick. That path
+/// shares the same bounded postorder continuation as initial hydration: a
+/// delete must not trade a correct retraction for an owner-turn monopoly.
+#[futures_test::test]
+async fn recursive_live_recompute_retains_traversal_through_retraction() {
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
+    for _ in 0..128 {
+        database.drive_ready_progress().await.unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    insert_edge(&mut batch, 3, 3, 4);
+    database.commit_batch(batch).await.unwrap();
+    let _initial = expect_recv_vals(&subscription);
+
+    let mut batch = database.open_batch();
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    database.commit_batch(batch).await.unwrap();
+    let mut values = expect_recv_vals(&subscription);
+    sort_pairs_by_value(&mut values);
+    assert_eq!(
+        values,
+        [
+            (vec![Value::U64(1), Value::U64(3)], -1),
+            (vec![Value::U64(1), Value::U64(4)], -1),
+            (vec![Value::U64(2), Value::U64(3)], -1),
+            (vec![Value::U64(2), Value::U64(4)], -1),
+        ]
+    );
+}
+
 #[futures_test::test]
 async fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
     let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");

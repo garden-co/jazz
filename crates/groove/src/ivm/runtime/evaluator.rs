@@ -2358,63 +2358,40 @@ impl TickEvaluator<'_> {
                 });
             }
             let scope = self.context.scope.child(node);
-            let accumulated = if let Some(inputs) = self.evaluation_inputs.as_deref_mut() {
-                let progress = super::recursion::resume_inputs_hydration_recompute(
-                    recursive_as_of.value_mut(),
-                    super::recursion::HydrationRecomputeContext {
-                        schema: self.schema,
-                        graph: self.graph,
-                        variant_projections: self.variant_projections,
-                        inputs,
-                        storage,
-                        binding_snapshots: self.binding_snapshots,
-                        scope,
-                        input_generation,
-                    },
-                    node,
-                    recursive,
-                    output_desc,
-                    seed,
-                    step,
-                )
-                .await;
-                match progress {
-                    Ok(super::recursion::HydrationRecomputeProgress::Yield) => {
-                        self.operator_states.insert(operator_key, operator);
-                        cooperative_operator_yield().await;
-                        unreachable!("retained recursive hydration yields through operator state")
-                    }
-                    Ok(
-                        super::recursion::HydrationRecomputeProgress::ReadyForArrangementHydration,
-                    ) => recursive_as_of
-                        .value()
-                        .pending_hydration_accumulated_deltas(output_desc),
-                    Err(error) => {
-                        self.operator_states.insert(operator_key, operator);
-                        return Err(error);
-                    }
-                }
-            } else {
-                let next = recompute_recursive(
-                    self.schema,
-                    self.graph,
-                    self.variant_projections,
-                    Some(self.table_deltas),
-                    None,
-                    node,
-                    recursive,
-                    output_desc,
-                    step,
+            let progress = super::recursion::resume_inputs_hydration_recompute(
+                recursive_as_of.value_mut(),
+                super::recursion::HydrationRecomputeContext {
+                    schema: self.schema,
+                    graph: self.graph,
+                    variant_projections: self.variant_projections,
+                    inputs: self.evaluation_inputs.as_deref_mut(),
+                    table_deltas: Some(self.table_deltas),
                     storage,
-                    self.binding_snapshots,
-                    self.current_tick,
+                    binding_snapshots: self.binding_snapshots,
                     scope,
-                )
-                .await?;
-                recursive_as_of.value_mut().replace_with(next);
-                RecordDeltas {
-                    descriptor: output_desc,
-                    deltas: recursive_as_of.value().accumulated_deltas(),
+                    input_generation,
+                },
+                node,
+                recursive,
+                output_desc,
+                seed,
+                step,
+            )
+            .await;
+            let accumulated = match progress {
+                Ok(super::recursion::HydrationRecomputeProgress::Yield) => {
+                    self.operator_states.insert(operator_key, operator);
+                    cooperative_operator_yield().await;
+                    unreachable!("retained recursive hydration yields through operator state")
+                }
+                Ok(super::recursion::HydrationRecomputeProgress::ReadyForArrangementHydration) => {
+                    recursive_as_of
+                        .value()
+                        .pending_hydration_accumulated_deltas(output_desc)
+                }
+                Err(error) => {
+                    self.operator_states.insert(operator_key, operator);
+                    return Err(error);
                 }
             };
             let mut runtime = graph_runtime_view(
@@ -2487,7 +2464,12 @@ impl TickEvaluator<'_> {
         )
         .await;
         let deltas = match deltas {
-            Ok(deltas) => deltas,
+            Ok(super::recursion::RecursiveDeltaProgress::Ready(deltas)) => deltas,
+            Ok(super::recursion::RecursiveDeltaProgress::Yield) => {
+                self.operator_states.insert(operator_key, operator);
+                cooperative_operator_yield().await;
+                unreachable!("retained recursive tick yields through operator state")
+            }
             Err(error) => {
                 self.operator_states.insert(operator_key, operator);
                 return Err(error);
