@@ -60,7 +60,11 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
               type: "module",
               name,
             });
-    const worker = createWorker(workerName);
+    // Lease acquisition and the schema/runtime connection must enter the same
+    // physical SharedWorker realm. Runtime connections generation-qualify the
+    // base name so a realm that has begun closing can be retired; omitting the
+    // suffix here would create a second durable owner for the same IndexedDB.
+    const worker = createWorker(`${workerName}:generation-${readWorkerGeneration(workerName)}`);
     const port = worker.port;
     port.start();
     const lease = await new Promise<SharedBrowserForegroundNodeLease>((resolve, reject) => {
