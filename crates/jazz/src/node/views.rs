@@ -1902,9 +1902,11 @@ where
             self.version_storage_sources_for_layer(version.table(), version.layer())?
         {
             let Some(canonical) = self
-                .query_version_by_alias_with_storage(
+                .query_version_by_alias_with_storage_in_schema(
+                    authored_schema,
                     version.table(),
                     &storage_table,
+                    version.branch_key(),
                     version.row_uuid(),
                     version.tx_time(),
                     version.tx_node_alias(),
