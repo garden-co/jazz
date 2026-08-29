@@ -21,6 +21,13 @@
   },
   "allowances": [
     {
+      "id": "large-value-json-streaming-semantic-parse",
+      "path": "crates/groove/src/large_values.rs",
+      "api": "serde_json::Deserializer::from_slice",
+      "expectedOccurrences": 1,
+      "classification": "Streaming semantic parse of already-authenticated JSON bytes while applying a user JSON operation. Its iterator result is reserialized by the explicit large-value V1 records; the serde deserializer is not a persisted container codec."
+    },
+    {
       "id": "catalogue-nested-json-number-parse",
       "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
       "api": "serde_json::from_str",
