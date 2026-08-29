@@ -46,13 +46,18 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
 }
 
-function jobIfCondition(workflow, job) {
+function jobSection(workflow, job) {
   const escapedJob = job.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const section = new RegExp(
     `^  ${escapedJob}:\\n([\\s\\S]*?)(?=^  [A-Za-z0-9_-]+:|(?![\\s\\S]))`,
     "m",
   ).exec(workflow)?.[1];
   assert.ok(section, `workflow is missing ${job}`);
+  return section;
+}
+
+function jobIfCondition(workflow, job) {
+  const section = jobSection(workflow, job);
   const condition = /^    if: >-\n([\s\S]*?)(?=^    (?:name|runs-on):)/m.exec(section)?.[1];
   assert.ok(condition, `${job} must have a block scalar if condition before name/runs-on`);
   return condition.replace(/\s+/g, " ").trim();
@@ -231,20 +236,41 @@ test("device fixture does not import internal jazz-tools relay-frame types", () 
 
 test("protocol receipt builds its workspace API prerequisites from clean outputs", () => {
   const acceptancePackage = JSON.parse(read("package.json"));
+  const jazzToolsPackage = JSON.parse(
+    fs.readFileSync(path.resolve(root, "../../packages/jazz-tools/package.json"), "utf8"),
+  );
   const protocol = acceptancePackage.scripts["test:protocol"];
-  const prerequisites = "pnpm --filter jazz-tools build && pnpm --filter jazz-rn build";
+  const workspacePrerequisites = acceptancePackage.scripts["build:workspace-prerequisites"];
+  const prerequisites = "pnpm build:workspace-prerequisites";
 
   // `jazz-tools/react-native` is a generated public entrypoint. The receipt
   // must create it itself rather than accidentally relying on artifacts left
-  // by another root Turbo task or an earlier CI step.
+  // by another root Turbo task or an earlier CI step. The RN public entry is
+  // TypeScript-only: it must not pull in the browser worker/WASM bundle.
   assert.match(protocol, new RegExp(`^${prerequisites.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} && `));
+  assert.equal(
+    workspacePrerequisites,
+    "pnpm --filter jazz-tools build:react-native && pnpm --filter jazz-rn build",
+    "the receipt must stage the narrow RN public entrypoint, not Jazz Tools' browser/WASM build",
+  );
+  assert.equal(jazzToolsPackage.scripts["build:react-native"], "tsc --project tsconfig.json");
+  assert.doesNotMatch(jazzToolsPackage.scripts["build:react-native"], /bundle-broker-worker|jazz-wasm/);
 
-  // Plant the previous clean-checkout failure: building only jazz-rn must not
-  // satisfy the contract because it leaves jazz-tools' generated entrypoint
-  // absent.
+  // Plant the former stale-artifact shortcut: skipping the prerequisite stage
+  // must not satisfy the receipt, even though a developer's checkout may
+  // happen to retain `dist/react-native` from an earlier build.
   assert.throws(
-    () => assert.match(protocol.replace("pnpm --filter jazz-tools build && ", ""), /jazz-tools build/),
-    /jazz-tools build/,
+    () => assert.match(protocol.replace("pnpm build:workspace-prerequisites && ", ""), /workspace-prerequisites/),
+    /workspace-prerequisites/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        workspacePrerequisites.replace("jazz-tools build:react-native", "jazz-tools build"),
+        /jazz-tools build:react-native/,
+      ),
+    /jazz-tools build:react-native/,
+    "a planted full browser/WASM build must fail the RN-only prerequisite contract",
   );
 });
 
@@ -358,6 +384,19 @@ test("dispatch device workflow uses hosted KVM while source jobs remain cheap", 
   assert.match(workflow, /scripts\/boot-android-emulator\.sh/);
   assert.doesNotMatch(workflow, /adb wait-for-device/);
   assert.match(workflow, /android-device-acceptance:[\s\S]*timeout-minutes: 45/);
+  for (const [job, followingStage] of [
+    ["ios-simulator", "Build and stage the relay XCFramework"],
+    ["android-device-acceptance", "Grant the runner user access to KVM"],
+  ]) {
+    const section = jobSection(workflow, job);
+    assert.match(
+      section,
+      new RegExp(
+        `pnpm install --frozen-lockfile[\\s\\S]*?pnpm --filter rn-device-acceptance build:workspace-prerequisites[\\s\\S]*?${followingStage}`,
+      ),
+      `${job} must stage the source-built React Native public entrypoint immediately after install and before native bundling`,
+    );
+  }
   assertRnDeviceWorkflowContract(workflow);
   assert.throws(
     () =>

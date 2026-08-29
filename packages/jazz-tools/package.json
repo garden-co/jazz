@@ -121,6 +121,7 @@
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
+    "build:react-native": "tsc --project tsconfig.json",
     "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/verify-runtime-sourcemaps.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",

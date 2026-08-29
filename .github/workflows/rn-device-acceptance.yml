@@ -97,6 +97,8 @@ jobs:
             ${{ env.JAZZ_DEVICE_DERIVED_DATA }}
           key: rn-device-ios-macos-15-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
       - run: pnpm install --frozen-lockfile
+      - name: Build the React Native JavaScript workspace entrypoints
+        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       - name: Build and stage the relay XCFramework
         run: |
           pnpm --filter jazz-rn build:relay:ios
@@ -165,6 +167,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Build the React Native JavaScript workspace entrypoints
+        run: pnpm --filter rn-device-acceptance build:workspace-prerequisites
       - name: Grant the runner user access to KVM
         shell: bash
         run: |
