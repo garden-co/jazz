@@ -122,6 +122,24 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
+/// Test-only direct execution of one frozen complete v1 frame through the
+/// generated NAPI artifact. This reaches the production Rust frame, feature,
+/// compression, and semantic-payload decoders; it is not a host wire API.
+#[napi(js_name = "__testValidateWireFrameCorpus", skip_typescript)]
+pub fn test_validate_wire_frame_corpus(frame: Buffer, negotiated_features: String) -> Result<()> {
+    let negotiated_features = negotiated_features
+        .parse()
+        .map_err(|_| napi::Error::from_reason("test wire corpus features must be a u64 decimal"))?;
+    jazz::wire::validate_frame_for_artifact_corpus(&frame, negotiated_features)
+        .map_err(napi::Error::from_reason)
+}
+
+/// Test-only feature inventory paired with [`test_validate_wire_frame_corpus`].
+#[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
+pub fn test_wire_frame_corpus_features() -> String {
+    jazz::wire::current_wire_features().to_string()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
     identity: CoreOpenDbIdentity,

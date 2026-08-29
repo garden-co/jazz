@@ -515,12 +515,20 @@
       },
       "rejection_receipt": {
         "path": "crates/jazz/tests/wire_fixtures.rs",
-        "anchor": "wire_message_frame_fixtures_decode_to_expected_messages"
+        "anchor": "fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed()"
       },
       "evidence": [
         {
           "path": "crates/jazz/tests/wire_fixtures.rs",
           "anchor": "fn wire_message_frame_fixtures_are_current()"
+        },
+        {
+          "path": "crates/jazz/tests/wire_fixtures.rs",
+          "anchor": "fn wire_hello_frame_fixtures_are_current()"
+        },
+        {
+          "path": "packages/jazz-tools/src/runtime/native-runtime/wire-frame-artifact-corpus.test.ts",
+          "anchor": "describe(\"wire frame artifact corpus\""
         }
       ]
     },
