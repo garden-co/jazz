@@ -135,9 +135,7 @@ export function verifyCorrectnessArtifactProducer(rootInput) {
   validateShape(manifest);
   const source = correctnessArtifactSourceIdentity(root);
   if (JSON.stringify(manifest.source) !== JSON.stringify(source))
-    throw new Error(
-      "correctness artifacts: producer manifest belongs to different source inputs",
-    );
+    throw new Error("correctness artifacts: producer manifest belongs to different source inputs");
   const snapshot = readCorrectnessArtifactSnapshotByFingerprint(root, manifest.snapshotFingerprint);
   if (
     manifest.snapshotFingerprint !== snapshot.fingerprint ||
@@ -170,7 +168,9 @@ export function verifyCorrectnessArtifactConsumerEnvironment(rootInput, env = pr
   const expected = correctnessArtifactConsumerEnvironment(rootInput);
   for (const [name, value] of Object.entries(expected)) {
     if (env[name] !== value)
-      throw new Error(`correctness artifacts: sealed consumer ${name} does not match producer manifest`);
+      throw new Error(
+        `correctness artifacts: sealed consumer ${name} does not match producer manifest`,
+      );
   }
   return expected;
 }

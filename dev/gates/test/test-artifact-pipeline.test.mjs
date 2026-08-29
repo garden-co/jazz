@@ -458,8 +458,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
     );
   assert.doesNotMatch(pipeline, /--filter=jazz-tools/);
   assert.ok(
-    consumers.indexOf("runCorrectnessConsumer(") <
-      consumers.indexOf('"--filter=jazz-tools"'),
+    consumers.indexOf("runCorrectnessConsumer(") < consumers.indexOf('"--filter=jazz-tools"'),
     "TS consumers must reject a stale producer receipt before Jazz Tools can build",
   );
 

@@ -42,9 +42,7 @@ export function runCorrectnessConsumer(
         verifyCorrectnessArtifactConsumerEnvironment(rootDir, env);
       } catch (error) {
         reject(
-          new Error(
-            `correctness artifacts changed during consumer execution (${error.message})`,
-          ),
+          new Error(`correctness artifacts changed during consumer execution (${error.message})`),
         );
         return;
       }

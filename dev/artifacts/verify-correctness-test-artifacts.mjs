@@ -94,7 +94,10 @@ function parameterCount(parameters) {
   return count;
 }
 
-export function verifyCorrectnessTestArtifacts(rootDir = root, { allowUnsealedFixture = false } = {}) {
+export function verifyCorrectnessTestArtifacts(
+  rootDir = root,
+  { allowUnsealedFixture = false } = {},
+) {
   const failures = [];
   let snapshot;
   try {

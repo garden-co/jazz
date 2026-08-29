@@ -58,8 +58,7 @@ function assertPublishedFile(stat, label) {
   // every admission as well: ordinary POSIX permissions cannot stop the file
   // owner from deliberately changing modes. They do make accidental producer
   // replacement fail, while admission and end-of-run checks detect changes.
-  if (stat.nlink !== 1)
-    throw new Error(`correctness artifacts: ${label} has a hardlink`);
+  if (stat.nlink !== 1) throw new Error(`correctness artifacts: ${label} has a hardlink`);
   if ((stat.mode & 0o222) !== 0)
     throw new Error(`correctness artifacts: ${label} is writable after publication`);
 }
@@ -100,8 +99,7 @@ function walkRealFiles(root, label, { published = false } = {}) {
       } else if (stat.isFile()) {
         if (published) assertPublishedFile(stat, `${label} child`);
         files.push(path);
-      }
-      else throw new Error(`correctness artifacts: ${label} contains a non-regular entry`);
+      } else throw new Error(`correctness artifacts: ${label} contains a non-regular entry`);
     }
   };
   visit(root);

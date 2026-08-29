@@ -17,7 +17,10 @@ try {
     // This exact path is supplied by the producer-manifest preflight.  Do not
     // follow a mutable worktree pointer here: another producer may publish one
     // while this consumer is still running.
-    module.exports = { nativeBinding: require(binding), expectedNativeArtifactFingerprint: fingerprint };
+    module.exports = {
+      nativeBinding: require(binding),
+      expectedNativeArtifactFingerprint: fingerprint,
+    };
   } else if (existsSync(correctnessPointer)) module.exports = require(correctnessPointer);
   else if (existsSync(pointer)) module.exports = require(pointer);
   else {

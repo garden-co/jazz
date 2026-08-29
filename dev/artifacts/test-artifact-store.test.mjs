@@ -168,7 +168,10 @@ test("a sealed publication collision accepts the winner without leaking its priv
     assert.equal(selected.fingerprint, winner.fingerprint);
     assert.equal(readCorrectnessArtifactSnapshot(root).fingerprint, winner.fingerprint);
     const storeEntries = readdirSync(join(root, "target", "correctness-test-artifacts"));
-    assert.equal(storeEntries.some((entry) => entry.startsWith(".stage-")), false);
+    assert.equal(
+      storeEntries.some((entry) => entry.startsWith(".stage-")),
+      false,
+    );
   } finally {
     removeFixture(root);
   }
@@ -317,17 +320,17 @@ test("the consumer wrapper rejects snapshot mutation after preflight", async () 
     writeCorrectnessArtifactProducerManifest(root, snapshot);
     await assert.rejects(
       runCorrectnessConsumer(
-      process.execPath,
-      [
-        "-e",
+        process.execPath,
         [
-          "const fs=require('node:fs')",
-          "const file=process.argv[1]",
-          "fs.chmodSync(file,0o755)",
-          "fs.writeFileSync(file,'accidental concurrent rebuild')",
-        ].join(";"),
-        join(snapshot.wasmPackage, "jazz_wasm.js"),
-      ],
+          "-e",
+          [
+            "const fs=require('node:fs')",
+            "const file=process.argv[1]",
+            "fs.chmodSync(file,0o755)",
+            "fs.writeFileSync(file,'accidental concurrent rebuild')",
+          ].join(";"),
+          join(snapshot.wasmPackage, "jazz_wasm.js"),
+        ],
         { cwd: root, rootDir: root },
       ),
       /correctness artifacts changed during consumer execution/,
@@ -360,7 +363,7 @@ test("tampered, hard-linked, or incomplete stored generations fail on read and r
   try {
     const snapshot = snapshotCorrectnessArtifacts(root);
     const wasmJs = join(snapshot.wasmPackage, "jazz_wasm.js");
-    assert.equal((readFileSync(wasmJs).length > 0), true);
+    assert.equal(readFileSync(wasmJs).length > 0, true);
     assert.throws(() => writeFileSync(wasmJs, "tampered"), /EACCES|EPERM/);
     chmodSync(wasmJs, 0o644);
     writeFileSync(wasmJs, "tampered");
@@ -396,10 +399,7 @@ test("stored snapshot rejects a hardlink replacement before admission", () => {
     rmSync(storedWasm);
     linkSync(replacement, storedWasm);
     chmodSync(snapshot.wasmPackage, 0o555);
-    assert.throws(
-      () => readCorrectnessArtifactSnapshot(root),
-      /hardlink/,
-    );
+    assert.throws(() => readCorrectnessArtifactSnapshot(root), /hardlink/);
   } finally {
     removeFixture(root);
   }

@@ -26,9 +26,7 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
     );
   }
 
-  const recordPlayer = JSON.parse(
-    read("examples/record-player/apps/next-betterauth/package.json"),
-  );
+  const recordPlayer = JSON.parse(read("examples/record-player/apps/next-betterauth/package.json"));
   assert.match(recordPlayer.scripts["test:topology"], /run-correctness-consumer\.mjs --/);
   assert.equal(recordPlayer.scripts["test:browser"], "pnpm test:topology");
 
@@ -45,10 +43,7 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
 test("sealed consumers select content-addressed artifact paths rather than worktree pointers", () => {
   const runner = read("dev/gates/run-correctness-consumer.mjs");
   const producer = read("dev/artifacts/correctness-artifact-producer.mjs");
-  for (const variable of [
-    "JAZZ_CORRECTNESS_WASM_PACKAGE",
-    "JAZZ_CORRECTNESS_NAPI_BINDING",
-  ])
+  for (const variable of ["JAZZ_CORRECTNESS_WASM_PACKAGE", "JAZZ_CORRECTNESS_NAPI_BINDING"])
     assert.match(producer, new RegExp(variable));
   assert.match(runner, /correctnessArtifactConsumerEnvironment/);
 
@@ -63,7 +58,8 @@ test("sealed consumers select content-addressed artifact paths rather than workt
   const worker = read("packages/jazz-tools/scripts/bundle-broker-worker.mjs");
   assert.match(worker, /JAZZ_CORRECTNESS_WASM_PACKAGE/);
   assert.ok(
-    worker.indexOf("const sealedWasmPackage") < worker.indexOf("const snapshot = sealedWasmPackage"),
+    worker.indexOf("const sealedWasmPackage") <
+      worker.indexOf("const snapshot = sealedWasmPackage"),
     "sealed worker bundling must not consult a mutable WASM pointer",
   );
 
@@ -105,18 +101,23 @@ test("every direct Jazz Tools Vitest consumer is sealed before it runs", () => {
 
 test("performance benchmarks remain on their explicit release-artifact boundary", () => {
   const pkg = JSON.parse(read("packages/jazz-tools/package.json"));
-  for (const name of [
-    "bench:abstract:node",
-    "bench:abstract:browser",
-    "bench:realistic:browser",
-  ]) {
+  for (const name of ["bench:abstract:node", "bench:abstract:browser", "bench:realistic:browser"]) {
     assert.doesNotMatch(pkg.scripts[name], /run-correctness-consumer\.mjs/);
     assert.match(pkg.scripts[name], /vitest run/);
   }
   const workflow = read(".github/workflows/benchmarks.yml");
-  assert.match(workflow, /name: Build jazz-tools server binary[\s\S]*cargo build -p jazz-cli --bin jazz-tools/);
-  assert.match(workflow, /name: Build jazz-napi package[\s\S]*pnpm --dir crates\/jazz-napi run build/);
-  assert.match(workflow, /name: Build jazz-wasm package[\s\S]*pnpm --dir crates\/jazz-wasm run build/);
+  assert.match(
+    workflow,
+    /name: Build jazz-tools server binary[\s\S]*cargo build -p jazz-cli --bin jazz-tools/,
+  );
+  assert.match(
+    workflow,
+    /name: Build jazz-napi package[\s\S]*pnpm --dir crates\/jazz-napi run build/,
+  );
+  assert.match(
+    workflow,
+    /name: Build jazz-wasm package[\s\S]*pnpm --dir crates\/jazz-wasm run build/,
+  );
   assert.match(workflow, /name: Run browser benchmark suite/);
   assert.ok(
     workflow.indexOf("name: Build jazz-wasm package") <

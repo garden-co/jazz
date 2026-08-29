@@ -64,26 +64,22 @@ export function sourceIdentity(root, { excludePathspecs = [] } = {}) {
     excludePathspecs.length === 0
       ? git(root, ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim()
       : sha256(
-          filteredRecords(
-            git(root, ["ls-tree", "-r", "-z", "HEAD"]),
-            excludePathspecs,
-            (record) => record.slice(record.lastIndexOf("\t") + 1),
+          filteredRecords(git(root, ["ls-tree", "-r", "-z", "HEAD"]), excludePathspecs, (record) =>
+            record.slice(record.lastIndexOf("\t") + 1),
           ),
         );
   const indexTree =
     excludePathspecs.length === 0
       ? git(root, ["write-tree"], { encoding: "utf8" }).trim()
       : sha256(
-          filteredRecords(
-            git(root, ["ls-files", "-s", "-z"]),
-            excludePathspecs,
-            (record) => record.slice(record.lastIndexOf("\t") + 1),
+          filteredRecords(git(root, ["ls-files", "-s", "-z"]), excludePathspecs, (record) =>
+            record.slice(record.lastIndexOf("\t") + 1),
           ),
         );
-  const staged = sha256(git(root, ["diff", "--cached", "--no-ext-diff", "--binary", "--", ...pathspec]));
-  const unstaged = sha256(
-    git(root, ["diff", "--no-ext-diff", "--binary", "--", ...pathspec]),
+  const staged = sha256(
+    git(root, ["diff", "--cached", "--no-ext-diff", "--binary", "--", ...pathspec]),
   );
+  const unstaged = sha256(git(root, ["diff", "--no-ext-diff", "--binary", "--", ...pathspec]));
   const untracked = filteredRecords(
     git(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
     excludePathspecs,

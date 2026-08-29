@@ -22,7 +22,7 @@ const wasmSource = sealedWasmPackage
   ? resolve(sealedWasmPackage, "jazz_wasm_bg.wasm")
   : snapshot
     ? resolve(snapshot.wasmPackage, "jazz_wasm_bg.wasm")
-  : fileURLToPath(new URL("../../../crates/jazz-wasm/pkg/jazz_wasm_bg.wasm", import.meta.url));
+    : fileURLToPath(new URL("../../../crates/jazz-wasm/pkg/jazz_wasm_bg.wasm", import.meta.url));
 
 export function brokerWorkerOutputDir(args = process.argv.slice(2)) {
   if (args.length === 0) return canonicalOutputDir;
