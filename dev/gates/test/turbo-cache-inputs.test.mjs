@@ -30,6 +30,25 @@ function jazzToolsDryGraph() {
   return task;
 }
 
+function assertUncachedCorrectnessArtifactTask(task) {
+  // A native generation contains its own Cargo target and can be tens of
+  // gigabytes. It is deliberately published through the content-addressed
+  // correctness-artifact store, not Turbo's tarball cache. `cache: false`
+  // must disable both local and remote archiving; checking the resolved graph
+  // catches a future task-default/override change rather than merely parsing
+  // turbo.json.
+  assert.equal(
+    task.cache.local,
+    false,
+    `${task.taskId} could archive native correctness output locally`,
+  );
+  assert.equal(
+    task.cache.remote,
+    false,
+    `${task.taskId} could archive native correctness output remotely`,
+  );
+}
+
 function dryGraph() {
   const output = execFileSync(
     "pnpm",
@@ -84,6 +103,7 @@ try {
   );
 
   const baseline = dryGraph();
+  for (const task of tasks) assertUncachedCorrectnessArtifactTask(baseline.get(task));
   for (const { name } of closures)
     for (const task of tasks)
       assert(

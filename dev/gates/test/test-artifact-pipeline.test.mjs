@@ -492,9 +492,20 @@ test("CI uses the correctness artifact path while package builds keep release WA
   // pass-through environment variable. Turbo does not include pass-through
   // values in its task hash, so restoring Jazz Tools' bundled output could
   // otherwise pair a verified current snapshot with stale embedded WASM.
-  // Keep the native producers cacheable below their publication boundary;
-  // only this reader-facing bundle task is deliberately uncached.
-  assert.equal(turbo.tasks["jazz-tools#build"].cache, false);
+  // The native producer's `.native-artifacts/**` output includes Cargo
+  // generations measured in tens of GiB. These four tasks must use the
+  // explicit producer/consumer hand-off, never Turbo archives.
+  for (const task of [
+    "jazz-napi#build",
+    "jazz-wasm#build",
+    "jazz-wasm#build:fast",
+    "jazz-tools#build",
+  ])
+    assert.equal(
+      turbo.tasks[task].cache,
+      false,
+      `${task} must remain uncached: correctness artifacts are not Turbo outputs`,
+    );
   assert.deepEqual(turbo.tasks.test.passThroughEnv, turbo.tasks["jazz-tools#build"].passThroughEnv);
 });
 

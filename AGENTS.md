@@ -98,6 +98,16 @@ rebuild in the checkout whose tests you are running. The boundary is deliberate
 and fail-closed: native production can succeed even when a TypeScript consumer
 build/test subsequently fails.
 
+**Correctness-artifact cache boundary.** Native/WASM generations are producer
+state, not Turbo cache entries. A NAPI generation can retain many GiB of Cargo
+products, so Turbo's local/remote archives would both be unbounded and unsafe
+to restore as correctness authority. Keep `jazz-napi#build`,
+`jazz-wasm#build`, `jazz-wasm#build:fast`, and `jazz-tools#build` explicitly
+`cache: false`; preserve the resolved-Turbo-graph assertion when changing this
+boundary. Ordinary small package builds may use Turbo normally, but must never
+add `.native-artifacts/**`, WASM `pkg/**`, or the correctness-artifact store as
+cacheable outputs.
+
 - `cargo test -p jazz`
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).
