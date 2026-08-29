@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +22,7 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
     const adb = join(fixture, "adb");
     const emulator = join(fixture, "emulator");
     const sessionLauncher = join(fixture, "session-launcher");
+    const portableBin = join(fixture, "portable-bin");
     const log = join(fixture, "emulator.log");
     const config = join(fixture, "config.ini");
     writeFileSync(adb, `#!/usr/bin/env bash\nset -euo pipefail\n${adbBody}\n`);
@@ -25,6 +35,20 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
     chmodSync(adb, 0o755);
     chmodSync(emulator, 0o755);
     chmodSync(sessionLauncher, 0o755);
+    if (options.portableNoTimeout) {
+      // Make `command -v timeout` fail even on this Linux host, while leaving
+      // the exact commands the receipt needs available. The Perl wrapper is a
+      // receipt: a green portable test must have taken the macOS fallback.
+      mkdirSync(portableBin);
+      for (const command of ["bash", "sleep", "tail", "tr"]) {
+        symlinkSync(`/usr/bin/${command}`, join(portableBin, command));
+      }
+      writeFileSync(
+        join(portableBin, "perl"),
+        '#!/bin/sh\nprintf "%s\\n" "${JAZZ_TEST_PERL_MARKER:?}" > "$JAZZ_TEST_PERL_MARKER"\nexec /usr/bin/perl "$@"\n',
+      );
+      chmodSync(join(portableBin, "perl"), 0o755);
+    }
     const result = spawnSync("bash", [script, "test-avd", log, config], {
       encoding: "utf8",
       env: {
@@ -33,12 +57,13 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
         JAZZ_DEVICE_EMULATOR: emulator,
         JAZZ_ANDROID_BOOT_TIMEOUT_SECONDS: "1",
         JAZZ_ANDROID_BOOT_POLL_SECONDS: "0.05",
-        ...(process.platform === "linux"
-          ? {}
-          : {
+        ...(options.portableNoTimeout ? { PATH: portableBin } : {}),
+        ...(options.portableNoTimeout || process.platform !== "linux"
+          ? {
               JAZZ_ANDROID_SESSION_LAUNCHER: sessionLauncher,
               JAZZ_ANDROID_SESSION_PROCESS_GROUP: "0",
-            }),
+            }
+          : {}),
         ...options.env,
       },
       timeout: 5_000,
@@ -108,7 +133,8 @@ test("Android boot receipt accepts the device-to-boot-complete transition", () =
   }
 });
 
-test("Android boot receipt uses a portable macOS launcher without GNU timeout", () => {
+test("Android boot receipt uses the Perl macOS fallback without GNU timeout", () => {
+  const perlMarker = join(tmpdir(), `jazz-rn-perl-fallback-${process.pid}-${Date.now()}`);
   withFixture(
     "portable-launcher",
     'case "$1" in get-state) echo device ;; shell) echo 1 ;; *) exit 2 ;; esac',
@@ -116,14 +142,45 @@ test("Android boot receipt uses a portable macOS launcher without GNU timeout", 
     (result) => assert.equal(result.status, 0, result.stderr),
     {
       env: {
-        JAZZ_ANDROID_SESSION_LAUNCHER: "/bin/sh",
-        JAZZ_ANDROID_SESSION_PROCESS_GROUP: "0",
+        JAZZ_TEST_PERL_MARKER: perlMarker,
       },
+      portableNoTimeout: true,
     },
   );
   // Plant the old macOS-only failure: no source receipt may hard-code the
   // Linux coreutils path. On macOS the launcher takes its Perl fallback.
   assert.doesNotMatch(readFileSync(script, "utf8"), /\/usr\/bin\/timeout/);
+  assert.equal(existsSync(perlMarker), true, "the timeout-free fixture must invoke Perl");
+  rmSync(perlMarker, { force: true });
+});
+
+test("Perl fallback bounds a wedged adb probe and cleans up the portable child", () => {
+  const perlMarker = join(tmpdir(), `jazz-rn-perl-timeout-${process.pid}-${Date.now()}`);
+  const emulatorPidFile = join(tmpdir(), `jazz-rn-perl-emulator-${process.pid}-${Date.now()}`);
+  try {
+    withFixture(
+      "portable-timeout",
+      'while [[ ! -e "$JAZZ_TEST_EMULATOR_PID" ]]; do sleep 0.01; done; sleep 10',
+      'echo $$ > "$JAZZ_TEST_EMULATOR_PID"; sleep 10',
+      (result) => {
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /within 1s/);
+      },
+      {
+        env: {
+          JAZZ_TEST_PERL_MARKER: perlMarker,
+          JAZZ_TEST_EMULATOR_PID: emulatorPidFile,
+        },
+        portableNoTimeout: true,
+      },
+    );
+    assert.equal(existsSync(perlMarker), true, "a wedged probe must be killed by the Perl fallback");
+    const emulatorPid = Number(readFileSync(emulatorPidFile, "utf8").trim());
+    assert.throws(() => process.kill(emulatorPid, 0), { code: "ESRCH" });
+  } finally {
+    rmSync(perlMarker, { force: true });
+    rmSync(emulatorPidFile, { force: true });
+  }
 });
 
 test(

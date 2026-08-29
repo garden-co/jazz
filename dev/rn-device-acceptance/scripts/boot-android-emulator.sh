@@ -49,8 +49,9 @@ bounded_file() {
 
 # GNU `timeout` is available on the Linux acceptance runner, but not on the
 # macOS runner that verifies the source receipt. Keep the production command
-# injectable and use Perl's portable alarm/exec pair when GNU coreutils is not
-# present. Each probe remains independently bounded in either case.
+# injectable and use Perl to supervise a separately grouped child when GNU
+# coreutils is not present. An alarm followed directly by `exec` is not enough:
+# the timer is not a reliable bound across every exec target.
 run_bounded() {
   local duration=$1
   shift
@@ -59,7 +60,25 @@ run_bounded() {
   elif command -v timeout >/dev/null 2>&1; then
     timeout --signal=KILL "${duration}s" "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV' "$duration" "$@"
+    perl -e '
+      use POSIX qw(setsid);
+      my $seconds = shift @ARGV;
+      my $pid = fork // die "fork: $!";
+      if ($pid == 0) {
+        setsid() or die "setsid: $!";
+        exec @ARGV or die "exec: $!";
+      }
+      $SIG{ALRM} = sub {
+        kill "KILL", -$pid;
+        waitpid $pid, 0;
+        exit 124;
+      };
+      alarm $seconds;
+      waitpid $pid, 0;
+      my $status = $?;
+      alarm 0;
+      exit($status == -1 ? 1 : $status & 127 ? 128 + ($status & 127) : $status >> 8);
+    ' "$duration" "$@"
   else
     echo "Android boot receipt requires GNU timeout or perl for bounded probes" >&2
     return 127
