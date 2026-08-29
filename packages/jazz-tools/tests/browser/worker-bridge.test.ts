@@ -356,7 +356,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
         await successor.retire();
       }
     } finally {
-      await first.retire().catch(() => undefined);
+      await withTimeout(
+        first.retire(),
+        1_000,
+        "Invalidated predecessor lease did not settle during test cleanup",
+      ).catch(() => undefined);
     }
   }, 15_000);
 
