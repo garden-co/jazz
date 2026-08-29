@@ -301,6 +301,48 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(db).toBeInstanceOf(Db);
   });
 
+  it("registers concurrent local subscriptions before worker admission while withholding openings", async () => {
+    const db = track(
+      await createDb({
+        appId: "concurrent-local-subscription-admission",
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: uniqueDbName("concurrent-local-subscription") },
+      }),
+    );
+    // Selecting the schema begins the worker handshake but cannot complete it
+    // in this same call stack. The registration spy distinguishes the required
+    // native ordering from the old workaround that waited before subscribing.
+    const client = (
+      db as unknown as {
+        getClient(schema: typeof todos._schema): { subscribe: (...args: never[]) => number };
+      }
+    ).getClient(todos._schema);
+    const nativeSubscribe = vi.spyOn(client, "subscribe");
+    const source = getDbSubscriptionSource(db);
+    const firstDeltas: unknown[] = [];
+    const secondDeltas: unknown[] = [];
+    const first = source.subscribeDelta(todos, (delta) => firstDeltas.push(delta), {
+      tier: "local",
+    });
+    const second = source.subscribeDelta(todos, (delta) => secondDeltas.push(delta), {
+      tier: "local",
+    });
+    try {
+      expect(first.ready).toBeDefined();
+      expect(second.ready).toBeDefined();
+      expect(nativeSubscribe).toHaveBeenCalledTimes(2);
+      expect(firstDeltas).toEqual([]);
+      expect(secondDeltas).toEqual([]);
+      await expect(Promise.all([first.ready, second.ready])).resolves.toEqual([
+        undefined,
+        undefined,
+      ]);
+    } finally {
+      first();
+      second();
+    }
+  });
+
   it("keeps createDb schema-lazy and rejects the first local subscription when durable storage cannot open", async () => {
     const ambientErrors: string[] = [];
     const unhandledRejections: string[] = [];
