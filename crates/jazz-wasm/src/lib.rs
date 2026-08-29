@@ -77,6 +77,15 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
+/// Test-only direct execution of one frozen complete v1 frame through the
+/// generated WASM artifact. This reaches the production Rust frame, feature,
+/// compression, and semantic-payload decoders; it is not a browser transport
+/// API.
+#[wasm_bindgen(js_name = __testValidateWireFrameCorpus)]
+pub fn test_validate_wire_frame_corpus(frame: Vec<u8>) -> Result<(), JsValue> {
+    jazz::wire::validate_frame_for_artifact_corpus(&frame).map_err(|error| error.into())
+}
+
 /// Generate a new UUID v7 (time-ordered).
 ///
 /// Useful when a caller wants the default generated row-id shape.

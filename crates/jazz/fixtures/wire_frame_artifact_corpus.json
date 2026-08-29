@@ -1,0 +1,33 @@
+{
+  "format": "jazz-wire-frame-artifact-corpus-v1",
+  "hello_cases": [
+    "client_without_authority",
+    "core_with_authority",
+    "core_with_max_u64_authority_epoch"
+  ],
+  "message_cases": [
+    "fate_update_accepted_global",
+    "view_update_mixed_version_carrier_runs",
+    "chunk_upload_start_root_descriptor",
+    "catalogue_snapshot_todos_lineage"
+  ],
+  "error_frame_hex": "0202000d66697874757265206572726f72",
+  "rejections": [
+    {
+      "name": "trailing complete hello",
+      "frame_hex": "00010100000000"
+    },
+    {
+      "name": "unknown WireFrame discriminant",
+      "frame_hex": "04"
+    },
+    {
+      "name": "unsupported exact-v2 hello",
+      "frame_hex": "000202000100"
+    },
+    {
+      "name": "corrupt zstd-compressed message payload",
+      "frame_hex": "01011000106e6f742061207a737464206672616d65"
+    }
+  ]
+}

@@ -122,6 +122,14 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
+/// Test-only direct execution of one frozen complete v1 frame through the
+/// generated NAPI artifact. This reaches the production Rust frame, feature,
+/// compression, and semantic-payload decoders; it is not a host wire API.
+#[napi(js_name = "__testValidateWireFrameCorpus", skip_typescript)]
+pub fn test_validate_wire_frame_corpus(frame: Buffer) -> Result<()> {
+    jazz::wire::validate_frame_for_artifact_corpus(&frame).map_err(napi::Error::from_reason)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
     identity: CoreOpenDbIdentity,
