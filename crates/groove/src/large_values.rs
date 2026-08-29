@@ -2429,7 +2429,10 @@ fn node_ref_from_values(values: &[Value]) -> Result<NodeRef, Error> {
 
 /// Encode a physical chunk identity through the same canonical Groove record
 /// used by indirect scalar roots.
-pub(crate) fn encode_node_ref(node_ref: &NodeRef) -> Result<Vec<u8>, Error> {
+///
+/// This is an engine-format primitive for storage compatibility receipts and
+/// engine-owned metadata keys, not an application value encoding.
+pub fn encode_node_ref(node_ref: &NodeRef) -> Result<Vec<u8>, Error> {
     let values = node_ref_record_schema().ordered_values([
         (
             NODE_REF_OBJECT_HASH_FIELD,

@@ -415,6 +415,32 @@ impl Database {
         Ok(self.storage.approximate_class_bytes(cf.to_owned()).await?)
     }
 
+    /// Return the durable ordered key/value bytes of Groove's engine-owned
+    /// large-value metadata class for a compatibility receipt.
+    ///
+    /// This deliberately does not decode or expose an application table: the
+    /// The metadata plane has several canonical record shapes selected by its
+    /// key namespace and cannot be represented by one public direct-record-
+    /// store descriptor. Ordinary application code must continue to use
+    /// schema-aware table and direct-store APIs.
+    #[doc(hidden)]
+    pub async fn large_value_metadata_entries_for_compatibility(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        let mut cursor = self
+            .storage
+            .scan(crate::storage::ScanRequest::prefix(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                Vec::new(),
+            ))
+            .await?;
+        let mut entries = Vec::new();
+        while let Some(batch) = cursor.next_batch().await? {
+            entries.extend(batch);
+        }
+        Ok(entries)
+    }
+
     pub fn into_storage(self) -> BoxedStorage {
         Rc::try_unwrap(self.storage)
             .unwrap_or_else(|_| panic!("database storage still has an outstanding operation"))
