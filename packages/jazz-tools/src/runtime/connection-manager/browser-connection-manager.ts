@@ -12,6 +12,7 @@ import {
   type DbForConnection,
 } from "./types.js";
 import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/browser-control-registry.js";
+import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js";
 
 /**
  * Every persistent browser tab is an in-memory client of one SharedWorker
@@ -170,6 +171,12 @@ export class BrowserConnectionManager extends ConnectionManager {
     cookieSession?: Session;
     trustedReservedSession?: Session;
   }): void {
+    // The persistent root belongs to the principal that opened it. Check
+    // before mutating Db config or forwarding anything to the worker, so a
+    // rejected Alice -> Bob switch cannot expose Alice's local rows to Bob.
+    const nextConfig = { ...this.host.config, ...auth } as DbForConnection["config"];
+    setTrustedReservedSession(nextConfig, getTrustedReservedSession(this.host.config));
+    assertBrowserStorageOwnerUnchanged(this.host.config, nextConfig);
     super.updateAuth(auth);
     void this.connection?.updateAuth(
       JSON.stringify(runtimeAuth(this.host.config)),

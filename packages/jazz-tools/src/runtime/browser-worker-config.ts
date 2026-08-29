@@ -206,6 +206,20 @@ export function createBrowserStorageOwner(config: DbConfig): string {
 }
 
 /**
+ * A persistent browser root is durably bound to its opening principal. Token
+ * refresh for that principal is safe; changing principal in a live runtime is
+ * not. Callers must shut down and reopen (or explicitly reset) instead of
+ * briefly exposing the old root under the new session.
+ */
+export function assertBrowserStorageOwnerUnchanged(current: DbConfig, next: DbConfig): void {
+  if (createBrowserStorageOwner(current) !== createBrowserStorageOwner(next)) {
+    throw new Error(
+      "Cannot change the authenticated user of a live persistent browser Db; shut it down and reopen for the new user, or explicitly reset its storage",
+    );
+  }
+}
+
+/**
  * Derive the physical IndexedDB/SharedWorker namespace from a caller-selected
  * logical base and its complete, non-secret browser storage scope.
  *

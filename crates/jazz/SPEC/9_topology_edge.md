@@ -121,6 +121,18 @@ namespace is the explicit ownership-transfer operation. This physical ownership
 is distinct from a foreground replica/node ID, which remains per live client,
 and from credentials, which are never persisted as the ownership marker.
 
+The owner marker alone does not establish _live_ worker ownership: rolling
+assets and generation retry can name distinct SharedWorker realms for the same
+physical root. Before a realm opens or recovers that root's foreground-lease
+pool, it MUST hold one origin-wide physical-root liveness lock and durably claim
+an opaque worker epoch beside the manifest. A live predecessor therefore makes
+a successor fail/retry operation-scoped rather than retiring its leases. Once
+the browser releases a dead predecessor's lock, a successor may replace its
+epoch; stale cleanup may delete only the epoch it claimed. A running persistent
+browser Db likewise MUST reject a principal-changing auth update before it
+reaches the worker; same-principal credential refresh remains allowed, while a
+user switch requires shutdown and reopening (or explicit storage reset).
+
 The main-thread client is deliberately non-durable: its authored transactions
 start at `Pending`/`None`. Each live foreground owns an exclusive leased
 `NodeUuid` and mints its own transaction identities locally; its clean handoff

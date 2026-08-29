@@ -1,6 +1,10 @@
 import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/client.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
+import {
+  acquireBrowserPhysicalDatabaseEpoch,
+  type BrowserPhysicalDatabaseEpoch,
+} from "../runtime/browser-physical-database-epoch.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
 import {
   BrowserWorkerTransportPump,
@@ -62,6 +66,7 @@ type RuntimeContext = {
   closing: Promise<void> | null;
   idleReleaseTimer: ReturnType<typeof setTimeout> | null;
   pageStore: IndexedDbPageStore | null;
+  disposePageStoreInvalidation: (() => void) | null;
   disposeTelemetry: (() => void) | null;
   disposeAuxiliaryTrace: (() => void) | null;
   resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
@@ -82,15 +87,77 @@ type ForegroundLeaseOwner = {
   activeLeaseIds: Set<string>;
 };
 
+type PhysicalDatabaseOwner = {
+  epoch: BrowserPhysicalDatabaseEpoch;
+  pageStore: IndexedDbPageStore;
+  release: Promise<void> | null;
+};
+
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const workerRealmId = crypto.randomUUID();
 const contexts = new Map<string, RuntimeContext>();
 const foregroundLeaseOwners = new Map<string, ForegroundLeaseOwner>();
+const physicalDatabaseOwners = new Map<string, PhysicalDatabaseOwner>();
 const inspectorControlPorts = new Set<MessagePort>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
 let wasmModuleSource: string | null = null;
 let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
+
+/**
+ * Open a physical root only after holding its origin-wide liveness fence.
+ *
+ * This deliberately lives outside `contexts`: worker assets/generations can
+ * create distinct SharedWorker realms, but must never concurrently recover
+ * the same durable foreground-lease pool.
+ */
+async function ensurePhysicalDatabaseOwner(
+  dbName: string,
+  storageOwner: string,
+): Promise<PhysicalDatabaseOwner> {
+  const existing = physicalDatabaseOwners.get(dbName);
+  if (existing) {
+    // A follower may arrive in the small clean-close window. Never hand it a
+    // page store whose epoch is already being released; wait for the release
+    // and claim a fresh physical epoch instead.
+    if (existing.release) {
+      await existing.release;
+      return await ensurePhysicalDatabaseOwner(dbName, storageOwner);
+    }
+    return existing;
+  }
+
+  const epoch = await acquireBrowserPhysicalDatabaseEpoch(dbName);
+  let pageStore: IndexedDbPageStore | null = null;
+  try {
+    pageStore = await IndexedDbPageStore.open(dbName, { owner: storageOwner });
+    await pageStore.claimBrowserWorkerEpoch(epoch.id);
+    const owner: PhysicalDatabaseOwner = { epoch, pageStore, release: null };
+    physicalDatabaseOwners.set(dbName, owner);
+    return owner;
+  } catch (error) {
+    pageStore?.close();
+    epoch.release();
+    throw error;
+  }
+}
+
+async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
+  const owner = physicalDatabaseOwners.get(dbName);
+  if (!owner) return;
+  if (!owner.release) {
+    owner.release = (async () => {
+      try {
+        await owner.pageStore.releaseBrowserWorkerEpoch(owner.epoch.id);
+      } finally {
+        owner.pageStore.close();
+        owner.epoch.release();
+        physicalDatabaseOwners.delete(dbName);
+      }
+    })();
+  }
+  await owner.release;
+}
 
 workerGlobal.onconnect = (event) => {
   const port = event.ports[0];
@@ -123,13 +190,12 @@ async function acquireForegroundNodeLease(
   try {
     let owner = foregroundLeaseOwners.get(request.dbName);
     if (!owner) {
+      const physicalOwner = await ensurePhysicalDatabaseOwner(request.dbName, request.storageOwner);
       owner = {
         // Lease bootstrap occurs before a foreground runtime is materialized,
         // but it still opens the physical root. Admit its exact durable owner
         // here, before the request can observe or mutate the lease pool.
-        pageStore: await IndexedDbPageStore.open(request.dbName, {
-          owner: request.storageOwner,
-        }),
+        pageStore: physicalOwner.pageStore,
         storageOwner: request.storageOwner,
         activeLeaseIds: new Set(),
       };
@@ -268,6 +334,7 @@ function createContext(
     peers: new Map(),
     runtime: null,
     pageStore: null,
+    disposePageStoreInvalidation: null,
     disposeTelemetry: null,
     disposeAuxiliaryTrace: null,
     resetBarrier: null,
@@ -301,10 +368,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
     // particular, a low-level attempt to open another account's physical root
     // is an ordinary connect rejection, not a partially
     // initialized worker that can affect the rightful owner's next open.
-    context.pageStore = await IndexedDbPageStore.open(options.dbName, {
-      owner: options.storageOwner,
-      onInvalidated: () => handleStorageInvalidation(context),
-    });
+    const physicalOwner = await ensurePhysicalDatabaseOwner(options.dbName, options.storageOwner);
+    context.pageStore = physicalOwner.pageStore;
+    context.disposePageStoreInvalidation = context.pageStore.onInvalidated(() =>
+      handleStorageInvalidation(context),
+    );
     workerGlobal.__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     const wasmModule = await loadWorkerWasmModule(options.runtimeSources);
     context.disposeTelemetry = installWasmTelemetry({
@@ -436,11 +504,12 @@ function workerWasmSource(
 
 function cleanupFailedContext(context: RuntimeContext): void {
   const runtime = context.runtime;
-  const pageStore = context.pageStore;
+  const disposePageStoreInvalidation = context.disposePageStoreInvalidation;
   const disposeTelemetry = context.disposeTelemetry;
   const disposeAuxiliaryTrace = context.disposeAuxiliaryTrace;
   context.runtime = null;
   context.pageStore = null;
+  context.disposePageStoreInvalidation = null;
   context.disposeTelemetry = null;
   context.disposeAuxiliaryTrace = null;
   if (contexts.get(context.key) === context) contexts.delete(context.key);
@@ -448,7 +517,7 @@ function cleanupFailedContext(context: RuntimeContext): void {
     runtime?.discard();
   } finally {
     try {
-      pageStore?.close();
+      disposePageStoreInvalidation?.();
     } finally {
       try {
         disposeTelemetry?.();
@@ -457,6 +526,7 @@ function cleanupFailedContext(context: RuntimeContext): void {
       }
     }
   }
+  maybeCloseWorker();
 }
 
 async function configureServer(
@@ -871,7 +941,8 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   }
   context.runtime?.discard();
   context.runtime = null;
-  context.pageStore?.close();
+  context.disposePageStoreInvalidation?.();
+  context.disposePageStoreInvalidation = null;
   context.pageStore = null;
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
@@ -889,6 +960,10 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
     foregroundLeaseOwners.delete(context.options.dbName);
     leaseOwner.pageStore.close();
   }
+  // `deleteStorage` invalidated the durable epoch record with the root. The
+  // Web Lock must nevertheless be released so a successor can claim the new
+  // physical epoch.
+  await releasePhysicalDatabaseOwner(context.options.dbName).catch(() => undefined);
 }
 
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {
@@ -905,7 +980,8 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       // suspended cold/query lifecycle cannot add durability at this point.
       context.runtime?.discard();
       context.runtime = null;
-      context.pageStore?.close();
+      context.disposePageStoreInvalidation?.();
+      context.disposePageStoreInvalidation = null;
       context.pageStore = null;
       context.disposeTelemetry?.();
       context.disposeTelemetry = null;
@@ -933,9 +1009,19 @@ function maybeCloseWorker(): void {
     (owner) => owner.activeLeaseIds.size > 0,
   );
   if (contexts.size === 0 && inspectorControlPorts.size === 0 && !hasActiveForegroundLease) {
-    for (const owner of foregroundLeaseOwners.values()) owner.pageStore.close();
+    const databaseNames = new Set<string>([
+      ...foregroundLeaseOwners.keys(),
+      ...physicalDatabaseOwners.keys(),
+    ]);
+    // The physical owner writes/deletes its epoch before closing the shared
+    // page-store handle below. Closing lease aliases first would turn an
+    // otherwise clean handoff into a stale durable epoch.
     foregroundLeaseOwners.clear();
-    workerGlobal.close();
+    void Promise.all([...databaseNames].map((dbName) => releasePhysicalDatabaseOwner(dbName)))
+      .catch(() => undefined)
+      // Unit harnesses execute the module outside an actual worker global;
+      // production SharedWorkerGlobal always supplies `close`.
+      .finally(() => workerGlobal.close?.());
   }
 }
 

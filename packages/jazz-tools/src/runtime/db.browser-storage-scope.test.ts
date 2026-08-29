@@ -5,7 +5,11 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   LOCAL_FIRST_JWT_ISSUER,
 } from "./client-session.js";
-import { createBrowserAuthSessionKey, createBrowserStorageOwner } from "./browser-worker-config.js";
+import {
+  assertBrowserStorageOwnerUnchanged,
+  createBrowserAuthSessionKey,
+  createBrowserStorageOwner,
+} from "./browser-worker-config.js";
 import { setTrustedReservedSession } from "./db-internal-session.js";
 
 function toBase64Url(value: unknown): string {
@@ -21,6 +25,28 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("resolveDefaultPersistentDbName", () => {
+  it("rejects a live persistent principal switch before forwarding it to storage", () => {
+    const alice: DbConfig = {
+      appId: "chat-app",
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice" }),
+    };
+    const refreshedAlice: DbConfig = {
+      ...alice,
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", exp: 2 }),
+    };
+    const bob: DbConfig = {
+      ...alice,
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "bob" }),
+    };
+
+    expect(() => assertBrowserStorageOwnerUnchanged(alice, refreshedAlice)).not.toThrow();
+    // Planted positive: removing the guard would let Bob inherit Alice's
+    // durable root before an upstream auth response could correct it.
+    expect(() => assertBrowserStorageOwnerUnchanged(alice, bob)).toThrow(
+      "Cannot change the authenticated user of a live persistent browser Db",
+    );
+  });
+
   it("uses the canonical public issuer/subject identity as the non-secret browser owner scope", () => {
     const config: DbConfig = {
       appId: "chat-app",

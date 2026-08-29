@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => {
   const telemetryDisposers: Mock[] = [];
   const pageStores: Array<{
     close: Mock;
+    claimBrowserWorkerEpoch: Mock;
+    releaseBrowserWorkerEpoch: Mock;
+    onInvalidated: Mock;
     canonicalReplicaNode: Uint8Array;
     readonly replicaNode: Uint8Array;
   }> = [];
@@ -71,6 +74,9 @@ const mocks = vi.hoisted(() => {
         replicaNode.fill(pageStores.length + 3);
         const pageStore = {
           close: vi.fn(),
+          claimBrowserWorkerEpoch: vi.fn(async () => undefined),
+          releaseBrowserWorkerEpoch: vi.fn(async () => undefined),
+          onInvalidated: vi.fn(() => () => undefined),
           canonicalReplicaNode: replicaNode,
           get replicaNode() {
             return Uint8Array.from(replicaNode);
@@ -580,7 +586,6 @@ describe("broker worker context initialization", () => {
       // Mutating production wiring to `owner: undefined` or a lossy surrogate
       // makes this mock receipt fail before a worker can open WASM.
       owner: exactStorageOwner,
-      onInvalidated: expect.any(Function),
     });
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();

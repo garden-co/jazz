@@ -22,6 +22,13 @@ export const INDEXEDDB_STORAGE_MANIFEST_KEY = "epoch";
  */
 export const INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY = "browser-runtime-owner";
 /**
+ * Opaque epoch held by the one live SharedWorker realm permitted to recover
+ * foreground leases for this physical root. Its companion Web Lock supplies
+ * liveness; this record fences a stale realm's later clean release.
+ */
+export const INDEXEDDB_BROWSER_WORKER_EPOCH_KEY = "browser-worker-epoch-v1";
+export const INDEXEDDB_BROWSER_WORKER_EPOCH_FORMAT = "jazz-browser-worker-epoch-v1";
+/**
  * The immutable NodeUuid for this physical browser replica.
  *
  * This is intentionally separate from the epoch/profile manifest: the profile
@@ -147,14 +154,24 @@ export class IndexedDbStorageInvalidatedError extends Error {
 export class IndexedDbPageStore {
   private invalidated = false;
   private replicaNodeBytes: Uint8Array | null = null;
+  private readonly invalidationListeners = new Set<
+    (error: IndexedDbStorageInvalidatedError) => void
+  >();
 
   private constructor(
     private readonly db: IDBDatabase,
     readonly name: string,
-    private readonly onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void,
+    initialInvalidationListener?: (error: IndexedDbStorageInvalidatedError) => void,
   ) {
+    if (initialInvalidationListener) this.invalidationListeners.add(initialInvalidationListener);
     db.addEventListener("versionchange", this.handleVersionChange);
     db.addEventListener("close", this.handleUnexpectedClose);
+  }
+
+  /** Subscribe while a worker context uses this physical page-store handle. */
+  onInvalidated(listener: (error: IndexedDbStorageInvalidatedError) => void): () => void {
+    this.invalidationListeners.add(listener);
+    return () => this.invalidationListeners.delete(listener);
   }
 
   static async open(
@@ -281,6 +298,43 @@ export class IndexedDbPageStore {
       const [lease] = pool.active.splice(index, 1);
       if (lease) pool.retired.push(lease.node);
     });
+  }
+
+  /**
+   * Durably fence this live worker realm after it has acquired the matching
+   * origin-wide Web Lock. A successor may replace an epoch only after that
+   * lock proves the preceding realm is no longer alive.
+   */
+  async claimBrowserWorkerEpoch(epoch: string): Promise<void> {
+    if (!isBrowserWorkerEpoch(epoch)) throw new Error("Invalid browser worker epoch");
+    this.assertValid();
+    const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+    const done = transactionDone(tx);
+    tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
+      { format: INDEXEDDB_BROWSER_WORKER_EPOCH_FORMAT, epoch },
+      INDEXEDDB_BROWSER_WORKER_EPOCH_KEY,
+    );
+    await done;
+  }
+
+  /** Delete only this realm's epoch; a stale realm must never clear its successor. */
+  async releaseBrowserWorkerEpoch(epoch: string): Promise<void> {
+    if (!isBrowserWorkerEpoch(epoch)) throw new Error("Invalid browser worker epoch");
+    this.assertValid();
+    const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+    const done = transactionDone(tx);
+    const store = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    const current = await requestResult(store.get(INDEXEDDB_BROWSER_WORKER_EPOCH_KEY));
+    if (
+      current &&
+      typeof current === "object" &&
+      (current as { format?: unknown; epoch?: unknown }).format ===
+        INDEXEDDB_BROWSER_WORKER_EPOCH_FORMAT &&
+      (current as { epoch?: unknown }).epoch === epoch
+    ) {
+      store.delete(INDEXEDDB_BROWSER_WORKER_EPOCH_KEY);
+    }
+    await done;
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
@@ -535,7 +589,8 @@ export class IndexedDbPageStore {
     if (this.invalidated) return;
     this.invalidated = true;
     this.removeInvalidationListeners();
-    this.onInvalidated?.(new IndexedDbStorageInvalidatedError(this.name));
+    const error = new IndexedDbStorageInvalidatedError(this.name);
+    for (const listener of this.invalidationListeners) listener(error);
   }
 
   private assertValid(): void {
@@ -661,6 +716,13 @@ function isNodeBuffer(value: unknown): value is ArrayBuffer {
 }
 
 function isLeaseId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+function isBrowserWorkerEpoch(value: unknown): value is string {
   return (
     typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)

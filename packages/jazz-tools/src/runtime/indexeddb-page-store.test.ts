@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
+  INDEXEDDB_BROWSER_WORKER_EPOCH_KEY,
   INDEXEDDB_BTREE_FORMAT_MAGIC,
   INDEXEDDB_BTREE_FORMAT_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
@@ -87,6 +88,31 @@ describe("IndexedDbPageStore", () => {
     ).toBe("app:alice");
     await transactionDone(tx);
     raw.close();
+  });
+
+  it("fences a stale browser worker epoch from clearing its successor", async () => {
+    const name = databaseName();
+    const first = await IndexedDbPageStore.open(name, { owner: "app:alice" });
+    const firstEpoch = "11111111-1111-4111-8111-111111111111";
+    const successorEpoch = "22222222-2222-4222-8222-222222222222";
+    await first.claimBrowserWorkerEpoch(firstEpoch);
+    await first.claimBrowserWorkerEpoch(successorEpoch);
+
+    // Planted positive: a late clean-up from a dead/replaced realm must not
+    // erase the durable fence now owned by the successor.
+    await first.releaseBrowserWorkerEpoch(firstEpoch);
+    const raw = await openRawDatabase(name);
+    const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    expect(
+      await requestResult(
+        tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_BROWSER_WORKER_EPOCH_KEY),
+      ),
+    ).toEqual({ format: "jazz-browser-worker-epoch-v1", epoch: successorEpoch });
+    await transactionDone(tx);
+    raw.close();
+
+    await first.releaseBrowserWorkerEpoch(successorEpoch);
+    first.close();
   });
 
   it("retains an exact long canonical owner marker rather than requiring a lossy digest", async () => {
