@@ -867,6 +867,17 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   context.disposeAuxiliaryTrace?.();
   context.disposeAuxiliaryTrace = null;
   contexts.delete(context.key);
+
+  // The reset deleted the physical lease pool along with the page tree. Drop
+  // the worker's handle to that erased epoch before a successor asks for a
+  // lease; otherwise it would try to mutate an invalidated IDB connection.
+  // Existing foregrounds are being reset/discarded and their captured owners
+  // may only fail closed while returning their now-retired leases.
+  const leaseOwner = foregroundLeaseOwners.get(context.options.dbName);
+  if (leaseOwner) {
+    foregroundLeaseOwners.delete(context.options.dbName);
+    leaseOwner.pageStore.close();
+  }
 }
 
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {
