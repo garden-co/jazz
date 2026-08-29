@@ -628,7 +628,7 @@ impl NativeRelayHost {
                     .allocate()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
                 let client = relay
-                    .attach_client(client_identity(handle, author), claims)
+                    .attach_client(fresh_client_identity(author).map_err(relay_status)?, claims)
                     .map_err(relay_status)?;
                 self.clients.insert(handle, (relay_handle, client));
                 Ok(RelayCommandResponse::Attached { client: handle })
@@ -778,7 +778,9 @@ impl NativeRelayHost {
         let client_handle = self
             .allocate()
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let client = match relay.attach_client(client_identity(client_handle, author), claims) {
+        let client = match relay
+            .attach_client(fresh_client_identity(author).map_err(relay_status)?, claims)
+        {
             Ok(client) => client,
             Err(error) => {
                 // The relay alias was not yet observable to the caller. Undo
@@ -978,14 +980,21 @@ impl NativeRelayHost {
     }
 }
 
-fn client_identity(handle: u64, author: jazz::ids::AuthorSubject) -> DbIdentity {
+/// Mint an ephemeral client identity for one foreground runtime.
+///
+/// A foreground `Db` owns a fresh in-memory HLC. Its node must therefore be
+/// fresh too: deriving it from the host-local handle counter would repeat the
+/// first node after every process restart, allowing same-clock restarts to
+/// reuse a transaction identity. The persistent relay identity remains the
+/// trusted platform configuration; this random identity is only for its
+/// short-lived in-memory peers.
+fn fresh_client_identity(author: jazz::ids::AuthorSubject) -> Result<DbIdentity, RelayError> {
     let mut node = [0_u8; 16];
-    node[..8].copy_from_slice(b"JAZZRN\0\0");
-    node[8..].copy_from_slice(&handle.to_be_bytes());
-    DbIdentity {
+    getrandom::fill(&mut node).map_err(|error| RelayError::Entropy(error.to_string()))?;
+    Ok(DbIdentity {
         node: jazz::ids::NodeUuid::from_bytes(node),
         author,
-    }
+    })
 }
 
 fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
@@ -3458,8 +3467,9 @@ mod tests {
     use jazz::groove::records::ValueType;
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
+    use jazz::time::TxTime;
     use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-    use jazz::tx::DurabilityTier;
+    use jazz::tx::{DurabilityTier, TxId};
     use std::sync::atomic::AtomicBool;
 
     fn schema() -> JazzSchema {
@@ -3854,7 +3864,7 @@ mod tests {
         let admitted = AuthorSubject::authenticated("https://issuer.example", "opaque-subject")
             .expect("fixture issuer and subject are valid");
 
-        let client = client_identity(42, admitted);
+        let client = fresh_client_identity(admitted).expect("OS entropy mints foreground node");
 
         assert_eq!(client.author, admitted);
         assert_eq!(
@@ -3862,6 +3872,32 @@ mod tests {
             r#"["https://issuer.example","opaque-subject"]"#
         );
         assert_ne!(client.author, AuthorSubject::SYSTEM);
+    }
+
+    #[test]
+    fn foreground_identity_is_fresh_across_fixed_clock_process_restarts() {
+        let author = AuthorSubject::for_test_bytes([0x42; 16]);
+        // Model the first foreground of two independently restarted native
+        // hosts. Both HLCs start at the same fixed physical position; their
+        // transaction identities must nevertheless differ by fresh node.
+        let before_restart = fresh_client_identity(author).expect("OS entropy is available");
+        let after_restart = fresh_client_identity(author).expect("OS entropy is available");
+        assert_ne!(before_restart.node, after_restart.node);
+        let fixed_time = TxTime::from(1234);
+        assert_ne!(
+            TxId::new(fixed_time, before_restart.node),
+            TxId::new(fixed_time, after_restart.node),
+            "same-millisecond first writes after a process restart need distinct transaction ids"
+        );
+
+        // Planted old construction: a handle-derived JAZZRN prefix would
+        // repeat after every host reset and makes the assertion above unsafe.
+        let mut deterministic = [0_u8; 16];
+        deterministic[..8].copy_from_slice(b"JAZZRN\0\0");
+        deterministic[8..].copy_from_slice(&2_u64.to_be_bytes());
+        let old_first_foreground = NodeUuid::from_bytes(deterministic);
+        assert_ne!(before_restart.node, old_first_foreground);
+        assert_ne!(after_restart.node, old_first_foreground);
     }
 
     #[test]
@@ -3879,7 +3915,8 @@ mod tests {
         .expect("relay opens");
         let client = relay
             .attach_client(
-                client_identity(7, AuthorSubject::for_test_bytes([0x44; 16])),
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x44; 16]))
+                    .expect("OS entropy mints foreground node"),
                 BTreeMap::new(),
             )
             .expect("client attaches");

@@ -42,7 +42,11 @@ validated session claims. JavaScript receives only an opaque random 256-bit
 admission capability
 and cannot choose or amend those values through the command codec. UI peer
 identities are derived inside the host from the admitted author and a fresh
-process-local node handle. Reusing a scope with a different path, schema, or
+cryptographically random node UUID for each ephemeral foreground `Db`; they
+are never derived from a restarting handle counter. This keeps fresh
+in-memory HLCs from reusing a transaction identity after process restart. The
+persistent relay identity remains stable and platform-supplied. Reusing a
+scope with a different path, schema, or
 identity fails. Trusted logout revokes the capability and atomically closes all
 relay/client aliases opened through it; guessed and revoked capabilities cannot
 open a scope. Tokens belong to upstream session negotiation. Logout also
