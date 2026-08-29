@@ -66,6 +66,13 @@ The Vercel project's **Preview** environment must contain no sensitive values:
 the labeled PR's code is built remotely. Put production-only secrets only in
 Vercel's Production environment when production deployment is enabled.
 
+Applying `docs` is a maintainer trust decision: it trusts the workflow
+definition committed on that same-repository PR to upload its source with the
+docs deployment token. The workflow builds the checkout without credentials in
+one job, and gives a separate job only the pinned Vercel uploader plus source
+checkout. This boundary reduces exposure; it cannot make a maintainer-approved
+workflow change safe for sensitive Preview environment values.
+
 Production deployment is deliberately disabled in the workflow: it has no
 `main` push trigger and its production job is permanently false. At release
 time, enable the documented main-only job deliberately. Do not enable Vercel's

@@ -35,21 +35,27 @@ function readWorkflow(source) {
   return parse(source);
 }
 
-function previewSteps(workflow) {
-  return workflow.jobs.preview.steps;
-}
-
 function assertPreviewWorkflowContract(source, packageSource = docsPackageSource) {
   const workflow = readWorkflow(source);
-  const condition = workflow.jobs.preview.if.replace(/\s+/g, " ");
-  const steps = previewSteps(workflow);
-  const commands = steps
+  const build = workflow.jobs.build;
+  const deploy = workflow.jobs.deploy;
+  const buildCondition = build.if.replace(/\s+/g, " ");
+  const deployCondition = deploy.if.replace(/\s+/g, " ");
+  const buildSteps = build.steps;
+  const deploySteps = deploy.steps;
+  const buildCommands = buildSteps
     .map((step) => step.run)
     .filter(Boolean)
     .join("\n");
-  const guardIndex = steps.findIndex((step) => step.name === "Guard Vercel preview configuration");
-  const checkoutIndex = steps.findIndex((step) => step.uses?.startsWith("actions/checkout@"));
-  const deploySteps = steps.filter((step) => step.run?.includes("vercel deploy"));
+  const deployCommands = deploySteps
+    .map((step) => step.run)
+    .filter(Boolean)
+    .join("\n");
+  const buildCheckoutIndex = buildSteps.findIndex((step) => step.uses?.startsWith("actions/checkout@"));
+  const deployCheckoutIndex = deploySteps.findIndex((step) => step.uses?.startsWith("actions/checkout@"));
+  const installIndex = deploySteps.findIndex((step) => step.name === "Install pinned Vercel uploader");
+  const guardIndex = deploySteps.findIndex((step) => step.name === "Guard Vercel preview configuration");
+  const deployStep = deploySteps.find((step) => step.name === "Deploy preview");
 
   assert.deepEqual(workflow.on.pull_request.types, [
     "labeled",
@@ -68,40 +74,58 @@ function assertPreviewWorkflowContract(source, packageSource = docsPackageSource
   );
   assert.equal(workflow.concurrency["cancel-in-progress"], true);
 
-  assert.match(condition, /head\.repo\.full_name == github\.repository/);
-  assert.match(condition, /\["OWNER","MEMBER","COLLABORATOR"\]/);
-  assert.match(condition, /labels\.\*\.name, 'docs'/);
-  assert.match(condition, /event\.action != 'closed'/);
-  assert.deepEqual(workflow.jobs.preview.permissions, { contents: "read" });
-  assert.equal(workflow.jobs.preview.env, undefined, "PR-code steps must not inherit credentials");
+  for (const condition of [buildCondition, deployCondition]) {
+    assert.match(condition, /head\.repo\.full_name == github\.repository/);
+    assert.match(condition, /\["OWNER","MEMBER","COLLABORATOR"\]/);
+    assert.match(condition, /labels\.\*\.name, 'docs'/);
+    assert.match(condition, /event\.action != 'closed'/);
+  }
+  assert.equal(build.env, undefined, "untrusted build job must not inherit credentials");
+  assert.deepEqual(build.permissions, { contents: "read" });
+  assert.deepEqual(deploy.permissions, { contents: "read" });
+  assert.deepEqual(deploy.needs, "build");
+  for (const step of buildSteps) {
+    assert.doesNotMatch(JSON.stringify(step), /VERCEL_(?:TOKEN|ORG_ID|PROJECT_ID)/);
+  }
+  assert.ok(buildCheckoutIndex >= 0, "build checks out the exact PR head");
+  assert.equal(buildSteps[buildCheckoutIndex].with.ref, "${{ github.event.pull_request.head.sha }}");
+  assert.match(buildCommands, /pnpm install --frozen-lockfile/);
+  assert.match(buildCommands, /pnpm build:vercel-docs/);
 
-  assert.ok(guardIndex >= 0 && guardIndex < checkoutIndex, "guard must precede checkout");
-  assert.match(steps[guardIndex].run, /\$\{!name\}/);
-  assert.doesNotMatch(steps[guardIndex].run, /echo.*\$\{!name\}/);
-
-  assert.equal(deploySteps.length, 1, "there must be one credentialed Vercel deployment step");
-  assert.match(deploySteps[0].run, /pnpm --filter docs exec vercel deploy --yes/);
-  assert.match(deploySteps[0].run, /git_sha="\$\{\{ github\.event\.pull_request\.head\.sha \}\}"/);
-  assert.match(deploySteps[0].env.VERCEL_TOKEN, /secrets\.VERCEL_DOCS_TOKEN/);
-  assert.match(deploySteps[0].env.VERCEL_PROJECT_ID, /vars\.VERCEL_DOCS_PROJECT_ID/);
-  for (const step of steps) {
-    if (step !== deploySteps[0] && step !== steps[guardIndex]) {
+  assert.ok(installIndex >= 0 && installIndex < deployCheckoutIndex, "install trusted CLI before PR checkout");
+  assert.ok(guardIndex >= 0 && guardIndex < deployCheckoutIndex, "guard must precede checkout");
+  assert.match(deploySteps[installIndex].run, /npm install --global --ignore-scripts vercel@59\.10\.0/);
+  assert.match(deploySteps[installIndex].run, /realpath "\$\(command -v vercel\)"/);
+  assert.match(deploySteps[installIndex].run, /\/\*\) ;;/, "captured uploader path must be absolute");
+  assert.match(deploySteps[installIndex].run, /echo "bin=\$vercel_bin" >> "\$GITHUB_OUTPUT"/);
+  assert.match(deploySteps[guardIndex].run, /\$\{!name\}/);
+  assert.doesNotMatch(deploySteps[guardIndex].run, /echo.*\$\{!name\}/);
+  assert.equal(deploySteps[deployCheckoutIndex].with.ref, "${{ github.event.pull_request.head.sha }}");
+  assert.ok(deployStep, "there must be one credentialed Vercel deployment step");
+  assert.match(deployStep.run, /"\$\{\{ steps\.vercel\.outputs\.bin \}\}" deploy --yes/);
+  assert.match(deployStep.run, /git_sha="\$\{\{ github\.event\.pull_request\.head\.sha \}\}"/);
+  assert.match(deployStep.env.VERCEL_TOKEN, /secrets\.VERCEL_DOCS_TOKEN/);
+  assert.match(deployStep.env.VERCEL_PROJECT_ID, /vars\.VERCEL_DOCS_PROJECT_ID/);
+  for (const step of deploySteps) {
+    if (step !== deployStep && step !== deploySteps[guardIndex]) {
       assert.doesNotMatch(JSON.stringify(step), /VERCEL_(?:TOKEN|ORG_ID|PROJECT_ID)/);
     }
   }
-  assert.match(commands, /pnpm build:vercel-docs/);
-  assert.doesNotMatch(commands, /\b(?:pnpm dlx|npx)\s+vercel/);
-  assert.doesNotMatch(commands, /\bvercel@(?:latest|\^|~)/);
-  assert.doesNotMatch(commands, /\b(?:pull|build)\s+.*vercel|vercel\s+(?:pull|build)/);
-  assert.doesNotMatch(commands, /\b--prebuilt\b/);
-  assert.doesNotMatch(commands, /\b--prod\b/);
+  const afterCheckout = deploySteps.slice(deployCheckoutIndex + 1).map((step) => step.run).filter(Boolean).join("\n");
+  assert.doesNotMatch(afterCheckout, /\b(?:pnpm|npm|npx|yarn|bun)\b/, "deploy must not execute workspace tooling");
+  assert.doesNotMatch(deployCommands, /\b(?:pnpm dlx|npx)\s+vercel/);
+  assert.doesNotMatch(deployCommands, /\bvercel@(?:latest|\^|~)/);
+  assert.doesNotMatch(deployCommands, /\b(?:pull|build)\s+.*vercel|vercel\s+(?:pull|build)/);
+  assert.doesNotMatch(deployCommands, /\b--prebuilt\b/);
+  assert.doesNotMatch(deployCommands, /\b--prod\b/);
   assert.match(workflow.jobs.production.if.replace(/\s+/g, " "), /false/);
 
   const docsPackage = JSON.parse(packageSource);
-  assert.match(docsPackage.devDependencies.vercel, /^\d+\.\d+\.\d+$/, "Vercel must be exact");
-  assert.match(lockfileSource, new RegExp(`vercel@${docsPackage.devDependencies.vercel.replaceAll(".", "\\.")}:`));
+  assert.equal(docsPackage.devDependencies.vercel, undefined, "workspace must not provide the credentialed CLI");
+  assert.doesNotMatch(lockfileSource, /\n\s{2}vercel@59\.10\.0:/, "lockfile must not carry the workflow-only CLI");
   assert.match(docsReadmeSource, /disable or disconnect its automatic\s+Git deployments/i);
   assert.match(docsReadmeSource, /Preview\*\* environment must contain no sensitive values/);
+  assert.match(docsReadmeSource, /maintainer trust decision: it trusts the workflow/i);
 }
 
 test("docs preview event truth table is explicit", () => {
@@ -124,7 +148,7 @@ test("docs preview event truth table is explicit", () => {
   }
 });
 
-test("workflow enforces tokenless local build and one pinned remote preview deploy", () => {
+test("workflow separates tokenless build from one pinned credentialed remote preview deploy", () => {
   assertPreviewWorkflowContract(workflowSource);
 });
 
@@ -141,7 +165,11 @@ test("contract tests reject planted close, credential, and version regressions",
     (error) => error.message.includes("VERCEL_(?:TOKEN|ORG_ID|PROJECT_ID)"),
   );
   assert.throws(
-    () => assertPreviewWorkflowContract(workflowSource, docsPackageSource.replace('"59.10.0"', '"^59.10.0"')),
-    /Vercel must be exact/,
+    () => assertPreviewWorkflowContract(workflowSource.replace("--ignore-scripts vercel@59.10.0", "--ignore-scripts vercel@latest")),
+    /vercel@59\\.10\\.0/,
+  );
+  assert.throws(
+    () => assertPreviewWorkflowContract(workflowSource.replace('"${{ steps.vercel.outputs.bin }}" deploy', "pnpm exec vercel deploy")),
+    /workspace tooling|steps\\.vercel\\.outputs\\.bin/,
   );
 });

@@ -14,11 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  preview:
-    name: Deploy docs preview
+  build:
+    name: Build docs
     # A maintainer label is an explicit opt-in, but it never turns fork code
-    # into trusted code. The deployment token is available only to trusted,
-    # same-repository pull requests.
+    # into trusted code. This job intentionally receives no Vercel credentials.
     if: >-
       ${{
         github.event.pull_request.head.repo.full_name == github.repository
@@ -31,22 +30,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Check provisioning before evaluating checked-out PR code. This command
-      # intentionally reports only variable names, never their values.
-      - name: Guard Vercel preview configuration
-        env:
-          VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
-          VERCEL_TOKEN: ${{ secrets.VERCEL_DOCS_TOKEN }}
-        run: |
-          set -euo pipefail
-          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing ${name}. Configure the Jazz docs Vercel project before applying the docs label."
-              exit 1
-            fi
-          done
-
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -66,9 +49,65 @@ jobs:
       - name: Build homepage and docs
         run: pnpm build:vercel-docs
 
-      # This is deliberately the only credentialed Vercel command. It performs
-      # Vercel's preview build remotely; checkout, install, and the local docs
-      # build above remain tokenless PR-code execution.
+  deploy:
+    name: Deploy docs preview
+    needs: build
+    # Repeat every admission condition here: a successful untrusted build is
+    # not authorization to expose deployment credentials.
+    if: >-
+      ${{
+        github.event.pull_request.head.repo.full_name == github.repository
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+        && contains(github.event.pull_request.labels.*.name, 'docs')
+        && github.event.action != 'closed'
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # This job deliberately installs its trusted, pinned uploader before
+      # checking out PR-controlled source. `--ignore-scripts` prevents package
+      # lifecycle code from executing on the credentialed runner.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.13.0
+
+      - name: Install pinned Vercel uploader
+        id: vercel
+        run: |
+          set -euo pipefail
+          npm install --global --ignore-scripts vercel@59.10.0
+          vercel_bin="$(realpath "$(command -v vercel)")"
+          case "$vercel_bin" in
+            /*) ;;
+            *) echo "::error::Vercel uploader path is not absolute"; exit 1 ;;
+          esac
+          test -x "$vercel_bin"
+          echo "bin=$vercel_bin" >> "$GITHUB_OUTPUT"
+
+      # Check provisioning before evaluating checked-out PR code. This command
+      # intentionally reports only variable names, never their values.
+      - name: Guard Vercel preview configuration
+        env:
+          VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_DOCS_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing ${name}. Configure the Jazz docs Vercel project before applying the docs label."
+              exit 1
+            fi
+          done
+
+      # Source only: this credentialed job never installs, builds, or invokes
+      # workspace code. The remote Vercel build remains intentionally untrusted.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
       - name: Deploy preview
         id: deploy
         env:
@@ -78,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           deployment_url="$(
-            pnpm --filter docs exec vercel deploy --yes \
+            "${{ steps.vercel.outputs.bin }}" deploy --yes \
               --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}" \
               -m git_pr="${{ github.event.pull_request.number }}" \
               -m git_sha="${{ github.event.pull_request.head.sha }}" \
