@@ -150,12 +150,16 @@ test("each native JSI runtime owns an independent foreground lease", () => {
     androidBridge,
     /std::unordered_map<jazz_native_relay_host \*, std::shared_ptr<ForegroundRuntimeInstallation>>/,
   );
-  // iOS uses the module instance as the runtime ownership token. A planted
-  // process-global `foregroundRuntimeLease` would make either bridge teardown
-  // kill its sibling and fails this source/device-host receipt.
-  assert.match(iosBridge, /std::unordered_map<JazzRelay \*, ForegroundRuntimeInstallation>/);
-  assert.match(iosBridge, /foregroundRuntimeLeases\.find\(self\)/);
+  // iOS uses an opaque, monotonically allocated runtime token instead of an
+  // Objective-C pointer identity. A pointer can be recycled after teardown;
+  // the token is never reused and is also checked by the native lease. A
+  // planted process-global `foregroundRuntimeLease` would make either bridge
+  // teardown kill its sibling and fails this source/device-host receipt.
+  assert.match(iosBridge, /static uint64_t nextForegroundRuntimeToken = 1/);
+  assert.match(iosBridge, /std::unordered_map<uint64_t, ForegroundRuntimeInstallation>/);
+  assert.match(iosBridge, /foregroundRuntimeLeases\.find\(runtimeToken\)/);
   assert.match(iosBridge, /foregroundRuntimeLeases\.erase\(found\)/);
+  assert.doesNotMatch(iosBridge, /std::unordered_map<JazzRelay \*, ForegroundRuntimeInstallation>/);
   assert.doesNotMatch(
     iosBridge,
     /static std::shared_ptr<jazz::rn::ForegroundRuntimeLease> foregroundRuntimeLease/,

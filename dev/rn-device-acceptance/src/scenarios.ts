@@ -29,7 +29,10 @@ export const scenarioPlan: readonly ScenarioResult[] = [
     "Two physical JSI runtimes observe one relay write (explicit installed-device gap; current ABI receipt covers aliases in one JSI runtime only)",
   ],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
-  ["reopen", "A fresh app process reopens scope A's durable relay store"],
+  [
+    "reopen",
+    "A fresh app process reopens scope A's durable relay store and reads the prior process's row through createJazzClient",
+  ],
   ["scope-isolation", "Distinct app/storage/auth scopes cannot observe each other"],
   ["logout-revocation", "Trusted native code revokes old admission aliases before any replacement"],
   [

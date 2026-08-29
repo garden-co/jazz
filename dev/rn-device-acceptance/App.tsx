@@ -9,7 +9,10 @@ import {
   proveForegroundWriteAbi,
   proveSameJsiRuntimeWriteSubscription,
 } from "./src/foreground-byte-abi";
-import { proveHighLevelForegroundRuntime } from "./src/high-level-foreground";
+import {
+  proveHighLevelForegroundRestart,
+  seedHighLevelForegroundRuntime,
+} from "./src/high-level-foreground";
 import {
   admittedNativeRelay,
   deviceReceiptContext,
@@ -32,10 +35,12 @@ import {
 async function observeTrustedAdmissionLifecycle() {
   const phase = await nativeAcceptancePhase();
   if (phase === "verify") {
-    // This is intentionally a new JS and native process.  The fixed A row was
-    // committed by the previous seed launch; this launch must only materialize
-    // it through a newly admitted relay/SQLite owner.
+    // This is intentionally a new JS and native process. The row was committed
+    // through `createJazzClient` by the previous seed launch; this launch must
+    // materialize it through a newly admitted relay/SQLite owner using that
+    // same public app surface, before the byte-level scope isolation receipt.
     const reopened = await admittedNativeRelay();
+    await proveHighLevelForegroundRestart(reopened.capability);
     const foregroundFactory = installNativeForegroundRuntime();
     const foregroundCodec = {
       encode: encodeNativeForegroundCommand,
@@ -72,7 +77,7 @@ async function observeTrustedAdmissionLifecycle() {
     admittedNativeRelay,
   );
   const scopeA = await admittedNativeRelay();
-  await proveHighLevelForegroundRuntime(scopeA.capability);
+  await seedHighLevelForegroundRuntime(scopeA.capability);
   proveForegroundScopeIsolation(foregroundFactory, scopeA.capability, foregroundCodec, {
     write: "a",
     contains: ["a"],

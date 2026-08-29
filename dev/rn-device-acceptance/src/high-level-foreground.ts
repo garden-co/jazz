@@ -11,8 +11,10 @@ const app = s.defineApp({
  * capability. This is deliberately one small consumer-shaped scenario:
  * schema-backed insert, local query, subscription publication, and shutdown.
  */
-export async function proveHighLevelForegroundRuntime(capability: Uint8Array): Promise<void> {
-  const config: JazzClientConfig = {
+export const HIGH_LEVEL_PERSISTED_TITLE = "high-level-foreground-row";
+
+function clientConfig(capability: Uint8Array): JazzClientConfig {
+  return {
     appId: "jazz-device-acceptance",
     nativeRelay: { capability },
     cookieSession: {
@@ -22,8 +24,16 @@ export async function proveHighLevelForegroundRuntime(capability: Uint8Array): P
       authMode: "external",
     },
   };
-  const client = await createJazzClient(config);
-  const title = "high-level-foreground-row";
+}
+
+/**
+ * Seed a durable row through the public foreground API. A later app process
+ * uses {@link proveHighLevelForegroundRestart} to prove that it can read this
+ * same row after the native relay and its SQLite owner have been recreated.
+ */
+export async function seedHighLevelForegroundRuntime(capability: Uint8Array): Promise<void> {
+  const client = await createJazzClient(clientConfig(capability));
+  const title = HIGH_LEVEL_PERSISTED_TITLE;
   let observed = false;
   const unsubscribe = client.db.subscribe(app.todos, (todos) => {
     observed ||= todos.some((todo) => todo.title === title);
@@ -51,3 +61,25 @@ export async function proveHighLevelForegroundRuntime(capability: Uint8Array): P
     await client.shutdown();
   }
 }
+
+/**
+ * Materialize the row written by a prior process through `createJazzClient`.
+ * This deliberately does not use the byte-level fixture or read SQLite: it is
+ * the public API half of the process-restart receipt.
+ */
+export async function proveHighLevelForegroundRestart(capability: Uint8Array): Promise<void> {
+  const client = await createJazzClient(clientConfig(capability));
+  try {
+    const rows = await client.db.all(app.todos);
+    if (!rows.some((row) => row.title === HIGH_LEVEL_PERSISTED_TITLE)) {
+      throw new Error(
+        "high-level React Native foreground did not materialize the prior process's persisted row",
+      );
+    }
+  } finally {
+    await client.shutdown();
+  }
+}
+
+/** @deprecated Use {@link seedHighLevelForegroundRuntime}. */
+export const proveHighLevelForegroundRuntime = seedHighLevelForegroundRuntime;
