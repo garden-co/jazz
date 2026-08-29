@@ -548,9 +548,19 @@ where
                 // bundle; use that member's exact `(table, row, tx)` witness
                 // to materialize the newly admitted row. This is payload
                 // lookup, not a facade-side query or recompute.
-                let tx_versions = self
-                    .storage_backed_maintained_result_versions(entry.0.as_str(), entry.1, entry.2)
-                    .await?;
+                let tx_versions = if local
+                    .maintained
+                    .uses_storage_backed_result_materialization()
+                {
+                    self.storage_backed_maintained_result_versions(
+                        entry.0.as_str(),
+                        entry.1,
+                        entry.2,
+                    )
+                    .await?
+                } else {
+                    self.query_versions_for_tx(entry.2).await?
+                };
                 let Some(version) = self.maintained_witness_for_result_member(
                     &tx_versions,
                     local.result_schema_version,
@@ -628,9 +638,15 @@ where
         )? {
             version.clone()
         } else {
-            let tx_versions = self
-                .storage_backed_maintained_result_versions(entry.0.as_str(), entry.1, entry.2)
-                .await?;
+            let tx_versions = if local
+                .maintained
+                .uses_storage_backed_result_materialization()
+            {
+                self.storage_backed_maintained_result_versions(entry.0.as_str(), entry.1, entry.2)
+                    .await?
+            } else {
+                self.query_versions_for_tx(entry.2).await?
+            };
             let Some(version) = self.maintained_witness_for_result_member(
                 &tx_versions,
                 local.result_schema_version,
