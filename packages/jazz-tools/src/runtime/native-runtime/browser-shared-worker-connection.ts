@@ -3,15 +3,161 @@ import {
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
-import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
+import type {
+  BrowserForegroundNodeLease,
+  BrowserWorkerConnection,
+  BrowserWorkerConnectionContext,
+} from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type {
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
+  BrowserForegroundNodeLeaseAcquireResponse,
+  BrowserForegroundNodeLeasePortEvent,
+  BrowserForegroundNodeLeasePortRequest,
   BrowserFollowerPortRequest,
   BrowserWorkerInitOptions,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+
+export type BrowserForegroundNodeLeaseOptions = Pick<
+  BrowserWorkerInitOptions,
+  "runtimeSources" | "dbName" | "authSessionKey"
+>;
+
+/**
+ * Lease-only worker connection established before a foreground schema/runtime
+ * exists. Its port stays open as the durable owner's liveness witness until
+ * explicit clean return or retirement.
+ */
+export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLease {
+  private worker: SharedWorker | null = null;
+  private port: MessagePort | null = null;
+  private closed = false;
+
+  private constructor(
+    readonly node: Uint8Array,
+    readonly confirmedTxTime: bigint,
+    private readonly leaseId: string,
+  ) {}
+
+  static async acquire(
+    options: BrowserForegroundNodeLeaseOptions,
+  ): Promise<SharedBrowserForegroundNodeLease> {
+    const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
+    const workerName = [
+      "jazz-runtime",
+      options.authSessionKey,
+      options.dbName,
+      createBrowserWorkerAssetScope(runtimeSources),
+    ].join(":");
+    const createWorker =
+      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
+        ? (name: string) =>
+            new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name })
+        : (name: string) =>
+            new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
+              type: "module",
+              name,
+            });
+    const worker = createWorker(workerName);
+    const port = worker.port;
+    port.start();
+    const lease = await new Promise<SharedBrowserForegroundNodeLease>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanup();
+        port.close();
+        reject(new Error("Shared browser runtime did not issue a foreground node lease"));
+      }, 1000);
+      const cleanup = () => {
+        clearTimeout(timeout);
+        port.removeEventListener("message", onMessage);
+        port.removeEventListener("messageerror", onMessageError);
+      };
+      const onMessage = (event: MessageEvent<BrowserForegroundNodeLeaseAcquireResponse>) => {
+        const message = event.data;
+        if (message?.type === "foreground-node-lease-error") {
+          cleanup();
+          reject(new Error(message.message));
+          return;
+        }
+        if (message?.type !== "foreground-node-lease-ready") return;
+        if (!/^(0|[1-9][0-9]*)$/.test(message.confirmedTxTime)) {
+          cleanup();
+          reject(
+            new Error("Shared browser runtime returned an invalid foreground lease high-water"),
+          );
+          return;
+        }
+        cleanup();
+        const result = new SharedBrowserForegroundNodeLease(
+          message.node.slice(),
+          BigInt(message.confirmedTxTime),
+          message.leaseId,
+        );
+        result.worker = worker;
+        result.port = port;
+        resolve(result);
+      };
+      const onMessageError = () => {
+        cleanup();
+        reject(new Error("Shared browser foreground lease port message error"));
+      };
+      port.addEventListener("message", onMessage);
+      port.addEventListener("messageerror", onMessageError);
+      port.postMessage({
+        type: "acquire-foreground-node-lease",
+        dbName: options.dbName,
+      });
+    });
+    return lease;
+  }
+
+  async returnWithHighWater(highWater: bigint): Promise<void> {
+    if (highWater < 0n) throw new Error("Invalid foreground transaction high-water");
+    await this.finish({
+      type: "return-foreground-node-lease",
+      confirmedTxTime: highWater.toString(),
+    });
+  }
+
+  async retire(): Promise<void> {
+    if (this.closed) return;
+    await this.finish({ type: "retire-foreground-node-lease" });
+  }
+
+  private async finish(message: BrowserForegroundNodeLeasePortRequest): Promise<void> {
+    if (this.closed) throw new Error("Shared browser foreground lease is already closed");
+    const port = this.port;
+    if (!port) throw new Error("Shared browser foreground lease port is unavailable");
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        port.removeEventListener("message", onMessage);
+        port.removeEventListener("messageerror", onMessageError);
+      };
+      const onMessage = (event: MessageEvent<BrowserForegroundNodeLeasePortEvent>) => {
+        const result = event.data;
+        if (result?.type !== "foreground-node-lease-result") return;
+        cleanup();
+        if (result.error) reject(new Error(result.error));
+        else resolve();
+      };
+      const onMessageError = () => {
+        cleanup();
+        reject(new Error("Shared browser foreground lease port message error"));
+      };
+      port.addEventListener("message", onMessage);
+      port.addEventListener("messageerror", onMessageError);
+      port.postMessage(message);
+    }).finally(() => {
+      this.closed = true;
+      this.port?.close();
+      this.port = null;
+      this.worker?.port.close();
+      this.worker = null;
+    });
+  }
+}
 
 export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;

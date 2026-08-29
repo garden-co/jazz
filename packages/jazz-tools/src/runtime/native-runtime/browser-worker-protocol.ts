@@ -28,6 +28,31 @@ export interface BrowserSharedWorkerConnectRequest {
   options: BrowserWorkerInitOptions;
 }
 
+/** Lease-only bootstrap that runs before the foreground schema is known. */
+export interface BrowserForegroundNodeLeaseAcquireRequest {
+  type: "acquire-foreground-node-lease";
+  dbName: string;
+}
+
+export type BrowserForegroundNodeLeaseAcquireResponse =
+  | {
+      type: "foreground-node-lease-ready";
+      leaseId: string;
+      node: Uint8Array;
+      /** Canonical decimal u64: never a lossy JS number. */
+      confirmedTxTime: string;
+    }
+  | { type: "foreground-node-lease-error"; message: string };
+
+export type BrowserForegroundNodeLeasePortRequest =
+  | { type: "return-foreground-node-lease"; confirmedTxTime: string }
+  | { type: "retire-foreground-node-lease" };
+
+export type BrowserForegroundNodeLeasePortEvent = {
+  type: "foreground-node-lease-result";
+  error?: string;
+};
+
 export type BrowserSharedWorkerConnectResponse =
   | { type: "worker-alive" }
   | { type: "runtime-ready" }

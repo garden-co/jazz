@@ -1,6 +1,7 @@
 //! Database construction, schema views, write-state waiting, and connection controls.
 
 use super::*;
+use crate::time::TxTime;
 
 impl<S> Db<S>
 where
@@ -422,6 +423,27 @@ where
     /// writes begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
+    }
+
+    /// Return the highest transaction HLC observed by this live runtime.
+    ///
+    /// This narrow internal lifecycle boundary is used by foreground lease
+    /// adapters during clean handoff. It is deliberately not a public query or
+    /// application clock API.
+    #[doc(hidden)]
+    pub async fn foreground_tx_time_high_water(&self) -> TxTime {
+        self.node.node.lock().await.tx_time_high_water()
+    }
+
+    /// Seed a foreground runtime from the durable lease owner's last confirmed
+    /// high-water mark before it mints any transaction identities.
+    #[doc(hidden)]
+    pub async fn seed_foreground_tx_time_high_water(&self, high_water: TxTime) {
+        self.node
+            .node
+            .lock()
+            .await
+            .seed_tx_time_high_water(high_water);
     }
 
     /// Configure this durable process as the internal browser relay that owns

@@ -19,7 +19,10 @@ import {
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
-import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-worker-connection.js";
+import {
+  SharedBrowserForegroundNodeLease,
+  SharedBrowserWorkerConnection,
+} from "./native-runtime/browser-shared-worker-connection.js";
 import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
@@ -188,6 +191,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
+    foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
@@ -203,7 +207,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     // identity. Reusing a deterministic node across independently opened tabs
     // would let their fresh HLC registers mint the same TxId before either has
     // observed the other's first commit.
-    const node = randomBytes();
+    const node = foregroundNodeLease?.node.slice() ?? randomBytes();
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
@@ -218,6 +222,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     );
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
+      if (!foregroundNodeLease) {
+        throw new Error("Persistent browser runtime requires a foreground node lease");
+      }
+      mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
     }
 
     const context: AppContext = {
@@ -233,6 +241,18 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
     return JazzClient.connectWithRuntime(mainThreadPeerRuntime, context, runtimeOptions);
+  }
+
+  override async acquireBrowserForegroundNodeLease(config: DbConfig) {
+    if (!isPersistentBrowserConfig(config)) {
+      throw new Error("Browser foreground node leases require persistent browser storage");
+    }
+    const dbName = resolveDefaultPersistentDbName(config);
+    return await SharedBrowserForegroundNodeLease.acquire({
+      runtimeSources: browserWorkerRuntimeSources(config),
+      dbName,
+      authSessionKey: createBrowserAuthSessionKey(config),
+    });
   }
 
   override createBrowserWorkerConnection({
