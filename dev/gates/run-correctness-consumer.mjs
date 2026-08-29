@@ -30,14 +30,17 @@ const capabilityPathEnv = "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY";
 const capabilityTokenEnv = "JAZZ_CORRECTNESS_CONSUMER_TOKEN";
 
 export function processStartIdentityFromStat(stat) {
+  const prefix = /^([1-9]\d*) \(/.exec(stat);
+  if (!prefix) return undefined;
   const commandEnd = stat.lastIndexOf(")");
-  if (commandEnd < 0) return undefined;
+  if (commandEnd < prefix[0].length || !/^\s/.test(stat.slice(commandEnd + 1))) return undefined;
   const fieldsFromState = stat
     .slice(commandEnd + 1)
     .trim()
     .split(/\s+/);
   // /proc/<pid>/stat field 3 is state, so field 22 (starttime) is index 19.
-  return fieldsFromState[19] || undefined;
+  if (fieldsFromState.length < 20 || !/^\d+$/.test(fieldsFromState[19])) return undefined;
+  return fieldsFromState[19];
 }
 
 function processStartIdentity(pid) {

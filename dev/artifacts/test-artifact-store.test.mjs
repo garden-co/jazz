@@ -47,7 +47,17 @@ test("Linux process identity parsing ignores spaces and parentheses in comm", ()
   const fieldsFromStateThroughStartTime = ["S", ...Array(18).fill("0"), "987654321"];
   const stat = `123 (worker name (nested) suffix) ${fieldsFromStateThroughStartTime.join(" ")} 0`;
   assert.equal(processStartIdentityFromStat(stat), "987654321");
-  assert.equal(processStartIdentityFromStat("malformed"), undefined);
+  const malformed = [
+    "123 worker) " + fieldsFromStateThroughStartTime.join(" "),
+    "0 (worker) " + fieldsFromStateThroughStartTime.join(" "),
+    "-1 (worker) " + fieldsFromStateThroughStartTime.join(" "),
+    "pid (worker) " + fieldsFromStateThroughStartTime.join(" "),
+    "123 (worker) " + ["S", ...Array(18).fill("0"), "not-a-number"].join(" "),
+    "123 (worker) " + ["S", ...Array(18).fill("0"), "-1"].join(" "),
+    "123 (worker) " + ["S", ...Array(17).fill("0"), "987654321"].join(" "),
+    "malformed",
+  ];
+  for (const input of malformed) assert.equal(processStartIdentityFromStat(input), undefined);
 });
 
 function fixture(label, wasmFingerprint, napiFingerprint) {
