@@ -430,3 +430,89 @@ test("accepted renamed serializer aliases remain governed and unclassified depen
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("only direct cfg predicates proven to imply test receive a test boundary", () => {
+  const root = fixture();
+  try {
+    const testOnly =
+      '#[cfg(all(test, feature = "fixture"))]\nfn receipt() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n';
+    const testEndpoints = endpoints(testOnly);
+    assert.ok(testEndpoints.every((endpoint) => endpoint.boundary === "test"));
+    writeSource(root, testOnly, testEndpoints);
+    assert.equal(run(root).status, 0, run(root).stderr);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
+    const ambiguous =
+      '#[cfg(any(test, feature = "fixture"))]\nfn receipt() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n' +
+      '#[cfg_attr(test, cfg(test))]\nfn also_receipt() { let _ = serde_json::from_str::<serde_json::Value>("null"); }\n';
+    const productionEndpoints = endpoints(ambiguous);
+    assert.ok(productionEndpoints.every((endpoint) => endpoint.boundary === "production"));
+    writeSource(root, ambiguous, productionEndpoints);
+    assert.equal(run(root).status, 0, run(root).stderr);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects path modules and includes that escape the collected persistence owner", () => {
+  const root = fixture();
+  try {
+    const outside = path.join(root, "crates/jazz/src/outside.rs");
+    fs.writeFileSync(outside, "pub fn outside() {}\n");
+    writeSource(root, 'include!("../outside.rs");\npub fn f() { outside(); }\n');
+    let result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /include! is prohibited/);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
+    writeSource(root, '#[path = "../outside.rs"]\nmod outside;\npub fn f() { outside::outside(); }\n');
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /#\[path\] mod is prohibited/);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
+    // Existing node source deliberately splits one parent namespace with
+    // literal includes. A target already collected by the audit is not an
+    // escape and remains token-checked itself.
+    fs.writeFileSync(path.join(root, "crates/jazz/src/node/in_scope.rs"), "pub fn in_scope() {}\n");
+    writeSource(root, 'include!("in_scope.rs");\npub fn f() { in_scope(); }\n');
+    result = run(root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("governs explicit serializer reexports from direct path dependencies", () => {
+  const root = fixture();
+  try {
+    const workspace = path.join(root, "Cargo.toml");
+    fs.writeFileSync(workspace, '[workspace]\nmembers = ["crates/jazz", "crates/bridge"]\nresolver = "2"\n');
+    fs.mkdirSync(path.join(root, "crates/bridge/src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "crates/bridge/Cargo.toml"),
+      '[package]\nname = "bridge"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\nserde_json = "1"\n',
+    );
+    const bridgeSource = path.join(root, "crates/bridge/src/lib.rs");
+    fs.writeFileSync(bridgeSource, "pub use serde_json as json;\n");
+    fs.appendFileSync(path.join(root, "crates/jazz/Cargo.toml"), 'bridge = { path = "../bridge" }\n');
+    writeRegistry(root, []);
+    const source = 'pub fn f() { let _ = bridge::json::to_string(&42); }\n';
+    writeSource(root, source);
+    let result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /bridge::json::to_string/);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
+    // Re-export surface is part of the snapshot, while unrelated implementation
+    // source is deliberately not hashed or snapshotted.
+    fs.writeFileSync(bridgeSource, "pub use serde_json as encoded_json;\n");
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /directDependencySnapshots differs/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

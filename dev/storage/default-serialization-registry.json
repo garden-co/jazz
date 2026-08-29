@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "scope": {
-    "description": "Every production source location that owns an authoritative persistence ingress, egress, or value carried across one. Test and benchmark directories are deliberately out of scope: they may construct historical or malformed bytes, but cannot define a production storage spelling. Every endpoint binds its declaration/field structural identity and cfg-derived test-versus-production boundary, including semicolon declarations. Endpoint allowances and direct-dependency classifications are sensitive reviewed policy, not an automatic serializer safety proof: this gate detects accidental dependency/endpoint drift rather than malicious misclassification.",
+    "description": "Every production source location that owns an authoritative persistence ingress, egress, or value carried across one. Test and benchmark directories are deliberately out of scope: they may construct historical or malformed bytes, but cannot define a production storage spelling. Every endpoint binds its declaration/field structural identity and cfg-derived test-versus-production boundary, including semicolon declarations. Direct path/workspace dependencies are identity- and public-reexport-surface-locked, so their explicit serializer aliases become governed roots too. Literal includes are permitted only when their target is itself already collected in this source scope; #[path] modules and computed/out-of-scope includes fail closed. This is a deliberately narrow ordinary-direct-use audit boundary, not a sound whole-program or proc-macro proof: intentional wrapper functions and generated code remain subject to normal code review. Endpoint allowances and dependency classifications are sensitive reviewed policy, not an automatic serializer safety proof: this gate detects accidental dependency/endpoint drift rather than malicious misclassification.",
     "serializerCrates": ["postcard", "serde_json"],
     "paths": [
       "crates/groove/src/db",
@@ -3588,6 +3588,24 @@
           "workspaceInherited": false
         },
         {
+          "identity": "idb_tree|idb-tree|normal|all",
+          "crate": "idb_tree",
+          "package": "idb-tree",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/idb-tree",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false,
+          "serializerReexports": []
+        },
+        {
           "identity": "internment|internment|normal|all",
           "crate": "internment",
           "package": "internment",
@@ -3603,6 +3621,42 @@
           "target": null,
           "kind": null,
           "workspaceInherited": false
+        },
+        {
+          "identity": "jazz_benchmark_guard|jazz-benchmark-guard|dev|all",
+          "crate": "jazz_benchmark_guard",
+          "package": "jazz-benchmark-guard",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/benchmark-guard",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz_storage_rocksdb|jazz-storage-rocksdb|dev|all",
+          "crate": "jazz_storage_rocksdb",
+          "package": "jazz-storage-rocksdb",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz-storage-rocksdb",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
         },
         {
           "identity": "paste|paste|normal|all",
@@ -4076,6 +4130,42 @@
           "workspaceInherited": false
         },
         {
+          "identity": "groove|groove|dev|all",
+          "crate": "groove",
+          "package": "groove",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/groove",
+          "features": ["test"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "groove|groove|normal|all",
+          "crate": "groove",
+          "package": "groove",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/groove",
+          "features": [],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
           "identity": "hdrhistogram|hdrhistogram|dev|all",
           "crate": "hdrhistogram",
           "package": "hdrhistogram",
@@ -4142,6 +4232,78 @@
           "target": null,
           "kind": null,
           "workspaceInherited": false
+        },
+        {
+          "identity": "jazz_benchmark_guard|jazz-benchmark-guard|dev|all",
+          "crate": "jazz_benchmark_guard",
+          "package": "jazz-benchmark-guard",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/benchmark-guard",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz_compression|jazz-compression|normal|all",
+          "crate": "jazz_compression",
+          "package": "jazz-compression",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz-compression",
+          "features": [],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz_storage_rocksdb|jazz-storage-rocksdb|dev|all",
+          "crate": "jazz_storage_rocksdb",
+          "package": "jazz-storage-rocksdb",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz-storage-rocksdb",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz_testkit|jazz-testkit|dev|all",
+          "crate": "jazz_testkit",
+          "package": "jazz-testkit",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz-testkit",
+          "features": [],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false,
+          "serializerReexports": []
         },
         {
           "identity": "jsonschema|jsonschema|normal|all",
@@ -4601,6 +4763,24 @@
           "workspaceInherited": false
         },
         {
+          "identity": "groove|groove|dev|all",
+          "crate": "groove",
+          "package": "groove",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/groove",
+          "features": [],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
           "identity": "hex|hex|normal|all",
           "crate": "hex",
           "package": "hex",
@@ -4633,6 +4813,78 @@
           "target": null,
           "kind": null,
           "workspaceInherited": false
+        },
+        {
+          "identity": "jazz_otel|jazz-otel|normal|all",
+          "crate": "jazz_otel",
+          "package": "jazz-otel",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": null,
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz-otel",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": true,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz_storage_rocksdb|jazz-storage-rocksdb|normal|all",
+          "crate": "jazz_storage_rocksdb",
+          "package": "jazz-storage-rocksdb",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz-storage-rocksdb",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz|jazz|dev|all",
+          "crate": "jazz",
+          "package": "jazz",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz",
+          "features": ["testing"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz|jazz|normal|all",
+          "crate": "jazz",
+          "package": "jazz",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/jazz",
+          "features": ["runtime"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true,
+          "serializerReexports": []
         },
         {
           "identity": "jsonwebtoken|jsonwebtoken|normal|all",
@@ -4964,6 +5216,60 @@
           "workspaceInherited": false
         },
         {
+          "identity": "groove|groove|dev|all",
+          "crate": "groove",
+          "package": "groove",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/groove",
+          "features": ["test"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "groove|groove|normal|all",
+          "crate": "groove",
+          "package": "groove",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/groove",
+          "features": [],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "jazz_benchmark_guard|jazz-benchmark-guard|dev|all",
+          "crate": "jazz_benchmark_guard",
+          "package": "jazz-benchmark-guard",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/benchmark-guard",
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false,
+          "serializerReexports": []
+        },
+        {
           "identity": "rocksdb|rust-rocksdb|normal|all",
           "crate": "rocksdb",
           "package": "rust-rocksdb",
@@ -5106,6 +5412,42 @@
           "workspaceInherited": false
         },
         {
+          "identity": "groove|groove|dev|all",
+          "crate": "groove",
+          "package": "groove",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/groove",
+          "features": ["test"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
+          "identity": "groove|groove|normal|all",
+          "crate": "groove",
+          "package": "groove",
+          "rename": null,
+          "requirement": "*",
+          "resolvedVersion": "0.1.0",
+          "source": null,
+          "registry": null,
+          "path": "crates/groove",
+          "features": [],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true,
+          "serializerReexports": []
+        },
+        {
           "identity": "rusqlite|rusqlite|normal|all",
           "crate": "rusqlite",
           "package": "rusqlite",
@@ -5192,8 +5534,23 @@
     },
     {
       "crate": "groove",
+      "dependency": "idb_tree|idb-tree|normal|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "groove",
       "dependency": "internment|internment|normal|all",
       "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "jazz_benchmark_guard|jazz-benchmark-guard|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "groove",
+      "dependency": "jazz_storage_rocksdb|jazz-storage-rocksdb|dev|all",
+      "classification": "governed-path-dependency"
     },
     {
       "crate": "groove",
@@ -5334,6 +5691,16 @@
     },
     {
       "crate": "jazz",
+      "dependency": "groove|groove|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "groove|groove|normal|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz",
       "dependency": "hdrhistogram|hdrhistogram|dev|all",
       "classification": "reviewed-non-serializer"
     },
@@ -5351,6 +5718,26 @@
       "crate": "jazz",
       "dependency": "internment|internment|normal|all",
       "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "jazz_benchmark_guard|jazz-benchmark-guard|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "jazz_compression|jazz-compression|normal|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "jazz_storage_rocksdb|jazz-storage-rocksdb|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "jazz_testkit|jazz-testkit|dev|all",
+      "classification": "governed-path-dependency"
     },
     {
       "crate": "jazz",
@@ -5486,6 +5873,11 @@
     },
     {
       "crate": "jazz-server",
+      "dependency": "groove|groove|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-server",
       "dependency": "hex|hex|normal|all",
       "classification": "reviewed-non-serializer"
     },
@@ -5493,6 +5885,26 @@
       "crate": "jazz-server",
       "dependency": "http|http|normal|all",
       "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "jazz_otel|jazz-otel|normal|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "jazz_storage_rocksdb|jazz-storage-rocksdb|normal|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "jazz|jazz|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "jazz|jazz|normal|all",
+      "classification": "governed-path-dependency"
     },
     {
       "crate": "jazz-server",
@@ -5593,6 +6005,21 @@
     },
     {
       "crate": "jazz-storage-rocksdb",
+      "dependency": "groove|groove|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "groove|groove|normal|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "jazz_benchmark_guard|jazz-benchmark-guard|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
       "dependency": "rocksdb|rust-rocksdb|normal|all",
       "classification": "reviewed-non-serializer"
     },
@@ -5631,6 +6058,16 @@
       "crate": "jazz-storage-sqlite",
       "dependency": "futures|futures|dev|all",
       "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "dependency": "groove|groove|dev|all",
+      "classification": "governed-path-dependency"
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "dependency": "groove|groove|normal|all",
+      "classification": "governed-path-dependency"
     },
     {
       "crate": "jazz-storage-sqlite",
