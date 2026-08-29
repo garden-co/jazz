@@ -172,6 +172,14 @@
       "dependsOn": ["^build"],
       "cache": false,
       "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
+    },
+    "rn-device-acceptance#test": {
+      "dependsOn": [],
+      "cache": false
+    },
+    "rn-device-acceptance#build": {
+      "dependsOn": [],
+      "cache": false
     }
   }
 }
