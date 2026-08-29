@@ -1790,6 +1790,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const successor = track(await createPersistentDb(syncServer.serverUrl));
     const mutationErrors = vi.fn();
     successor.onMutationError(mutationErrors);
+    // `createDb` is intentionally lazy. Attach the foreground runtime before
+    // opening the inspector so this receipt observes the same public startup
+    // path as an application's first local query.
+    await successor.all(allTodos, { tier: "local" });
     const successorInspector = await successor.openInspectorControlPort();
     successorInspector.start();
 
