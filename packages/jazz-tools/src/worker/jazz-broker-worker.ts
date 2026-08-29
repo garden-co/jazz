@@ -90,6 +90,7 @@ type ForegroundLeaseOwner = {
 type PhysicalDatabaseOwner = {
   epoch: BrowserPhysicalDatabaseEpoch;
   pageStore: IndexedDbPageStore;
+  storageOwner: string;
   release: Promise<void> | null;
   disposeInvalidation: (() => void) | null;
 };
@@ -125,6 +126,11 @@ async function ensurePhysicalDatabaseOwner(
       await existing.release;
       return await ensurePhysicalDatabaseOwner(dbName, storageOwner);
     }
+    if (existing.storageOwner !== storageOwner) {
+      throw new Error(
+        `IndexedDB database ${dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
+      );
+    }
     return existing;
   }
 
@@ -136,6 +142,7 @@ async function ensurePhysicalDatabaseOwner(
     const owner: PhysicalDatabaseOwner = {
       epoch,
       pageStore,
+      storageOwner,
       release: null,
       disposeInvalidation: null,
     };
@@ -332,6 +339,16 @@ async function connectTab(
     if (context?.closing) {
       await context.closing;
       context = contexts.get(key);
+    }
+    // `runtimeKey` intentionally names the physical root alone. Do not let a
+    // caller with a stale or forged compatible fingerprint attach a different
+    // auth scope to that already-open root: this path bypasses a fresh
+    // IndexedDbPageStore.open, so the durable marker cannot perform its usual
+    // owner comparison for us.
+    if (context && context.options.storageOwner !== message.options.storageOwner) {
+      throw new Error(
+        `IndexedDB database ${message.options.dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
+      );
     }
     if (context && context.fingerprint !== message.fingerprint) {
       throw new Error("incompatible persistent browser configuration");

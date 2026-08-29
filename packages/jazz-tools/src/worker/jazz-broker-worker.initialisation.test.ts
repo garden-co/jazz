@@ -592,6 +592,33 @@ describe("broker worker context initialization", () => {
     expect(mocks.fromDb).toHaveBeenCalledOnce();
   });
 
+  it("rejects a second context with a different owner before it can reuse a live physical root", async () => {
+    const alice = {
+      ...options("shared-physical-root"),
+      storageOwner: "owner:alice",
+      authSessionKey: "session:alice",
+    };
+    const bob = {
+      ...options("shared-physical-root"),
+      storageOwner: "owner:bob",
+      authSessionKey: "session:bob",
+    };
+
+    expect((await connect(alice, "alice-tab")).outcome).toEqual({ type: "runtime-ready" });
+
+    // Planted positive: omitting the in-memory physical-owner comparison
+    // reuses Alice's already-open page store and admits Bob without calling
+    // IndexedDbPageStore.open, so this must fail before the fix.
+    expect((await connect(bob, "bob-tab")).outcome).toEqual({
+      type: "runtime-error",
+      message:
+        "IndexedDB database shared-physical-root is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts",
+    });
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.openBrowser).toHaveBeenCalledOnce();
+    expect(mocks.fromDb).toHaveBeenCalledOnce();
+  });
+
   it("serializes cross-port disconnect and reconnect before publishing state", async () => {
     const initOptions = { ...options("serialized-transport"), serverUrl: "ws://server.test" };
     const owner = await connect(initOptions, "owner-tab");
