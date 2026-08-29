@@ -57,6 +57,26 @@ fn native_corpus_checksum(receipt: &NativeCorpusReceipt) -> String {
     format!("{:x}", digest.finalize())
 }
 
+fn assert_same_native_corpus(
+    left: &NativeCorpusReceipt,
+    right: &NativeCorpusReceipt,
+    message: &str,
+) {
+    if left == right {
+        return;
+    }
+    let differing_store = left
+        .stores
+        .keys()
+        .chain(right.stores.keys())
+        .find(|store| left.stores.get(*store) != right.stores.get(*store));
+    panic!(
+        "{message}; first differing store={differing_store:?}, left checksum={}, right checksum={}",
+        native_corpus_checksum(left),
+        native_corpus_checksum(right),
+    );
+}
+
 fn native_corpus_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
@@ -73,6 +93,14 @@ fn native_corpus_schema() -> JazzSchema {
 
 fn native_corpus_branch(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+}
+
+fn native_corpus_large_attachment() -> Vec<u8> {
+    // Cross the public inline boundary by one byte.  The repeated payload
+    // keeps the checked-in physical fixture compact under the native adapters'
+    // ordinary compression while still forcing a real indirect root/node
+    // closure into the historical store.
+    vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1]
 }
 
 fn native_corpus_storage_tables(schema: &JazzSchema) -> (Vec<String>, Vec<String>) {
@@ -100,14 +128,58 @@ fn native_corpus_storage_tables(schema: &JazzSchema) -> (Vec<String>, Vec<String
 /// different UUID identities, but would make the purportedly backend-neutral
 /// historical pack meaningless.
 fn native_corpus_authority_snapshot(schema: &JazzSchema) -> crate::protocol::CatalogueSnapshot {
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&refs).expect("open authority corpus storage");
-    let authority = crate::db::block_on(NodeState::new(node(0xbf), schema.clone(), storage))
-        .expect("open corpus authority");
-    authority
-        .catalogue_snapshot()
-        .expect("authority emits a durable catalogue snapshot")
+    // This deliberately mirrors the authority's one-time UUID allocation,
+    // but derives the fixture identities from a fixed namespace. Random UUIDs
+    // are right in real authority publication; they would make a committed
+    // byte corpus change on every test run.
+    let namespace = uuid::Uuid::from_bytes([0x4a; 16]);
+    let physical_identities = crate::protocol::PhysicalIdentityManifest {
+        tables: schema
+            .tables
+            .iter()
+            .map(|table| {
+                let columns = table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        let path = format!("table/{}/column/{}", table.name, column.name);
+                        (
+                            column.name.clone(),
+                            crate::protocol::PhysicalColumnIdentity {
+                                id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v5(
+                                    &namespace,
+                                    path.as_bytes(),
+                                )),
+                                // The corpus schema intentionally contains no
+                                // enums; enum identity fixtures remain in the
+                                // focused catalogue corpus.
+                                enum_variants: BTreeMap::new(),
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    table.name.clone(),
+                    crate::protocol::PhysicalTableIdentity {
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::new_v5(
+                            &namespace,
+                            format!("table/{}", table.name).as_bytes(),
+                        )),
+                        columns,
+                    },
+                )
+            })
+            .collect(),
+    };
+    crate::protocol::CatalogueSnapshot {
+        genesis_physical_identities: physical_identities,
+        schemas: vec![crate::protocol::SchemaVersion::new(schema.clone())],
+        lineages: Vec::new(),
+        current_write_schema: crate::protocol::CurrentWriteSchema {
+            revision: 0,
+            schema: schema.version_id(),
+        },
+    }
 }
 
 fn native_corpus_receipt<S>(node: &NodeState<S>, schema: &JazzSchema) -> NativeCorpusReceipt
@@ -220,15 +292,43 @@ where
 {
     let row_uuid = row(0xc1);
     let branch = native_corpus_branch(0xc2);
+    let mut first_commit = MergeableCommit::new("todos", row_uuid, 100)
+        .branch(branch.clone())
+        .cells(BTreeMap::from([("title".to_owned(), v(first_title))]));
+    // Normal applications deliberately receive fresh random retrieval
+    // capabilities. The corpus is the exception: it needs one replayable
+    // authority-produced byte snapshot, so Groove's test-only constructor
+    // supplies deterministic capabilities while the ordinary stage/finalize
+    // and row-publication paths remain unchanged.
+    let prepared = groove::large_values::prepare_with_fixture_locators(
+        groove::large_values::LargeValueKind::Bytes,
+        &native_corpus_large_attachment(),
+        b"jazz-storage-epoch-1-native-corpus",
+    )
+    .expect("fixture large value prepares");
+    let upload_id = groove::large_values::StagedLargeValueId([0xc5; 16]);
+    crate::db::block_on(node.begin_streaming_large_value_upload(
+        upload_id,
+        groove::large_values::LargeValueKind::Bytes,
+    ))
+    .expect("fixture upload establishes its normal pending journal");
+    crate::db::block_on(node.stage_large_value_chunk_batch(
+        upload_id,
+        groove::large_values::LargeValueKind::Bytes,
+        prepared.staged_chunks,
+    ))
+    .expect("fixture chunks stage through the normal node admission path");
+    let staged = crate::db::block_on(node.finalize_large_value_upload(upload_id, prepared.value_ref))
+        .expect("fixture root finalizes through the normal node admission path");
+    first_commit
+        .cells
+        .insert("attachment".to_owned(), Value::Large(staged.value_ref));
+    first_commit
+        .prepared_large_columns
+        .insert("attachment".to_owned());
+    first_commit.staged_large_values.push(staged.id);
     let first = node
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row_uuid, 100)
-                .branch(branch.clone())
-                .cells(BTreeMap::from([
-                    ("title".to_owned(), v(first_title)),
-                    ("attachment".to_owned(), Value::Bytes(vec![0, 1, 2, 255])),
-                ])),
-        )
+        .commit_mergeable_settled(first_commit)
         .expect("seed branch/history/current transaction");
     let second = node
         .commit_mergeable_settled(
@@ -449,13 +549,14 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
         .map(YieldingStorage::wrap)
     });
 
-    assert_eq!(
-        rocks_receipt, sqlite_receipt,
-        "the native adapters must preserve the same canonical Jazz logical pack"
+    assert_same_native_corpus(
+        &rocks_receipt,
+        &sqlite_receipt,
+        "the native adapters must preserve the same canonical Jazz logical pack",
     );
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
-        "f22130961052b8d9dc2c549ee2d48246d908c4044f3808037af933667ad8a88f",
+        "0a81edc17508c40d1a04c52bfc00e92f34da4bf9070d394dc038370701a2779b",
         "a producer/codecs change must explicitly update the reviewed epoch-one corpus fixture"
     );
 }

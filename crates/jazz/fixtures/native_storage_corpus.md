@@ -9,7 +9,7 @@ native adapters under the closed `epoch_1_storage_codec_profile`.
 Its settlement-baseline logical-pack SHA-256 is:
 
 ```text
-fd05bb7c4d1fe89a5eb35cb7031e7af18f150eb6377166e858e135eaee35cbc7
+0a81edc17508c40d1a04c52bfc00e92f34da4bf9070d394dc038370701a2779b
 ```
 
 The digest is over sorted system and physical application store names and, for
@@ -31,10 +31,12 @@ passing while excluding application rows.
 
 The currently populated historical families are catalogue genesis, durable
 node/schema identities, branch-keyed immutable versions/current projections,
-transaction/fate/global-change/merge-head records, and a byte scalar. The
-registry additionally names catalogue pointers, deletion history, known state,
-settled result members, and program facts so an intentionally narrow producer
-cannot quietly become the final corpus.
+transaction/fate/global-change/merge-head records, and an authenticated
+indirect byte tree. Its fixed test-only capabilities exist solely to make this
+historical receipt reproducible; product writers continue to mint random
+capabilities. The registry additionally names provenance, catalogue pointers,
+deletion history, known state, settled result members, and program facts so an
+intentionally narrow producer cannot quietly become the final corpus.
 
 This is an executable producer slice, **not yet the final committed physical
 fixture**. The remaining #2307 promotion work is to archive SQLite/RocksDB

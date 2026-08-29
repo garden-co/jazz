@@ -167,7 +167,7 @@ impl Locator {
     }
 
     /// Deterministically derive a capability for crate-internal fixtures.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn from_seed(seed: &[u8]) -> Self {
         Self(*blake3::hash(seed).as_bytes())
     }
@@ -2175,6 +2175,27 @@ fn prepare_with_locator(
 /// immutable node.
 pub fn prepare(kind: LargeValueKind, logical_bytes: &[u8]) -> Result<PreparedLargeValue, Error> {
     prepare_with_locator(kind, logical_bytes, |_| Locator::random())
+}
+
+/// Construct a deterministic preparation for a committed compatibility
+/// fixture. This is test-only on purpose: production locators are unguessable
+/// retrieval capabilities and must be allocated randomly by [`prepare`].
+///
+/// The fixed seed is domain-separated with each node's content hash, so equal
+/// fixture content deduplicates to one locator while distinct nodes cannot
+/// accidentally share a capability.
+#[cfg(feature = "test")]
+pub fn prepare_with_fixture_locators(
+    kind: LargeValueKind,
+    logical_bytes: &[u8],
+    fixture_seed: &[u8],
+) -> Result<PreparedLargeValue, Error> {
+    prepare_with_locator(kind, logical_bytes, |hash| {
+        let mut seed = Vec::with_capacity(fixture_seed.len() + hash.0.len());
+        seed.extend_from_slice(fixture_seed);
+        seed.extend_from_slice(&hash.0);
+        Locator::from_seed(&seed)
+    })
 }
 
 /// Rebuild while preserving the exact retrieval identity of every byte-equal
