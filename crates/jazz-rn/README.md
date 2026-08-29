@@ -16,6 +16,20 @@ Those crates have Rust contract tests, but they are not wired through this
 package yet. The former UniFFI/JSI surface has been removed rather than left as
 a broken alternative runtime path.
 
+The package now contains the first real foreground-owner substrate. The shared
+JSI HostObject source plus Rust C ABI can open one memory-only foreground `Db`
+only from an already admitted opaque 32-byte capability, run an ordinary bounded
+core `tick`, and close that exact alias. It does not accept storage paths,
+schema, claims, identities, or tokens, and it never reads relay SQLite for a
+foreground operation. Owner work is bounded and capability revocation makes
+all aliases unusable. Android and iOS now install the shared private factory
+through their New-Architecture JSI hooks, including a retained host-state lease
+that makes late finalizers harmless during bridge teardown. The complete
+encoded `NativeDb` read/write/query/subscription codec remains deliberately
+unfinished, so this substrate is not yet an end-to-end RN client. The complete
+ownership/threading/packaging contract and staged acceptance path are specified
+in [`jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
+
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
 iOS autolink the module, report ABI `0` (unavailable), and explicitly reject
 commands unless a development or release assembly stages the shared Rust relay
@@ -54,8 +68,18 @@ route through the obsolete UniFFI library. The remaining Android runner gate is
 a real Gradle/NDK AAR build and emulator installation against that linked
 artifact.
 
-The wrapper accepts ABI 3, which uses opaque host-generated admission
-capabilities and trusted revocation.
+The wrapper accepts ABI 6, which retains ABI 5's opaque host-generated
+admission capabilities, trusted revocation, and V1 foreground `NativeDb`
+postcard command vocabulary (canonical-query prepare/read/subscribe/drain/
+cancel). ABI 6 adds only the private per-runtime native-to-JS wake registration:
+the owner thread coalesces a wake through React Native's `CallInvoker`, and JS
+schedules the next ordinary tick on its own runtime thread. It is deliberately
+a byte-oriented native-host contract, not a new React Native row/query API:
+the query and row-delta codecs are the same ones used by NAPI/WASM. This
+capability-gated slice supports only ordinary local-first reads; remote tiers,
+structured relation terminal operations, and write/transaction commands remain
+unavailable, so `jazz-tools/react-native` must not select it as its general
+runtime yet.
 
 ## Expo development-build install path
 
@@ -96,13 +120,15 @@ at relay use rather than pretend to provide persistence.
 
 ## What remains before React Native is supported
 
-1. Link the staged host lifecycle codec through thin JNI/Swift translation and
-   extend it with shared event/peer-frame drainage (not an object-per-row API).
-2. Build real iOS XCFramework and Android AAR/shared-library slices from that
+1. Complete the encoded `NativeDb` binding contract against the already
+   attached in-memory clients; do not add a browser-WASM fallback.
+2. Extend the staged host lifecycle codec with shared event/peer-frame drainage
+   (not an object-per-row API).
+3. Build real iOS XCFramework and Android AAR/shared-library slices from that
    module.
-3. Verify bare React Native autolinking plus Expo prebuild/development builds
+4. Verify bare React Native autolinking plus Expo prebuild/development builds
    on Android and iOS in CI, using a first-party device app and structured
-   scenario results.
+   two-foreground-runtime scenario results.
 
 Expo Go cannot load Jazz native code. Expo development builds will be supported
 once the native module and artifacts above exist.

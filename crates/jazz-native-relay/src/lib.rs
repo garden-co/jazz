@@ -7,6 +7,7 @@
 //! crate; they do not implement query, write, policy, or sync behavior here.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
@@ -16,25 +17,51 @@ use std::thread;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::lock::Mutex as LocalMutex;
-use jazz::db::{Db, DbConfig, DbIdentity, PeerConnection, Transport, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, PeerConnection, PreparedQuery, ReadOpts, SubscriptionEvent,
+    SubscriptionStream, TickScheduler, TickUrgency, Transport, block_on,
+};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::protocol::SyncMessage;
 use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_len};
+use jazz::query::Query;
 use jazz::schema::JazzSchema;
-use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
 use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
-use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
+use jazz_storage_sqlite::SqliteStorage;
 use thiserror::Error;
 
 /// Increment this only for a breaking change to the native command/wire ABI.
 /// JS wrappers must compare this with their expected range during startup and
 /// explain that an OTA update needs a new native development build when it is
 /// incompatible.
-pub const NATIVE_RELAY_ABI_VERSION: u16 = 3;
+pub const NATIVE_RELAY_ABI_VERSION: u16 = 6;
+
+/// Stable wake classes crossing from a foreground core owner into an installed
+/// platform scheduler.  This is deliberately separate from
+/// [`ForegroundDbCommandRequest`]: registering a callback must not grow or
+/// reinterpret the shared byte command vocabulary.
+const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
+const FOREGROUND_WAKE_DEFERRED: u8 = 1;
+const FOREGROUND_WAKE_AFTER: u8 = 2;
+const FOREGROUND_WAKE_CANCELLED: u8 = 3;
+
+/// A platform-owned, non-borrowing foreground wake callback.
+///
+/// The callback may run on the relay owner thread. It must only enqueue work
+/// onto the JavaScript runtime (for RN, through `CallInvoker`); it must never
+/// call JavaScript or reenter the relay synchronously. `context` is retained
+/// by the platform until it synchronously unregisters this callback.
+pub type ForegroundWakeCallback =
+    unsafe extern "C" fn(context: *mut c_void, foreground: u64, wake_kind: u8, delay_ms: u64);
 
 const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
 const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
+/// Commands which cross from a platform/JSI call into a relay owner must not
+/// be allowed to accumulate without bound. Peer frames have their own byte
+/// budget above; this is the independent bound for owner-thread work such as
+/// foreground opens, closes, and ticks.
+const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
 const NATIVE_RELAY_DRAIN_MAX_MESSAGES: usize = 64;
 const NATIVE_RELAY_DRAIN_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_RELAY_PUMP_MAX_CLIENTS: usize = 64;
@@ -247,6 +274,90 @@ pub enum RelayCommandResponse {
     },
 }
 
+/// Commands for one opaque in-memory foreground `Db`.
+///
+/// This is intentionally a separate vocabulary from [`RelayCommandRequest`]:
+/// relay commands own persistent-relay lifecycle and peer frames, while these
+/// commands own the existing byte-oriented `NativeDb` surface for one UI
+/// runtime. Both are postcard and are versioned by [`NATIVE_RELAY_ABI_VERSION`].
+/// A caller can carry an opaque foreground handle only after capability-only
+/// admission; it can never smuggle an open configuration through this codec.
+///
+/// Query bytes are the canonical postcard [`Query`] bytes already produced by
+/// the shared JS query codec.  This is intentionally *not* a second RN query
+/// AST.  Read options are fixed to the ordinary local-first default for this
+/// first capability-gated slice; non-default tiers/views remain unavailable
+/// until their shared codec is added.
+///
+/// Adding these variants changed what an ABI-4 wrapper could safely request,
+/// so this extension is gated by native-relay ABI 5.  Future changes follow
+/// the same rule: additive commands which a caller must understand require a
+/// new relay ABI, while a command's established payload is immutable.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundDbCommandRequest {
+    /// Verify that this attached foreground is still live and return the ABI.
+    Probe,
+    /// Run one bounded ordinary core turn for this foreground and its relay.
+    Tick,
+    /// Compile and retain a canonical query in this foreground DB.
+    PrepareQuery { query: Vec<u8> },
+    /// Materialize the current local-first result for a retained query.
+    All { query: u64 },
+    /// Open a local-first subscription for a retained query.
+    Subscribe { query: u64 },
+    /// Drain currently publishable events without waiting. Each delta is
+    /// encoded through `jazz::binding_codec`, exactly like NAPI and WASM.
+    DrainSubscription { subscription: u64 },
+    /// Cancel one subscription and wait for the core finalization ack.
+    Unsubscribe { subscription: u64 },
+    /// Close this foreground alias. Repeated closes report `closed: false`.
+    Close,
+}
+
+/// Response for [`ForegroundDbCommandRequest`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundDbCommandResponse {
+    Probe {
+        abi_version: u16,
+    },
+    Ticked,
+    PreparedQuery {
+        query: u64,
+    },
+    Rows {
+        rows: Vec<u8>,
+    },
+    Subscribed {
+        subscription: u64,
+    },
+    SubscriptionEvents {
+        events: Vec<ForegroundSubscriptionEvent>,
+    },
+    Unsubscribed {
+        closed: bool,
+    },
+    Closed {
+        closed: bool,
+    },
+}
+
+/// One already-materialized subscription event.  The byte payload deliberately
+/// reuses the normal binding codec; the JSI bridge only copies bytes and never
+/// interprets row/query state.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ForegroundSubscriptionEvent {
+    Delta {
+        reset: bool,
+        settled: bool,
+        tier: String,
+        delta: Vec<u8>,
+    },
+    Rejected {
+        reason: String,
+    },
+    Closed,
+}
+
 /// ABI-owned response buffer. On successful execution, `data` is allocated by
 /// Rust and must be released exactly once through
 /// [`jazz_native_relay_bytes_free`]. Do not copy this struct before freeing it.
@@ -286,6 +397,10 @@ pub struct NativeRelayHost {
     admitted_scopes: BTreeMap<AdmissionCapability, AdmittedRelayScope>,
     relays: BTreeMap<u64, OpenedRelay>,
     clients: BTreeMap<u64, (u64, NativeRelayClient)>,
+    /// Foreground aliases opened through the capability-only C ABI. Keeping
+    /// this separate from the general command handles makes it impossible for
+    /// JSI to turn a guessed number into a relay/client pairing.
+    foregrounds: BTreeMap<u64, OpenedForeground>,
     next_handle: u64,
     #[cfg(test)]
     thread_start_counter: Option<Arc<AtomicUsize>>,
@@ -303,6 +418,33 @@ struct OpenedRelay {
     relay: NativeRelay,
 }
 
+struct OpenedForeground {
+    relay: u64,
+    client: u64,
+    wake: Option<ForegroundWakeRegistration>,
+}
+
+#[derive(Clone, Copy)]
+struct ForegroundWakeRegistration {
+    callback: ForegroundWakeCallback,
+    context: usize,
+}
+
+impl ForegroundWakeRegistration {
+    fn cancelled(self, foreground: u64) {
+        // SAFETY: the platform keeps this context alive until it synchronously
+        // clears the callback, foreground close/revocation, or lease release.
+        unsafe {
+            (self.callback)(
+                self.context as *mut c_void,
+                foreground,
+                FOREGROUND_WAKE_CANCELLED,
+                0,
+            );
+        }
+    }
+}
+
 impl Default for NativeRelayHost {
     fn default() -> Self {
         Self {
@@ -310,6 +452,7 @@ impl Default for NativeRelayHost {
             admitted_scopes: BTreeMap::new(),
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
+            foregrounds: BTreeMap::new(),
             next_handle: 1,
             #[cfg(test)]
             thread_start_counter: None,
@@ -516,6 +659,159 @@ impl NativeRelayHost {
         }
     }
 
+    /// Open one in-memory foreground client for an already admitted scope.
+    ///
+    /// This deliberately bypasses the postcard lifecycle envelope: the
+    /// capability is not a JavaScript command payload, and the C caller gets
+    /// only an opaque foreground handle. Internally it still uses the same
+    /// `NativeRelay` owner thread and ordinary peer link as `Open` + `Attach`.
+    fn open_foreground(
+        &mut self,
+        admitted_scope: AdmissionCapability,
+    ) -> Result<u64, JazzNativeRelayStatus> {
+        let (config, author, claims) = {
+            let admitted = self
+                .admitted_scopes
+                .get(&admitted_scope)
+                .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+            (
+                admitted.config.clone(),
+                admitted.config.identity.author,
+                admitted.claims.clone(),
+            )
+        };
+        let scope = config.scope.clone();
+        let relay = self.registry.open(config).map_err(relay_status)?;
+        let relay_handle = self
+            .allocate()
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        self.relays.insert(
+            relay_handle,
+            OpenedRelay {
+                scope: scope.clone(),
+                admitted_scope,
+                relay: relay.clone(),
+            },
+        );
+        let client_handle = self
+            .allocate()
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let client = match relay.attach_client(client_identity(client_handle, author), claims) {
+            Ok(client) => client,
+            Err(error) => {
+                // The relay alias was not yet observable to the caller. Undo
+                // it before returning the attachment failure.
+                self.relays.remove(&relay_handle);
+                let final_alias = !self.relays.values().any(|opened| opened.scope == scope);
+                if final_alias {
+                    let _ = self.registry.close(&scope);
+                }
+                return Err(relay_status(error));
+            }
+        };
+        self.clients.insert(client_handle, (relay_handle, client));
+        let foreground = match self.allocate() {
+            Ok(foreground) => foreground,
+            Err(_) => {
+                if let Some((_, client)) = self.clients.remove(&client_handle) {
+                    let _ = client.close();
+                }
+                self.relays.remove(&relay_handle);
+                let final_alias = !self.relays.values().any(|opened| opened.scope == scope);
+                if final_alias {
+                    let _ = self.registry.close(&scope);
+                }
+                return Err(JazzNativeRelayStatus::LifecycleFailure);
+            }
+        };
+        self.foregrounds.insert(
+            foreground,
+            OpenedForeground {
+                relay: relay_handle,
+                client: client_handle,
+                wake: None,
+            },
+        );
+        Ok(foreground)
+    }
+
+    fn tick_foreground(&mut self, foreground: u64) -> Result<(), JazzNativeRelayStatus> {
+        let relay = self
+            .foregrounds
+            .get(&foreground)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+            .relay;
+        self.relays
+            .get(&relay)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+            .relay
+            .pump()
+            .map_err(relay_status)
+    }
+
+    fn foreground_client(
+        &self,
+        foreground: u64,
+    ) -> Result<&NativeRelayClient, JazzNativeRelayStatus> {
+        let client = self
+            .foregrounds
+            .get(&foreground)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+            .client;
+        self.clients
+            .get(&client)
+            .map(|(_, client)| client)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)
+    }
+
+    fn close_foreground(&mut self, foreground_handle: u64) -> Result<bool, JazzNativeRelayStatus> {
+        let Some(foreground) = self.foregrounds.remove(&foreground_handle) else {
+            return Ok(false);
+        };
+        if let Some(wake) = foreground.wake {
+            wake.cancelled(foreground_handle);
+        }
+        let Some(opened) = self.relays.remove(&foreground.relay) else {
+            return Ok(false);
+        };
+        if let Some((_, client)) = self.clients.remove(&foreground.client) {
+            client.close().map_err(relay_status)?;
+        }
+        let final_alias = !self
+            .relays
+            .values()
+            .any(|remaining| remaining.scope == opened.scope);
+        if final_alias {
+            self.registry
+                .close(&opened.scope)
+                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        }
+        Ok(true)
+    }
+
+    /// Register or clear the platform-owned wake sink for exactly one
+    /// foreground Db. The sink lives outside Rust and is only allowed to
+    /// enqueue a later JavaScript turn; the Db itself remains owner-thread
+    /// affine. Clearing waits for the owner turn which removes the scheduler,
+    /// so platform teardown can then safely release its callback context.
+    fn set_foreground_wake_callback(
+        &mut self,
+        foreground: u64,
+        callback: Option<ForegroundWakeCallback>,
+        context: usize,
+    ) -> Result<(), JazzNativeRelayStatus> {
+        let client = self.foreground_client(foreground)?.clone();
+        client
+            .set_foreground_wake_callback(foreground, callback, context)
+            .map_err(relay_status)?;
+        let opened = self
+            .foregrounds
+            .get_mut(&foreground)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        opened.wake = callback.map(|callback| ForegroundWakeRegistration { callback, context });
+        Ok(())
+    }
+
     fn admit_scope(
         &mut self,
         request: RelayScopeAdmissionRequest,
@@ -577,6 +873,15 @@ impl NativeRelayHost {
                 (opened.admitted_scope == admitted_scope).then_some(*handle)
             })
             .collect::<Vec<_>>();
+        self.foregrounds.retain(|foreground_handle, foreground| {
+            if !relay_handles.contains(&foreground.relay) {
+                return true;
+            }
+            if let Some(wake) = foreground.wake {
+                wake.cancelled(*foreground_handle);
+            }
+            false
+        });
         let mut removed_scopes = Vec::new();
         for relay_handle in relay_handles {
             if let Some(opened) = self.relays.remove(&relay_handle) {
@@ -618,7 +923,9 @@ fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
     match error {
         RelayError::InvalidAbiRange { .. } => JazzNativeRelayStatus::InvalidAbiRange,
         RelayError::IncompatibleAbi { .. } => JazzNativeRelayStatus::IncompatibleAbi,
-        RelayError::QueueCapacityExceeded { .. } => JazzNativeRelayStatus::Backpressure,
+        RelayError::QueueCapacityExceeded { .. } | RelayError::OwnerQueueFull => {
+            JazzNativeRelayStatus::Backpressure
+        }
         RelayError::Db(error) if error.code == jazz::db::ErrorCode::Backpressure => {
             JazzNativeRelayStatus::Backpressure
         }
@@ -699,13 +1006,22 @@ pub unsafe extern "C" fn jazz_native_relay_execute(
 /// Opaque C-owned native relay host. It owns one scope registry and all handles.
 #[repr(C)]
 pub struct JazzNativeRelayHost {
-    inner: Mutex<NativeRelayHost>,
+    inner: Arc<Mutex<NativeRelayHost>>,
+}
+
+/// Retained native-host ownership for a JSI factory and its foreground
+/// HostObjects. A platform may release its `JazzNativeRelayHost` wrapper while
+/// JavaScript finalizers still exist; this Arc keeps the Rust host state alive
+/// until the final foreground object has become unreachable.
+#[repr(C)]
+pub struct JazzNativeRelayHostLease {
+    inner: Arc<Mutex<NativeRelayHost>>,
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_host_new() -> *mut JazzNativeRelayHost {
     Box::into_raw(Box::new(JazzNativeRelayHost {
-        inner: Mutex::new(NativeRelayHost::default()),
+        inner: Arc::new(Mutex::new(NativeRelayHost::default())),
     }))
 }
 
@@ -719,6 +1035,37 @@ pub unsafe extern "C" fn jazz_native_relay_host_free(host: *mut JazzNativeRelayH
         unsafe {
             drop(Box::from_raw(host));
         }
+    }
+}
+
+/// Retain a host for private JSI foreground objects.
+///
+/// The returned lease keeps the host's Rust state alive after the platform
+/// releases its original host wrapper. It is intentionally opaque: callers
+/// can pass it only to the attached-foreground APIs and must release it once
+/// the last factory/HostObject for that JS runtime has been invalidated.
+///
+/// # Safety
+/// `host` must be a live pointer returned by [`jazz_native_relay_host_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_retain(
+    host: *mut JazzNativeRelayHost,
+) -> *mut JazzNativeRelayHostLease {
+    if host.is_null() {
+        return std::ptr::null_mut();
+    }
+    let inner = unsafe { Arc::clone(&(&*host).inner) };
+    Box::into_raw(Box::new(JazzNativeRelayHostLease { inner }))
+}
+
+/// Release one host lease returned by [`jazz_native_relay_host_retain`].
+///
+/// # Safety
+/// `lease` must be null or an unfreed pointer returned by host_retain.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_free(lease: *mut JazzNativeRelayHostLease) {
+    if !lease.is_null() {
+        unsafe { drop(Box::from_raw(lease)) };
     }
 }
 
@@ -857,6 +1204,348 @@ pub unsafe extern "C" fn jazz_native_relay_host_revoke_scope_capability(
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
     let _ = host.revoke_scope(AdmissionCapability(bytes));
+    JazzNativeRelayStatus::Ok
+}
+
+/// Open one actual memory-only foreground client from a trusted 32-byte
+/// admission capability.
+///
+/// This is intentionally not expressible through [`RelayCommandRequest`]: a
+/// foreground factory may carry the opaque capability, but it must never be
+/// able to smuggle one into the generic JavaScript command channel. The output
+/// is an opaque host-local handle, not a Rust `Db` pointer. The foreground
+/// client runs on the relay owner thread and is already connected to the
+/// admitted scope's persistent relay through the ordinary peer protocol.
+///
+/// # Safety
+/// `host` must be live, `capability` must point to exactly 32 readable bytes,
+/// and `out_foreground` must be writable for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_open_attached_foreground(
+    host: *mut JazzNativeRelayHost,
+    capability: *const u8,
+    capability_len: usize,
+    out_foreground: *mut u64,
+) -> JazzNativeRelayStatus {
+    if host.is_null() || capability.is_null() || capability_len != 32 || out_foreground.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out_foreground = 0 };
+    let capability = unsafe { std::slice::from_raw_parts(capability, capability_len) };
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(capability);
+    let mut host = match unsafe { (&*host).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.open_foreground(AdmissionCapability(bytes)) {
+        Ok(foreground) => {
+            unsafe { *out_foreground = foreground };
+            JazzNativeRelayStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// Perform one bounded ordinary core tick for an attached foreground client.
+///
+/// This is the first native implementation of an existing `NativeDb` method:
+/// it makes no row/object API available to JSI, but proves the handle invokes
+/// the real memory `Db` and its peer link on the dedicated owner thread.
+/// A full byte codec for reads/writes/subscriptions will extend this same
+/// handle rather than open another runtime or access relay SQLite directly.
+///
+/// # Safety
+/// `host` must be live and `foreground` must be an unclosed handle returned by
+/// [`jazz_native_relay_host_open_attached_foreground`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_tick_attached_foreground(
+    host: *mut JazzNativeRelayHost,
+    foreground: u64,
+) -> JazzNativeRelayStatus {
+    if host.is_null() || foreground == 0 {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let mut host = match unsafe { (&*host).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.tick_foreground(foreground) {
+        Ok(()) => JazzNativeRelayStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Close exactly one attached foreground client. It is intentionally
+/// idempotent: a JSI HostObject finalizer and an explicit JavaScript `close`
+/// may race during bridge teardown without turning a stale alias into an
+/// error. The out flag reports whether this call owned the close transition.
+///
+/// # Safety
+/// `host` must be live and `out_closed` writable for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_close_attached_foreground(
+    host: *mut JazzNativeRelayHost,
+    foreground: u64,
+    out_closed: *mut bool,
+) -> JazzNativeRelayStatus {
+    if host.is_null() || foreground == 0 || out_closed.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out_closed = false };
+    let mut host = match unsafe { (&*host).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.close_foreground(foreground) {
+        Ok(closed) => {
+            unsafe { *out_closed = closed };
+            JazzNativeRelayStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// Lease-safe variant of [`jazz_native_relay_host_open_attached_foreground`].
+/// Private JSI factories must use this form rather than retain a raw host
+/// pointer across bridge teardown.
+///
+/// # Safety
+/// `lease` must be live, `capability` exactly 32 readable bytes, and
+/// `out_foreground` writable for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_open_attached_foreground(
+    lease: *mut JazzNativeRelayHostLease,
+    capability: *const u8,
+    capability_len: usize,
+    out_foreground: *mut u64,
+) -> JazzNativeRelayStatus {
+    if lease.is_null() || capability.is_null() || capability_len != 32 || out_foreground.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out_foreground = 0 };
+    let capability = unsafe { std::slice::from_raw_parts(capability, capability_len) };
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(capability);
+    let mut host = match unsafe { (&*lease).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.open_foreground(AdmissionCapability(bytes)) {
+        Ok(foreground) => {
+            unsafe { *out_foreground = foreground };
+            JazzNativeRelayStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// Lease-safe variant of [`jazz_native_relay_host_tick_attached_foreground`].
+///
+/// # Safety
+/// `lease` must be live for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_tick_attached_foreground(
+    lease: *mut JazzNativeRelayHostLease,
+    foreground: u64,
+) -> JazzNativeRelayStatus {
+    if lease.is_null() || foreground == 0 {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let mut host = match unsafe { (&*lease).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.tick_foreground(foreground) {
+        Ok(()) => JazzNativeRelayStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Lease-safe variant of [`jazz_native_relay_host_close_attached_foreground`].
+///
+/// # Safety
+/// `lease` must be live and `out_closed` writable for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_close_attached_foreground(
+    lease: *mut JazzNativeRelayHostLease,
+    foreground: u64,
+    out_closed: *mut bool,
+) -> JazzNativeRelayStatus {
+    if lease.is_null() || foreground == 0 || out_closed.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out_closed = false };
+    let mut host = match unsafe { (&*lease).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.close_foreground(foreground) {
+        Ok(closed) => {
+            unsafe { *out_closed = closed };
+            JazzNativeRelayStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// Register or clear the native-to-JavaScript wake sink for one attached
+/// foreground runtime. This is a lifecycle seam, not a foreground command:
+/// the supplied callback only asks the platform to schedule a later JS turn.
+/// Passing a null `callback` clears the scheduler synchronously, after which
+/// the platform may release `context` without a late owner-thread wake using
+/// it.
+///
+/// # Safety
+/// `lease` must be live. When `callback` is non-null, `context` must remain
+/// valid until a successful null-callback clear for this foreground, its
+/// foreground is closed/revoked, or the retained lease has been released.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_set_foreground_wake_callback(
+    lease: *mut JazzNativeRelayHostLease,
+    foreground: u64,
+    callback: Option<ForegroundWakeCallback>,
+    context: *mut c_void,
+) -> JazzNativeRelayStatus {
+    // A non-null callback receives `context` asynchronously from the relay
+    // owner. Accepting a null context would turn one malformed platform call
+    // into a later null dereference on that thread.
+    if lease.is_null() || foreground == 0 || (callback.is_some() && context.is_null()) {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let mut host = match unsafe { (&*lease).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    match host.set_foreground_wake_callback(foreground, callback, context as usize) {
+        Ok(()) => JazzNativeRelayStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Execute one complete postcard [`ForegroundDbCommandRequest`] against an
+/// attached foreground `Db` retained by a private JSI factory.
+///
+/// This is the shared native database-command seam for RN, Swift, and Kotlin:
+/// the platform binding only copies bytes in/out, while Rust owns the handle,
+/// scheduling, and core operation. It is deliberately *not* reachable through
+/// [`RelayCommandRequest`] or the public relay TurboModule command API.
+///
+/// # Safety
+/// `lease` must be live, `foreground` must be an opaque handle returned by an
+/// attached-foreground open, `request` must be readable for `request_len`
+/// bytes (unless that length is zero), and `out` must be writable. On every
+/// error `out` is reset to an empty buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
+    lease: *mut JazzNativeRelayHostLease,
+    foreground: u64,
+    request: *const u8,
+    request_len: usize,
+    out: *mut JazzNativeRelayBytes,
+) -> JazzNativeRelayStatus {
+    if out.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out = JazzNativeRelayBytes::EMPTY };
+    if lease.is_null() || foreground == 0 || (request.is_null() && request_len != 0) {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let request = if request_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(request, request_len) }
+    };
+    let command = match postcard::from_bytes::<ForegroundDbCommandRequest>(request) {
+        Ok(command) => command,
+        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
+    };
+    let mut host = match unsafe { (&*lease).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    // Every command validates foreground liveness before returning a result.
+    // This keeps a stale JSI object from treating `Probe` as a capability
+    // oracle after explicit close or platform revocation.
+    if !host.foregrounds.contains_key(&foreground)
+        && !matches!(command, ForegroundDbCommandRequest::Close)
+    {
+        return JazzNativeRelayStatus::InvalidHandle;
+    }
+    let response = match command {
+        ForegroundDbCommandRequest::Probe => ForegroundDbCommandResponse::Probe {
+            abi_version: NATIVE_RELAY_ABI_VERSION,
+        },
+        ForegroundDbCommandRequest::Tick => match host.tick_foreground(foreground) {
+            Ok(()) => ForegroundDbCommandResponse::Ticked,
+            Err(status) => return status,
+        },
+        ForegroundDbCommandRequest::PrepareQuery { query } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.prepare_foreground_query(query) {
+                Ok(query) => ForegroundDbCommandResponse::PreparedQuery { query },
+                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+            }
+        }
+        ForegroundDbCommandRequest::All { query } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.all_foreground_query(query) {
+                Ok(rows) => ForegroundDbCommandResponse::Rows { rows },
+                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+            }
+        }
+        ForegroundDbCommandRequest::Subscribe { query } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.subscribe_foreground_query(query) {
+                Ok(subscription) => ForegroundDbCommandResponse::Subscribed { subscription },
+                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+            }
+        }
+        ForegroundDbCommandRequest::DrainSubscription { subscription } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.drain_foreground_subscription(subscription) {
+                Ok(events) => ForegroundDbCommandResponse::SubscriptionEvents { events },
+                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+            }
+        }
+        ForegroundDbCommandRequest::Unsubscribe { subscription } => {
+            let client = match host.foreground_client(foreground) {
+                Ok(client) => client,
+                Err(status) => return status,
+            };
+            match client.close_foreground_subscription(subscription) {
+                Ok(closed) => ForegroundDbCommandResponse::Unsubscribed { closed },
+                Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+            }
+        }
+        ForegroundDbCommandRequest::Close => match host.close_foreground(foreground) {
+            Ok(closed) => ForegroundDbCommandResponse::Closed { closed },
+            Err(status) => return status,
+        },
+    };
+    let bytes = match postcard::to_allocvec(&response) {
+        Ok(bytes) => bytes,
+        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
+    };
+    let boxed = bytes.into_boxed_slice();
+    unsafe {
+        *out = JazzNativeRelayBytes {
+            len: boxed.len(),
+            data: Box::into_raw(boxed).cast(),
+        };
+    }
     JazzNativeRelayStatus::Ok
 }
 
@@ -1047,6 +1736,100 @@ impl NativeRelayClient {
     pub fn wire(&self) -> NativeRelayWire {
         self.wire.clone()
     }
+
+    fn prepare_foreground_query(&self, query: Vec<u8>) -> Result<u64, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.prepare_foreground_query(id, query))
+    }
+
+    fn all_foreground_query(&self, query: u64) -> Result<Vec<u8>, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.all_foreground_query(id, query))
+    }
+
+    fn subscribe_foreground_query(&self, query: u64) -> Result<u64, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.subscribe_foreground_query(id, query))
+    }
+
+    fn drain_foreground_subscription(
+        &self,
+        subscription: u64,
+    ) -> Result<Vec<ForegroundSubscriptionEvent>, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.drain_foreground_subscription(id, subscription))
+    }
+
+    fn close_foreground_subscription(&self, subscription: u64) -> Result<bool, RelayError> {
+        let id = self.id;
+        self.relay
+            .run(move |worker| worker.close_foreground_subscription(id, subscription))
+    }
+
+    fn set_foreground_wake_callback(
+        &self,
+        foreground: u64,
+        callback: Option<ForegroundWakeCallback>,
+        context: usize,
+    ) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            let client = worker
+                .clients
+                .get(&id)
+                .ok_or(RelayError::UnknownClient(id))?;
+            let scheduler = callback.map(|callback| {
+                Rc::new(ForegroundWakeScheduler {
+                    callback,
+                    context,
+                    foreground,
+                }) as Rc<dyn TickScheduler>
+            });
+            client.db.set_tick_scheduler(scheduler);
+            Ok(())
+        })
+    }
+}
+
+/// The Rust half of the native-to-JS wake bridge. It has no JavaScript or
+/// platform references beyond the opaque callback/context pair. The C++ host
+/// coalesces calls and schedules the eventual JS turn; each foreground has a
+/// distinct handle in every callback to prevent cross-runtime wake delivery.
+struct ForegroundWakeScheduler {
+    callback: ForegroundWakeCallback,
+    context: usize,
+    foreground: u64,
+}
+
+impl ForegroundWakeScheduler {
+    fn wake(&self, kind: u8, delay_ms: u64) {
+        // SAFETY: registration accepts only a platform callback. Its context
+        // remains live until the platform synchronously clears this Db's
+        // scheduler through `set_foreground_wake_callback(None, ...)`.
+        unsafe {
+            (self.callback)(self.context as *mut c_void, self.foreground, kind, delay_ms);
+        }
+    }
+}
+
+impl TickScheduler for ForegroundWakeScheduler {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        self.wake(
+            match urgency {
+                TickUrgency::Immediate => FOREGROUND_WAKE_IMMEDIATE,
+                TickUrgency::Deferred => FOREGROUND_WAKE_DEFERRED,
+            },
+            0,
+        );
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        self.wake(FOREGROUND_WAKE_AFTER, delay_ms);
+    }
 }
 
 /// Thread-safe handle to one executor-local relay owner.
@@ -1056,7 +1839,7 @@ pub struct NativeRelay {
 }
 
 struct RelayInner {
-    jobs: Mutex<Option<mpsc::Sender<RelayCommand>>>,
+    jobs: Mutex<Option<mpsc::SyncSender<RelayCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     wire: NativeRelayWire,
     sqlite_path: PathBuf,
@@ -1070,6 +1853,10 @@ impl Drop for RelayInner {
             return;
         };
         let (done_tx, done_rx) = mpsc::channel();
+        // Teardown must not be starved behind a full foreground command
+        // queue. It is allowed to wait for an in-flight command, but never
+        // leaves an owner thread behind merely because the bounded queue was
+        // busy at the instant the last host lease disappeared.
         let _ = sender.send(RelayCommand::Shutdown(done_tx));
         let _ = done_rx.recv();
         if let Ok(mut join) = self.join.lock()
@@ -1310,6 +2097,9 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
 struct ConnectedClient {
     db: Db<MemoryStorage>,
     wire: NativeRelayWire,
+    prepared_queries: BTreeMap<u64, PreparedQuery>,
+    subscriptions: BTreeMap<u64, SubscriptionStream>,
+    next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
     _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
@@ -1332,16 +2122,9 @@ impl RelayWorker {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let codec_profile = epoch_1_storage_codec_profile().map_err(RelayError::Storage)?;
         let persistent = block_on(Db::open(DbConfig {
             schema: config.schema.clone(),
-            storage: SqliteStorage::open_with_durability_and_codec_profile(
-                config.sqlite_path,
-                &refs,
-                SqliteDurability::WalNoSync,
-                &codec_profile,
-            )
-            .map_err(RelayError::Storage)?,
+            storage: SqliteStorage::open(config.sqlite_path, &refs).map_err(RelayError::Storage)?,
             identity: config.identity,
             id_source: None,
         }))
@@ -1390,6 +2173,9 @@ impl RelayWorker {
             ConnectedClient {
                 db,
                 wire,
+                prepared_queries: BTreeMap::new(),
+                subscriptions: BTreeMap::new(),
+                next_foreground_handle: 1,
                 _upstream: upstream,
                 _served: served,
             },
@@ -1417,6 +2203,153 @@ impl RelayWorker {
             map_tick_result(block_on(client.db.tick()))?;
         }
         Ok(())
+    }
+
+    fn foreground_client(&self, client: u64) -> Result<&ConnectedClient, RelayError> {
+        self.clients
+            .get(&client)
+            .ok_or(RelayError::UnknownClient(client))
+    }
+
+    fn foreground_client_mut(&mut self, client: u64) -> Result<&mut ConnectedClient, RelayError> {
+        self.clients
+            .get_mut(&client)
+            .ok_or(RelayError::UnknownClient(client))
+    }
+
+    fn next_foreground_handle(client: &mut ConnectedClient) -> Result<u64, RelayError> {
+        let handle = client.next_foreground_handle;
+        client.next_foreground_handle = client
+            .next_foreground_handle
+            .checked_add(1)
+            .ok_or(RelayError::ClientIdExhausted)?;
+        Ok(handle)
+    }
+
+    fn prepare_foreground_query(&mut self, client: u64, query: Vec<u8>) -> Result<u64, RelayError> {
+        let query = postcard::from_bytes::<Query>(&query).map_err(|error| {
+            RelayError::ForegroundCommand(format!("decode canonical query: {error}"))
+        })?;
+        let client = self.foreground_client_mut(client)?;
+        let prepared = client.db.prepare_query(&query).map_err(RelayError::Db)?;
+        let handle = Self::next_foreground_handle(client)?;
+        client.prepared_queries.insert(handle, prepared);
+        Ok(handle)
+    }
+
+    fn all_foreground_query(&mut self, client: u64, query: u64) -> Result<Vec<u8>, RelayError> {
+        let client = self.foreground_client(client)?;
+        let prepared = client.prepared_queries.get(&query).ok_or_else(|| {
+            RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
+        })?;
+        let mut rows =
+            block_on(client.db.all(prepared, ReadOpts::default())).map_err(RelayError::Db)?;
+        block_on(client.db.hydrate_rows_for_binding(&mut rows)).map_err(RelayError::Db)?;
+        jazz::binding_codec::encode_rows(&rows)
+            .map_err(|error| RelayError::ForegroundCommand(format!("encode row payload: {error}")))
+    }
+
+    fn subscribe_foreground_query(&mut self, client: u64, query: u64) -> Result<u64, RelayError> {
+        let client = self.foreground_client_mut(client)?;
+        let prepared = client
+            .prepared_queries
+            .get(&query)
+            .ok_or_else(|| {
+                RelayError::ForegroundCommand(format!("unknown foreground query {query}"))
+            })?
+            .clone();
+        let subscription = block_on(client.db.subscribe(&prepared, ReadOpts::default()))
+            .map_err(RelayError::Db)?;
+        let handle = Self::next_foreground_handle(client)?;
+        client.subscriptions.insert(handle, subscription);
+        Ok(handle)
+    }
+
+    fn drain_foreground_subscription(
+        &mut self,
+        client: u64,
+        subscription: u64,
+    ) -> Result<Vec<ForegroundSubscriptionEvent>, RelayError> {
+        let client = self.foreground_client_mut(client)?;
+        let mut pending = Vec::new();
+        {
+            let stream = client.subscriptions.get_mut(&subscription).ok_or_else(|| {
+                RelayError::ForegroundCommand(format!(
+                    "unknown foreground subscription {subscription}"
+                ))
+            })?;
+            while let Some(event) = stream.try_next_event() {
+                pending.push(event);
+            }
+        }
+        let mut events = Vec::with_capacity(pending.len());
+        for mut event in pending {
+            // Hydration can suspend on storage. Do it before borrowing fields
+            // for the binding envelope, just like the NAPI/WASM adapters.
+            block_on(client.db.hydrate_subscription_event_for_binding(&mut event))
+                .map_err(RelayError::Db)?;
+            match &mut event {
+                SubscriptionEvent::Delta {
+                    reset,
+                    added,
+                    updated,
+                    removed,
+                    terminal_operations,
+                    settled,
+                    tier,
+                    ..
+                } => {
+                    // `binding_codec` intentionally carries only rows and occurrence
+                    // positions.  Terminal operations need their existing dedicated
+                    // shared codec before this capability can claim full structured
+                    // relation support, so fail closed rather than dropping them.
+                    if !terminal_operations.is_empty() {
+                        return Err(RelayError::ForegroundCommand(
+                            "foreground V1 does not yet encode terminal operations".to_owned(),
+                        ));
+                    }
+                    let delta =
+                        jazz::binding_codec::encode_subscription_delta(added, updated, removed)
+                            .map_err(|error| {
+                                RelayError::ForegroundCommand(format!(
+                                    "encode subscription delta: {error}"
+                                ))
+                            })?;
+                    events.push(ForegroundSubscriptionEvent::Delta {
+                        reset: *reset,
+                        settled: *settled,
+                        tier: format!("{tier:?}").to_ascii_lowercase(),
+                        delta,
+                    });
+                }
+                SubscriptionEvent::Rejected { reason } => {
+                    events.push(ForegroundSubscriptionEvent::Rejected {
+                        reason: format!("{reason:?}"),
+                    })
+                }
+                SubscriptionEvent::Closed => events.push(ForegroundSubscriptionEvent::Closed),
+            }
+        }
+        Ok(events)
+    }
+
+    fn close_foreground_subscription(
+        &mut self,
+        client: u64,
+        subscription: u64,
+    ) -> Result<bool, RelayError> {
+        let client = self.foreground_client_mut(client)?;
+        let Some(subscription) = client.subscriptions.remove(&subscription) else {
+            return Ok(false);
+        };
+        // `SubscriptionStream::close` awaits a node turn. This command is
+        // itself executing on that node's owner thread, so awaiting it here
+        // would deadlock the JSI call. Dropping queues the identical cleanup
+        // without an acknowledgement; the following ordinary Tick performs
+        // it. The handle is already retired, so no subsequent drain can
+        // publish an old buffered event.
+        drop(subscription);
+        Ok(true)
     }
 }
 
@@ -1456,7 +2389,8 @@ impl NativeRelay {
         let schema_version = config.schema.version_id();
         let identity = config.identity;
         let wire = NativeRelayWire::default();
-        let (commands, receiver) = mpsc::channel::<RelayCommand>();
+        let (commands, receiver) =
+            mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
         let (started_tx, started_rx) = mpsc::channel();
         let owner_wire = wire.clone();
         #[cfg(test)]
@@ -1556,8 +2490,11 @@ impl NativeRelay {
             .map_err(|_| RelayError::Poisoned("relay command queue"))?
             .as_ref()
             .ok_or(RelayError::Closed)?
-            .send(RelayCommand::Run(job))
-            .map_err(|_| RelayError::Closed)?;
+            .try_send(RelayCommand::Run(job))
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => RelayError::OwnerQueueFull,
+                mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
+            })?;
         response_rx.recv().map_err(|_| RelayError::Closed)?
     }
 }
@@ -1635,6 +2572,8 @@ pub enum RelayError {
     Entropy(String),
     #[error("native relay is closed")]
     Closed,
+    #[error("native relay owner command queue is full; retry after the next scheduled tick")]
+    OwnerQueueFull,
     #[error("native relay internal mutex poisoned: {0}")]
     Poisoned(&'static str),
     #[error("native relay does not know UI client {0}")]
@@ -1647,6 +2586,8 @@ pub enum RelayError {
     Storage(jazz::groove::storage::Error),
     #[error("Jazz database failed: {0}")]
     Db(jazz::db::Error),
+    #[error("foreground NativeDb command failed: {0}")]
+    ForegroundCommand(String),
 }
 
 #[cfg(test)]
@@ -1690,28 +2631,6 @@ mod tests {
             },
             thread_start_counter: None,
         }
-    }
-
-    #[test]
-    fn public_relay_open_rejects_a_planted_groove_only_manifest() {
-        // This is an internal physical-admission receipt. The public relay
-        // opener must not silently adopt a root that was initialized through
-        // SQLite's generic Groove-only convenience API.
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("relay.sqlite");
-        let config = config(path.clone(), Some("alice"));
-        let column_families = config.schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        drop(SqliteStorage::open(&path, &refs).expect("plant generic Groove manifest"));
-
-        let registry = NativeRelayRegistry::default();
-        assert!(
-            registry.open(config).is_err(),
-            "the public relay open must reject a manifest that omits Jazz codecs"
-        );
     }
 
     #[test]
@@ -2645,6 +3564,602 @@ mod tests {
             execute(RelayCommandRequest::Pump { relay: bob_relay }),
             Ok(RelayCommandResponse::Pumped)
         ));
+        unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
+    fn attached_foreground_c_abi_opens_ticks_and_closes_only_admitted_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let admission = RelayScopeAdmissionRequest {
+            scope: RelayScopeRequest {
+                app_namespace: "foreground-c-abi".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("opaque-validated-subject".to_owned()),
+            },
+            sqlite_path: directory
+                .path()
+                .join("foreground.sqlite")
+                .display()
+                .to_string(),
+            schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0x71; 16]),
+                author: AuthorSubject::for_test_bytes([0x72; 16]),
+            },
+            claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
+        };
+        let capability = unsafe { (*host).inner.lock().unwrap().admit_scope(admission) }
+            .expect("trusted fixture admission succeeds");
+
+        let mut foreground = u64::MAX;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_open_attached_foreground(
+                    host,
+                    capability.0.as_ptr(),
+                    capability.0.len() - 1,
+                    &mut foreground,
+                )
+            },
+            JazzNativeRelayStatus::InvalidArgument
+        );
+        assert_eq!(foreground, u64::MAX, "invalid calls do not write outputs");
+
+        foreground = 0;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_open_attached_foreground(
+                    host,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                    &mut foreground,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_ne!(foreground, 0, "a real foreground alias was opened");
+        assert_eq!(
+            unsafe { jazz_native_relay_host_tick_attached_foreground(host, foreground) },
+            JazzNativeRelayStatus::Ok,
+            "tick reaches the actual memory Db through its owner thread"
+        );
+
+        let mut closed = false;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_close_attached_foreground(host, foreground, &mut closed)
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert!(closed, "the first close owns the foreground transition");
+        assert_eq!(
+            unsafe { jazz_native_relay_host_tick_attached_foreground(host, foreground) },
+            JazzNativeRelayStatus::InvalidHandle,
+            "a closed JSI alias cannot continue to invoke the owner"
+        );
+        closed = true;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_close_attached_foreground(host, foreground, &mut closed)
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert!(
+            !closed,
+            "explicit close and finalization are safely idempotent"
+        );
+
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_revoke_scope_capability(
+                    host,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        let mut reopened = 0;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_open_attached_foreground(
+                    host,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                    &mut reopened,
+                )
+            },
+            JazzNativeRelayStatus::InvalidHandle,
+            "revocation closes aliases and prevents all future opens"
+        );
+        assert_eq!(reopened, 0);
+        unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
+    fn retained_foreground_lease_outlives_the_platform_host_wrapper() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let capability = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "foreground-lease-receipt".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: Some("opaque-validated-subject".to_owned()),
+                    },
+                    sqlite_path: directory
+                        .path()
+                        .join("foreground.sqlite")
+                        .display()
+                        .to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0x81; 16]),
+                        author: AuthorSubject::for_test_bytes([0x82; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                })
+                .expect("trusted fixture admission succeeds")
+        };
+        let lease = unsafe { jazz_native_relay_host_retain(host) };
+        assert!(!lease.is_null());
+        let mut foreground = 0;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_open_attached_foreground(
+                    lease,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                    &mut foreground,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+
+        // This is the precise teardown race that the JSI lease closes: platform
+        // ownership may disappear while a finalizer still owns its foreground
+        // handle. The retained opaque lease keeps Rust state alive and usable.
+        unsafe { jazz_native_relay_host_free(host) };
+        assert_eq!(
+            unsafe { jazz_native_relay_host_lease_tick_attached_foreground(lease, foreground) },
+            JazzNativeRelayStatus::Ok
+        );
+        let mut closed = false;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_close_attached_foreground(
+                    lease,
+                    foreground,
+                    &mut closed,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert!(closed);
+        unsafe { jazz_native_relay_host_lease_free(lease) };
+    }
+
+    #[test]
+    fn attached_foregrounds_are_independent_and_closing_one_keeps_the_other_live() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let capability = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "two-foregrounds".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: Some("opaque-validated-subject".to_owned()),
+                    },
+                    sqlite_path: directory
+                        .path()
+                        .join("foreground.sqlite")
+                        .display()
+                        .to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0x91; 16]),
+                        author: AuthorSubject::for_test_bytes([0x92; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                })
+                .expect("trusted fixture admission succeeds")
+        };
+
+        let open = |host: *mut JazzNativeRelayHost| {
+            let mut foreground = 0;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_open_attached_foreground(
+                        host,
+                        capability.0.as_ptr(),
+                        capability.0.len(),
+                        &mut foreground,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+            foreground
+        };
+        let first = open(host);
+        let second = open(host);
+        assert_ne!(
+            first, second,
+            "each JS runtime receives its own opaque foreground handle"
+        );
+        assert_eq!(
+            unsafe { jazz_native_relay_host_tick_attached_foreground(host, first) },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_eq!(
+            unsafe { jazz_native_relay_host_tick_attached_foreground(host, second) },
+            JazzNativeRelayStatus::Ok
+        );
+
+        let mut first_closed = false;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_close_attached_foreground(host, first, &mut first_closed)
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert!(first_closed);
+        assert_eq!(
+            unsafe { jazz_native_relay_host_tick_attached_foreground(host, first) },
+            JazzNativeRelayStatus::InvalidHandle,
+            "closing one JS runtime cannot leave its foreground alias usable"
+        );
+        assert_eq!(
+            unsafe { jazz_native_relay_host_tick_attached_foreground(host, second) },
+            JazzNativeRelayStatus::Ok,
+            "closing one JS runtime cannot tear down its sibling foreground"
+        );
+
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_revoke_scope_capability(
+                    host,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_eq!(
+            unsafe { jazz_native_relay_host_tick_attached_foreground(host, second) },
+            JazzNativeRelayStatus::InvalidHandle,
+            "revocation invalidates every foreground belonging to the capability"
+        );
+        unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[derive(Default)]
+    struct ForegroundWakeReceipt {
+        immediate: AtomicUsize,
+        deferred: AtomicUsize,
+        after: AtomicUsize,
+        cancelled: AtomicUsize,
+    }
+
+    unsafe extern "C" fn record_foreground_wake(
+        context: *mut c_void,
+        _foreground: u64,
+        kind: u8,
+        _delay_ms: u64,
+    ) {
+        // SAFETY: the test keeps both receipts alive until it synchronously
+        // clears/closes every foreground callback through the C ABI.
+        let receipt = unsafe { &*(context.cast::<ForegroundWakeReceipt>()) };
+        let counter = match kind {
+            FOREGROUND_WAKE_IMMEDIATE => &receipt.immediate,
+            FOREGROUND_WAKE_DEFERRED => &receipt.deferred,
+            FOREGROUND_WAKE_AFTER => &receipt.after,
+            FOREGROUND_WAKE_CANCELLED => &receipt.cancelled,
+            other => panic!("unexpected foreground wake kind {other}"),
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn foreground_wake_callbacks_are_runtime_scoped_and_revocation_cancels_only_affected_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let capability = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "foreground-wakes".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: Some("opaque-validated-subject".to_owned()),
+                    },
+                    sqlite_path: directory
+                        .path()
+                        .join("foreground.sqlite")
+                        .display()
+                        .to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0xa1; 16]),
+                        author: AuthorSubject::for_test_bytes([0xa2; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                })
+                .expect("trusted fixture admission succeeds")
+        };
+        let lease = unsafe { jazz_native_relay_host_retain(host) };
+        let open = || {
+            let mut foreground = 0;
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_open_attached_foreground(
+                        lease,
+                        capability.0.as_ptr(),
+                        capability.0.len(),
+                        &mut foreground,
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+            foreground
+        };
+        let first = open();
+        let second = open();
+        let first_receipt = ForegroundWakeReceipt::default();
+        let second_receipt = ForegroundWakeReceipt::default();
+        // This is an internal ABI test because a null raw callback context is
+        // not observable through the safe binding API. The C seam must reject
+        // it synchronously instead of allowing a later owner-thread crash.
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_set_foreground_wake_callback(
+                    lease,
+                    first,
+                    Some(record_foreground_wake),
+                    std::ptr::null_mut(),
+                )
+            },
+            JazzNativeRelayStatus::InvalidArgument,
+        );
+        for (foreground, receipt) in [(first, &first_receipt), (second, &second_receipt)] {
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_set_foreground_wake_callback(
+                        lease,
+                        foreground,
+                        Some(record_foreground_wake),
+                        (receipt as *const ForegroundWakeReceipt).cast_mut().cast(),
+                    )
+                },
+                JazzNativeRelayStatus::Ok
+            );
+        }
+        let schedule = |foreground, urgency| {
+            let client = unsafe {
+                (*lease)
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .foreground_client(foreground)
+                    .unwrap()
+                    .clone()
+            };
+            client
+                .with_db(move |db| {
+                    db.schedule_tick(urgency);
+                    Ok(())
+                })
+                .unwrap();
+        };
+
+        schedule(first, TickUrgency::Immediate);
+        assert_eq!(first_receipt.immediate.load(Ordering::SeqCst), 1);
+        assert_eq!(second_receipt.immediate.load(Ordering::SeqCst), 0);
+
+        schedule(second, TickUrgency::Deferred);
+        assert_eq!(second_receipt.deferred.load(Ordering::SeqCst), 1);
+        ForegroundWakeScheduler {
+            callback: record_foreground_wake,
+            context: (&second_receipt as *const ForegroundWakeReceipt) as usize,
+            foreground: second,
+        }
+        .schedule_tick_after(17);
+        assert_eq!(second_receipt.after.load(Ordering::SeqCst), 1);
+
+        let mut first_closed = false;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_close_attached_foreground(
+                    lease,
+                    first,
+                    &mut first_closed,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert!(first_closed);
+        assert_eq!(first_receipt.cancelled.load(Ordering::SeqCst), 1);
+
+        schedule(second, TickUrgency::Immediate);
+        assert_eq!(
+            second_receipt.immediate.load(Ordering::SeqCst),
+            1,
+            "closing one runtime cannot suppress a sibling wake callback"
+        );
+
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_revoke_scope_capability(
+                    host,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_eq!(
+            second_receipt.cancelled.load(Ordering::SeqCst),
+            1,
+            "revocation cancels the outstanding runtime callback before its context can be torn down"
+        );
+        unsafe {
+            jazz_native_relay_host_lease_free(lease);
+            jazz_native_relay_host_free(host);
+        }
+    }
+
+    #[test]
+    fn foreground_command_c_abi_uses_one_binary_runtime_vocabulary() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let capability = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "foreground-command-abi".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: Some("opaque-validated-subject".to_owned()),
+                    },
+                    sqlite_path: directory
+                        .path()
+                        .join("foreground.sqlite")
+                        .display()
+                        .to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0xa1; 16]),
+                        author: AuthorSubject::for_test_bytes([0xa2; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                })
+                .expect("trusted fixture admission succeeds")
+        };
+        let lease = unsafe { jazz_native_relay_host_retain(host) };
+        let mut foreground = 0;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_open_attached_foreground(
+                    lease,
+                    capability.0.as_ptr(),
+                    capability.0.len(),
+                    &mut foreground,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+
+        let execute = |command| {
+            let request = postcard::to_allocvec(&command).unwrap();
+            let mut response = JazzNativeRelayBytes::EMPTY;
+            let status = unsafe {
+                jazz_native_relay_host_lease_execute_foreground(
+                    lease,
+                    foreground,
+                    request.as_ptr(),
+                    request.len(),
+                    &mut response,
+                )
+            };
+            let bytes = unsafe { std::slice::from_raw_parts(response.data, response.len) }.to_vec();
+            unsafe { jazz_native_relay_bytes_free(&mut response) };
+            (status, bytes)
+        };
+        let (status, response) = execute(ForegroundDbCommandRequest::Probe);
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::Probe {
+                abi_version: NATIVE_RELAY_ABI_VERSION
+            }
+        );
+        let (status, response) = execute(ForegroundDbCommandRequest::Tick);
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::Ticked
+        );
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let (status, response) = execute(ForegroundDbCommandRequest::PrepareQuery { query });
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        let ForegroundDbCommandResponse::PreparedQuery { query } =
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
+        else {
+            panic!("prepare must return an opaque query handle");
+        };
+        let (status, response) = execute(ForegroundDbCommandRequest::All { query });
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        let ForegroundDbCommandResponse::Rows { rows } =
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
+        else {
+            panic!("all must return the shared row-batch bytes");
+        };
+        assert!(rows.len() <= 2, "empty foreground read must stay bounded");
+        let (status, response) = execute(ForegroundDbCommandRequest::Subscribe { query });
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        let ForegroundDbCommandResponse::Subscribed { subscription } =
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap()
+        else {
+            panic!("subscribe must return an opaque subscription handle");
+        };
+        let (status, response) =
+            execute(ForegroundDbCommandRequest::DrainSubscription { subscription });
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        assert!(matches!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::SubscriptionEvents { .. }
+        ));
+        let (status, response) = execute(ForegroundDbCommandRequest::Unsubscribe { subscription });
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::Unsubscribed { closed: true }
+        );
+        let (status, response) = execute(ForegroundDbCommandRequest::Close);
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        let (status, response) = execute(ForegroundDbCommandRequest::Close);
+        assert_eq!(status, JazzNativeRelayStatus::Ok);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&response).unwrap(),
+            ForegroundDbCommandResponse::Closed { closed: false },
+            "the byte ABI retains the same idempotent close rule as the JSI convenience method"
+        );
+
+        let request = postcard::to_allocvec(&ForegroundDbCommandRequest::Probe).unwrap();
+        let mut stale_response = JazzNativeRelayBytes {
+            data: usize::MAX as *mut u8,
+            len: usize::MAX,
+        };
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_execute_foreground(
+                    lease,
+                    foreground,
+                    request.as_ptr(),
+                    request.len(),
+                    &mut stale_response,
+                )
+            },
+            JazzNativeRelayStatus::InvalidHandle
+        );
+        assert!(stale_response.data.is_null() && stale_response.len == 0);
+        unsafe { jazz_native_relay_host_lease_free(lease) };
         unsafe { jazz_native_relay_host_free(host) };
     }
 

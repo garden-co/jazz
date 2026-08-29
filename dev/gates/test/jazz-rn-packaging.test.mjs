@@ -17,20 +17,30 @@ const packageJson = JSON.parse(
 const withJazzRn = require("../../../crates/jazz-rn/app.plugin.js");
 
 // This is a fixed ABI, not a denylist of sensitive-looking names. The public
-// JavaScript surface may only probe the ABI and submit one opaque command.
-// Trusted native scope admission deliberately has no entry in these tables.
+// JavaScript surface may only probe the ABI, install/open the private JSI
+// factory, and submit opaque relay/foreground byte commands. Trusted native
+// scope admission deliberately has no entry in these tables.
 const relayJsExports = new Set([
   "NativeRelayAbiRange",
+  "NativeForegroundRuntimeFactory",
+  "NativeForegroundRuntime",
+  "NativeForegroundCommand",
+  "NativeForegroundResponse",
   "NATIVE_RELAY_ABI",
+  "installNativeForegroundRuntime",
+  "encodeNativeForegroundCommand",
+  "decodeNativeForegroundResponse",
   "executeNativeRelayCommand",
 ]);
-const nativeSpecMethods = new Set(["getAbiVersion", "execute"]);
-const androidRelayMethods = new Set(["getAbiVersion", "execute"]);
+const nativeSpecMethods = new Set(["getAbiVersion", "installForegroundRuntime", "execute"]);
+const androidRelayMethods = new Set(["getAbiVersion", "installForegroundRuntime", "execute"]);
 // This includes lifecycle/generated hooks, which are not JavaScript methods.
 // Keeping them explicit catches accidental methods added beside the ABI.
 const iosRelaySelectors = new Set([
   "init",
   "getAbiVersion",
+  "installForegroundRuntime",
+  "installJSIBindingsWithRuntime",
   "execute",
   "invalidate",
   "getTurboModule",
@@ -169,6 +179,16 @@ function assertExactNativeSpecMethod(member, name) {
     return;
   }
 
+  if (name === "installForegroundRuntime") {
+    assert.equal(member.parameters.length, 0, "installForegroundRuntime takes no arguments");
+    assert.equal(
+      member.type?.kind,
+      ts.SyntaxKind.VoidKeyword,
+      "installForegroundRuntime returns void",
+    );
+    return;
+  }
+
   assert.equal(member.parameters.length, 1, "execute takes exactly one argument");
   const parameter = member.parameters[0];
   assert.ok(ts.isIdentifier(parameter.name));
@@ -232,49 +252,51 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
   );
   assert.notEqual(specExports[1].isExportEquals, true);
 
-  assert.equal(relayExports.length, 3, "relay must expose exactly its fixed ABI declarations");
-  assert.ok(
-    ts.isInterfaceDeclaration(relayExports[0]),
-    "relay must export NativeRelayAbiRange as an interface",
-  );
-  assert.equal(relayExports[0].name.text, "NativeRelayAbiRange");
-  assert.ok(
-    ts.isVariableStatement(relayExports[1]),
-    "relay must export NATIVE_RELAY_ABI as a variable",
-  );
-  assert.notEqual(
-    relayExports[1].declarationList.flags & ts.NodeFlags.Const,
-    0,
-    "relay must export NATIVE_RELAY_ABI as a const",
-  );
-  assert.equal(relayExports[1].declarationList.declarations.length, 1);
-  assert.equal(relayExports[1].declarationList.declarations[0].name.getText(), "NATIVE_RELAY_ABI");
-  assert.ok(
-    ts.isFunctionDeclaration(relayExports[2]),
-    "relay must export executeNativeRelayCommand as a function",
-  );
-  assert.equal(relayExports[2].name?.text, "executeNativeRelayCommand");
   assertExactNames(
     "relay TypeScript module",
     new Set(relayExports.map(exportedDeclarationName).filter(Boolean)),
-    relayJsExports,
+    new Set([
+      "NativeRelayAbiRange",
+      "NATIVE_RELAY_ABI",
+      "NativeForegroundRuntimeFactory",
+      "NativeForegroundRuntime",
+      "NativeForegroundCommand",
+      "NativeForegroundResponse",
+      "installNativeForegroundRuntime",
+      "encodeNativeForegroundCommand",
+      "decodeNativeForegroundResponse",
+      "executeNativeRelayCommand",
+    ]),
   );
+  assert.equal(relayExports.length, 10, "relay must expose exactly its fixed ABI declarations");
 
   assert.equal(
     indexExports.length,
     2,
-    "relay package entry point must contain only its two fixed re-exports",
+    "relay package entry point must contain only its fixed re-exports",
   );
   assertNamedRelayReexport(
     "relay package entry point",
     indexExports[0],
-    ["NATIVE_RELAY_ABI", "executeNativeRelayCommand"],
+    [
+      "NATIVE_RELAY_ABI",
+      "decodeNativeForegroundResponse",
+      "encodeNativeForegroundCommand",
+      "executeNativeRelayCommand",
+      "installNativeForegroundRuntime",
+    ],
     false,
   );
   assertNamedRelayReexport(
     "relay package entry point",
     indexExports[1],
-    ["NativeRelayAbiRange"],
+    [
+      "NativeForegroundCommand",
+      "NativeForegroundResponse",
+      "NativeForegroundRuntime",
+      "NativeForegroundRuntimeFactory",
+      "NativeRelayAbiRange",
+    ],
     true,
   );
 
@@ -298,7 +320,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
   assert.equal(
     spec.members.length,
     nativeSpecMethods.size,
-    "NativeJazzRelay TurboModule has exactly its two ABI methods",
+    "NativeJazzRelay TurboModule has exactly its fixed ABI methods",
   );
   assertExactNames("NativeJazzRelay TurboModule", new Set(membersByName.keys()), nativeSpecMethods);
   for (const name of nativeSpecMethods) {
@@ -306,7 +328,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
   }
   assert.match(
     commentFreeSpec,
-    /^\s*export\s+default\s+TurboModuleRegistry\.get<Spec>\('JazzRelay'\);\s*$/m,
+    /^\s*export\s+default\s+TurboModuleRegistry\.get<Spec>\(["']JazzRelay["']\);\s*$/m,
     "NativeJazzRelay may only default-export its registry lookup",
   );
 }
@@ -323,6 +345,28 @@ function assertOpaqueAndroidRelaySurface(androidModule) {
     // Generated TurboModule methods use @Override; handwritten React Native
     // modules use @ReactMethod, including its fully-qualified spelling.
     if (/(?:@Override\b|@[A-Za-z_$][A-Za-z0-9_$.]*\.ReactMethod\b|@ReactMethod\b)/.test(match[1])) {
+      // This is New Architecture installation plumbing, invoked by React
+      // Native while it owns a JSI runtime; it is not a JS-visible
+      // TurboModule method. Keep its exact native-only type checked here so a
+      // similarly named public JavaScript method cannot hide behind it.
+      if (match[2] === "getBindingsInstaller") {
+        assert.match(
+          match[0],
+          /BindingsInstallerHolder\s+getBindingsInstaller\s*\(/,
+          "Android's only extra New Architecture hook must return a bindings installer",
+        );
+        continue;
+      }
+      // These React Native lifecycle hooks retain/release the native host for
+      // the lifetime of this module instance. They are not TurboModule ABI.
+      if (match[2] === "initialize" || match[2] === "invalidate") {
+        assert.match(
+          match[0],
+          /void\s+(initialize|invalidate)\s*\(\s*\)/,
+          "Android lifecycle hooks must stay parameterless void hooks",
+        );
+        continue;
+      }
       exportedMethods.add(match[2]);
     }
   }
@@ -430,6 +474,34 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   assert.equal(packageJson.bugs.url, "https://github.com/garden-co/jazz/issues");
 });
 
+test("the canonical Expo scaffold preserves the direct native-package contract", async () => {
+  const [manifestText, appConfigText, readme] = await Promise.all([
+    readFile(
+      new URL("../../../examples/todo-client-localfirst-expo/package.json", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../examples/todo-client-localfirst-expo/app.json", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  const appConfig = JSON.parse(appConfigText).expo;
+
+  assert.equal(manifest.dependencies["jazz-rn"], "workspace:*");
+  assert.equal(manifest.scripts["verify:expo"], "pnpm verify:expo:android && pnpm verify:expo:ios");
+  assert.equal(appConfig.newArchEnabled, true);
+  assert.deepEqual(appConfig.plugins, ["jazz-rn"]);
+  assert.match(readme, /jazz-rn@alpha/);
+  assert.match(readme, /direct app dependency/);
+  assert.match(readme, /does \*\*not\*\* run in Expo Go/);
+  assert.match(readme, /not a runnable persistent Jazz client/);
+});
+
 test("the canonical Expo scaffold really prebuilds both relay-only platforms", () => {
   const root = new URL("../../../", import.meta.url);
   const expoBin = new URL(
@@ -493,6 +565,58 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   );
 });
 
+test("React Native installation docs advertise only the currently proven package boundary", async () => {
+  const [readme, installGuide, clientSetupGuide, durabilityGuide, exampleReadme, previewWorkflow] = await Promise.all([
+    readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
+    readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(readme, /pnpm add jazz-rn@alpha/);
+  assert.match(readme, /"plugins": \["jazz-rn"\]/);
+  assert.match(readme, /npx expo prebuild --clean/);
+  assert.match(readme, /newArchEnabled=true/);
+  assert.match(readme, /RCT_NEW_ARCH_ENABLED=1 bundle exec pod install/);
+  assert.match(readme, /Expo Go is not\s+supported/);
+  assert.match(readme, /not yet a supported high-level React Native Jazz client/);
+  assert.match(readme, /rn-preview-release/);
+  assert.match(
+    previewWorkflow,
+    /contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\)/,
+    "the documented preview label must still opt into the actual artifact workflow",
+  );
+  assert.match(
+    installGuide,
+    /React Native and Expo are intentionally not part of this application quickstart yet[\s\S]*not a supported React Native Jazz client/,
+    "the public install guide must put the unsupported RN boundary before its runtime quickstart",
+  );
+  for (const [name, guide] of [
+    ["install guide", installGuide],
+    ["client setup guide", clientSetupGuide],
+    ["durability guide", durabilityGuide],
+  ]) {
+    assert.doesNotMatch(
+      guide,
+    /<Tab value="Expo">|jazz-tools\/expo|todo-client-localfirst-expo/,
+      `${name} must not retain runnable-looking Expo tabs or RN runtime snippets`,
+    );
+  }
+  assert.match(exampleReadme, /native-relay install\/ABI boundary/);
+  assert.match(exampleReadme, /not a runnable persistent Jazz client/);
+});
+
 test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", async () => {
   // The canonical example is useful, but its workspace link can accidentally
   // hide npm-packaging mistakes. This receipt instead constructs the smallest
@@ -509,6 +633,8 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
   const installedNodeModules = join(installDirectory, "node_modules");
   const appDirectory = join(directory, "app");
   const appNodeModules = join(appDirectory, "node_modules");
+  const bareAppDirectory = join(directory, "bare-react-native-app");
+  const bareAppNodeModules = join(bareAppDirectory, "node_modules");
   const canonicalNodeModules = new URL(
     "../../../examples/todo-client-localfirst-expo/node_modules/",
     import.meta.url,
@@ -614,6 +740,118 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     for (const dependency of ["@types", "expo", "react", "react-native", "typescript"]) {
       await symlink(join(canonicalNodeModules, dependency), join(appNodeModules, dependency));
     }
+    // Typechecking and autolinking prove that the packed package is present,
+    // but neither executes the JavaScript an app actually imports. Run the
+    // compiled entry point from the installed tarball under a deliberately
+    // tiny native-module shim. The shim is a Node loader rather than a copied
+    // package file: `jazz-rn` still resolves its own published
+    // `NativeJazzRelay.js`, which in turn resolves the host's `react-native`
+    // import in exactly the ordinary package graph.
+    //
+    // This is not a substitute for the linked Android/iOS receipts. It makes
+    // the installation boundary executable: a tarball with stale/missing
+    // compiled JavaScript, a broken package export, or a changed ABI failure
+    // path cannot pass merely because its declarations and Podspec parse.
+    const nativeModuleShim = join(directory, "native-relay-shim.mjs");
+    const nativeModuleLoader = join(directory, "native-relay-loader.mjs");
+    await writeFile(
+      nativeModuleShim,
+      [
+        "const available = process.env.JAZZ_RN_PACKED_NATIVE_AVAILABLE === '1';",
+        "const abi = Number(process.env.JAZZ_RN_PACKED_NATIVE_ABI);",
+        "export const TurboModuleRegistry = {",
+        "  get() {",
+        "    return available ? {",
+        "      getAbiVersion: () => abi,",
+        "      execute: async (command) => `native:${command}`,",
+        "    } : null;",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      nativeModuleLoader,
+      [
+        "export async function resolve(specifier, context, nextResolve) {",
+        '  if (specifier !== "react-native") return nextResolve(specifier, context);',
+        "  return { url: new URL('./native-relay-shim.mjs', import.meta.url).href, shortCircuit: true };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const runPackedRelay = (environment, program) =>
+      execFileSync(
+        process.execPath,
+        [
+          "--no-warnings",
+          "--experimental-loader",
+          nativeModuleLoader,
+          "--input-type=module",
+          "--eval",
+          program,
+        ],
+        {
+          cwd: appDirectory,
+          env: { ...process.env, ...environment },
+          encoding: "utf8",
+        },
+      );
+    assert.equal(
+      runPackedRelay(
+        {
+          JAZZ_RN_PACKED_NATIVE_AVAILABLE: "1",
+          JAZZ_RN_PACKED_NATIVE_ABI: "3",
+        },
+        'const { executeNativeRelayCommand } = await import("jazz-rn"); process.stdout.write(await executeNativeRelayCommand("AQI="));',
+      ),
+      "native:AQI=",
+      "the fresh app must execute the published relay entry point through its installed native module",
+    );
+    for (const [name, environment, expected] of [
+      [
+        "missing native module",
+        {
+          JAZZ_RN_PACKED_NATIVE_AVAILABLE: "0",
+          JAZZ_RN_PACKED_NATIVE_ABI: "3",
+        },
+        /native relay is unavailable.*Expo Go never includes it/i,
+      ],
+      [
+        "source-only ABI zero",
+        {
+          JAZZ_RN_PACKED_NATIVE_AVAILABLE: "1",
+          JAZZ_RN_PACKED_NATIVE_ABI: "0",
+        },
+        /source fallback \(ABI 0\)/i,
+      ],
+      [
+        "incompatible native ABI",
+        {
+          JAZZ_RN_PACKED_NATIVE_AVAILABLE: "1",
+          JAZZ_RN_PACKED_NATIVE_ABI: "4",
+        },
+        /ABI 4 is incompatible with JavaScript ABI 3\.\.=3/i,
+      ],
+    ]) {
+      const diagnostic = runPackedRelay(
+        environment,
+        [
+          'const { executeNativeRelayCommand } = await import("jazz-rn");',
+          "try {",
+          '  await executeNativeRelayCommand("AQI=");',
+          '  throw new Error("packed relay unexpectedly accepted this unavailable native state");',
+          "} catch (error) {",
+          "  process.stdout.write(error instanceof Error ? error.message : String(error));",
+          "}",
+        ].join("\n"),
+      );
+      assert.match(
+        diagnostic,
+        expected,
+        `the fresh packed runtime must explain ${name} before attempting relay I/O`,
+      );
+    }
     execFileSync(join(appNodeModules, "typescript", "bin", "tsc"), ["--noEmit"], {
       cwd: appDirectory,
       stdio: "inherit",
@@ -633,6 +871,132 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       bareReactNativeConfig.dependencies["jazz-rn"].platforms.ios.podspecPath,
       /JazzRn\.podspec$/,
       "a bare React Native host must discover the packed iOS podspec too",
+    );
+    // Expo prebuild hosts an ordinary React Native app, but it also brings
+    // Expo's config/plugin machinery. Keep an explicitly bare scaffold in
+    // this receipt so an Expo-specific resolver, transitive workspace link,
+    // or config convention cannot accidentally stand in for the direct React
+    // Native installation path.
+    await mkdir(bareAppDirectory, { recursive: true });
+    await writeFile(
+      join(bareAppDirectory, "package.json"),
+      `${JSON.stringify(
+        {
+          name: "jazz-rn-fresh-bare-receipt",
+          version: "0.0.0",
+          private: true,
+          dependencies: {
+            "jazz-rn": `file:../package/${packed[0].filename}`,
+            react: "19.2.4",
+            "react-native": "0.81.5",
+          },
+          devDependencies: {
+            "@types/react": "19.2.14",
+            typescript: "6.0.2",
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(bareAppDirectory, "index.js"),
+      [
+        'import { AppRegistry } from "react-native";',
+        'import App from "./App";',
+        'AppRegistry.registerComponent("JazzRnFreshBareReceipt", () => App);',
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(bareAppDirectory, "App.tsx"),
+      [
+        'import { Text } from "react-native";',
+        'import { NATIVE_RELAY_ABI } from "jazz-rn";',
+        "",
+        "export default function App() {",
+        "  return <Text>Jazz Relay ABI {NATIVE_RELAY_ABI.maximum}</Text>;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(bareAppDirectory, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            jsx: "react-jsx",
+            module: "esnext",
+            moduleResolution: "bundler",
+            noEmit: true,
+            skipLibCheck: true,
+            target: "es2022",
+          },
+          include: ["App.tsx"],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await mkdir(bareAppNodeModules, { recursive: true });
+    await cp(join(installedNodeModules, "jazz-rn"), join(bareAppNodeModules, "jazz-rn"), {
+      recursive: true,
+      dereference: true,
+    });
+    for (const dependency of ["react", "react-native", "typescript"]) {
+      await symlink(join(canonicalNodeModules, dependency), join(bareAppNodeModules, dependency));
+    }
+    await mkdir(join(bareAppNodeModules, "@types"), { recursive: true });
+    await symlink(
+      new URL("../../../node_modules/.pnpm/node_modules/@types/react", import.meta.url).pathname,
+      join(bareAppNodeModules, "@types", "react"),
+    );
+    execFileSync(join(bareAppNodeModules, "typescript", "bin", "tsc"), ["--noEmit"], {
+      cwd: bareAppDirectory,
+      stdio: "inherit",
+    });
+    const directBareReactNativeConfig = JSON.parse(
+      execFileSync(join(canonicalNodeModules, ".bin", "react-native"), ["config"], {
+        cwd: bareAppDirectory,
+        encoding: "utf8",
+      }),
+    );
+    const directBareJazzRn = directBareReactNativeConfig.dependencies["jazz-rn"];
+    assert.ok(directBareJazzRn, "a direct bare host must discover the packed jazz-rn package");
+    assert.throws(
+      () => require.resolve("expo/package.json", { paths: [bareAppDirectory] }),
+      { code: "MODULE_NOT_FOUND" },
+      "the direct bare receipt must not resolve Expo from its application graph",
+    );
+    assert.equal(
+      directBareJazzRn.root,
+      join(bareAppNodeModules, "jazz-rn"),
+      "a direct bare host must discover its tarball installation, not the workspace package",
+    );
+    assert.equal(
+      directBareJazzRn.platforms.android.packageInstance,
+      "new JazzRelayPackage()",
+      "a direct bare host must expose the generated Android relay package to autolinking",
+    );
+    assert.match(
+      directBareJazzRn.platforms.android.sourceDir,
+      new RegExp(`${bareAppNodeModules.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\/]jazz-rn[\\/]android$`),
+      "a direct bare host must retain the Android source from its packed installation",
+    );
+    assert.equal(
+      directBareJazzRn.platforms.ios.podspecPath,
+      join(bareAppNodeModules, "jazz-rn", "JazzRn.podspec"),
+      "a direct bare host must retain the iOS podspec from its packed installation",
+    );
+    assert.equal(
+      require.resolve("jazz-rn/package.json", { paths: [bareAppDirectory] }),
+      join(bareAppNodeModules, "jazz-rn", "package.json"),
+      "the direct bare receipt must resolve jazz-rn from the copied packed tarball",
+    );
+    assert.equal(
+      require.resolve("jazz-rn", { paths: [bareAppDirectory] }),
+      join(bareAppNodeModules, "jazz-rn", "lib", "module", "index.js"),
+      "the direct bare receipt must resolve the published JavaScript entry, not workspace source",
     );
     for (const platform of ["android", "ios"]) {
       execFileSync(
@@ -785,7 +1149,7 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
 
   assert.equal(packageJson.exports["./relay"].source, "./src/relay.ts");
   assert.equal(packageJson.scripts["test:codegen"], "bash scripts/test-codegen.sh");
-  assert.match(nativeSpec, /TurboModuleRegistry\.get<Spec>\('JazzRelay'\)/);
+  assert.match(nativeSpec, /TurboModuleRegistry\.get<Spec>\(["']JazzRelay["']\)/);
   assert.match(nativeSpec, /execute\(commandBase64: string\): Promise<string>/);
   assert.match(relay, /getAbiVersion\(\)/);
   assert.match(relay, /matching native development or release build/);
@@ -1042,6 +1406,8 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   assert.match(androidBridge, /trustedCapabilities \+=/);
   assert.match(androidBridge, /trustedCapabilities -=/);
   assert.match(androidBridge, /releaseRuntime/);
+  assert.match(androidModule, /void initialize\(\)[\s\S]*?bridge\.acquireRuntime\(\)/);
+  assert.match(androidModule, /void invalidate\(\)[\s\S]*?bridge\.releaseRuntime\(runtimeToken\)/);
   assert.match(iosRelay, /JazzRelayTrustedAdmission/);
   assert.match(iosRelay, /jazz_native_relay_host_admit_scope_json/);
   assert.match(iosRelay, /jazz_native_relay_host_revoke_scope_capability/);
@@ -1049,6 +1415,174 @@ test("trusted relay admission stays outside the JavaScript command channel", asy
   assert.match(iosRelay, /\[trustedCapabilities removeObject:capability\]/);
   assert.match(header, /jazz_native_relay_host_admit_scope_json/);
   assert.match(header, /jazz_native_relay_host_revoke_scope_capability/);
+});
+
+test("the private foreground JSI host retains teardown ownership and rejects malformed views", async () => {
+  const [runtime, header, androidBridge, androidModule, androidCpp, iosRelay] = await Promise.all([
+    readFile(
+      new URL("../../../crates/jazz-rn/native/foreground-runtime.cpp", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-native-relay/include/jazz_native_relay.h", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayBridge.kt", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayModule.java", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../../../crates/jazz-rn/android/cpp-relay.cpp", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
+  ]);
+
+  // The HostObjects only call lease APIs while holding the lifecycle lock. A
+  // raw host pointer could otherwise be freed after an `active()` observation
+  // but before a JS finalizer calls tick/close.
+  assert.match(runtime, /lockIfActive\(\)/);
+  assert.match(
+    runtime,
+    /jazz_native_relay_host_lease_invalidate_foreground_runtime\(lease_\)/,
+    "platform teardown must retire Rust foreground aliases before making JSI finalizers inert",
+  );
+  assert.match(
+    header,
+    /jazz_native_relay_host_lease_invalidate_foreground_runtime/,
+    "the staged native header must expose the token-scoped teardown ABI",
+  );
+  assert.match(
+    androidBridge,
+    /fun acquireRuntime\(\): Long[\s\S]*?activeRuntimeTokens\.add\(token\)/,
+    "Android must issue one explicit stable token per JS runtime",
+  );
+  assert.match(
+    androidBridge,
+    /fun releaseRuntime\(runtimeToken: Long\)[\s\S]*?nativeInvalidateForegroundRuntime\(host, runtimeToken\)/,
+    "Android teardown must invalidate only its own runtime token",
+  );
+  assert.match(androidModule, /private long runtimeToken = 0;/);
+  assert.match(androidModule, /private boolean ownsRuntimeLease = false;/);
+  assert.match(androidModule, /bridge\.releaseRuntime\(releasedToken\)/);
+  assert.match(
+    androidModule,
+    /ownsRuntimeLease = false;[\s\S]*?runtimeToken = 0;[\s\S]*?bridge\.releaseRuntime\(releasedToken\)/,
+    "Android must clear a module's runtime ownership before release so repeated invalidation cannot consume a sibling lease",
+  );
+  assert.match(
+    androidCpp,
+    /unordered_map<uint64_t, std::shared_ptr<ForegroundRuntimeInstallation>>/,
+    "Android's native registry must key installations by stable runtime token, not host pointer",
+  );
+  assert.match(androidCpp, /nativeInvalidateForegroundRuntime\([\s\S]*?jlong runtime_token/);
+  assert.doesNotMatch(androidCpp, /unordered_map<jazz_native_relay_host \*/);
+  assert.match(iosRelay, /uint64_t foregroundRuntimeToken/);
+  assert.match(iosRelay, /BOOL ownsForegroundRuntimeLease/);
+  assert.match(
+    iosRelay,
+    /unordered_map<uint64_t, std::shared_ptr<ForegroundRuntimeInstallation>>/,
+    "iOS must keep separate foreground leases for separately invalidated runtimes",
+  );
+  assert.match(iosRelay, /InvalidateForegroundInstallation\(EnsureRelayHost\(\), self\.foregroundRuntimeToken\)/);
+  assert.match(
+    iosRelay,
+    /ownsForegroundRuntimeLease = NO;[\s\S]*?foregroundRuntimeToken = 0;[\s\S]*?InvalidateForegroundInstallation\(EnsureRelayHost\(\), releasedToken\)/,
+    "iOS must clear a module's runtime ownership before release so repeated invalidation cannot decrement a sibling lease",
+  );
+  assert.doesNotMatch(iosRelay, /static facebook::jsi::Runtime \*foregroundJsiRuntime/);
+  assert.match(runtime, /jazz_native_relay_host_lease_open_attached_foreground/);
+  assert.match(runtime, /jazz_native_relay_host_lease_tick_attached_foreground/);
+  assert.match(runtime, /jazz_native_relay_host_lease_close_attached_foreground/);
+  assert.match(runtime, /jazz_native_relay_host_lease_execute_foreground/);
+  assert.match(runtime, /copyForegroundCommand/);
+  assert.match(runtime, /foregroundResponse/);
+  // The factory's reported ABI must come from the embedded Rust relay, not a
+  // second C++ literal. Otherwise an additive foreground command can bump the
+  // shared relay ABI while every real JSI factory keeps advertising the old
+  // value and the JS wrapper rejects it at installation.
+  assert.match(runtime, /jazz_native_relay_abi_version\(\)/);
+  assert.doesNotMatch(runtime, /kForegroundAbiVersion/);
+  assert.doesNotMatch(runtime, /jazz_native_relay_host_tick_attached_foreground\(lease_->/);
+
+  // Validate floating JSI numbers before narrowing byteOffset to size_t, and
+  // reject a DataView/lookalike before copying its selected ArrayBuffer range.
+  assert.match(runtime, /getProperty\(runtime, "Uint8Array"\)/);
+  assert.match(runtime, /Object::strictEquals/);
+  assert.match(runtime, /std::isfinite\(offset_number\)/);
+  assert.match(runtime, /std::floor\(offset_number\) != offset_number/);
+  assert.match(runtime, /numeric_limits<size_t>::max/);
+  assert.throws(
+    () => {
+      const broken = runtime.replaceAll("std::isfinite(offset_number) ||", "");
+      assert.match(broken, /std::isfinite\(offset_number\)/);
+    },
+    /isfinite/,
+    "the receipt is sensitive to removing finite-offset validation",
+  );
+  assert.throws(
+    () => {
+      const broken = runtime.replaceAll("Object::strictEquals", "Object::weakEquals");
+      assert.match(broken, /Object::strictEquals/);
+    },
+    /strictEquals/,
+    "the receipt is sensitive to accepting non-Uint8Array lookalikes",
+  );
+  assert.match(header, /jazz_native_relay_host_retain/);
+  assert.match(header, /jazz_native_relay_host_lease_free/);
+  assert.match(header, /jazz_native_relay_host_lease_execute_foreground/);
+
+  // Wake registration is deliberately a per-foreground JSI lifecycle seam,
+  // not another public TurboModule method or foreground command tag. The
+  // owner thread can only enqueue CallInvoker work; each JS runtime later
+  // drains/ticks itself. These concrete guards make this source receipt
+  // sensitive to collapsing wake state across aliases or reintroducing a
+  // synchronous callback path.
+  assert.match(header, /jazz_native_relay_foreground_wake_callback/);
+  assert.match(header, /jazz_native_relay_host_lease_set_foreground_wake_callback/);
+  assert.match(runtime, /class ForegroundWakeRegistration/);
+  assert.match(runtime, /foreground_/);
+  assert.match(runtime, /callbackKey\(\).*foreground_/);
+  assert.match(runtime, /CallInvoker/);
+  assert.match(runtime, /invokeAsync/);
+  assert.match(runtime, /wakeFromOwner\([^)]*\) noexcept/);
+  assert.match(runtime, /void schedule\([^)]*\) noexcept/);
+  assert.match(runtime, /catch \(\.\.\.\)[\s\S]*scheduled_ = false;/);
+  assert.match(runtime, /if \(scheduled_ \|\| !callInvoker_\) return;/);
+  assert.match(runtime, /deactivateAndClear/);
+  assert.match(runtime, /kWakeCancelled/);
+  const openAttached = runtime.match(
+    /jazz_native_relay_host_lease_open_attached_foreground\([\s\S]*?Object::createFromHostObject/,
+  )?.[0];
+  assert.ok(openAttached, "the foreground factory must open through the retained lease");
+  assert.match(
+    openAttached,
+    /lease_lock\.unlock\(\);[\s\S]*Object::createFromHostObject/,
+    "ForegroundHandle registration takes the same lifecycle mutex, so construction must happen after the open lock is released",
+  );
+  assert.throws(
+    () => {
+      const broken = runtime.replace(
+        "if (scheduled_ || !callInvoker_) return;",
+        "if (!callInvoker_) return;",
+      );
+      assert.match(broken, /if \(scheduled_ \|\| !callInvoker_\) return;/);
+    },
+    /scheduled_/,
+    "the receipt is sensitive to removing per-runtime wake coalescing",
+  );
+  assert.throws(
+    () => {
+      const broken = runtime.replace("lease_lock.unlock();", "");
+      const brokenOpen = broken.match(
+        /jazz_native_relay_host_lease_open_attached_foreground\([\s\S]*?Object::createFromHostObject/,
+      )?.[0];
+      assert.match(brokenOpen, /lease_lock\.unlock\(\);/);
+    },
+    /unlock/,
+    "the receipt is sensitive to reintroducing the foreground-open self-deadlock",
+  );
 });
 
 test("relay artifact staging targets every Android ABI and iOS framework slice", async () => {

@@ -37,7 +37,7 @@ for platform in android ios; do
     echo "React Native Codegen did not generate the JazzRelay module for $platform" >&2
     exit 1
   fi
-  if [[ "$platform" == android ]] && ! rg -q 'getAbiVersion|execute' "$output_dir/$platform"; then
+  if [[ "$platform" == android ]] && ! rg -q 'getAbiVersion|installForegroundRuntime|execute' "$output_dir/$platform"; then
     echo "React Native Codegen did not generate the JazzRelay command methods for Android" >&2
     exit 1
   fi
@@ -93,7 +93,7 @@ if rg -q '#import "JazzRelaySpec\.h"|NativeJazzRelaySpec|@interface JazzRelay[[:
   exit 1
 fi
 if ! rg -q '#import "JazzRelaySpec\.h"' "$private_header" \
-  || ! rg -q '@interface JazzRelay : NSObject <NativeJazzRelaySpec>' "$private_header"; then
+  || ! rg -q '@interface JazzRelay : NSObject <NativeJazzRelaySpec(?:, RCTTurboModuleWithJSIBindings)?>' "$private_header"; then
   echo "JazzRn private TurboModule header no longer owns the generated spec contract" >&2
   exit 1
 fi

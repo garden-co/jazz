@@ -16,6 +16,10 @@
 #import <ReactCommon/RCTTurboModule.h>
 #endif
 
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+#include "../native/foreground-runtime.h"
+#endif
+
 @implementation JazzRelay
 
 // New-Architecture modules still require this registration hook: it binds the
@@ -28,6 +32,8 @@ RCT_EXPORT_MODULE()
 static jazz_native_relay_host *relayHost = NULL;
 static NSUInteger relayRuntimeReferences = 0;
 static NSMutableSet<NSData *> *trustedCapabilities = nil;
+static facebook::jsi::Runtime *foregroundJsiRuntime = nullptr;
+static std::shared_ptr<jazz::rn::ForegroundRuntimeLease> foregroundRuntimeLease;
 
 static jazz_native_relay_host *EnsureRelayHost(void) {
   if (relayHost == NULL) relayHost = jazz_native_relay_host_new();
@@ -90,9 +96,43 @@ static NSError *RelayLifecycleError(NSString *message) {
 #endif
 }
 
+- (void)installForegroundRuntime {
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+  @synchronized([JazzRelay class]) {
+    if (foregroundJsiRuntime == nullptr || foregroundRuntimeLease == nullptr ||
+        !foregroundRuntimeLease->active()) {
+      // The JS wrapper validates that native code installed a fresh factory
+      // immediately after this method returns, yielding its normal actionable
+      // development-build diagnostic if React Native has not handed us a live
+      // JSI runtime yet.
+      return;
+    }
+    jazz::rn::installForegroundRuntime(*foregroundJsiRuntime, foregroundRuntimeLease);
+  }
+#endif
+}
+
+- (void)installJSIBindingsWithRuntime:(facebook::jsi::Runtime &)runtime
+                          callInvoker:(const std::shared_ptr<facebook::react::CallInvoker> &)callInvoker {
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE
+  @synchronized([JazzRelay class]) {
+    foregroundJsiRuntime = &runtime;
+    foregroundRuntimeLease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
+        EnsureRelayHost(), callInvoker);
+    jazz::rn::installForegroundRuntime(runtime, foregroundRuntimeLease);
+  }
+#else
+  (void)runtime;
+  (void)callInvoker;
+#endif
+}
+
 - (void)invalidate {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
+    if (foregroundRuntimeLease != nullptr) foregroundRuntimeLease->invalidate();
+    foregroundRuntimeLease.reset();
+    foregroundJsiRuntime = nullptr;
     if (relayRuntimeReferences > 0) relayRuntimeReferences -= 1;
     DestroyRelayHostIfUnused();
   }

@@ -91,10 +91,11 @@ alias has yet been opened.
 Auth switching is ordered: revoke every capability for the old authenticated
 scope (which atomically closes its relay and UI-client aliases), then admit the
 new complete scope. A revoked or guessed capability cannot open or attach a
-client. Platform host destruction occurs only after its foreground runtime
-leases and trusted capabilities are both gone, at which point it calls
-`jazz_native_relay_host_free`; it does not retain Rust `Db` pointers across
-that lifecycle.
+client. Platform invalidation first makes every foreground-runtime lease
+uncallable, then releases its host wrapper. Each installed JSI factory retains
+an opaque host-state lease so a late finalizer cannot dereference freed state;
+that retained state is released only when the final factory/foreground object
+is gone. No platform binding retains a Rust `Db` pointer across that lifecycle.
 
 `Db` and its peer connections are executor-local. A native relay therefore owns
 all core values on one dedicated native owner thread. Host calls are encoded
@@ -217,6 +218,244 @@ and Maven/Kotlin packages consume the same relay core and artifact slices.
 CI caches Cargo+sccache, pnpm, Gradle, CocoaPods, and native artifacts by
 toolchain + lockfile + native-source fingerprint. Native artifacts are built
 independently from JS-only scenario changes.
+
+### 19.6 Foreground native-runtime execution
+
+React Native does **not** use the browser/WASM runtime as its foreground
+engine. Hermes does not expose the WebAssembly API required by the generated
+browser binding, and bundling that binding would duplicate a large core image
+beside the native relay. Switching a test app from Hermes to a different JS
+engine is not a supported workaround: it changes the application engine rather
+than supplying Jazz's native runtime.
+
+Instead, each foreground JavaScript client is backed by one distinct in-memory
+ordinary `Db` owned by the same native relay owner thread. This preserves the
+topology from 19.1--there are still two memory-only UI replicas and one durable
+SQLite relay replica--while eliminating the browser-WASM dependency:
+
+```text
+JS runtime A ─ JSI encoded binding calls ─ foreground Db A ┐
+JS runtime B ─ JSI encoded binding calls ─ foreground Db B ├─ relay Db ─ upstream
+                                                   (one native owner thread)
+```
+
+The foreground `Db`s are not views into SQLite and do not share query,
+transaction, subscription, or lifecycle state. The relay owner merely
+serializes their ordinary core operations and their normal peer links. A
+foreground write is committed in its own in-memory `Db`, crosses the ordinary
+peer connection to the relay on a bounded pump, and then follows the existing
+fate/subscription path. In particular, no RN binding may answer a query by
+reading relay SQLite directly.
+
+#### 19.6.1 JSI boundary
+
+`JazzRelay` remains the small TurboModule used for package discovery, ABI
+diagnostics, trusted platform admission, and lifecycle control. It installs a
+private versioned JSI foreground-runtime factory; the factory is not an
+object-per-row API and it is not a second JavaScript implementation of Jazz.
+
+The factory opens a foreground runtime only from a 32-byte admitted capability:
+
+```ts
+// Binding-internal shape, not an application configuration object.
+const foreground = installNativeForegroundRuntime().openAttached(capability);
+```
+
+It never accepts a SQLite path, schema, session claims, token, identity, or
+server URL. `openAttached` causes the host to create one fresh foreground `Db`
+using the schema, admitted author, claims, and relay scope already validated at
+the trusted native boundary. A guessed, revoked, or mismatched capability
+fails before a runtime object is returned. Closing the runtime releases exactly
+that foreground alias; revoking its capability closes every alias for that
+scope as specified in 19.1.
+
+The installer first removes the private global and then requires the native
+module to synchronously replace it with a configurable own property of the
+current JS runtime. ABI equality alone is not enough: a no-op installer must
+not reuse a same-ABI HostObject from a preceding bridge/runtime. The JS wrapper
+also rejects a non-`Uint8Array` or non-32-byte argument before it crosses JSI;
+the native host remains responsible for admission validation and copying those
+bytes into its bounded owner-thread command.
+
+The JSI object implements the existing internal byte-oriented `NativeDb`
+contract consumed by `NativeRuntimeAdapter`: encoded schemas, prepared queries,
+row batches, mutations, write receipts, transaction handles, subscriptions,
+and peer/tick scheduling use the same binding codecs as other native bindings.
+The TypeScript public `Db` API stays unchanged. Rust-owned result memory is
+copied into JS-owned `Uint8Array`/ArrayBuffer values before returning; no JSI
+object exposes a Rust pointer or borrows Rust-owned bytes after a call returns.
+
+#### 19.6.2 Serialized foreground `NativeDb` command contract
+
+The foreground JSI HostObject has one binary operation:
+
+```ts
+foreground.execute(request: Uint8Array): Uint8Array
+```
+
+It copies a complete postcard `ForegroundDbCommandRequest` into the relay
+owner queue and returns one complete postcard `ForegroundDbCommandResponse`.
+The foreground handle travels as an out-of-band opaque C/JSI handle; it is not
+encoded in the request and no command can open a different scope. `execute` is
+private binding machinery: applications interact only with the maintained
+TypeScript `Db` API.
+
+The vocabulary is shared by every native host (RN JSI, Swift, Kotlin, and any
+future NAPI-compatible host). It is not an RN object API. Its operation mapping
+is intentionally the maintained `NativeDb` contract, grouped to keep the wire
+surface orderly:
+
+| Command family           | Existing `NativeDb` operations mapped by the binding                                                     | Response / handle rule                                                                                                                 |
+| ------------------------ | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| lifecycle and scheduling | `Probe`, `tick`, `close`, `setTickScheduler`, `onMutationError`                                          | probe and bounded tick are synchronous; close is idempotent; native-to-JS wakes are coalesced callbacks, never a borrowed Rust closure |
+| schema and identity      | `registerSchema`, `setIdentityClaims`, `setNonDurableClient`, `setRelayAuthoritySessionOwner`            | schema/view handles are opaque native IDs scoped to their foreground                                                                   |
+| query and attachment     | `prepareQuery`, `all*`, relation reads, attach/covered/detach                                            | query and attachment handles are opaque; rows are existing encoded row-batch bytes                                                     |
+| subscriptions            | `subscribe*`, `readAll`/`drain`, cancel                                                                  | subscription handles are opaque; batches are existing encoded subscription payloads                                                    |
+| writes and transactions  | `begin/commit/rollback`, attach tx, insert/update/upsert/delete/restore, `writeState`, `wait`            | transaction and write handles are opaque; write receipts retain the existing encoded receipt contract                                  |
+| large values and advice  | staging policy/eviction, range/text/JSON reads, append/splice/diffs, streaming upload, permission advice | existing value and advice payload codecs; streaming/advice handles are opaque and explicitly finished/cancelled                        |
+| peer transport           | `connectUpstream*`, accept subscriber, receive/send frames, close                                        | normal canonical peer-frame bytes; this remains the only route between foreground and relay/upstream                                   |
+
+Commands are append-only within a native ABI version: adding a new discriminant
+is allowed only when older bindings cannot select or decode it; changing a
+discriminant's fields, response layout, semantic meaning, or an existing codec
+is a breaking native ABI change. The top-level relay ABI is bumped for such a
+change and the JS wrapper's supported range rejects an OTA/native mismatch
+before opening a foreground. Unknown or malformed command/response bytes fail
+closed, with no partially returned buffer. Command outputs are copied into
+JS-owned memory before Rust frees its response allocation.
+
+**V1 vertical slice.** Native relay ABI 6 defines the first concrete
+foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
+local-first query lifecycle `PrepareQuery`, `All`, `Subscribe`,
+`DrainSubscription`, `Unsubscribe`. Query inputs are exactly the canonical
+postcard `Query` bytes used by the existing native `prepareQuery`; read output
+is the existing `binding_codec::encode_rows` payload and subscription deltas
+are the existing `binding_codec::encode_subscription_delta` payload. Query and
+subscription identifiers are owner-thread-local opaque u64 handles allocated
+once across every foreground attached to that relay, so a value copied from a
+sibling foreground cannot alias a same-number local resource.
+`All` and `DrainSubscription` first poll their foreground-owned operation and
+return its ordinary rows/events only when ready. If physical large-value
+hydration needs chunk or peer I/O, they instead return an opaque pending
+operation handle. `Poll` reports the exact ready, pending, or terminal-error
+state; `Cancel` drops a pending operation and reports whether it owned that
+cancellation. A draining subscription keeps its already-dequeued raw event
+batch subscription-owned until a ready response has published it. Thus a
+cancelled or failed hydration attempt returns that exact batch, in order, on
+the next drain rather than dropping or duplicating events; unsubscribe,
+foreground close, and capability revocation intentionally discard it together
+with the whole subscription. A pending operation is scoped to the foreground,
+bounded, and cancelled automatically by its owning unsubscribe, foreground
+close, or capability revocation. Crucially, the owner thread never waits for that work:
+the platform runs its normal bounded `Tick`/peer pump, then polls again. An
+in-process foreground relay routes its auxiliary chunk request/response lane
+through the same `PeerIoPump` boundary before attempting a semantic `Db` tick;
+that lane never takes the semantic node lock, so a hydration future holding
+that lock cannot deadlock its own fulfillment. Semantic foreground ticks wait
+until that pending operation completes or is cancelled.
+`Unsubscribe` retires the handle synchronously and queues the ordinary core
+cleanup; the next bounded `Tick` performs its finalization, because awaiting
+that acknowledgement while already executing on the core owner thread would
+deadlock. Repeated close or unsubscribe reports `false`.
+
+This V1 subset deliberately supports only `ReadOpts::default()` local-first
+reads. It fails closed for remote tiers/read views, relation terminal
+operations, writes, transactions, permission advice, and async suspension;
+those remain required extension work rather than silently receiving a distinct
+RN meaning. The admitted native scope continues to own schema, canonical
+session/author identity, claims, and ordinary peer synchronization; JavaScript
+only provides canonical query bytes. `tick`/`close` convenience JSI methods may
+remain internal compatibility shorthands only while they invoke the same
+foreground lifecycle; `jazz-tools` must move to `execute` as each family is
+implemented.
+
+**Wake registration.** ABI 6 leaves that postcard command vocabulary unchanged
+and adds the private JSI `setTickScheduler(callback)` companion on each
+foreground handle. The callback receives `"immediate"`, `"deferred"`, or
+`"after:<milliseconds>"`; it schedules the adapter's normal JS-side tick and
+does not synchronously call the native handle. Rust records one opaque platform
+callback per foreground Db. The C++ registration coalesces owner-thread signals
+per foreground/runtime through that runtime's `CallInvoker`, chooses the most
+urgent pending wake, and never invokes JavaScript while a host or relay mutex
+is held. Teardown synchronously clears Rust's callback before freeing its
+platform context; scope revocation sends a terminal cancel signal, so an
+already queued callback becomes a no-op. This is a JSI lifecycle extension,
+not a new byte command discriminant.
+
+Synchronous local operations (opening an attached foreground runtime, local
+writes, transaction bookkeeping, and ready local reads) may synchronously send
+a bounded command to the native owner thread and wait for its response. A read
+or subscription operation that needs asynchronous chunk/peer progress returns
+the existing pending binding object and is resumed by the adapter's scheduler;
+it must not block the JS thread while waiting for storage or the network.
+
+#### 19.6.3 Ownership, callbacks, and teardown
+
+- The application/authentication layer alone admits and revokes scope
+  capabilities. JavaScript can carry a capability to the factory but cannot
+  construct scope configuration.
+- The native host owns all `Db`, SQLite, peer connection, and queue state on
+  its dedicated owner thread. JSI calls copy an encoded request into that
+  thread's bounded command queue and copy the response back. A JSI object never
+  retains a Rust `Db` pointer.
+- Core wakeups cross from the owner thread through React Native's `CallInvoker`
+  to a registered JavaScript scheduler callback. They are coalesced by runtime
+  and only schedule an ordinary adapter tick; they never invoke JavaScript while
+  holding a host/relay mutex.
+- Subscription delivery crosses as encoded batches. The JS adapter owns user
+  callbacks and cancellation; the native runtime owns the underlying core
+  subscription until that cancellation/close command has been processed.
+- The native module invalidation path first marks each factory lease inactive
+  under its lifecycle lock, then releases the platform's host-wrapper pointer.
+  Every installed factory and foreground HostObject holds an opaque retained
+  Rust-host lease; that lease keeps host state alive until finalization, but
+  rejects all further foreground FFI calls after invalidation. Thus an Android
+  activity recreation or iOS bridge reload cannot race a late JSI callback or
+  finalizer into freed Rust state. The final retained lease releases host state
+  only after the last foreground object is gone; trusted capabilities remain
+  owned by the platform lifecycle as in 19.1.
+
+#### 19.6.4 Platform and packaging contract
+
+Android and iOS implement the same C ABI and JSI factory protocol. Android's
+JNI/Kotlin and iOS's Objective-C++/Swift layers are thin converters for
+byte/typed-array ownership, trusted admission, and lifecycle events; neither
+contains query evaluation or peer semantics. The JSI factory is packaged with
+the same Android ABI slices and iOS XCFramework slices as the relay, so its
+version is covered by the native relay ABI check before startup.
+
+Bare React Native applications obtain the module through autolinking. Expo
+prebuild/CNG and Expo development builds obtain that same module through the
+config plugin and autolinking. Expo Go remains unsupported because it cannot
+contain the native JSI/relay artifact. An over-the-air JavaScript update whose
+factory ABI is incompatible fails before opening a runtime with the existing
+"new native development/release build required" diagnostic.
+
+#### 19.6.5 Implementation and acceptance sequence
+
+1. Define and source-test the versioned private JSI factory installer and its
+   capability-only `openAttached` entry. This is a binding contract, not yet a
+   claim of device support.
+2. Implement the capability-only Rust host substrate against the already
+   attached `MemoryStorage` client: it opens an opaque foreground alias and
+   executes postcard `Probe`/`Tick`/`Close` commands through a bounded owner
+   queue. This V1 command slice is implemented and tested at the C ABI and
+   JSI wrapper boundaries; it is not yet a complete JS database binding.
+3. The shared C++ JSI factory is now installed through Android JNI and iOS
+   Objective-C++ and exposes capability-only opening plus the binary command
+   seam. Complete the remaining `NativeDb` families in that seam, then make
+   `jazz-tools/react-native` select this runtime source rather than loading
+   `jazz-wasm`; remove the JavaScript relay-frame adapter from the foreground
+   path once the host owns the peer link.
+4. Add black-box Rust, TypeScript, Android-emulator, and iOS-simulator
+   receipts: open two foreground runtimes from one admitted capability; write
+   in A; observe the subscription change in B; reload B without losing relay
+   durability; revoke the capability and prove every foreground operation
+   fails. Plant a wrong/missing B observation and require the device receipt
+   to fail.
+5. Add native upstream transport/auth-refresh ownership after the local
+   two-runtime receipt is stable. Tokens remain in platform-owned session
+   negotiation and never enter the JSI foreground factory.
 
 ## Implementation ledger
 

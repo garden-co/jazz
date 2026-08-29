@@ -1,5 +1,13 @@
 #include <jni.h>
 
+#include <ReactCommon/BindingsInstallerHolder.h>
+#include <fbjni/fbjni.h>
+
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+
+#include "../native/foreground-runtime.h"
 #include "jazz_native_relay.h"
 
 namespace {
@@ -17,6 +25,35 @@ jbyteArray copy_response(JNIEnv *env, jazz_native_relay_bytes *output,
   }
   jazz_native_relay_bytes_free(output);
   return result;
+}
+
+struct ForegroundRuntimeInstallation {
+  ForegroundRuntimeInstallation(
+      jazz_native_relay_host *host,
+      const std::shared_ptr<facebook::react::CallInvoker> &callInvoker)
+      : lease(std::make_shared<jazz::rn::ForegroundRuntimeLease>(host, callInvoker)) {}
+
+  std::mutex mutex;
+  std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
+  facebook::jsi::Runtime *runtime{nullptr};
+};
+
+std::mutex foreground_installations_mutex;
+std::unordered_map<jazz_native_relay_host *, std::shared_ptr<ForegroundRuntimeInstallation>>
+    foreground_installations;
+
+std::shared_ptr<ForegroundRuntimeInstallation> foregroundInstallation(
+    jazz_native_relay_host *host,
+    const std::shared_ptr<facebook::react::CallInvoker> &callInvoker = nullptr) {
+  std::lock_guard<std::mutex> lock(foreground_installations_mutex);
+  const auto found = foreground_installations.find(host);
+  if (found != foreground_installations.end()) {
+    return found->second;
+  }
+  if (!callInvoker) return nullptr;
+  auto installation = std::make_shared<ForegroundRuntimeInstallation>(host, callInvoker);
+  foreground_installations.emplace(host, installation);
+  return installation;
 }
 }  // namespace
 
@@ -75,4 +112,57 @@ Java_com_jazzrn_JazzRelayBridge_nativeRevokeTrustedScope(
     env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
                   "Jazz trusted relay revocation failed");
   }
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_jazzrn_JazzRelayBridge_nativeForegroundBindingsInstaller(
+    JNIEnv *, jclass, jlong host) {
+  auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
+  if (relay_host == nullptr) {
+    return nullptr;
+  }
+  auto holder = facebook::react::BindingsInstallerHolder::newObjectCxxArgs(
+      [relay_host](facebook::jsi::Runtime &runtime,
+                     const std::shared_ptr<facebook::react::CallInvoker> &callInvoker) {
+        auto installation = foregroundInstallation(relay_host, callInvoker);
+        if (!installation) return;
+        std::lock_guard<std::mutex> lock(installation->mutex);
+        installation->runtime = &runtime;
+        jazz::rn::installForegroundRuntime(runtime, installation->lease);
+      });
+  return holder.release();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jazzrn_JazzRelayBridge_nativeInstallForegroundRuntime(
+    JNIEnv *env, jclass, jlong host) {
+  auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
+  const auto installation = foregroundInstallation(relay_host);
+  if (relay_host == nullptr || !installation) {
+    env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
+                  "Jazz native foreground runtime is unavailable for this bridge");
+    return;
+  }
+  std::lock_guard<std::mutex> lock(installation->mutex);
+  if (installation->runtime == nullptr || !installation->lease->active()) {
+    env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
+                  "Jazz native foreground runtime is unavailable for this bridge");
+    return;
+  }
+  jazz::rn::installForegroundRuntime(*installation->runtime, installation->lease);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jazzrn_JazzRelayBridge_nativeInvalidateForegroundRuntime(
+    JNIEnv *, jclass, jlong host) {
+  auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
+  std::lock_guard<std::mutex> lock(foreground_installations_mutex);
+  const auto found = foreground_installations.find(relay_host);
+  if (found == foreground_installations.end()) {
+    return;
+  }
+  std::lock_guard<std::mutex> installation_lock(found->second->mutex);
+  found->second->lease->invalidate();
+  found->second->runtime = nullptr;
+  foreground_installations.erase(found);
 }
