@@ -730,6 +730,36 @@ where
         )
     }
 
+    /// The storage-backed maintained subset retrieves omitted witnesses by the
+    /// result table name at the wire boundary.  A table-rename lens breaks
+    /// that identity: its result member is named with the projected table but
+    /// its persisted history is named with the authored table.  Keep such
+    /// shapes on the self-contained witness path until the fallback resolves
+    /// canonical physical identities end-to-end.
+    fn storage_backed_maintained_root_has_identity_table_mapping(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+    ) -> bool {
+        if schema_version != self.catalogue.current_schema_version_id {
+            return false;
+        }
+        let Some(table_id) = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .map(|mapping| mapping.table_id)
+        else {
+            return false;
+        };
+        self.catalogue.physical_mappings.values().all(|mapping| {
+            mapping.tables.iter().all(|(candidate_name, candidate)| {
+                candidate.table_id != table_id || candidate_name == table
+            })
+        })
+    }
+
     fn current_query_program_request_with_prepared_claim_mode(
         &self,
         shape: &ValidatedQuery,
@@ -868,7 +898,16 @@ where
             .flatten();
         let storage_backed_result_materialization =
             matches!(output, CurrentQueryProgramOutput::MaintainedView)
-                && storage_backed_maintained_view_eligible(shape.query(), read_view, &input_shape);
+                && self.storage_backed_maintained_root_has_identity_table_mapping(
+                    shape.schema_version(),
+                    &shape.query().table,
+                )
+                && storage_backed_maintained_view_eligible(
+                    shape.query(),
+                    tier,
+                    read_view,
+                    &input_shape,
+                );
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
                 shape,

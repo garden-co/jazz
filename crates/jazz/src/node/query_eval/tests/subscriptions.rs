@@ -100,6 +100,11 @@ fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
     node.unsubscribe_groove_subscription(receiver.id());
 }
 
+/// Storage-backed scalar membership ships the exact deletion-register winner
+/// alongside a restored row, so a separate reader's later ordinary lookup
+/// agrees with the subscription.
+///
+/// server ──insert/delete/restore──► peer ──ViewUpdate──► reader
 #[test]
 fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_rehydrates_scalar_rows()
  {
@@ -248,6 +253,24 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
     let restore = peer
         .query_update(&mut server, &shape, &binding)
         .expect("serve scalar restoration update");
+    let restore_bundles = match &restore {
+        SyncMessage::ViewUpdate(payload) => {
+            crate::protocol::expand_version_carriers(&payload.version_carriers)
+                .expect("restore update carriers should expand")
+        }
+        _ => panic!("scalar subscription must produce a view update"),
+    };
+    assert!(
+        restore_bundles.iter().any(|bundle| {
+            bundle.tx.tx_id == restore_tx
+                && bundle.versions.iter().any(|version| {
+                    version.table() == "notes"
+                        && version.row_uuid() == row(0)
+                        && version.deletion() == Some(crate::tx::DeletionEvent::Restored)
+                })
+        }),
+        "the storage-backed restore must ship its deletion-register winner, not merely re-add the old content member"
+    );
     reader
         .apply_sync_message_settled(restore)
         .expect("separate reader applies scalar restoration update");

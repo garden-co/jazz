@@ -100,10 +100,16 @@ pub(super) fn current_query_output_request(
 /// self-contained version/replacement witness path.
 pub(super) fn storage_backed_maintained_view_eligible(
     query: &JazzQuery,
+    tier: DurabilityTier,
     read_view: &ReadViewSpec,
     normalized: &NormalizedRowSetShape,
 ) -> bool {
-    read_view.is_default()
+    // The fallback reads the settled physical register to recover an omitted
+    // deletion/restore winner.  Edge and Local have separate ahead-current
+    // visibility rules, so they retain their self-contained witnesses until
+    // that fallback has an equally exact physical resolver.
+    tier == DurabilityTier::Global
+        && read_view.is_default()
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.reachable.is_empty()

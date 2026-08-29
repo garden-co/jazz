@@ -255,6 +255,80 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Add one exact winner to the per-update bundle cache when the small
+    /// storage-backed maintained subset deliberately omitted its source-wide
+    /// replacement witnesses.  This is a wire-payload fallback only: the
+    /// maintained program still retains no per-binding replacement state.
+    async fn ensure_maintained_view_winner_in_bundle_cache(
+        &mut self,
+        tx_versions_cache: &mut BTreeMap<TxId, Vec<VersionRow>>,
+        winner: &VersionRow,
+        allow_storage_witness_fallback: bool,
+        context: &mut ViewEvaluationContext,
+    ) -> Result<(), Error> {
+        let tx_id = self.version_tx_id(winner)?;
+        if tx_versions_cache
+            .get(&tx_id)
+            .is_some_and(|versions| maintained_view_tx_versions_contain_winner(versions, winner))
+        {
+            return Ok(());
+        }
+        if !allow_storage_witness_fallback {
+            return Ok(());
+        }
+
+        let stored_tx = self
+            .query_transaction_memo(tx_id, context)
+            .await?
+            .ok_or(Error::MissingTransaction(tx_id))?;
+        let wanted_row = BTreeSet::from([(winner.table().to_owned(), winner.row_uuid())]);
+        let stored_versions = self
+            .query_versions_for_tx_rows_by_alias(tx_id, stored_tx.node_alias, &wanted_row)
+            .await?;
+        let cached = tx_versions_cache.entry(tx_id).or_default();
+        for stored in stored_versions {
+            if !cached.iter().any(|existing| existing == &stored) {
+                cached.push(stored);
+            }
+        }
+        Ok(())
+    }
+
+    /// Recover the current global deletion-register winner for an optimized
+    /// scalar root.  Result membership tells us that the row is visible, but
+    /// not whether that visibility is due to a later `Restored` register
+    /// event; the receiver must learn that event to keep its own register
+    /// current for later ordinary reads.
+    async fn storage_backed_maintained_global_deletion_winner(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+        context: &mut ViewEvaluationContext,
+    ) -> Result<Option<VersionRow>, Error> {
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+        let Some(tx_id) = self
+            .visible_global_layer_tx_id_for_physical_table_now(
+                table_id,
+                row_uuid,
+                VersionLayer::Deletion,
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+        let stored_tx = self
+            .query_transaction_memo(tx_id, context)
+            .await?
+            .ok_or(Error::MissingTransaction(tx_id))?;
+        let wanted_row = BTreeSet::from([(table.to_owned(), row_uuid)]);
+        Ok(self
+            .query_versions_for_tx_rows_by_alias(tx_id, stored_tx.node_alias, &wanted_row)
+            .await?
+            .into_iter()
+            .find(|version| version.deletion().is_some()))
+    }
+
     async fn preflight_view_bundle_conflicts(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
@@ -536,7 +610,7 @@ where
             previous_program_facts,
             flat_tuple_source_tables,
             identity: _identity,
-            tier: _tier,
+            tier,
             maintained_facts,
             allow_storage_witness_fallback,
         } = inputs;
@@ -817,7 +891,20 @@ where
             ));
         }
         for (entry_table, row_uuid, content_tx_id) in &row_result_adds {
-            let (_, deletion_winner) = maintained_facts.replacement_for(entry_table, *row_uuid);
+            let (_, retained_deletion_winner) =
+                maintained_facts.replacement_for(entry_table, *row_uuid);
+            let deletion_winner = match retained_deletion_winner {
+                Some(winner) => Some(winner),
+                None if allow_storage_witness_fallback && tier == DurabilityTier::Global => {
+                    self.storage_backed_maintained_global_deletion_winner(
+                        entry_table,
+                        *row_uuid,
+                        &mut context,
+                    )
+                    .await?
+                }
+                None => None,
+            };
             let Some(version) = deletion_winner.as_ref() else {
                 continue;
             };
@@ -829,9 +916,19 @@ where
                 peer_payload_inventory_refs.push(tx_id);
                 record_maintained_view_removal_stream_bundle();
             } else {
-                let tx_versions = tx_versions_cache
+                tx_versions_cache
                     .entry(tx_id)
                     .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
+                self.ensure_maintained_view_winner_in_bundle_cache(
+                    &mut tx_versions_cache,
+                    version,
+                    allow_storage_witness_fallback,
+                    &mut context,
+                )
+                .await?;
+                let tx_versions = tx_versions_cache
+                    .get(&tx_id)
+                    .expect("winner fallback must preserve the transaction cache entry");
                 if maintained_view_tx_versions_contain_winner(tx_versions, version) {
                     let stored_tx = self
                         .query_transaction_memo(tx_id, &mut context)
@@ -853,8 +950,20 @@ where
             }
         }
         for (entry_table, row_uuid, old_tx_id) in &row_result_removes {
-            let (content_winner, deletion_winner) =
+            let (content_winner, retained_deletion_winner) =
                 maintained_facts.replacement_for(entry_table, *row_uuid);
+            let deletion_winner = match retained_deletion_winner {
+                Some(winner) => Some(winner),
+                None if allow_storage_witness_fallback && tier == DurabilityTier::Global => {
+                    self.storage_backed_maintained_global_deletion_winner(
+                        entry_table,
+                        *row_uuid,
+                        &mut context,
+                    )
+                    .await?
+                }
+                None => None,
+            };
             for (version, missing_witness) in [
                 (
                     content_winner.as_ref(),
@@ -877,9 +986,19 @@ where
                     record_maintained_view_removal_stream_bundle();
                     continue;
                 }
-                let tx_versions = tx_versions_cache
+                tx_versions_cache
                     .entry(tx_id)
                     .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
+                self.ensure_maintained_view_winner_in_bundle_cache(
+                    &mut tx_versions_cache,
+                    version,
+                    allow_storage_witness_fallback,
+                    &mut context,
+                )
+                .await?;
+                let tx_versions = tx_versions_cache
+                    .get(&tx_id)
+                    .expect("winner fallback must preserve the transaction cache entry");
                 if !maintained_view_tx_versions_contain_winner(tx_versions, version) {
                     return Err(Error::MaintainedViewMissingBundleWitness(missing_witness));
                 }
