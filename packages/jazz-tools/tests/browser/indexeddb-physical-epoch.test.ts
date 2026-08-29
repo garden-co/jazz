@@ -16,6 +16,8 @@ import {
   INDEXEDDB_STORAGE_MANIFEST,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
+  INDEXEDDB_REPLICA_NODE_BYTES,
+  INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
 
@@ -26,6 +28,40 @@ afterEach(async () => {
 });
 
 describe("IndexedDB physical epoch", () => {
+  it("atomically installs one replica node when concurrent first opens share a physical database", async () => {
+    const name = databaseName();
+    const [first, second] = await Promise.all([
+      IndexedDbPageStore.open(name),
+      IndexedDbPageStore.open(name),
+    ]);
+    try {
+      expect(first.replicaNode).toEqual(second.replicaNode);
+      expect(first.replicaNode).toHaveLength(INDEXEDDB_REPLICA_NODE_BYTES);
+    } finally {
+      first.close();
+      second.close();
+    }
+  });
+
+  it("preserves a replica node across reopen and replaces it only after physical reset", async () => {
+    const name = databaseName();
+    const first = await IndexedDbPageStore.open(name);
+    const firstNode = first.replicaNode;
+    first.close();
+
+    const reopened = await IndexedDbPageStore.open(name);
+    expect(reopened.replicaNode).toEqual(firstNode);
+    reopened.close();
+
+    await IndexedDbPageStore.destroy(name);
+    const reset = await IndexedDbPageStore.open(name);
+    try {
+      expect(reset.replicaNode).not.toEqual(firstNode);
+    } finally {
+      reset.close();
+    }
+  });
+
   it("opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens", async () => {
     const name = databaseName();
     const page = hexBytes(pageV1LeafHex);
@@ -67,6 +103,25 @@ describe("IndexedDB physical epoch", () => {
     }
   });
 
+  it("fails closed for a torn or old epoch-one namespace without its replica node", async () => {
+    for (const replicaNode of [null, new Uint8Array(INDEXEDDB_REPLICA_NODE_BYTES - 1)]) {
+      const name = databaseName();
+      const page = new Uint8Array([0x99]);
+      await installEpochOneFixture(name, INDEXEDDB_STORAGE_MANIFEST, page, replicaNode);
+      await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
+        "Missing or invalid IndexedDB replica node identity",
+      );
+      expect(await rawPage(name, 1)).toEqual(page);
+    }
+
+    const tornName = databaseName();
+    const torn = await createRawEpochDatabase(tornName);
+    torn.close();
+    await expect(IndexedDbPageStore.open(tornName)).rejects.toThrow(
+      "Missing or invalid IndexedDB storage epoch manifest",
+    );
+  });
+
   it("keeps a stale-generation page outside the committed transaction", async () => {
     const name = databaseName();
     const store = await IndexedDbPageStore.open(name);
@@ -97,6 +152,7 @@ async function installEpochOneFixture(
   name: string,
   manifest: unknown,
   page: Uint8Array,
+  replicaNode: Uint8Array | null = epochOneReplicaNode(),
 ): Promise<void> {
   const db = await createRawEpochDatabase(name);
   const tx = db.transaction(
@@ -118,8 +174,18 @@ async function installEpochOneFixture(
   if (manifest !== undefined) {
     tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
   }
+  if (replicaNode !== null) {
+    tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
+      replicaNode.slice().buffer,
+      INDEXEDDB_REPLICA_NODE_KEY,
+    );
+  }
   await transactionDone(tx);
   db.close();
+}
+
+function epochOneReplicaNode(): Uint8Array {
+  return Uint8Array.from({ length: INDEXEDDB_REPLICA_NODE_BYTES }, (_, index) => index + 1);
 }
 
 async function rawPage(name: string, pageId: number): Promise<Uint8Array | null> {

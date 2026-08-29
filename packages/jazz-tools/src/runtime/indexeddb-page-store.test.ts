@@ -1,4 +1,4 @@
-import { indexedDB as fakeIndexedDb } from "fake-indexeddb";
+import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -12,6 +12,8 @@ import {
   INDEXEDDB_STORAGE_MANIFEST,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
+  INDEXEDDB_REPLICA_NODE_BYTES,
+  INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
 } from "./indexeddb-page-store.js";
 
@@ -245,6 +247,11 @@ describe("IndexedDbPageStore", () => {
           .get(INDEXEDDB_STORAGE_MANIFEST_KEY),
       ),
     ).toEqual(INDEXEDDB_STORAGE_MANIFEST);
+    expect(
+      await requestResult(
+        manifestTx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_REPLICA_NODE_KEY),
+      ),
+    ).toEqual(store.replicaNode.buffer);
     const tx = raw.transaction(INDEXEDDB_BTREE_METADATA_STORE, "readonly");
     const value = await requestResult(
       tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE).get("current"),
@@ -259,6 +266,77 @@ describe("IndexedDbPageStore", () => {
     });
     raw.close();
     store.close();
+  });
+
+  it("persists one random node per physical replica, not per logical database name", async () => {
+    const logicalName = "same-app-and-author";
+    const firstFactory = new IDBFactory();
+    const secondFactory = new IDBFactory();
+
+    const firstNode = await withIndexedDbFactory(firstFactory, async () => {
+      const store = await IndexedDbPageStore.open(logicalName);
+      const node = store.replicaNode;
+      expect(node).toHaveLength(INDEXEDDB_REPLICA_NODE_BYTES);
+      node.fill(0);
+      expect(store.replicaNode).not.toEqual(node);
+      store.close();
+
+      const reopened = await IndexedDbPageStore.open(logicalName);
+      try {
+        expect(reopened.replicaNode).toEqual(store.replicaNode);
+        return reopened.replicaNode;
+      } finally {
+        reopened.close();
+      }
+    });
+    const secondNode = await withIndexedDbFactory(secondFactory, async () => {
+      const store = await IndexedDbPageStore.open(logicalName);
+      try {
+        return store.replicaNode;
+      } finally {
+        store.close();
+      }
+    });
+
+    // TxId is exactly (HLC time, node), so equal clocks could alias only if
+    // these independently durable physical identities were equal.
+    expect(secondNode).not.toEqual(firstNode);
+  });
+
+  it("admits one identity across concurrent first opens and replaces it after reset", async () => {
+    const name = databaseName();
+    const [first, second] = await Promise.all([
+      IndexedDbPageStore.open(name),
+      IndexedDbPageStore.open(name),
+    ]);
+    const firstNode = first.replicaNode;
+    expect(second.replicaNode).toEqual(firstNode);
+    first.close();
+    second.close();
+
+    await IndexedDbPageStore.destroy(name);
+    const reset = await IndexedDbPageStore.open(name);
+    try {
+      expect(reset.replicaNode).not.toEqual(firstNode);
+    } finally {
+      reset.close();
+    }
+  });
+
+  it("rejects a missing or malformed physical replica node before touching pages", async () => {
+    for (const replicaNode of [null, new Uint8Array(INDEXEDDB_REPLICA_NODE_BYTES - 1)]) {
+      const name = databaseName();
+      await installRawEpochOneFixture(name, INDEXEDDB_STORAGE_MANIFEST, replicaNode);
+      await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
+        "Missing or invalid IndexedDB replica node identity",
+      );
+      const raw = await openRawDatabase(name);
+      const tx = raw.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
+      expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+        new Uint8Array([1]).buffer,
+      );
+      raw.close();
+    }
   });
 
   it("rejects missing, unknown, and inconsistent manifests before touching pages", async () => {
@@ -389,7 +467,11 @@ function openRawDatabase(name: string): Promise<IDBDatabase> {
   return requestResult(fakeIndexedDb.open(name));
 }
 
-async function installRawEpochOneFixture(name: string, manifest: unknown): Promise<void> {
+async function installRawEpochOneFixture(
+  name: string,
+  manifest: unknown,
+  replicaNode: Uint8Array | null = epochOneReplicaNode(),
+): Promise<void> {
   const raw = await createRawEpochDatabase(name);
   const tx = raw.transaction(
     [INDEXEDDB_BTREE_PAGES_STORE, INDEXEDDB_BTREE_METADATA_STORE, INDEXEDDB_STORAGE_MANIFEST_STORE],
@@ -410,8 +492,29 @@ async function installRawEpochOneFixture(name: string, manifest: unknown): Promi
   if (manifest !== undefined) {
     tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
   }
+  if (replicaNode !== null) {
+    tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
+      replicaNode.slice().buffer,
+      INDEXEDDB_REPLICA_NODE_KEY,
+    );
+  }
   await transactionDone(tx);
   raw.close();
+}
+
+function epochOneReplicaNode(): Uint8Array {
+  return Uint8Array.from({ length: INDEXEDDB_REPLICA_NODE_BYTES }, (_, index) => index + 1);
+}
+
+async function withIndexedDbFactory<T>(factory: IDBFactory, run: () => Promise<T>): Promise<T> {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: factory });
+  try {
+    return await run();
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "indexedDB", previous);
+    else Reflect.deleteProperty(globalThis, "indexedDB");
+  }
 }
 
 function createRawEpochDatabase(name: string): Promise<IDBDatabase> {

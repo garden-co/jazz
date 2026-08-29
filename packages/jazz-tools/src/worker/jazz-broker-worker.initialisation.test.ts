@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => {
   const encodeSchema = vi.fn(() => new Uint8Array());
   const openConfig = vi.fn(() => new Uint8Array());
   const telemetryDisposers: Mock[] = [];
-  const pageStores: Array<{ close: Mock }> = [];
+  const pageStores: Array<{ close: Mock; replicaNode: Uint8Array }> = [];
   const browserDbs: Array<{ close: Mock; setRelayAuthoritySessionOwner: Mock }> = [];
   const runtimes: Array<Record<string, Mock>> = [];
   const createBrowserDb = () => {
@@ -59,7 +59,9 @@ const mocks = vi.hoisted(() => {
         return dispose;
       });
       openPageStore.mockReset().mockImplementation(async () => {
-        const pageStore = { close: vi.fn() };
+        const replicaNode = new Uint8Array(16);
+        replicaNode.fill(3);
+        const pageStore = { close: vi.fn(), replicaNode };
         pageStores.push(pageStore);
         return pageStore;
       });
@@ -214,7 +216,6 @@ function options(dbName: string): BrowserWorkerInitOptions {
   return {
     schema: {},
     dbName,
-    node: new Uint8Array([1]),
     author: new Uint8Array([2]),
     initialSyncFlushEvery: 1,
     appId: "worker-initialization-test",
@@ -457,7 +458,7 @@ describe("broker worker context initialization", () => {
     expect(mocks.fromDb).toHaveBeenCalledWith(
       expect.anything(),
       initOptions.schema,
-      initOptions.node,
+      mocks.pageStores[0]?.replicaNode,
       initOptions.author,
       1,
       false,

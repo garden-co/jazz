@@ -147,17 +147,6 @@ export function selfSignedClientProofFromConfig(
   };
 }
 
-function persistentIdentitySeed(
-  config: DbConfig,
-  session: ReturnType<typeof sessionFromConfig>,
-): string {
-  const author = canonicalAuthorSubject(
-    session?.issuer ?? ANONYMOUS_JWT_ISSUER,
-    session?.user_id ?? `${config.appId}:${config.env ?? "dev"}:unauthenticated`,
-  );
-  return `${config.appId}:${config.env ?? "dev"}:${author}`;
-}
-
 function initialSyncFlushEvery(config: DbConfig): number {
   const value = config.initialSyncFlushEvery ?? 512;
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -269,7 +258,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         "Persistent browser workers require a verified client session, not backend credentials",
       );
     }
-    const identitySeed = persistentIdentitySeed(config, session);
     const dbName = resolveDefaultPersistentDbName(config);
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     if (config.runtimeSources?.browserWorkerPort) {
@@ -294,7 +282,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         runtimeSources: browserWorkerRuntimeSources(config),
         schema,
         dbName,
-        node: deterministicBytes(`${identitySeed}:${dbName}:node`),
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),

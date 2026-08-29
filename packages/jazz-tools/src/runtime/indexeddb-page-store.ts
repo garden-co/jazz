@@ -21,6 +21,15 @@ export const INDEXEDDB_STORAGE_MANIFEST_KEY = "epoch";
  * IndexedDB root to the first logical Jazz owner that opens it.
  */
 export const INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY = "browser-runtime-owner";
+/**
+ * The immutable NodeUuid for this physical browser replica.
+ *
+ * This is intentionally separate from the epoch/profile manifest: the profile
+ * describes a shared format, while this value distinguishes two independent
+ * stores that happen to use that same format and logical app/account scope.
+ */
+export const INDEXEDDB_REPLICA_NODE_KEY = "replica-node-v1";
+export const INDEXEDDB_REPLICA_NODE_BYTES = 16;
 const CURRENT_METADATA_KEY = "current";
 const MIN_PAGE_SIZE = 1024;
 const MAX_PAGE_SIZE = 0x8000_0000;
@@ -111,6 +120,7 @@ export class IndexedDbStorageInvalidatedError extends Error {
  */
 export class IndexedDbPageStore {
   private invalidated = false;
+  private replicaNodeBytes: Uint8Array | null = null;
 
   private constructor(
     private readonly db: IDBDatabase,
@@ -150,6 +160,7 @@ export class IndexedDbPageStore {
         const manifest = db.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
         if (request.transaction) {
           manifest.put(INDEXEDDB_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
+          manifest.put(randomReplicaNodeBytes().buffer, INDEXEDDB_REPLICA_NODE_KEY);
         }
       }
     };
@@ -166,11 +177,25 @@ export class IndexedDbPageStore {
     try {
       await store.assertStorageManifest();
       if (options.owner) await store.claimBrowserRuntimeOwner(options.owner);
+      store.replicaNodeBytes = await store.readReplicaNodeBytes();
       return store;
     } catch (error) {
       store.close();
       throw error;
     }
+  }
+
+  /**
+   * Return this physical store's durable transaction-node identity.
+   *
+   * A copy prevents callers from mutating the bytes held by the page-store
+   * boundary after it has admitted the manifest-owned identity.
+   */
+  get replicaNode(): Uint8Array {
+    if (!this.replicaNodeBytes) {
+      throw new Error("IndexedDB replica node is unavailable before storage admission");
+    }
+    return this.replicaNodeBytes.slice();
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
@@ -230,6 +255,26 @@ export class IndexedDbPageStore {
     throw new Error(
       `IndexedDB database ${this.name} is already owned by a different Jazz browser session; this indicates a wrong physical root or namespace derivation error. Reset this scoped database only if you intend to discard its cache`,
     );
+  }
+
+  private async readReplicaNodeBytes(): Promise<Uint8Array> {
+    const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const done = transactionDone(tx);
+    const value = await requestResult(
+      tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_REPLICA_NODE_KEY),
+    );
+    await done;
+    if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) {
+      throw new Error("Missing or invalid IndexedDB replica node identity");
+    }
+    const bytes =
+      value instanceof ArrayBuffer
+        ? new Uint8Array(value)
+        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    if (bytes.byteLength !== INDEXEDDB_REPLICA_NODE_BYTES) {
+      throw new Error("Missing or invalid IndexedDB replica node identity");
+    }
+    return bytes.slice();
   }
 
   async readPage(pageId: number): Promise<Uint8Array | null> {
@@ -393,6 +438,17 @@ export class IndexedDbPageStore {
 
 function relaxedReadWriteTransaction(db: IDBDatabase, stores: string[]): IDBTransaction {
   return db.transaction(stores, "readwrite", { durability: "relaxed" });
+}
+
+function randomReplicaNodeBytes(): Uint8Array {
+  const bytes = new Uint8Array(INDEXEDDB_REPLICA_NODE_BYTES);
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error(
+      "Browser storage requires cryptographic random values for its replica identity",
+    );
+  }
+  globalThis.crypto.getRandomValues(bytes);
+  return bytes;
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {

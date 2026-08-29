@@ -1308,6 +1308,83 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
   }, 60_000);
 
+  /**
+   * Two independent browser storage replicas can intentionally share every
+   * logical input (app, schema, server, author, and first-write clock). Their
+   * `dbName` is the physical-storage locator only, so each opens a separate
+   * SharedWorker + Wasm + IndexedDB realm and must receive a distinct durable
+   * replica node. The public TxIds are therefore distinct even at one fixed
+   * first-write clock, both settle, and each replica can be reopened.
+   */
+  it("keeps public transaction identities distinct across physical browser replicas", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "distinct-physical-replica-tx-ids",
+      transactionIdentityPermissions,
+      transactionIdentityApp.wasmSchema,
+    );
+    const secret = generateAuthSecret();
+    const firstName = uniqueDbName("physical-replica-a");
+    const secondName = uniqueDbName("physical-replica-b");
+    const config = (dbName: string) => ({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+      schema: transactionIdentityApp,
+    });
+    const [first, second] = await Promise.all([
+      createDb(config(firstName)),
+      createDb(config(secondName)),
+    ]);
+    track(first);
+    track(second);
+
+    const fixedNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    const { firstWrite, secondWrite } = (() => {
+      try {
+        return {
+          firstWrite: first.insert(transactionIdentityApp.projects, {
+            name: "physical replica a project",
+          }),
+          secondWrite: second.insert(transactionIdentityApp.projects, {
+            name: "physical replica b project",
+          }),
+        };
+      } finally {
+        now.mockRestore();
+      }
+    })();
+    const [firstTxId, secondTxId] = await Promise.all([firstWrite.txId, secondWrite.txId]);
+    expect(firstTxId).not.toBe(secondTxId);
+    await withTimeout(
+      Promise.all([firstWrite.wait({ tier: "global" }), secondWrite.wait({ tier: "global" })]),
+      20_000,
+      "physical-replica writes did not both settle globally",
+    );
+
+    await first.shutdown();
+    await second.shutdown();
+    untrack(first);
+    untrack(second);
+    const [reopenedFirst, reopenedSecond] = await Promise.all([
+      createDb(config(firstName)),
+      createDb(config(secondName)),
+    ]);
+    track(reopenedFirst);
+    track(reopenedSecond);
+    await expect(
+      reopenedFirst.all(transactionIdentityApp.projects, { tier: "local" }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: firstWrite.value.id })]),
+    );
+    await expect(
+      reopenedSecond.all(transactionIdentityApp.projects, { tier: "local" }),
+    ).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: secondWrite.value.id })]),
+    );
+  }, 60_000);
+
   it("resolves insert wait at edge tier through the worker bridge", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-wait-edge");
     const sharedLocalAuthToken = generateAuthSecret();
