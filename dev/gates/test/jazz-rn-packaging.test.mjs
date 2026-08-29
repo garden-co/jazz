@@ -1144,6 +1144,17 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(androidBuild, /-DREACT_NATIVE_DIR=\$\{reactNativeDir\}/);
   assert.match(androidCmake, /find_package\(ReactAndroid REQUIRED CONFIG\)/);
   assert.match(androidCmake, /find_package\(fbjni REQUIRED CONFIG\)/);
+  assert.match(androidCmake, /target_compile_features\(jazzrelay PRIVATE cxx_std_20\)/);
+  assert.match(androidCmake, /set_target_properties\(jazzrelay PROPERTIES CXX_EXTENSIONS OFF\)/);
+  assert.throws(
+    () =>
+      assert.match(
+        androidCmake.replace("cxx_std_20", "cxx_std_17"),
+        /target_compile_features\(jazzrelay PRIVATE cxx_std_20\)/,
+      ),
+    /cxx_std_20/,
+    "the Android source receipt must reject lowering the RN target below C++20",
+  );
   assert.match(
     androidCmake,
     /\$\{REACT_NATIVE_DIR\}\/ReactAndroid\/src\/main\/jni\/react\/turbomodule/,
