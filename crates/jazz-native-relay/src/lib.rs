@@ -525,6 +525,15 @@ struct ForegroundWakeRegistration {
     callback: ForegroundWakeCallback,
     context: usize,
 }
+
+/// The only two legitimate endings for a foreground lease. A clean explicit
+/// close may return a node after reading its owner-local HLC; every forced
+/// teardown is uncertain and therefore permanently retires it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForegroundTeardown {
+    CleanHandoff,
+    Retire,
+}
 impl ForegroundWakeRegistration {
     fn cancelled(self, foreground: u64) {
         unsafe {
@@ -940,22 +949,58 @@ impl NativeRelayHost {
             .ok_or(JazzNativeRelayStatus::InvalidHandle)
     }
 
-    fn close_foreground(&mut self, foreground_handle: u64) -> Result<bool, JazzNativeRelayStatus> {
+    /// Retire or cleanly hand off exactly one foreground alias.
+    ///
+    /// Removing the public handle is deliberately the first step. It prevents
+    /// a concurrent/later native call from beginning more work while this
+    /// function drains the owner-thread state. The Rust scheduler is then
+    /// cleared synchronously before the platform callback receives its
+    /// cancellation notification; a queued platform turn may still run, but
+    /// it has no native scheduler or foreground handle to re-enter.
+    fn teardown_foreground(
+        &mut self,
+        foreground_handle: u64,
+        teardown: ForegroundTeardown,
+    ) -> Result<bool, JazzNativeRelayStatus> {
         let Some(foreground) = self.foregrounds.remove(&foreground_handle) else {
             return Ok(false);
         };
+
+        // Do not use `set_foreground_wake_callback` here: the foreground was
+        // intentionally removed above to make all new public work fail
+        // synchronously. The retained client still reaches the owner thread
+        // directly and clears its `Db` scheduler before its raw platform
+        // callback context can be released.
+        let client = self
+            .clients
+            .get(&foreground.client)
+            .map(|(_, client)| client.clone());
+        let wake_cleared = client
+            .as_ref()
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure)
+            .and_then(|client| {
+                client
+                    .set_foreground_wake_callback(foreground_handle, None, 0)
+                    .map_err(relay_status)
+            });
         if let Some(wake) = foreground.wake {
             wake.cancelled(foreground_handle);
         }
-        // Read out the runtime-owned HLC before dropping the client, then
-        // close every owner edge before placing the lease back in the pool.
-        // Any failed or missing step is an uncertain shutdown: retire rather
-        // than let a later foreground repeat this node identity.
-        let high_water = self
-            .clients
-            .get(&foreground.client)
-            .ok_or(JazzNativeRelayStatus::LifecycleFailure)
-            .and_then(|(_, client)| client.minted_tx_time_high_water().map_err(relay_status));
+
+        // Read out the runtime-owned HLC only for an explicit clean close.
+        // Revocation and platform invalidation have no supported clean
+        // handoff, even if this synchronous teardown happens to succeed.
+        let high_water = match teardown {
+            ForegroundTeardown::CleanHandoff => client
+                .as_ref()
+                .ok_or(JazzNativeRelayStatus::LifecycleFailure)
+                .and_then(|client| client.minted_tx_time_high_water().map_err(relay_status)),
+            ForegroundTeardown::Retire => Ok(TxTime::default()),
+        };
+
+        // `NativeRelayClient::close` removes the owner-local client. Dropping
+        // it aborts pending foreground futures/subscriptions and its explicit
+        // transaction drain abandons every mutable transaction handle.
         let client_closed = self
             .clients
             .remove(&foreground.client)
@@ -976,17 +1021,32 @@ impl NativeRelayHost {
             Some(_) => Ok(()),
             None => Err(JazzNativeRelayStatus::LifecycleFailure),
         };
-        match (high_water, client_closed, relay_closed) {
-            (Ok(high_water), Ok(Some(())), Ok(())) => {
+        let owner_closed = matches!(client_closed, Ok(Some(())));
+        let relay_closed = relay_closed.is_ok();
+        let wake_cleared = wake_cleared.is_ok();
+        match teardown {
+            ForegroundTeardown::CleanHandoff
+                if wake_cleared && owner_closed && relay_closed && high_water.is_ok() =>
+            {
                 if self
-                    .clean_foreground_lease(&foreground.scope, foreground.lease, high_water)
+                    .clean_foreground_lease(
+                        &foreground.scope,
+                        foreground.lease,
+                        high_water.expect("clean handoff already checked high water"),
+                    )
                     .is_err()
                 {
                     self.retire_foreground_lease(&foreground.scope, foreground.lease);
                     return Err(JazzNativeRelayStatus::LifecycleFailure);
                 }
             }
-            _ => {
+            ForegroundTeardown::Retire => {
+                self.retire_foreground_lease(&foreground.scope, foreground.lease);
+                if !wake_cleared || !owner_closed || !relay_closed {
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                }
+            }
+            ForegroundTeardown::CleanHandoff => {
                 self.retire_foreground_lease(&foreground.scope, foreground.lease);
                 return Err(JazzNativeRelayStatus::LifecycleFailure);
             }
@@ -994,11 +1054,18 @@ impl NativeRelayHost {
         Ok(true)
     }
 
+    fn close_foreground(&mut self, foreground_handle: u64) -> Result<bool, JazzNativeRelayStatus> {
+        self.teardown_foreground(foreground_handle, ForegroundTeardown::CleanHandoff)
+    }
+
     /// Platform runtime invalidation is an uncertain shutdown. It must retire
     /// only aliases owned by that token, preserve sibling runtimes, and never
     /// return a node identity to the reusable pool without a confirmed HLC
     /// handoff.
-    fn retire_foregrounds_for_runtime(&mut self, runtime_token: u64) {
+    fn retire_foregrounds_for_runtime(
+        &mut self,
+        runtime_token: u64,
+    ) -> Result<(), JazzNativeRelayStatus> {
         let foregrounds = self
             .foregrounds
             .iter()
@@ -1006,26 +1073,18 @@ impl NativeRelayHost {
                 (opened.runtime_token == runtime_token).then_some(*handle)
             })
             .collect::<Vec<_>>();
+        let mut failed = false;
         for handle in foregrounds {
-            let Some(foreground) = self.foregrounds.remove(&handle) else {
-                continue;
-            };
-            if let Some(wake) = foreground.wake {
-                wake.cancelled(handle);
+            if self
+                .teardown_foreground(handle, ForegroundTeardown::Retire)
+                .is_err()
+            {
+                failed = true;
             }
-            if let Some((_, client)) = self.clients.remove(&foreground.client) {
-                let _ = client.close();
-            }
-            let opened = self.relays.remove(&foreground.relay);
-            let final_alias = !self
-                .relays
-                .values()
-                .any(|remaining| remaining.scope == foreground.scope);
-            if let Some(opened) = opened.filter(|_| final_alias) {
-                let _ = self.registry.close(&opened.scope);
-            }
-            self.retire_foreground_lease(&foreground.scope, foreground.lease);
         }
+        (!failed)
+            .then_some(())
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure)
     }
 
     fn set_foreground_wake_callback(
@@ -1095,9 +1154,12 @@ impl NativeRelayHost {
         Ok(handle)
     }
 
-    fn revoke_scope(&mut self, admitted_scope: AdmissionCapability) -> bool {
+    fn revoke_scope(
+        &mut self,
+        admitted_scope: AdmissionCapability,
+    ) -> Result<bool, JazzNativeRelayStatus> {
         if self.admitted_scopes.remove(&admitted_scope).is_none() {
-            return false;
+            return Ok(false);
         }
         let relay_handles = self
             .relays
@@ -1106,8 +1168,27 @@ impl NativeRelayHost {
                 (opened.admitted_scope == admitted_scope).then_some(*handle)
             })
             .collect::<Vec<_>>();
-        self.foregrounds
-            .retain(|_, foreground| !relay_handles.contains(&foreground.relay));
+        // Revocation is an unclean lifecycle boundary. Each foreground must
+        // synchronously reject new work, clear its owner wake, abort pending
+        // work, and retire its lease after admission has stopped new opens.
+        // The old `retain` merely hid aliases and left raw wake contexts plus
+        // active node identities behind.
+        let foregrounds = self
+            .foregrounds
+            .iter()
+            .filter_map(|(handle, foreground)| {
+                relay_handles.contains(&foreground.relay).then_some(*handle)
+            })
+            .collect::<Vec<_>>();
+        let mut failed = false;
+        for foreground in foregrounds {
+            if self
+                .teardown_foreground(foreground, ForegroundTeardown::Retire)
+                .is_err()
+            {
+                failed = true;
+            }
+        }
         let mut removed_scopes = Vec::new();
         for relay_handle in relay_handles {
             if let Some(opened) = self.relays.remove(&relay_handle) {
@@ -1131,7 +1212,9 @@ impl NativeRelayHost {
                 let _ = self.registry.close(&scope);
             }
         }
-        true
+        (!failed)
+            .then_some(true)
+            .ok_or(JazzNativeRelayStatus::LifecycleFailure)
     }
 }
 
@@ -1324,8 +1407,10 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_invalidate_foreground_runt
         Ok(host) => host,
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
-    host.retire_foregrounds_for_runtime(lease.runtime_token);
-    JazzNativeRelayStatus::Ok
+    match host.retire_foregrounds_for_runtime(lease.runtime_token) {
+        Ok(()) => JazzNativeRelayStatus::Ok,
+        Err(status) => status,
+    }
 }
 
 /// Execute lifecycle commands against one explicit host context.
@@ -1462,8 +1547,10 @@ pub unsafe extern "C" fn jazz_native_relay_host_revoke_scope_capability(
         Ok(host) => host,
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
-    let _ = host.revoke_scope(AdmissionCapability(bytes));
-    JazzNativeRelayStatus::Ok
+    match host.revoke_scope(AdmissionCapability(bytes)) {
+        Ok(_) => JazzNativeRelayStatus::Ok,
+        Err(status) => status,
+    }
 }
 
 /// Open one actual memory-only foreground client from a trusted 32-byte
@@ -3991,6 +4078,62 @@ mod tests {
         }
     }
 
+    /// Models the two stages of the platform wake bridge without a JSI
+    /// runtime: Rust's owner thread queues a platform task, and the platform
+    /// later decides whether that queued task may still deliver. This remains
+    /// an internal lifecycle receipt because raw callback-context lifetime is
+    /// a native-host concern, not a user-visible Db API.
+    #[derive(Default)]
+    struct QueuedNativeWake {
+        active: AtomicBool,
+        cancelled: AtomicUsize,
+        queued: Mutex<Vec<(u64, u8, u64)>>,
+        delivered: AtomicUsize,
+    }
+
+    impl QueuedNativeWake {
+        fn active() -> Self {
+            Self {
+                active: AtomicBool::new(true),
+                ..Self::default()
+            }
+        }
+
+        fn queued(&self) -> usize {
+            self.queued.lock().unwrap().len()
+        }
+
+        /// Run platform turns which were queued before a revoke. Cancellation
+        /// must make these harmless instead of delivering a stale result into
+        /// a foreground whose owner/context has already been torn down.
+        fn deliver_queued(&self) {
+            let queued = std::mem::take(&mut *self.queued.lock().unwrap());
+            if self.active.load(Ordering::Acquire) {
+                self.delivered.fetch_add(queued.len(), Ordering::AcqRel);
+            }
+        }
+    }
+
+    unsafe extern "C" fn queue_native_wake(
+        context: *mut c_void,
+        foreground: u64,
+        kind: u8,
+        delay_ms: u64,
+    ) {
+        let wake = unsafe { &*(context as *const QueuedNativeWake) };
+        if kind == FOREGROUND_WAKE_CANCELLED {
+            wake.active.store(false, Ordering::Release);
+            wake.cancelled.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        if wake.active.load(Ordering::Acquire) {
+            wake.queued
+                .lock()
+                .unwrap()
+                .push((foreground, kind, delay_ms));
+        }
+    }
+
     #[test]
     fn native_c_abi_process_reopen_rehydrates_the_exact_persisted_foreground_row() {
         // This is the close/reopen receipt that an RN device host needs, but
@@ -4156,6 +4299,151 @@ mod tests {
             JazzNativeRelayStatus::Ok,
             "B remains admissible after A revocation"
         );
+    }
+
+    #[test]
+    fn revocation_clears_queued_owner_wakes_and_retires_only_its_foreground_lease() {
+        // Internal native-host lifecycle receipt. A JSI owner turn can already
+        // be queued when trusted code revokes its admitted scope. The old
+        // `foregrounds.retain(...)` implementation hid A's handle but left
+        // its owner client, raw callback context, and active lease alive.
+        // This exact C-ABI path proves revocation clears all three while B
+        // remains usable.
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let schema = permissive_schema();
+        let a_capability = fixture.admit(
+            &directory.path().join("revoke-a.sqlite"),
+            "revoke-a",
+            &schema,
+            0x71,
+        );
+        let b_capability = fixture.admit(
+            &directory.path().join("revoke-b.sqlite"),
+            "revoke-b",
+            &schema,
+            0x81,
+        );
+        let a = fixture.open_foreground(&a_capability);
+        let b = fixture.open_foreground(&b_capability);
+        let (a_lease, b_lease, a_scope, b_scope) = unsafe {
+            let host = (*fixture.host).inner.lock().unwrap();
+            (
+                host.foregrounds[&a].lease,
+                host.foregrounds[&b].lease,
+                host.foregrounds[&a].scope.clone(),
+                host.foregrounds[&b].scope.clone(),
+            )
+        };
+
+        let a_wake = Arc::new(QueuedNativeWake::active());
+        let b_wake = Arc::new(QueuedNativeWake::active());
+        for (foreground, wake) in [(a, &a_wake), (b, &b_wake)] {
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_lease_set_foreground_wake_callback(
+                        fixture.lease,
+                        foreground,
+                        Some(queue_native_wake),
+                        Arc::as_ptr(wake) as *mut c_void,
+                    )
+                },
+                JazzNativeRelayStatus::Ok,
+                "the owner installs one native callback before it schedules work"
+            );
+        }
+
+        // This is a real owner-thread wake, not a direct callback invocation:
+        // the public Db scheduler crosses the native relay owner and queues a
+        // later platform turn for each foreground.
+        unsafe {
+            let host = (*fixture.host).inner.lock().unwrap();
+            for foreground in [a, b] {
+                host.foreground_client(foreground)
+                    .unwrap()
+                    .with_db(|db| {
+                        db.schedule_tick(TickUrgency::Deferred);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        }
+        assert_eq!(a_wake.queued(), 1, "A has one queued platform wake");
+        assert_eq!(b_wake.queued(), 1, "B has one queued platform wake");
+
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_revoke_scope_capability(
+                    fixture.host,
+                    a_capability.as_ptr(),
+                    a_capability.len(),
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_eq!(
+            a_wake.cancelled.load(Ordering::Acquire),
+            1,
+            "revocation clears A's raw native callback before its context can be dropped"
+        );
+        assert_eq!(
+            b_wake.cancelled.load(Ordering::Acquire),
+            0,
+            "revoking A never touches B's native callback"
+        );
+        assert_eq!(fixture.tick_status(a), JazzNativeRelayStatus::InvalidHandle);
+        assert_eq!(fixture.tick_status(b), JazzNativeRelayStatus::Ok);
+        let mut late_finalizer_closed = true;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_lease_close_attached_foreground(
+                    fixture.lease,
+                    a,
+                    &mut late_finalizer_closed,
+                )
+            },
+            JazzNativeRelayStatus::Ok,
+            "a finalizer that races after revocation remains an idempotent no-op"
+        );
+        assert!(
+            !late_finalizer_closed,
+            "revocation already owned A's only teardown transition"
+        );
+
+        // Deliver the tasks only after revocation. A's stale task is a no-op;
+        // B's independent task remains live, which catches both a UAF-prone
+        // omitted cancellation and over-broad scope teardown.
+        a_wake.deliver_queued();
+        b_wake.deliver_queued();
+        assert_eq!(a_wake.delivered.load(Ordering::Acquire), 0);
+        assert_eq!(b_wake.delivered.load(Ordering::Acquire), 1);
+
+        unsafe {
+            let mut host = (*fixture.host).inner.lock().unwrap();
+            let pool = host
+                .foreground_node_leases
+                .get_mut(&a_scope)
+                .expect("the revoked scope retains its lease retirement ledger");
+            assert_eq!(
+                pool.acquire_reusable(),
+                None,
+                "A's revoked identity was retired, never clean-returned"
+            );
+            assert_eq!(
+                pool.acquire_fresh(a_lease.node),
+                Err(jazz::foreground_node_lease::ForegroundNodeLeaseError::DuplicateNode),
+                "the retired A identity cannot be minted again"
+            );
+            let b_pool = host
+                .foreground_node_leases
+                .get_mut(&b_scope)
+                .expect("the independent live scope retains B's lease pool");
+            assert_eq!(
+                b_pool.acquire_fresh(b_lease.node),
+                Err(jazz::foreground_node_lease::ForegroundNodeLeaseError::DuplicateNode),
+                "B's still-live foreground retains its own exclusive lease"
+            );
+        }
     }
 
     #[test]
@@ -5335,7 +5623,7 @@ mod tests {
             Err(JazzNativeRelayStatus::InvalidHandle)
         );
 
-        assert!(unsafe { (*host).inner.lock().unwrap().revoke_scope(alice) });
+        assert!(unsafe { (*host).inner.lock().unwrap().revoke_scope(alice) }.unwrap());
 
         assert_eq!(
             execute(open(alice)),
