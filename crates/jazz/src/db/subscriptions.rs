@@ -488,12 +488,16 @@ where
                 authorization_mode,
             )
             .await?;
+        // The subscription opener performs one bounded IVM poll. Keep the
+        // current host scheduler as the cold-storage continuation owner,
+        // rather than the short-lived foreground future opening this stream.
+        let progress_waker = self.node.query_runtime_waker();
         let (subscription, snapshot) = self
             .node
             .node
             .lock()
             .await
-            .open_maintained_view_subscription_in_authorization_mode(
+            .open_maintained_view_subscription_in_authorization_mode_with_waker(
                 &local_shape,
                 &local_binding,
                 author,
@@ -501,6 +505,7 @@ where
                 &opts.read_view,
                 Some(_local_plan),
                 authorization_mode,
+                progress_waker.as_ref(),
             )
             .await?;
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();

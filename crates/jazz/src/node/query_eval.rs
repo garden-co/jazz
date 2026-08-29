@@ -2948,6 +2948,7 @@ where
             .clone()
     }
 
+    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_seeded_maintained_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -2955,6 +2956,33 @@ where
         identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
+        self.open_seeded_maintained_subscription_view_with_waker(
+            shape, binding, identity, tier, read_view, None,
+        )
+        .await
+    }
+
+    /// Owner-loop variant retaining a durable wake route during cold initial
+    /// hydration.
+    pub(crate) async fn open_seeded_maintained_subscription_view_with_waker(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -2975,6 +3003,7 @@ where
             QueryAuthorizationMode::TrustedServing,
             None,
             PreparedClaimBindingMode::Strict,
+            progress_waker,
         )
         .await
     }
@@ -2983,12 +3012,37 @@ where
     /// browser peer. The relay's Global receipt already names the
     /// authority-selected members, so this must consume that membership as
     /// its source instead of applying the query window a second time.
+    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_seeded_relay_edge_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorSubject,
         read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
+        self.open_seeded_relay_edge_subscription_view_with_waker(
+            shape, binding, identity, read_view, None,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_seeded_relay_edge_subscription_view_with_waker(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        read_view: &ReadViewSpec,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3011,6 +3065,7 @@ where
             QueryAuthorizationMode::ClientLocal,
             settled_binding_view,
             PreparedClaimBindingMode::Strict,
+            progress_waker,
         )
         .await
     }
@@ -3062,6 +3117,7 @@ where
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
     /// ordinary prepared query, a missing policy claim is a denied proof and
     /// is surfaced to the peer as an empty, settled authorization view.
+    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_seeded_authorization_support_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -3069,6 +3125,31 @@ where
         identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
+        self.open_seeded_authorization_support_subscription_view_with_waker(
+            shape, binding, identity, tier, read_view, None,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_seeded_authorization_support_subscription_view_with_waker(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3089,6 +3170,7 @@ where
             QueryAuthorizationMode::TrustedServing,
             None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
+            progress_waker,
         )
         .await
     }
@@ -3103,6 +3185,7 @@ where
         authorization_mode: QueryAuthorizationMode,
         settled_binding_view: Option<BindingViewKey>,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3158,6 +3241,7 @@ where
                 &binding,
                 binding_source_shape,
                 prepared_claim_binding_mode,
+                progress_waker,
             )
             .await?;
         let mut maintained = MaintainedSubscriptionView::default();

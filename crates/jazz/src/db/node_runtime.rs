@@ -1807,7 +1807,7 @@ where
             let (maintained, mut snapshot) = node
                 .lock()
                 .await
-                .open_maintained_view_subscription_in_authorization_mode(
+                .open_maintained_view_subscription_in_authorization_mode_with_waker(
                     &shape,
                     &binding,
                     author,
@@ -1815,6 +1815,7 @@ where
                     &read_view,
                     Some(prepared_plan),
                     authorization_mode,
+                    progress_waker,
                 )
                 .await?;
             if state.borrow().closed.get() {
@@ -1938,10 +1939,11 @@ where
                     let drained = node
                         .lock()
                         .await
-                        .drain_local_maintained_view_subscription_preserving_rows(
+                        .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                             &mut maintained,
                             Some(binding_view),
                             &local_overlay_row_keys,
+                            progress_waker,
                         )
                         .await;
                     {
@@ -2238,7 +2240,7 @@ where
                 let (replacement, snapshot) = node
                     .lock()
                     .await
-                    .open_maintained_view_subscription_in_authorization_mode(
+                    .open_maintained_view_subscription_in_authorization_mode_with_waker(
                         &shape,
                         &binding,
                         author,
@@ -2246,6 +2248,7 @@ where
                         &read_view,
                         None,
                         authorization_mode,
+                        progress_waker,
                     )
                     .await?;
                 let replacement_subscription_id = replacement.subscription_id();
@@ -2299,7 +2302,11 @@ where
                     let mut node_ref = node.lock().await;
                     if authoritative_snapshot_available {
                         match node_ref
-                            .drain_local_maintained_view_subscription_state(maintained, None)
+                            .drain_local_maintained_view_subscription_state_with_waker(
+                                maintained,
+                                None,
+                                progress_waker,
+                            )
                             .await
                         {
                             Ok(_) => {
@@ -2315,7 +2322,11 @@ where
                         }
                     } else {
                         match node_ref
-                            .drain_local_maintained_view_subscription(maintained, None)
+                            .drain_local_maintained_view_subscription_with_waker(
+                                maintained,
+                                None,
+                                progress_waker,
+                            )
                             .await
                         {
                             Ok(update) => update,
@@ -2406,7 +2417,11 @@ where
                         // publishing its redundant reconstruction.
                         node.lock()
                             .await
-                            .drain_local_maintained_view_subscription_state(maintained, None)
+                            .drain_local_maintained_view_subscription_state_with_waker(
+                                maintained,
+                                None,
+                                progress_waker,
+                            )
                             .await?;
                     }
                     let settled = subscription_is_settled(
@@ -2462,10 +2477,11 @@ where
                             && shape.query().aggregate.is_none())
                         .then_some(settled_binding_view);
                         match node_ref
-                            .drain_local_maintained_view_subscription_preserving_rows(
+                            .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                                 maintained,
                                 authoritative_binding_view,
                                 &local_overlay_row_keys,
+                                progress_waker,
                             )
                             .await
                         {

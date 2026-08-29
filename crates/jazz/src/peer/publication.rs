@@ -254,6 +254,7 @@ impl PeerState {
                     read_view: &read_view,
                     purpose: RehydratePurpose::Query,
                 },
+                None,
             )
             .await?
             {
@@ -273,6 +274,7 @@ impl PeerState {
                 &binding,
                 subscription,
                 Some(table),
+                None,
             )
             .await?
             {
@@ -286,6 +288,7 @@ impl PeerState {
                     &binding,
                     subscription,
                     Some(table),
+                    None,
                 )
                 .await?
                 .ok_or(Error::InvalidStoredValue(
@@ -344,8 +347,38 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts)
-            .await
+        self.query_update_for_subscription_with_opts_and_waker(
+            node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn query_update_for_subscription_with_opts_and_waker<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<Option<SyncMessage>, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        self.query_update_inner_for_subscription(
+            node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            progress_waker,
+        )
+        .await
     }
 
     async fn query_update_inner<S>(
@@ -390,13 +423,14 @@ impl PeerState {
                 shape,
                 binding,
                 opts.clone(),
+                None,
             )
             .await?
         {
             return Ok(update);
         }
         node.drive_query_runtime().await?;
-        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts)
+        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, None)
             .await?
             .ok_or(Error::InvalidStoredValue(
                 "maintained hydration ended without a query publication",
@@ -410,6 +444,7 @@ impl PeerState {
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<Option<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
@@ -437,6 +472,7 @@ impl PeerState {
                 binding,
                 subscription,
                 None,
+                progress_waker,
             )
             .await;
         }
@@ -482,6 +518,7 @@ impl PeerState {
                 read_view: &read_view,
                 purpose: RehydratePurpose::Query,
             },
+            progress_waker,
         )
         .await
     }
@@ -493,6 +530,7 @@ impl PeerState {
         binding: &Binding,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<Option<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
@@ -507,6 +545,7 @@ impl PeerState {
             shape,
             subscription,
             result_table_filter,
+            progress_waker,
         )
         .await?;
         if !self
@@ -571,6 +610,7 @@ impl PeerState {
                     read_view: &read_view,
                     purpose: RehydratePurpose::Query,
                 },
+                progress_waker,
             )
             .await;
         }
@@ -704,11 +744,13 @@ impl PeerState {
         shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<ResultTransitions, Error>
     where
         S: OrderedKvStorage,
     {
-        node.drive_ready_query_runtime().await?;
+        node.drive_ready_query_runtime_with_waker(progress_waker)
+            .await?;
         let previous_member_result_set = self
             .publication_states
             .get(&subscription)
@@ -869,6 +911,7 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         request: MaintainedRehydrateRequest<'_>,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<Option<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
@@ -899,26 +942,34 @@ impl PeerState {
             // only a window or policy-scoped exact-ID read would change
             // semantics if evaluated from the relay's local cache.
             RehydratePurpose::Query if relay_edge_requires_authority_source => {
-                node.open_seeded_relay_edge_subscription_view(shape, binding, self.identity(), read_view)
+                node.open_seeded_relay_edge_subscription_view_with_waker(
+                    shape,
+                    binding,
+                    self.identity(),
+                    read_view,
+                    progress_waker,
+                )
                     .await
             }
             RehydratePurpose::Query => {
-                node.open_seeded_maintained_subscription_view(
+                node.open_seeded_maintained_subscription_view_with_waker(
                     shape,
                     binding,
                     self.identity(),
                     tier,
                     read_view,
+                    progress_waker,
                 )
                 .await
             }
             RehydratePurpose::AuthorizationSupport => node
-                .open_seeded_authorization_support_subscription_view(
+                .open_seeded_authorization_support_subscription_view_with_waker(
                     shape,
                     binding,
                     self.identity(),
                     tier,
                     read_view,
+                    progress_waker,
                 )
                 .await,
         };
@@ -1264,6 +1315,30 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.rehydrate_query_for_subscription_with_opts_and_waker(
+            node,
+            subscription,
+            shape,
+            binding,
+            opts,
+            None,
+        )
+        .await
+    }
+
+    /// Owner-loop variant retaining the tick owner's cold-query wake route.
+    pub(crate) async fn rehydrate_query_for_subscription_with_opts_and_waker<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<Option<SyncMessage>, Error>
+    where
+        S: OrderedKvStorage,
+    {
         self.rehydrate_query_for_subscription_with_purpose(
             node,
             subscription,
@@ -1271,6 +1346,7 @@ impl PeerState {
             binding,
             opts,
             RehydratePurpose::Query,
+            progress_waker,
         )
         .await
     }
@@ -1283,6 +1359,7 @@ impl PeerState {
         binding: &Binding,
         opts: RegisterShapeOptions,
         purpose: RehydratePurpose,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<Option<SyncMessage>, Error>
     where
         S: OrderedKvStorage,
@@ -1341,6 +1418,7 @@ impl PeerState {
                 read_view: &read_view,
                 purpose,
             },
+            progress_waker,
         )
         .await
     }
@@ -1373,6 +1451,7 @@ impl PeerState {
                 binding,
                 opts,
                 RehydratePurpose::AuthorizationSupport,
+                None,
             )
             .await
             .and_then(|update| {
@@ -1396,12 +1475,34 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.rehydrate_query_for_subscription_from_maintained_subscription_and_waker(
+            node,
+            maintained_subscription,
+            target_subscription,
+            shape,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn rehydrate_query_for_subscription_from_maintained_subscription_and_waker<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        maintained_subscription: SubscriptionKey,
+        target_subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<Option<SyncMessage>, Error>
+    where
+        S: OrderedKvStorage,
+    {
         self.clear_stale_groove_runtime_handles(node, maintained_subscription);
         let source_transitions = self.drain_maintained_subscription_view_changes(
             node,
             shape,
             maintained_subscription,
             None,
+            progress_waker,
         )
         .await?;
         if !self

@@ -2480,7 +2480,7 @@ impl IvmRuntime {
         }
         let multisink = self.subscribe_staged(vec![(DEFAULT_SINK.to_owned(), graph)], storage)?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(None)?;
         Ok(subscription)
     }
 
@@ -2494,20 +2494,38 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
+        self.subscribe_with_waker(sinks, storage, None)
+    }
+
+    /// Internal owner-loop counterpart to [`Self::subscribe`].
+    pub(crate) fn subscribe_with_waker<I, K, S>(
+        &mut self,
+        sinks: I,
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+        S: OrderedKvStorage + 'static,
+    {
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
         let subscription = self.subscribe_staged(sinks, storage)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
     /// Publish all subscription work that can complete from resident inputs
     /// before returning control to the caller. Cold inputs remain queued for
     /// the runtime owner to resume when storage wakes them.
-    fn poll_ready_subscription_work_now(&mut self) -> Result<(), IvmRuntimeError> {
-        let mut cx = Context::from_waker(Waker::noop());
+    fn poll_ready_subscription_work_now_with_waker(
+        &mut self,
+        progress_waker: Option<&Waker>,
+    ) -> Result<(), IvmRuntimeError> {
+        let mut cx = Context::from_waker(progress_waker.unwrap_or(Waker::noop()));
         match self.poll_pending_incremental(&mut cx) {
             Poll::Ready(result) => result,
             Poll::Pending => Ok(()),
@@ -2702,7 +2720,27 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
-        self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
+        self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage, None)
+    }
+
+    /// Internal owner-loop counterpart to [`Self::bind_shape`].
+    pub(crate) fn bind_shape_with_waker<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.bind_shape_with_public_fields(
+            shape_id,
+            binding_values,
+            BTreeMap::new(),
+            storage,
+            progress_waker,
+        )
     }
 
     fn bind_shape_with_public_fields<S>(
@@ -2711,6 +2749,7 @@ impl IvmRuntime {
         binding_values: &[Value],
         public_fields: BTreeMap<String, Vec<String>>,
         storage: &Rc<S>,
+        progress_waker: Option<&Waker>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -2721,7 +2760,7 @@ impl IvmRuntime {
             public_fields,
             storage,
         )?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
 
@@ -2923,7 +2962,7 @@ impl IvmRuntime {
             storage,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(None)?;
         Ok(subscription)
     }
 
@@ -2952,7 +2991,7 @@ impl IvmRuntime {
             storage,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
-        self.poll_ready_subscription_work_now()?;
+        self.poll_ready_subscription_work_now_with_waker(None)?;
         Ok(subscription)
     }
 

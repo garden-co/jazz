@@ -709,7 +709,11 @@ where
         binding: &Binding,
         binding_source_shape: String,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
+        // Subscription opening performs one bounded IVM poll.  When that poll
+        // finds cold storage, retain the node owner's wake route so the
+        // runtime can resume it without unrelated transport traffic.
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_params = prepared_route_param_names(&program.lowered.parameters);
         if params.is_empty() {
@@ -719,7 +723,10 @@ where
                 .into_iter()
                 .map(|terminal| (terminal.sink, terminal.graph))
                 .collect();
-            return self.database.subscribe(sinks).map_err(Error::Groove);
+            return self
+                .database
+                .subscribe_with_waker(sinks, progress_waker)
+                .map_err(Error::Groove);
         }
         let param_names = params
             .iter()
@@ -762,7 +769,7 @@ where
             .prepare(terminals, binding_source_shape, binding_descriptor)
             .await?;
         self.database
-            .bind_shape(prepared.id(), &values)
+            .bind_shape_with_waker(prepared.id(), &values, progress_waker)
             .await
             .map_err(Error::Groove)
     }

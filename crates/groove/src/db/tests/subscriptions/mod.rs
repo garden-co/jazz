@@ -89,6 +89,90 @@ async fn cold_hydration_wakes_the_supplied_owner_once_without_polling() {
     );
 }
 
+/// Subscription opening performs one bounded incremental poll to publish
+/// resident rows without another owner turn.  That opening poll must retain
+/// the host's durable continuation when it discovers cold storage: otherwise
+/// a worker can render its initial empty view yet never receive the wake that
+/// lets it process a later local write or shutdown.
+#[futures_test::test]
+async fn cold_subscription_open_retains_the_supplied_owner_waker() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::String("opening wake bridge".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let subscription = database
+        .subscribe_with_waker(
+            [("albums", GraphBuilder::table("albums"))],
+            Some(&owner_waker),
+        )
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        1,
+        "the opening poll uses the supplied owner waker rather than Waker::noop"
+    );
+
+    // Simulate the owner turn that the opening poll just requested. It starts
+    // the controlled storage operation and leaves the same durable wake route
+    // attached to that cold operation.
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    let wakes_before_resume = wakes.0.load(Ordering::Acquire);
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        wakes_before_resume + 1,
+        "cold work opened by a subscription schedules its runtime owner"
+    );
+
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert!(
+        subscription.try_recv().is_ok(),
+        "the resumed subscription publishes its seeded snapshot"
+    );
+}
+
 #[futures_test::test]
 async fn subscribe_sends_empty_hydration_snapshot_without_writes() {
     let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");

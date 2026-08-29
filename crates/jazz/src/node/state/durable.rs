@@ -979,6 +979,7 @@ self.database.finish_persistence(persisted)?;
 
     /// Resume all query work that can make progress now, without holding the
     /// caller open for storage-blocked nodes.
+    #[allow(dead_code)] // Test-only and feature-gated direct callers use the no-owner form.
     pub(crate) async fn drive_ready_query_runtime(&mut self) -> Result<(), Error> {
         self.drive_ready_query_runtime_with_waker(None).await
     }

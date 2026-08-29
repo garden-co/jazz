@@ -770,7 +770,10 @@ where
     /// Rebuild this subscriber's maintained views if its process-local claims
     /// changed. Policy claim values are bound when a maintained view opens, so
     /// retaining the old view after a claim change would retain its authority.
-    async fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+    async fn rebind_subscriber_views_after_claim_change(
+        &mut self,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<bool, Error> {
         let connection_epoch = self.connection_epoch;
         let identity = match &self.link {
             ConnectionLink::Subscriber(SubscriberConnectionState { ingest_context, .. }) => {
@@ -815,12 +818,13 @@ where
             };
             let update = {
                 let mut node = self.node.lock().await;
-                peer.rehydrate_query_for_subscription_with_opts(
+                peer.rehydrate_query_for_subscription_with_opts_and_waker(
                     &mut node,
                     maintained_subscription,
                     &shape,
                     &binding,
                     coverage.opts,
+                    progress_waker,
                 )
                 .await?
             };
@@ -996,6 +1000,11 @@ where
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
     pub(super) async fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+        let progress_waker = self
+            .scheduler
+            .borrow()
+            .as_ref()
+            .and_then(|scheduler| scheduler.query_runtime_waker());
         self.bind_subscriber_session_claims();
         let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber(SubscriberConnectionState {
@@ -1030,12 +1039,13 @@ where
             };
             let update = {
                 let mut node = self.node.lock().await;
-                peer.rehydrate_query_for_subscription_with_opts(
+                peer.rehydrate_query_for_subscription_with_opts_and_waker(
                     &mut node,
                     group_subscription,
                     &shape,
                     &binding,
                     coverage.opts.clone(),
+                    progress_waker.as_ref(),
                 )
                 .await?
             };
@@ -1144,7 +1154,8 @@ where
         let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
         self.bind_subscriber_session_claims();
-        self.rebind_subscriber_views_after_claim_change().await?;
+        self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
+            .await?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -2691,6 +2702,7 @@ where
                                 ingest_context.trust,
                                 authority_scope_hydrations,
                                 authority_scope_hydration_count,
+                                progress_waker.as_ref(),
                             )
                             .await?;
                             if !self.pending_control_responses.is_empty() {
@@ -3678,20 +3690,22 @@ where
                                 if group.initialized
                                     || peer.has_maintained_subscription(group_subscription)
                                 {
-                                    peer.rehydrate_query_for_subscription_from_maintained_subscription(
+                                    peer.rehydrate_query_for_subscription_from_maintained_subscription_and_waker(
                                         &mut node,
                                         group_subscription,
                                         subscription,
                                         &group.shape,
+                                        progress_waker.as_ref(),
                                     )
                                     .await
                                 } else {
-                                    peer.rehydrate_query_for_subscription_with_opts(
+                                    peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                         &mut node,
                                         group_subscription,
                                         &group.shape,
                                         &group.binding,
                                         coverage.opts.clone(),
+                                        progress_waker.as_ref(),
                                     )
                                     .await
                                     .map(|update| {
@@ -3774,21 +3788,23 @@ where
                         let update_result = {
                             let mut node = self.node.lock().await;
                             if settled_handoff {
-                                peer.rehydrate_query_for_subscription_with_opts(
+                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
+                                    progress_waker.as_ref(),
                                 )
                                 .await
                             } else {
-                                peer.query_update_for_subscription_with_opts(
+                                peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
+                                    progress_waker.as_ref(),
                                 )
                                 .await
                             }
@@ -4242,6 +4258,7 @@ async fn serve_authorization_scope_intent<S>(
         ServedAuthorizationScopeHydration,
     >,
     hydration_count: &mut u64,
+    progress_waker: Option<&std::task::Waker>,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -4365,12 +4382,13 @@ where
         peer.declare_known_state(subscription, None);
         let update = {
             let mut node = node.lock().await;
-            peer.rehydrate_query_for_subscription_with_opts(
+            peer.rehydrate_query_for_subscription_with_opts_and_waker(
                 &mut node,
                 subscription,
                 shape,
                 binding,
                 scope.options.clone(),
+                progress_waker,
             )
             .await?
         };

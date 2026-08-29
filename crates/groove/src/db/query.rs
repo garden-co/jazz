@@ -270,6 +270,22 @@ impl Database {
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
+        self.subscribe_with_waker(sinks, None)
+    }
+
+    /// Internal owner-loop subscription entrypoint.  A bounded opening poll
+    /// may encounter cold storage; `progress_waker` remains its continuation
+    /// instead of the transient opening task's waker.
+    #[doc(hidden)]
+    pub fn subscribe_with_waker<I, K>(
+        &mut self,
+        sinks: I,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+    {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -280,7 +296,7 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .subscribe(sinks, &storage)
+            .subscribe_with_waker(sinks, &storage, progress_waker)
             .map_err(Error::IvmRuntime)
     }
 
@@ -647,6 +663,18 @@ impl Database {
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
+        self.bind_shape_with_waker(shape, binding_values, None)
+            .await
+    }
+
+    /// Internal owner-loop binding entrypoint; see [`Self::subscribe_with_waker`].
+    #[doc(hidden)]
+    pub async fn bind_shape_with_waker(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -657,7 +685,7 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .bind_shape(shape, binding_values, &storage)
+            .bind_shape_with_waker(shape, binding_values, &storage, progress_waker)
             .map_err(Error::IvmRuntime)
     }
 
