@@ -11,6 +11,7 @@ use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
+use crate::node::query_engine::left_field;
 use crate::protocol::{
     ContributingMembersEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
     RealRowMemberEntry, ResultMemberEntry, RowVersionRef, VersionBundle, VersionBundleRef,
@@ -320,23 +321,12 @@ where
             DurabilityTier::Global => global,
             // Local reads select the greatest global/ahead register winner.
             DurabilityTier::Local => self.local_deletion_winner_tx_id(table, row_uuid).await?,
-            // Edge has the same current tables as Local, but an ahead winner
-            // only participates after Edge acceptance. If an unaccepted/local
-            // ahead winner shadows that table's current row, the executable
-            // Edge graph likewise falls back to the global winner.
+            // Edge filters ahead candidates before selecting a winner. A
+            // later Local register event must not shadow an earlier
+            // Edge-accepted event in that filter/argmax ordering.
             DurabilityTier::Edge => {
-                match self.local_deletion_winner_tx_id(table, row_uuid).await? {
-                    Some(local) => match self.query_transaction_memo(local, context).await? {
-                        Some(stored)
-                            if matches!(stored.fate, Fate::Accepted)
-                                && stored.durability >= DurabilityTier::Edge =>
-                        {
-                            Some(local)
-                        }
-                        _ => global,
-                    },
-                    None => global,
-                }
+                self.edge_visible_deletion_winner_tx_id(table_id, table, row_uuid)
+                    .await?
             }
             // No-tier reads do not have a settled maintained source.
             DurabilityTier::None => None,
@@ -354,6 +344,80 @@ where
             .await?
             .into_iter()
             .find(|version| version.deletion().is_some()))
+    }
+
+    /// Mirror the Edge deletion source exactly: filter accepted
+    /// Edge-or-Global ahead entries first, then select the winner with the
+    /// settled global register.  This cannot be implemented by validating the
+    /// raw Local argmax afterwards because that loses an older visible ahead
+    /// row when a newer Local-only row shares the current key.
+    async fn edge_visible_deletion_winner_tx_id(
+        &mut self,
+        table_id: PhysicalTableId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        use groove::ivm::{LiteralValue, StaticScanSpec};
+
+        let scan = StaticScanSpec::Point(vec![
+            LiteralValue::from(Value::Bytes(BranchKey::default().canonical_bytes())),
+            LiteralValue::from(Value::Uuid(row_uuid.0)),
+        ]);
+        let fields = ["row_uuid", "tx_time", "tx_node_id"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let global = GraphBuilder::table_scan(
+            physical_register_global_current_table_name(table_id),
+            scan.clone(),
+        )
+        .project(fields.clone());
+        let ahead =
+            GraphBuilder::table_scan(physical_register_ahead_current_table_name(table_id), scan);
+        let edge_ahead = GraphBuilder::join(
+            ahead.project(fields.clone()),
+            GraphBuilder::table("jazz_transactions")
+                .filter(
+                    PredicateExpr::And(vec![
+                        PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+                        PredicateExpr::Or(vec![
+                            PredicateExpr::eq("durability", Value::EnumTag(2)),
+                            PredicateExpr::eq("durability", Value::EnumTag(3)),
+                        ])
+                        .canonicalize(),
+                    ])
+                    .canonicalize(),
+                )
+                .project(["time", "node_id"]),
+            ["tx_time", "tx_node_id"],
+            ["time", "node_id"],
+        )
+        .project_fields(
+            fields
+                .into_iter()
+                .map(|field| ProjectField::renamed(left_field(&field), field)),
+        );
+        let result = self
+            .database
+            .query_graph(GraphBuilder::arg_max_by(
+                GraphBuilder::union([global, edge_ahead]),
+                ["row_uuid"],
+                ["tx_time", "tx_node_id"],
+            ))
+            .await
+            .map_err(|error| Self::malformed_current_query_error(table, row_uuid, error))?;
+        let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
+            return Ok(None);
+        };
+        let record = BorrowedRecord::new(&delta.record, &result.descriptor);
+        let time = TxTime(record.get_u64(1)?);
+        let node_alias = NodeAlias(record.get_u64(2)?);
+        let node = self
+            .node_for_alias(node_alias)
+            .ok_or(Error::InvalidStoredValue(
+                "Edge deletion winner references an unknown node alias",
+            ))?;
+        Ok(Some(TxId::new(time, node)))
     }
 
     async fn preflight_view_bundle_conflicts(

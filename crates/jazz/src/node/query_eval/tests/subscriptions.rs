@@ -367,15 +367,8 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
         let initial_tx = commit(&mut server, 1, None);
         let mut peer = PeerState::new();
         let initial = peer
-            .rehydrate_query_for_subscription_with_opts(
-                &mut server,
-                subscription,
-                &shape,
-                &binding,
-                opts.clone(),
-            )
-            .expect("serve initial tiered update")
-            .expect("initial tiered update is ready");
+            .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())
+            .expect("serve initial tiered update");
         reader
             .apply_sync_message_settled(initial)
             .expect("reader applies tiered initial update");
@@ -499,6 +492,134 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
 
         assert_ne!(initial_tx, deletion_tx, "tiered transition tx ids differ");
     }
+}
+
+/// A fresh Edge reader must receive the earlier Edge-visible restore even when
+/// a newer Local-only register event occupies the raw ahead-current key.
+///
+/// server: Global delete t2 ──► Edge restore t3 ──► Local delete t4
+///                                     │                   │
+///                                     └────fresh Edge reader sees t3─────┘
+#[test]
+fn storage_backed_edge_restore_filters_before_ahead_current_winner_selection() {
+    let scalar_schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text)),
+    );
+    let (_server_dir, mut server) =
+        open_node_with_uuid(NodeUuid::from_bytes([0x73; 16]), scalar_schema.clone());
+    let shape = Query::from("notes")
+        .validate(&server.catalogue.schema)
+        .expect("validate Edge shadow query");
+    let binding = shape.bind(BTreeMap::new()).expect("bind Edge shadow query");
+    let edge_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    register_query_shape(&mut server, &shape, edge_opts.clone());
+    subscribe_query_binding_with_opts(&mut server, &shape, &binding, edge_opts.clone());
+
+    let content_tx = server
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row(0), 1)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("visible".to_owned()),
+                )])),
+        )
+        .expect("commit global content");
+    server
+        .apply_fate_update(
+            content_tx,
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept global content");
+    let global_delete_tx = server
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row(0), 2)
+                .made_by(AuthorSubject::SYSTEM)
+                .deletion(crate::tx::DeletionEvent::Deleted),
+        )
+        .expect("commit global deletion");
+    server
+        .apply_fate_update(
+            global_delete_tx,
+            Fate::Accepted,
+            Some(GlobalTime(2)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept global deletion");
+    let edge_restore_tx = server
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row(0), 3)
+                .made_by(AuthorSubject::SYSTEM)
+                .deletion(crate::tx::DeletionEvent::Restored),
+        )
+        .expect("commit Edge restore");
+    server
+        .apply_fate_update(
+            edge_restore_tx,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .expect("accept Edge restore");
+    let local_delete_tx = server
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row(0), 4)
+                .made_by(AuthorSubject::SYSTEM)
+                .deletion(crate::tx::DeletionEvent::Deleted),
+        )
+        .expect("commit Local-only deletion");
+    server
+        .apply_fate_update(
+            local_delete_tx,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Local),
+        )
+        .expect("accept Local-only deletion");
+
+    let (_reader_dir, mut reader) =
+        open_node_with_uuid(NodeUuid::from_bytes([0x74; 16]), scalar_schema);
+    register_query_shape(&mut reader, &shape, edge_opts.clone());
+    subscribe_query_binding_with_opts(&mut reader, &shape, &binding, edge_opts.clone());
+    let update = PeerState::new()
+        .rehydrate_query_with_opts(&mut server, &shape, &binding, edge_opts)
+        .expect("serve fresh Edge hydration");
+    let bundles = match &update {
+        SyncMessage::ViewUpdate(payload) => {
+            crate::protocol::expand_version_carriers(&payload.version_carriers)
+                .expect("fresh Edge carriers should expand")
+        }
+        _ => panic!("fresh Edge scalar subscription must produce a view update"),
+    };
+    assert!(
+        bundles.iter().any(|bundle| {
+            bundle.tx.tx_id == edge_restore_tx
+                && bundle.versions.iter().any(|version| {
+                    version.row_uuid() == row(0)
+                        && version.deletion() == Some(crate::tx::DeletionEvent::Restored)
+                })
+        }),
+        "fresh Edge hydration ships t3 instead of the Global t2 deletion or Local t4 deletion"
+    );
+    reader
+        .apply_sync_message_settled(update)
+        .expect("fresh reader applies Edge hydration");
+    assert_eq!(
+        reader
+            .query_rows(&shape, &binding, DurabilityTier::Edge)
+            .expect("fresh reader Edge lookup")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0)]),
+        "fresh reader matches the source's filter-before-argmax Edge view"
+    );
 }
 
 #[test]
