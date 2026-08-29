@@ -1,10 +1,11 @@
 # jazz-rn
 
 This directory is the React Native package for Jazz's native relay boundary.
-It is a narrow alpha rather than general React Native support. A matching
-native development or release build, plus a capability issued by trusted
-platform admission, enables the ordinary local-first public `Db` API. Expo Go
-cannot contain this native module.
+It is a narrow alpha rather than general React Native support. React Native is
+not yet a supported high-level React Native Jazz client: a matching native
+development or release build and trusted platform admission are necessary
+building blocks, but do not yet constitute an app-facing support guarantee.
+Expo Go cannot contain this native module.
 
 The shared JSI
 HostObject source plus Rust C ABI opens one memory-only foreground `Db` only
@@ -16,11 +17,12 @@ unusable. Android and iOS install the shared private factory through their
 New-Architecture JSI hooks, including a retained host-state lease that makes
 late finalizers harmless during bridge teardown. `jazz-tools/react-native` maps
 the shared local-first query/subscription and ordinary full-cell transaction
-commands onto its existing `NativeRuntimeAdapter`, so a packed consumer can use
-the public schema-backed Db API without a WASM fallback. Advanced families
-(remote tiers, branches, restore, large values, and trusted-serving reads) are
-still deliberately unavailable. The complete ownership/threading/packaging
-contract and staged acceptance path are specified in
+commands onto its existing `NativeRuntimeAdapter`. That implementation is a
+WIP capability rather than a supported app API until rebuilt Android and iOS
+artifacts and real-app device E2E receipts prove the complete path. Advanced
+families (remote tiers, branches, restore, large values, and trusted-serving
+reads) are still deliberately unavailable. The complete
+ownership/threading/packaging contract and staged acceptance path are specified in
 [`jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
 
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
