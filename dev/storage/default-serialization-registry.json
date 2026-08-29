@@ -1447,16 +1447,16 @@
           "path": "crates/jazz/src/node/mod.rs",
           "canonicalPath": "serde_json::Error",
           "location": {
-            "line": 2229,
+            "line": 2285,
             "column": 28
           },
           "span": {
             "start": {
-              "line": 2229,
+              "line": 2285,
               "column": 28
             },
             "end": {
-              "line": 2229,
+              "line": 2285,
               "column": 45
             }
           },
