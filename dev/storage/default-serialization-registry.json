@@ -10,10 +10,47 @@
       "crates/idb-tree/src",
       "crates/jazz-storage-rocksdb/src",
       "crates/jazz-storage-sqlite/src",
+      "crates/jazz/src/db",
+      "crates/jazz/src/db.rs",
       "crates/jazz/src/node"
     ]
   },
   "allowances": [
+    {
+      "id": "typed-schema-view-fingerprint",
+      "path": "crates/jazz/src/db.rs",
+      "pattern": "serde_json::to_vec",
+      "expectedOccurrences": 1,
+      "classification": "A process-local typed-facade map key. It is immediately domain-separated and hashed, and never enters node or adapter storage."
+    },
+    {
+      "id": "relay-upstream-subscription-key",
+      "path": "crates/jazz/src/db/peer_connection.rs",
+      "pattern": "postcard::to_allocvec",
+      "expectedOccurrences": 1,
+      "classification": "Temporary UUIDv5 input for an in-memory relay subscription handle; it is not a persisted subscription identity."
+    },
+    {
+      "id": "catalogue-snapshot-fingerprint",
+      "path": "crates/jazz/src/db/peer_connection.rs",
+      "pattern": "serde_json::to_vec",
+      "expectedOccurrences": 1,
+      "classification": "Temporary BLAKE3 input that suppresses duplicate peer sends in the current process; the snapshot itself crosses the versioned sync path."
+    },
+    {
+      "id": "subscription-size-measurements",
+      "path": "crates/jazz/src/db/lifecycle.rs",
+      "pattern": "postcard::to_allocvec",
+      "expectedOccurrences": 3,
+      "classification": "Testing-feature size estimators; the encoded bytes are measured then discarded."
+    },
+    {
+      "id": "json-api-semantic-transform",
+      "path": "crates/jazz/src/db/mutations.rs",
+      "pattern": "serde_json::(?:from_str|from_slice|to_vec)",
+      "expectedOccurrences": 3,
+      "classification": "Public JSON pointer read/set behavior. JsonSet explicitly transforms application JSON source into a full replacement before Groove stages its ordinary byte edit; this is not an engine-owned record/key codec. Source-preserving versus semantic rewrite behavior is tracked by #2337."
+    },
     {
       "id": "large-value-json-semantics",
       "path": "crates/groove/src/large_values.rs",
