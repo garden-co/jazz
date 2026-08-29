@@ -51,7 +51,8 @@ bounded_file() {
 # macOS runner that verifies the source receipt. Keep the production command
 # injectable and use Perl to supervise a separately grouped child when GNU
 # coreutils is not present. An alarm followed directly by `exec` is not enough:
-# the timer is not a reliable bound across every exec target.
+# a wedged adb helper can retain the command-substitution pipe after its direct
+# parent exits.
 run_bounded() {
   local duration=$1
   shift

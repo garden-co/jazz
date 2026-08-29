@@ -100,7 +100,7 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("../runtime/client.js", () => ({
+vi.mock("../runtime/wasm-loader.js", () => ({
   loadWasmModule: mocks.loadWasmModule,
 }));
 

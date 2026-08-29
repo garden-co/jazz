@@ -27,8 +27,9 @@ export {
 } from "./storage.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export type { AuthSecretStore } from "../runtime/auth-secret-store.js";
-export { schema } from "../index.js";
+export { schema } from "../schema-namespace.js";
 export {
+  REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
 } from "./runtime-source.js";

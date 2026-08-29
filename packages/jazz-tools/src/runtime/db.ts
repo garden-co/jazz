@@ -38,10 +38,6 @@ import {
   type StreamingValueSource,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
-import {
-  DefaultRuntimeSource,
-  trustAttachedBrowserWorkerSession,
-} from "./default-runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
@@ -2800,7 +2796,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
-  trustAttachedBrowserWorkerSession(resolvedConfig);
+  runtimeSource.admitConfig(resolvedConfig as RuntimeConfig);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
   const db =
@@ -2813,10 +2809,6 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   }
 
   return db;
-}
-
-export async function createDb(config: DbConfig): Promise<Db> {
-  return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
 }
 
 /** Keep server-only admission credentials out of every client runtime factory. */

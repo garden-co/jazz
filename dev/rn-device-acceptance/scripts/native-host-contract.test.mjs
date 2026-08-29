@@ -274,6 +274,92 @@ test("protocol receipt builds its workspace API prerequisites from clean outputs
   );
 });
 
+test("the React Native public entrypoint cannot reach the browser WASM loader", () => {
+  const runtimeSource = fs.readFileSync(
+    path.resolve(root, "../../packages/jazz-tools/src/react-native/runtime-source.ts"),
+    "utf8",
+  );
+  const browserRuntimeLoader = fs.readFileSync(
+    path.resolve(root, "../../packages/jazz-tools/src/runtime/default-runtime-source.ts"),
+    "utf8",
+  );
+
+  // Metro resolves the complete static module graph while bundling. A fallback
+  // which only *executes* in a memory configuration still makes the native
+  // package depend on the browser `jazz-wasm` artifact. RN intentionally has
+  // one runtime: the installed native relay.
+  const assertNoBrowserRuntime = (source) => {
+    assert.doesNotMatch(source, /^\s*import[^\n]*DefaultRuntimeSource/m);
+    assert.doesNotMatch(source, /^\s*import[^\n]*wasm-loader/m);
+    assert.doesNotMatch(source, /^\s*import[^\n]*jazz-wasm/m);
+    assert.match(source, /REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR/);
+  };
+  assertNoBrowserRuntime(runtimeSource);
+  assert.match(browserRuntimeLoader, /wasm-loader/);
+
+  // Plant the historical fallback. The receipt must fail rather than relying
+  // on a successful TypeScript build to notice Metro's transitive resolution.
+  assert.throws(
+    () => assertNoBrowserRuntime(`${runtimeSource}\nimport { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";`),
+    /DefaultRuntimeSource/,
+  );
+});
+
+function emittedRelativeModuleGraph(entry, sourceOverrides = new Map()) {
+  const pending = [entry];
+  const visited = new Map();
+  const staticSpecifiers = /(?:^|\n)\s*(?:import|export)\s+(?:[^"'\n]*?\s+from\s+)?["']([^"']+)["']/g;
+  const dynamicSpecifiers = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
+
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (!file || visited.has(file)) continue;
+    const source = sourceOverrides.get(file) ?? fs.readFileSync(file, "utf8");
+    visited.set(file, source);
+    for (const matcher of [staticSpecifiers, dynamicSpecifiers]) {
+      matcher.lastIndex = 0;
+      for (const match of source.matchAll(matcher)) {
+        const specifier = match[1];
+        if (!specifier?.startsWith(".")) continue;
+        const target = path.resolve(path.dirname(file), specifier);
+        assert.equal(fs.existsSync(target), true, `emitted relative module must exist: ${target}`);
+        pending.push(target);
+      }
+    }
+  }
+  return visited;
+}
+
+function assertEmittedRnGraphHasNoBrowserWasm(graph) {
+  const names = [...graph.keys()].map((file) => file.replaceAll("\\", "/"));
+  assert.equal(
+    names.some((file) => /\/runtime\/(?:wasm-loader|default-runtime-source)\.js$/.test(file)),
+    false,
+    "the emitted RN graph must not reach browser/Node runtime loading",
+  );
+  assert.equal(
+    [...graph.values()].some((source) => /(?:from\s*|import\()\s*["']jazz-wasm["']/.test(source)),
+    false,
+    "the emitted RN graph must not mention the browser WASM package",
+  );
+}
+
+test("the emitted React Native graph cannot reach browser WASM through barrel exports", () => {
+  const entry = path.resolve(root, "../../packages/jazz-tools/dist/react-native/index.js");
+  const graph = emittedRelativeModuleGraph(entry);
+  assertEmittedRnGraphHasNoBrowserWasm(graph);
+
+  // Plant the former `../index.js` re-export. This follows the emitted barrel
+  // graph, unlike a direct source-import scan, and must discover its WASM
+  // loader through runtime/index.
+  const oldBarrel = fs.readFileSync(entry, "utf8");
+  const planted = new Map([[entry, oldBarrel.replace("../schema-namespace.js", "../index.js")]]);
+  assert.throws(
+    () => assertEmittedRnGraphHasNoBrowserWasm(emittedRelativeModuleGraph(entry, planted)),
+    /browser\/Node runtime loading|browser WASM package/,
+  );
+});
+
 test("process-restart acceptance has two disjoint, host-terminated phases", () => {
   const androidDriver = read("scripts/run-android.mjs");
   const iosDriver = read("scripts/run-ios.mjs");

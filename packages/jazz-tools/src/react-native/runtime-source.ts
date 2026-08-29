@@ -1,5 +1,4 @@
-import { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";
-import type { RuntimeClientContext, RuntimeTokenOptions } from "../runtime/runtime-source.js";
+import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
 import { JazzClient as JazzRuntimeClient } from "../runtime/client.js";
@@ -53,13 +52,14 @@ export const REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR =
   "React Native persistent runtime requires the installed JazzRelay native artifact and its platform-provided opaque nativeRelay capability";
 export const REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR =
   "React Native nativeRelay is only valid with persistent storage; remove nativeRelay when driver.type='memory'";
+export const REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR =
+  "React Native requires the installed JazzRelay native runtime; driver.type='memory' is not supported";
 
 function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
   return (config.driver?.type ?? "persistent") === "persistent";
 }
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
-  private readonly fallback = new DefaultRuntimeSource();
   private foregroundModule: NativeForegroundModule | null = null;
   private foregroundFactory: NativeForegroundFactory | null = null;
 
@@ -84,7 +84,10 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     }
 
     if (config.nativeRelay) throw new Error(REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR);
-    await this.fallback.load(config);
+    // Do not delegate to DefaultRuntimeSource here. It is the browser/Node
+    // implementation and imports the WASM runtime; Metro resolves that import
+    // even for code paths that would never execute on a native device.
+    throw new Error(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   }
 
   override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
@@ -118,21 +121,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         onAuthFailure: context.onAuthFailure,
       });
     }
-    return this.fallback.createClient(context);
-  }
-
-  override installTelemetry(
-    context: Parameters<DefaultRuntimeSource["installTelemetry"]>[0],
-  ): (() => void) | null | undefined {
-    return this.fallback.installTelemetry(context);
-  }
-
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return this.fallback.mintLocalFirstToken(options);
-  }
-
-  override mintAnonymousToken(options: RuntimeTokenOptions): string {
-    return this.fallback.mintAnonymousToken(options);
+    throw new Error(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   }
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -15,6 +15,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 const script = new URL("./boot-android-emulator.sh", import.meta.url).pathname;
+
+function hostCommand(command) {
+  return execFileSync("sh", ["-lc", `command -v ${command}`], { encoding: "utf8" }).trim();
+}
 
 const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
   const fixture = mkdtempSync(join(tmpdir(), `jazz-rn-boot-${name}-`));
@@ -41,11 +45,11 @@ const withFixture = (name, adbBody, emulatorBody, assertion, options = {}) => {
       // receipt: a green portable test must have taken the macOS fallback.
       mkdirSync(portableBin);
       for (const command of ["bash", "sleep", "tail", "tr"]) {
-        symlinkSync(`/usr/bin/${command}`, join(portableBin, command));
+        symlinkSync(hostCommand(command), join(portableBin, command));
       }
       writeFileSync(
         join(portableBin, "perl"),
-        '#!/bin/sh\nprintf "%s\\n" "${JAZZ_TEST_PERL_MARKER:?}" > "$JAZZ_TEST_PERL_MARKER"\nexec /usr/bin/perl "$@"\n',
+        `#!/bin/sh\nprintf "%s\\n" "\${JAZZ_TEST_PERL_MARKER:?}" > "$JAZZ_TEST_PERL_MARKER"\nexec ${JSON.stringify(hostCommand("perl"))} "$@"\n`,
       );
       chmodSync(join(portableBin, "perl"), 0o755);
     }

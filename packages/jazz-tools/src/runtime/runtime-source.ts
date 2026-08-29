@@ -87,6 +87,9 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     await this.loadRuntime(config);
   }
 
+  /** Apply source-specific admission after the shared auth config is resolved. */
+  admitConfig(_config: RuntimeConfig): void {}
+
   protected async loadRuntime(_config: RuntimeConfig): Promise<unknown> {
     return undefined;
   }

@@ -49,6 +49,7 @@ import {
   createDb,
   createJazzClient,
   REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
+  REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
@@ -125,13 +126,14 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     expect((error as Error).message).toMatch(/createJazzContext/);
   });
 
-  it("routes explicit memory configuration through the Node WASM harness", async () => {
-    client = await createJazzClient({
+  it("rejects explicit memory configuration instead of importing the browser WASM runtime", async () => {
+    const error = await createJazzClient({
       appId: "react-native-memory-launch-test",
       driver: { type: "memory" },
-    });
+    }).catch((error: unknown) => error);
 
-    await expect(client.db.all(app.notes)).resolves.toEqual([]);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   });
 
   it("accepts native admission only through the public RN client config", () => {
@@ -346,17 +348,14 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
-  it("can shut down and reopen the Node-only memory scaffold", async () => {
+  it("keeps the Node-only memory scaffold out of the React Native entrypoint", async () => {
     const config = {
       appId: "react-native-memory-reopen-test",
       driver: { type: "memory" as const },
     };
-    client = await createJazzClient(config);
-    await expect(client.db.all(app.notes)).resolves.toEqual([]);
-    await client.shutdown();
-
-    client = await createJazzClient(config);
-    await expect(client.db.all(app.notes)).resolves.toEqual([]);
+    const error = await createJazzClient(config).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR);
   });
 });
 
