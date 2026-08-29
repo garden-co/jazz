@@ -6,16 +6,10 @@
  * the installed-app acceptance suite.
  */
 module.exports = {
-  testEnvironment: 'node',
-  testMatch: ['<rootDir>/src/**/__tests__/**/*.[jt]s?(x)'],
+  testEnvironment: "node",
+  testMatch: ["<rootDir>/src/**/__tests__/**/*.[jt]s?(x)"],
   transform: {
-    '^.+\\.[jt]sx?$': [
-      'babel-jest',
-      { presets: ['module:@react-native/babel-preset'] },
-    ],
+    "^.+\\.[jt]sx?$": ["babel-jest", { presets: ["module:@react-native/babel-preset"] }],
   },
-  modulePathIgnorePatterns: [
-    '<rootDir>/example/node_modules',
-    '<rootDir>/lib/',
-  ],
+  modulePathIgnorePatterns: ["<rootDir>/example/node_modules", "<rootDir>/lib/"],
 };

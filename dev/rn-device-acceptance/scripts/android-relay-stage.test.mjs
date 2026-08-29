@@ -35,18 +35,13 @@ function staged({ omit = false, corrupt = false } = {}) {
       files,
     }),
   );
-  if (corrupt)
-    writeFileSync(
-      join(libraryRoot, androidRelayFiles[0]),
-      "corrupt staged relay",
-    );
+  if (corrupt) writeFileSync(join(libraryRoot, androidRelayFiles[0]), "corrupt staged relay");
   return root;
 }
 
 test("accepts a staged manifest only with the exact four Android ABI libraries", () => {
   assert.equal(
-    verifyAndroidRelayStage({ packageRoot: staged(), sourceRevision: revision })
-      .files.length,
+    verifyAndroidRelayStage({ packageRoot: staged(), sourceRevision: revision }).files.length,
     4,
   );
 });
