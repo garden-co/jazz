@@ -134,8 +134,17 @@ pub struct AuthConfig {
     pub jwks_url: Option<String>,
     /// Single JWK JSON object or PEM public key used to verify external JWTs.
     pub jwt_public_key: Option<String>,
+    /// Issuer that every externally verified JWT must contain.
+    pub jwt_issuer: Option<String>,
+    /// Audience that every externally verified JWT must target.
+    pub jwt_audience: Option<String>,
     /// Cookie name used to read browser auth tokens during the WS upgrade.
     pub auth_cookie_name: Option<String>,
+    /// Trust `X-Forwarded-Host` for cookie WebSocket origin checks.
+    ///
+    /// Enable only when every request reaches Jazz through a trusted proxy
+    /// that removes client-supplied forwarded headers.
+    pub trust_forwarded_host: bool,
     /// Whether local-first Ed25519 JWT auth is allowed (default: true for new apps).
     pub allow_local_first_auth: bool,
     /// Secret for backend session impersonation.
@@ -151,7 +160,10 @@ impl AuthConfig {
     pub fn is_configured(&self) -> bool {
         self.jwks_url.is_some()
             || self.jwt_public_key.is_some()
+            || self.jwt_issuer.is_some()
+            || self.jwt_audience.is_some()
             || self.auth_cookie_name.is_some()
+            || self.trust_forwarded_host
             || self.allow_local_first_auth
             || self.backend_secret.is_some()
             || self.admin_secret.is_some()
@@ -190,6 +202,37 @@ pub struct JwtClaims {
     pub iat: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum JwtAudience {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl JwtAudience {
+    fn into_values(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DecodedJwtClaims {
+    sub: String,
+    #[serde(default)]
+    iss: Option<String>,
+    #[serde(default)]
+    aud: Option<JwtAudience>,
+    #[serde(default)]
+    claims: serde_json::Value,
+    #[serde(default)]
+    exp: Option<u64>,
+    #[serde(default)]
+    nbf: Option<u64>,
+}
+
 /// JWT identity data extracted after signature validation.
 #[derive(Debug, Clone)]
 pub struct VerifiedJwt {
@@ -197,6 +240,8 @@ pub struct VerifiedJwt {
     pub issuer: Option<String>,
     pub claims: serde_json::Value,
     pub exp: Option<u64>,
+    pub audiences: Vec<String>,
+    pub not_before: Option<u64>,
 }
 
 /// JWT validation error.
@@ -302,14 +347,13 @@ impl JwksCache {
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
 
-        // Downgrade forced refresh if within cooldown window.
-        let force_refresh = if force_refresh {
-            let last = self.last_forced_refresh_us.load(Ordering::SeqCst);
-            let age_us = now_timestamp_us().saturating_sub(last);
-            age_us > cooldown_us
-        } else {
-            false
-        };
+        // Reserve a forced refresh before starting network I/O.  A plain
+        // load-then-store here would let every concurrent request carrying an
+        // unknown `kid` observe the old timestamp and trigger its own JWKS
+        // fetch.  The reservation deliberately survives a failed fetch: the
+        // cooldown protects the endpoint from the unauthenticated caller in
+        // precisely that failure case as well.
+        let force_refresh = force_refresh && self.reserve_forced_refresh(cooldown_us);
 
         if !force_refresh {
             let guard = self.cached.read().await;
@@ -349,9 +393,6 @@ impl JwksCache {
         };
 
         let now = now_timestamp_us();
-        if force_refresh {
-            self.last_forced_refresh_us.store(now, Ordering::SeqCst);
-        }
 
         *self.cached.write().await = Some(CachedJwksEntry {
             endpoint: self.endpoint.clone(),
@@ -360,6 +401,27 @@ impl JwksCache {
         });
 
         Ok(jwks)
+    }
+
+    /// Atomically claim the one forced refresh permitted by the cooldown.
+    ///
+    /// This is intentionally independent of cache loading: it must happen
+    /// before an unknown-key request can begin an outbound JWKS request.
+    fn reserve_forced_refresh(&self, cooldown_us: u64) -> bool {
+        loop {
+            let last = self.last_forced_refresh_us.load(Ordering::SeqCst);
+            let now = now_timestamp_us();
+            if now.saturating_sub(last) <= cooldown_us {
+                return false;
+            }
+            if self
+                .last_forced_refresh_us
+                .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
 }
 
@@ -372,11 +434,16 @@ impl JwtVerifier {
     pub async fn validate_at(
         &self,
         token: &str,
+        config: &AuthConfig,
         now_seconds: u64,
     ) -> Result<VerifiedJwt, JwtError> {
         match self {
-            Self::Jwks(cache) => validate_jwt_with_cache_at(token, cache, now_seconds).await,
-            Self::Static(verifier) => validate_jwt_with_static_key_at(token, verifier, now_seconds),
+            Self::Jwks(cache) => {
+                validate_jwt_with_cache_at(token, cache, config, now_seconds).await
+            }
+            Self::Static(verifier) => {
+                validate_jwt_with_static_key_at(token, verifier, config, now_seconds)
+            }
         }
     }
 }
@@ -566,7 +633,11 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
 
         let jwt_result = if let Some(ref verifier) = state.jwt_verifier {
             verifier
-                .validate_at(token, state.auth_config.clock.now_seconds())
+                .validate_at(
+                    token,
+                    &state.auth_config,
+                    state.auth_config.clock.now_seconds(),
+                )
                 .await
         } else {
             Err(JwtError::NoKeyConfigured)
@@ -692,6 +763,17 @@ fn signature_only_validation(alg: Algorithm) -> Validation {
     validation
 }
 
+fn verified_jwt(claims: DecodedJwtClaims) -> VerifiedJwt {
+    VerifiedJwt {
+        subject: claims.sub,
+        issuer: claims.iss,
+        claims: claims.claims,
+        exp: claims.exp,
+        audiences: claims.aud.map(JwtAudience::into_values).unwrap_or_default(),
+        not_before: claims.nbf,
+    }
+}
+
 fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm) -> Vec<&'a Jwk> {
     let mut candidates = Vec::new();
 
@@ -747,15 +829,8 @@ pub fn verify_jwt_signature_with_jwks(
             }
         };
 
-        match decode::<JwtClaims>(token, &decoding_key, &validation) {
-            Ok(data) => {
-                return Ok(VerifiedJwt {
-                    subject: data.claims.sub,
-                    issuer: data.claims.iss,
-                    claims: data.claims.claims,
-                    exp: data.claims.exp,
-                });
-            }
+        match decode::<DecodedJwtClaims>(token, &decoding_key, &validation) {
+            Ok(data) => return Ok(verified_jwt(data.claims)),
             Err(e) => {
                 last_error = Some(format!("JWT signature verification failed: {e}"));
             }
@@ -767,13 +842,49 @@ pub fn verify_jwt_signature_with_jwks(
     )))
 }
 
-fn ensure_jwt_not_expired_at(verified: &VerifiedJwt, now: u64) -> Result<(), JwtError> {
-    let Some(exp) = verified.exp else {
-        return Ok(());
-    };
+fn ensure_external_jwt_claims_at(
+    verified: &VerifiedJwt,
+    config: &AuthConfig,
+    now: u64,
+) -> Result<(), JwtError> {
+    let expected_issuer = config.jwt_issuer.as_deref().ok_or_else(|| {
+        JwtError::Invalid(
+            "external JWT issuer is not configured; set --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
+        )
+    })?;
+    let expected_audience = config.jwt_audience.as_deref().ok_or_else(|| {
+        JwtError::Invalid(
+            "external JWT audience is not configured; set --jwt-audience / JAZZ_JWT_AUDIENCE"
+                .to_owned(),
+        )
+    })?;
 
+    if verified.issuer.as_deref() != Some(expected_issuer) {
+        return Err(JwtError::Invalid(
+            "JWT issuer does not match the configured issuer".to_owned(),
+        ));
+    }
+    if !verified
+        .audiences
+        .iter()
+        .any(|audience| audience == expected_audience)
+    {
+        return Err(JwtError::Invalid(
+            "JWT audience does not include the configured audience".to_owned(),
+        ));
+    }
+
+    let exp = verified
+        .exp
+        .ok_or_else(|| JwtError::Invalid("JWT exp claim is required".to_owned()))?;
     if exp <= now {
         return Err(JwtError::Expired);
+    }
+    if verified
+        .not_before
+        .is_some_and(|not_before| not_before > now)
+    {
+        return Err(JwtError::Invalid("JWT is not valid yet".to_owned()));
     }
 
     Ok(())
@@ -788,13 +899,15 @@ fn ensure_jwt_not_expired_at(verified: &VerifiedJwt, now: u64) -> Result<(), Jwt
 pub async fn validate_jwt_with_cache(
     token: &str,
     cache: &JwksCache,
+    config: &AuthConfig,
 ) -> Result<VerifiedJwt, JwtError> {
-    validate_jwt_with_cache_at(token, cache, system_now_seconds()).await
+    validate_jwt_with_cache_at(token, cache, config, system_now_seconds()).await
 }
 
 pub async fn validate_jwt_with_cache_at(
     token: &str,
     cache: &JwksCache,
+    config: &AuthConfig,
     now_seconds: u64,
 ) -> Result<VerifiedJwt, JwtError> {
     let cached_jwks = cache.load(false).await.map_err(|e| {
@@ -804,7 +917,7 @@ pub async fn validate_jwt_with_cache_at(
 
     match verify_jwt_signature_with_jwks(token, &cached_jwks) {
         Ok(verified) => {
-            ensure_jwt_not_expired_at(&verified, now_seconds)?;
+            ensure_external_jwt_claims_at(&verified, config, now_seconds)?;
             return Ok(verified);
         }
         Err(JwtVerificationError::Fatal(e)) => return Err(JwtError::Invalid(e)),
@@ -823,7 +936,7 @@ pub async fn validate_jwt_with_cache_at(
 
     match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
         Ok(verified) => {
-            ensure_jwt_not_expired_at(&verified, now_seconds)?;
+            ensure_external_jwt_claims_at(&verified, config, now_seconds)?;
             Ok(verified)
         }
         Err(JwtVerificationError::Retryable(e) | JwtVerificationError::Fatal(e)) => {
@@ -848,13 +961,8 @@ fn verify_jwt_signature_with_pem_public_key(
     }
 
     let validation = signature_only_validation(header.alg);
-    match decode::<JwtClaims>(token, &verifier.decoding_key, &validation) {
-        Ok(data) => Ok(VerifiedJwt {
-            subject: data.claims.sub,
-            issuer: data.claims.iss,
-            claims: data.claims.claims,
-            exp: data.claims.exp,
-        }),
+    match decode::<DecodedJwtClaims>(token, &verifier.decoding_key, &validation) {
+        Ok(data) => Ok(verified_jwt(data.claims)),
         Err(e) => Err(JwtVerificationError::Fatal(format!(
             "JWT signature verification failed: {e}"
         ))),
@@ -864,6 +972,7 @@ fn verify_jwt_signature_with_pem_public_key(
 pub fn validate_jwt_with_static_key_at(
     token: &str,
     verifier: &StaticJwtVerifier,
+    config: &AuthConfig,
     now_seconds: u64,
 ) -> Result<VerifiedJwt, JwtError> {
     let verified = match verifier {
@@ -878,7 +987,7 @@ pub fn validate_jwt_with_static_key_at(
         }
     })?;
 
-    ensure_jwt_not_expired_at(&verified, now_seconds)?;
+    ensure_external_jwt_claims_at(&verified, config, now_seconds)?;
     Ok(verified)
 }
 
@@ -1041,7 +1150,7 @@ pub async fn extract_session(
         // External JWT path.
         let jwt_result = if let Some(verifier) = jwt_verifier {
             verifier
-                .validate_at(token, config.clock.now_seconds())
+                .validate_at(token, config, config.clock.now_seconds())
                 .await
         } else {
             Err(JwtError::NoKeyConfigured)
@@ -1130,6 +1239,8 @@ mod tests {
     fn make_test_config() -> AuthConfig {
         AuthConfig {
             jwks_url: Some("https://example.test/.well-known/jwks.json".to_string()),
+            jwt_issuer: Some("https://issuer.jazz.test".to_owned()),
+            jwt_audience: Some("jazz-audience".to_owned()),
             allow_local_first_auth: false,
             backend_secret: Some("backend-secret-12345".to_string()),
             admin_secret: Some("admin-secret-67890".to_string()),
@@ -1156,6 +1267,40 @@ mod tests {
         JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
     }
 
+    #[test]
+    fn forced_jwks_refresh_reservation_allows_only_one_concurrent_request() {
+        let cache = std::sync::Arc::new(test_jwks_cache());
+        let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        cache.last_forced_refresh_us.store(
+            now_timestamp_us().saturating_sub(cooldown_us.saturating_add(1)),
+            Ordering::SeqCst,
+        );
+
+        let callers = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(callers));
+        let mut workers = Vec::with_capacity(callers);
+        for _ in 0..callers {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                cache.reserve_forced_refresh(cooldown_us)
+            }));
+        }
+
+        let refreshes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("forced-refresh worker must not panic"))
+            .filter(|claimed| *claimed)
+            .count();
+        assert_eq!(
+            refreshes, 1,
+            "only one unknown-kid request may refresh JWKS"
+        );
+    }
+
     fn test_jwt_verifier() -> JwtVerifier {
         JwtVerifier::Jwks(test_jwks_cache())
     }
@@ -1164,7 +1309,77 @@ mod tests {
         let key = EncodingKey::from_secret(secret.as_bytes());
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some(kid.to_string());
-        encode(&header, claims, &key).unwrap()
+        let mut claims = serde_json::to_value(claims).unwrap();
+        let object = claims.as_object_mut().unwrap();
+        if object.get("exp").is_none_or(serde_json::Value::is_null) {
+            object.insert("exp".to_owned(), serde_json::json!(4_102_444_800_u64));
+        }
+        object.insert("aud".to_owned(), serde_json::json!("jazz-audience"));
+        encode(&header, &claims, &key).unwrap()
+    }
+
+    fn make_raw_jwt(claims: serde_json::Value) -> String {
+        let key = EncodingKey::from_secret(TEST_JWKS_SECRET.as_bytes());
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(TEST_JWKS_KID.to_string());
+        encode(&header, &claims, &key).unwrap()
+    }
+
+    #[tokio::test]
+    async fn bug_119_external_jwt_admission_is_bound_and_time_limited() {
+        let config = make_test_config();
+        let verifier = test_jwt_verifier();
+        let now = config.clock.now_seconds();
+        let cases = [
+            (
+                "wrong issuer",
+                serde_json::json!({
+                    "iss": "https://other-issuer.jazz.test",
+                    "aud": "jazz-audience",
+                    "sub": "user-123",
+                    "exp": now + 3_600,
+                }),
+            ),
+            (
+                "wrong audience",
+                serde_json::json!({
+                    "iss": "https://issuer.jazz.test",
+                    "aud": "other-audience",
+                    "sub": "user-123",
+                    "exp": now + 3_600,
+                }),
+            ),
+            (
+                "missing expiration",
+                serde_json::json!({
+                    "iss": "https://issuer.jazz.test",
+                    "aud": "jazz-audience",
+                    "sub": "user-123",
+                }),
+            ),
+            (
+                "not yet valid",
+                serde_json::json!({
+                    "iss": "https://issuer.jazz.test",
+                    "aud": "jazz-audience",
+                    "sub": "user-123",
+                    "nbf": now + 600,
+                    "exp": now + 3_600,
+                }),
+            ),
+        ];
+
+        for (case, claims) in cases {
+            let token = make_raw_jwt(claims);
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+            assert!(
+                extract_session(&headers, test_app_id(), &config, Some(&verifier))
+                    .await
+                    .is_err(),
+                "{case} JWT must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1176,6 +1391,8 @@ mod tests {
                     issuer: Some("https://issuer.jazz.test".to_owned()),
                     claims: serde_json::json!({}),
                     exp: None,
+                    audiences: Vec::new(),
+                    not_before: None,
                 })
                 .is_err()
             );
@@ -1187,6 +1404,8 @@ mod tests {
             issuer: Some("https://issuer.jazz.test".to_owned()),
             claims: serde_json::json!({}),
             exp: None,
+            audiences: Vec::new(),
+            not_before: None,
         })
         .unwrap();
         assert_eq!(session.user_id, subject);
@@ -1332,7 +1551,7 @@ mod tests {
 
         let claims = JwtClaims {
             sub: "cookie-user".to_string(),
-            iss: Some("https://issuer.example".to_string()),
+            iss: Some("https://issuer.jazz.test".to_string()),
             claims: serde_json::json!({ "role": "editor" }),
             exp: None,
             iat: None,
@@ -1360,7 +1579,7 @@ mod tests {
 
         let claims = JwtClaims {
             sub: "user-42".to_string(),
-            iss: Some("https://issuer.example".to_string()),
+            iss: Some("https://issuer.jazz.test".to_string()),
             claims: serde_json::json!({ "role": "admin" }),
             exp: None,
             iat: None,
@@ -1376,7 +1595,7 @@ mod tests {
         assert_eq!(session.user_id, "user-42");
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::External);
         assert_eq!(session.claims["subject"], "user-42");
-        assert_eq!(session.claims["issuer"], "https://issuer.example");
+        assert_eq!(session.claims["issuer"], "https://issuer.jazz.test");
     }
 
     #[test]
@@ -1392,6 +1611,8 @@ mod tests {
                     issuer,
                     claims: serde_json::json!({}),
                     exp: None,
+                    audiences: Vec::new(),
+                    not_before: None,
                 })
                 .is_err(),
                 "missing or ASCII-whitespace-only issuer must be rejected"
@@ -1403,6 +1624,8 @@ mod tests {
             issuer: Some(" https://issuer.example ".to_owned()),
             claims: serde_json::json!({}),
             exp: None,
+            audiences: Vec::new(),
+            not_before: None,
         })
         .expect("non-empty issuer is retained exactly");
         assert_eq!(session.issuer, " https://issuer.example ");

@@ -30,7 +30,7 @@ fn current_winner_projects_rename_copy_chains_across_durability_tiers() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -141,7 +141,7 @@ fn assert_current_winner_copied_enum_remap(
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -192,7 +192,7 @@ fn assert_current_winner_copied_enum_remap(
                     transform: "jazz.identity".to_owned(),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

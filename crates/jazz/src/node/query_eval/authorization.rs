@@ -1769,23 +1769,27 @@ mod authorization_scope_compiler_tests {
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                SchemaVersion::new(evolved),
-                MigrationLens::new(
-                    base.version_id(),
-                    evolved_id,
-                    vec![TableLens {
-                        source_table: "notes".to_owned(),
-                        target_table: "notes".to_owned(),
-                        ops: vec![LensOp::AddColumn {
-                            column: "body".to_owned(),
-                            default: Value::String(String::new()),
+            publication: Box::new(
+                node.author_schema_lineage_publication(
+                    SchemaVersion::new(evolved),
+                    MigrationLens::new(
+                        base.version_id(),
+                        evolved_id,
+                        vec![TableLens {
+                            source_table: "notes".to_owned(),
+                            target_table: "notes".to_owned(),
+                            ops: vec![LensOp::AddColumn {
+                                column: "body".to_owned(),
+                                default: Value::String(String::new()),
+                            }],
                         }],
-                    }],
-                ),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+                    )
+                    .expect("valid migration lens"),
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )
+                .unwrap(),
+            ),
         })
         .unwrap();
         node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
@@ -1879,29 +1883,33 @@ mod authorization_scope_compiler_tests {
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                SchemaVersion::new(evolved),
-                MigrationLens::new(
-                    base.version_id(),
-                    evolved_id,
-                    vec![TableLens {
-                        source_table: "users".to_owned(),
-                        target_table: "people".to_owned(),
-                        ops: vec![
-                            LensOp::RenameTable {
-                                from: "users".to_owned(),
-                                to: "people".to_owned(),
-                            },
-                            LensOp::AddColumn {
-                                column: "body".to_owned(),
-                                default: Value::String("migrated".to_owned()),
-                            },
-                        ],
-                    }],
-                ),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+            publication: Box::new(
+                node.author_schema_lineage_publication(
+                    SchemaVersion::new(evolved),
+                    MigrationLens::new(
+                        base.version_id(),
+                        evolved_id,
+                        vec![TableLens {
+                            source_table: "users".to_owned(),
+                            target_table: "people".to_owned(),
+                            ops: vec![
+                                LensOp::RenameTable {
+                                    from: "users".to_owned(),
+                                    to: "people".to_owned(),
+                                },
+                                LensOp::AddColumn {
+                                    column: "body".to_owned(),
+                                    default: Value::String("migrated".to_owned()),
+                                },
+                            ],
+                        }],
+                    )
+                    .expect("valid migration lens"),
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )
+                .unwrap(),
+            ),
         })
         .unwrap();
         node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {

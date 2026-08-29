@@ -72,17 +72,23 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
     upstream_transport
         .send(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                target.clone(),
-                lens,
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+            publication: Box::new(
+                SchemaLineagePublication::author_from_prior(
+                    &base,
+                    &crate::protocol::PhysicalIdentityManifest::allocate(&base),
+                    target.clone(),
+                    lens,
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )
+                .unwrap(),
+            ),
         })
         .unwrap();
 

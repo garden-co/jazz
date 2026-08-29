@@ -76,6 +76,79 @@ fn descriptor_fields_remain_in_declaration_order() {
 }
 
 #[test]
+fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
+    // A descriptor can cross a durable engine boundary (for example, inside a
+    // Jazz settled result payload). Its encoding must therefore be Groove's
+    // normal record/value algebra, not the incidental serde layout of these
+    // Rust types. Cover every recursive descriptor family here; concrete
+    // persistent-key fixtures live with Jazz's result-member codec.
+    let status = ScalarEnumSchema::new("status", ["draft", "published"]).unwrap();
+    let event = EnumSchema::new(
+        "event",
+        [
+            EnumCase::new("none", RecordDescriptor::default()),
+            EnumCase::new("changed", RecordDescriptor::new([("at", ValueType::U64)])),
+        ],
+    )
+    .unwrap();
+    let descriptor = RecordDescriptor::new([
+        ("u8", ValueType::U8),
+        ("u16", ValueType::U16),
+        ("u32", ValueType::U32),
+        ("u64", ValueType::U64),
+        ("i32", ValueType::I32),
+        ("i64", ValueType::I64),
+        ("f64", ValueType::F64),
+        ("bool", ValueType::Bool),
+        ("string", ValueType::String),
+        ("bytes", ValueType::Bytes),
+        ("raw_string", ValueType::raw_string()),
+        ("raw_bytes", ValueType::raw_bytes()),
+        (
+            "stored_bytes",
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::Bytes),
+        ),
+        (
+            "stored_string",
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::String),
+        ),
+        (
+            "stored_json",
+            ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+        ),
+        ("uuid", ValueType::Uuid),
+        ("tag", ValueType::EnumTag(status)),
+        (
+            "tuple",
+            ValueType::Tuple(vec![ValueType::U32, ValueType::Bool]),
+        ),
+        (
+            "array",
+            ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ),
+        (
+            "record",
+            ValueType::Record(Box::new(RecordDescriptor::new([("child", ValueType::U8)]))),
+        ),
+        ("event", ValueType::Enum(Box::new(event))),
+    ]);
+    let encoded = encode_record_descriptor(&descriptor).unwrap();
+    assert_eq!(
+        blake3::hash(&encoded).to_hex().as_str(),
+        "cbd13e34977a858a99ed0b54faf55883ce9893d125401d3c47d1a030fd43e3eb"
+    );
+    let decoded = decode_record_descriptor(&encoded).unwrap();
+    assert_eq!(encode_record_descriptor(&decoded).unwrap(), encoded);
+
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(decode_record_descriptor(&trailing).is_err());
+    let mut corrupt = encoded;
+    corrupt[0] ^= 1;
+    assert!(decode_record_descriptor(&corrupt).is_err());
+}
+
+#[test]
 fn record_newtype_static_wrapper_round_trips_in_logical_order() {
     let descriptor = RecordDescriptor::new([
         ("id", ValueType::U64),

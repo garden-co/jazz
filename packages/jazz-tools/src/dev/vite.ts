@@ -29,6 +29,8 @@ export interface JazzServerOptions {
   dataDir?: string;
   inMemory?: boolean;
   jwksUrl?: string;
+  jwtIssuer?: string;
+  jwtAudience?: string;
 }
 
 export interface JazzPluginOptions {

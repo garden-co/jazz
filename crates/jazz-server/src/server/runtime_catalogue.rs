@@ -235,11 +235,12 @@ fn convert_lens(lens: &Lens, source: &Schema, target: &Schema) -> Result<Migrati
         table_lens.ops.push(runtime_op);
     }
 
-    Ok(MigrationLens::new(
+    MigrationLens::new(
         source_runtime.version_id(),
         target_runtime.version_id(),
         table_lenses,
-    ))
+    )
+    .map_err(str::to_owned)
 }
 
 fn public_value_to_core(value: Value) -> Result<CoreValue, String> {

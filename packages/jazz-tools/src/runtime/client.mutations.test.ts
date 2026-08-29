@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   JazzClient,
-  type BatchId,
-  type OpenBatchId,
+  type TxId,
+  type OpenTransactionId,
   type Runtime,
   type TransactionalRuntime,
   type WriteReceipt,
@@ -19,12 +19,12 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     writeContextJson: string | null | undefined,
     committedId: string,
   ): WriteReceipt => {
-    const openBatchId = writeContextJson
-      ? (JSON.parse(writeContextJson).batch_id as OpenBatchId | undefined)
+    const openTransactionId = writeContextJson
+      ? (JSON.parse(writeContextJson).transaction_id as OpenTransactionId | undefined)
       : undefined;
-    return openBatchId
-      ? { kind: "staged", openBatchId }
-      : { kind: "committed", batchId: committedId as BatchId };
+    return openTransactionId
+      ? { kind: "staged", openTransactionId }
+      : { kind: "committed", txId: committedId as TxId };
   };
   const insertCalls: Array<
     [string, Record<string, unknown>, string | undefined, string | undefined]
@@ -111,7 +111,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    commitTransaction: vi.fn(() => "committed-batch" as BatchId),
+    commitTransaction: vi.fn(() => "committed-batch" as TxId),
     rollbackTransaction: async () => false,
   };
   const runtime: TransactionalRuntime = { ...runtimeBase, ...runtimeOverrides };

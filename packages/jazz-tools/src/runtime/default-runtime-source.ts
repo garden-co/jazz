@@ -25,7 +25,9 @@ import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-f
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import {
   ANONYMOUS_JWT_ISSUER,
+  internalSessionFromVerifiedReservedJwtPayload,
   LOCAL_FIRST_JWT_ISSUER,
+  parseJwtPayload,
   resolveClientInternalSessionSync,
 } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -71,6 +73,41 @@ function sessionFromConfig(config: DbConfig) {
     ...config,
     trustedReservedSession: getTrustedReservedSession(config),
   });
+}
+
+/**
+ * Admit the identity carried by a same-origin inspector attachment.
+ *
+ * The session is used only to bind the main-thread peer to the host worker's
+ * identity. Reserved-issuer tokens remain fail-closed: the native constructor
+ * verifies the self-signed proof and audience before this peer can open.
+ */
+export function trustAttachedBrowserWorkerSession(config: DbConfig): void {
+  const attachedSession = config.runtimeSources?.browserWorkerSession;
+  if (!config.runtimeSources?.browserWorkerPort || !attachedSession) return;
+
+  const payload = parseJwtPayload(config.jwtToken ?? "");
+  const authMode =
+    payload?.iss === LOCAL_FIRST_JWT_ISSUER
+      ? "local-first"
+      : payload?.iss === ANONYMOUS_JWT_ISSUER
+        ? "anonymous"
+        : null;
+  if (!authMode) return;
+
+  const tokenSession = internalSessionFromVerifiedReservedJwtPayload(payload ?? {}, authMode);
+  if (
+    !tokenSession ||
+    tokenSession.issuer !== attachedSession.issuer ||
+    tokenSession.user_id !== attachedSession.user_id ||
+    tokenSession.authMode !== attachedSession.authMode
+  ) {
+    throw new Error("Attached browser worker session does not match its identity token");
+  }
+
+  // Claims come from the token, not the cross-realm session object. The native
+  // open below verifies the token before accepting this author.
+  setTrustedReservedSession(config, tokenSession);
 }
 
 function runtimeAuthorFromConfig(config: DbConfig) {

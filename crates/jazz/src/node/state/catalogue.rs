@@ -2,6 +2,107 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Reservation history for admitting `candidate_schema`. Descendant parked
+    /// envelopes are excluded: they are allowed to inherit identities minted
+    /// by this candidate, even when they arrived out of order. Unrelated
+    /// parked/staged envelopes remain reservations and therefore cannot claim
+    /// one of its new UUIDs first.
+    pub(super) fn physical_identity_history_for_candidate(
+        &self,
+        candidate_schema: SchemaVersionId,
+        omit: Option<crate::ids::SchemaLineagePublicationId>,
+    ) -> Vec<PhysicalIdentityManifest> {
+        let mut parents = BTreeMap::new();
+        for lineage in self.catalogue.active_lineages_by_target.values() {
+            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+        }
+        for lineage in self.catalogue.staged_lineages.values() {
+            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+        }
+        for lineage in self.catalogue.pending_lineages.values() {
+            parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+        }
+        let is_descendant = |schema: SchemaVersionId| {
+            let mut cursor = schema;
+            let mut visited = BTreeSet::new();
+            while visited.insert(cursor) {
+                let Some(parent) = parents.get(&cursor).copied() else {
+                    return false;
+                };
+                if parent == candidate_schema {
+                    return true;
+                }
+                cursor = parent;
+            }
+            false
+        };
+        self.catalogue
+            .physical_mappings
+            .values()
+            .map(|mapping| mapping.identities.clone())
+            .chain(
+                self.catalogue
+                    .staged_lineages
+                    .values()
+                    .filter(|staged| {
+                        Some(staged.publication.id) != omit
+                            && !is_descendant(staged.publication.schema.id)
+                    })
+                    .map(|staged| staged.publication.physical_identities.clone()),
+            )
+            .chain(
+                self.catalogue
+                    .pending_lineages
+                    .values()
+                    .filter(|pending| {
+                        Some(pending.publication.id) != omit
+                            && !is_descendant(pending.publication.schema.id)
+                    })
+                    .map(|pending| pending.publication.physical_identities.clone()),
+            )
+            .collect()
+    }
+
+    /// Author a descendant lineage from this authority's complete durable
+    /// catalogue history. This is the only NodeState construction path for a
+    /// non-genesis publication: it preserves mapped physical UUIDs and mints
+    /// identities only for genuinely new entities, never identities retired
+    /// by older active, staged, or parked publications.
+    pub fn author_schema_lineage_publication(
+        &self,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<SchemaLineagePublication, Error> {
+        let source = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lens.source)
+            .ok_or(Error::InvalidCatalogueUpdate(
+                "schema lineage source is missing",
+            ))?;
+        let identities = &self
+            .catalogue
+            .physical_mappings
+            .get(&lens.source)
+            .ok_or(Error::InvalidCatalogueUpdate(
+                "schema lineage source identities are missing",
+            ))?
+            .identities;
+        let history = self.physical_identity_history_for_candidate(schema.id, None);
+        SchemaLineagePublication::author_from_prior_with_history(
+            &source.schema,
+            identities,
+            history,
+            schema,
+            lens,
+            new_tables,
+            dropped_tables,
+        )
+        .map_err(Error::InvalidCatalogueUpdate)
+    }
+
     async fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
@@ -37,6 +138,12 @@ self.database.finish_persistence(persisted)?;
             .get_mut(&schema_version)
             .ok_or(Error::InvalidStoredValue("physical mapping missing"))?;
         for table in &schema.tables {
+            let table_identities = mapping
+                .identities
+                .tables
+                .get(&table.name)
+                .ok_or(Error::InvalidStoredValue("physical table identities missing"))?
+                .clone();
             let Some(physical) = mapping.tables.get_mut(&table.name) else {
                 continue;
             };
@@ -47,17 +154,11 @@ self.database.finish_persistence(persisted)?;
                 let Some(id) = physical.columns.get(&column.name).copied() else {
                     continue;
                 };
-                physical.scalar_enum_cases.entry(id).or_insert_with(|| {
-                    enum_schema
-                        .variants
-                        .iter()
-                        .enumerate()
-                        .map(|(ordinal, _)| GlobalScalarEnumCaseId {
-                            introducing_schema: schema_version,
-                            introducing_ordinal: ordinal as u8,
-                        })
-                        .collect()
-                });
+                let ids = &table_identities.columns[&column.name].enum_variants["root"];
+                if ids.len() != enum_schema.variants.len() {
+                    return Err(Error::InvalidStoredValue("scalar enum authority identity width mismatch"));
+                }
+                install_enum_case_ids(physical.scalar_enum_cases.entry(id).or_default(), ids, schema_version)?;
             }
             for column in &table.columns {
                 let records::ValueType::Enum(enum_schema) = &column.column_type else {
@@ -66,28 +167,27 @@ self.database.finish_persistence(persisted)?;
                 let Some(id) = physical.columns.get(&column.name).copied() else {
                     continue;
                 };
-                physical.payload_enum_cases.entry(id).or_insert_with(|| {
-                    enum_schema
-                        .cases
-                        .iter()
-                        .enumerate()
-                        .map(|(ordinal, _)| GlobalScalarEnumCaseId {
-                            introducing_schema: schema_version,
-                            introducing_ordinal: ordinal as u8,
-                        })
-                        .collect()
-                });
+                let identities = &table_identities.columns[&column.name].enum_variants;
+                let ids = &identities["root"];
+                if ids.len() != enum_schema.cases.len() {
+                    return Err(Error::InvalidStoredValue("payload enum authority identity width mismatch"));
+                }
+                install_enum_case_ids(physical.payload_enum_cases.entry(id).or_default(), ids, schema_version)?;
                 let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
                 hydrate_nested_scalar_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested,
                 )?;
                 let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
                 hydrate_nested_payload_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested_payload,
                 )?;
@@ -100,16 +200,21 @@ self.database.finish_persistence(persisted)?;
                     continue;
                 };
                 let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
+                let identities = &table_identities.columns[&column.name].enum_variants;
                 hydrate_nested_scalar_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested,
                 )?;
                 let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
                 hydrate_nested_payload_enum_cases(
                     &column.column_type,
+                    identities,
                     schema_version,
+                    "root",
                     "root",
                     nested_payload,
                 )?;
@@ -166,7 +271,10 @@ self.database.finish_persistence(persisted)?;
                         },
                     );
                 }
-                SchemaPhysicalMapping { tables }
+                SchemaPhysicalMapping {
+                    identities: PhysicalIdentityManifest::allocate(&schema),
+                    tables,
+                }
             }
         };
         let alias = match self.catalogue.schema_version_aliases.get(&schema_version) {
@@ -353,6 +461,12 @@ self.database.finish_persistence(persisted)?;
                 .ok_or(Error::InvalidStoredValue(
                     "target physical table schema missing",
                 ))?;
+            let target_table_identities = target_mapping
+                .identities
+                .tables
+                .get(&table_lens.target_table)
+                .ok_or(Error::InvalidStoredValue("target physical table identities missing"))?
+                .clone();
             let mut columns = source_table
                 .columns
                 .iter()
@@ -438,14 +552,8 @@ self.database.finish_persistence(persisted)?;
                                 "scalar enum registry changed non-additively",
                             ));
                         }
-                        for ordinal in cases.len()..enum_schema.variants.len() {
-                            cases.push(GlobalScalarEnumCaseId {
-                                introducing_schema: target_schema_version.id,
-                                introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
-                                    Error::InvalidStoredValue("scalar enum ordinal exhausted")
-                                })?,
-                            });
-                        }
+                        let ids = &target_table_identities.columns[&column.name].enum_variants["root"];
+                        install_enum_case_ids(&mut cases, ids, target_schema_version.id)?;
                         scalar_enum_cases.insert(id, cases);
                     }
                     records::ValueType::Enum(enum_schema) => {
@@ -459,14 +567,8 @@ self.database.finish_persistence(persisted)?;
                                 "payload enum registry changed non-additively",
                             ));
                         }
-                        for ordinal in cases.len()..enum_schema.cases.len() {
-                            cases.push(GlobalScalarEnumCaseId {
-                                introducing_schema: target_schema_version.id,
-                                introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
-                                    Error::InvalidStoredValue("payload enum ordinal exhausted")
-                                })?,
-                            });
-                        }
+                        let ids = &target_table_identities.columns[&column.name].enum_variants["root"];
+                        install_enum_case_ids(&mut cases, ids, target_schema_version.id)?;
                         payload_enum_cases.insert(id, cases);
                     }
                     _ => {}
@@ -479,16 +581,21 @@ self.database.finish_persistence(persisted)?;
                     "nested enum physical column missing",
                 ))?;
                 let nested = nested_scalar_enum_cases.entry(id).or_default();
-                reconcile_nested_scalar_enum_cases(
+                let identities = &target_table_identities.columns[&column.name].enum_variants;
+                hydrate_nested_scalar_enum_cases(
                     &column.column_type,
+                    identities,
                     target_schema_version.id,
+                    "root",
                     "root",
                     nested,
                 )?;
                 let nested_payload = nested_payload_enum_cases.entry(id).or_default();
-                reconcile_nested_payload_enum_cases(
+                hydrate_nested_payload_enum_cases(
                     &column.column_type,
+                    identities,
                     target_schema_version.id,
+                    "root",
                     "root",
                     nested_payload,
                 )?;
@@ -654,7 +761,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
-                Value::Bytes(serde_json::to_vec(staged)?),
+                Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
@@ -673,7 +780,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
                 Value::Uuid(pending.publication.id.0),
-                Value::Bytes(serde_json::to_vec(pending)?),
+                Value::Bytes(codec::encode_catalogue_pending_lineage(pending)?),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
@@ -708,6 +815,20 @@ self.database.finish_persistence(persisted)?;
     ) -> Result<(), Error> {
         let schema = &staged.publication.schema;
         let lens = &staged.publication.lens;
+        // The active receipt retains the canonical staged payload as its
+        // durable witness.  The pending envelope, however, is an obligation
+        // to activate: leaving it behind after this batch commits would make
+        // reopen retain a stale retry candidate beside an already-active
+        // lineage.  Delete it in the same batch that makes the schema, lens,
+        // mapping, and active receipt visible, so an active recovery state
+        // never also carries a stale pending obligation.
+        batch.delete(
+            "jazz_catalogue",
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
+                PrimaryKeyValue::Uuid(staged.publication.id.0),
+            ]),
+        );
         // The active marker only carries an id and sequence. Persist its
         // canonical payload in the same durable activation batch so recovery
         // can prove both the prefix identity and its exact sequence.
@@ -716,7 +837,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
-                Value::Bytes(serde_json::to_vec(staged)?),
+                Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
             ],
         );
         batch.update(
@@ -732,7 +853,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
-                Value::Bytes(serde_json::to_vec(lens)?),
+                Value::Bytes(codec::encode_catalogue_lens(lens)),
             ],
         );
         Self::write_schema_version_mapping_to_batch(
@@ -767,7 +888,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
-                Value::Bytes(serde_json::to_vec(lens)?),
+                Value::Bytes(codec::encode_catalogue_lens(lens)),
             ],
         );
         if let Some(mapping) = mapping {
@@ -797,7 +918,7 @@ self.database.finish_persistence(persisted)?;
             vec![
                 Value::U64(alias.0),
                 Value::Uuid(schema_version.0),
-                Value::Bytes(serde_json::to_vec(mapping)?),
+                Value::Bytes(codec::encode_physical_mapping(mapping)?),
             ],
         );
         Ok(())

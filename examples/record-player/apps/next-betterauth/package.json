@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "pnpm test:unit && pnpm test:provider && pnpm test:selection && pnpm test:topology",
+    "test": "pnpm test:unit && pnpm test:provider && pnpm test:selection",
     "test:unit": "vitest run tests/*.test.ts",
     "test:topology": "vitest run --config vitest.config.browser.ts",
     "test:browser": "pnpm test:topology",

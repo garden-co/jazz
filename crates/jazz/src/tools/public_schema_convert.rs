@@ -932,6 +932,10 @@ fn convert_policy_with_native_select_inherits(
     expr: &PolicyExpr,
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
+    // Do this before choosing a lowering path. In particular, an ExistsRel
+    // nested below a boolean operator must not escape this validation merely
+    // because that operator is rejected by a later lowering stage.
+    validate_exists_rel_policy_join_conditions(table, path, expr)?;
     match expr {
         PolicyExpr::And(exprs) => {
             if !exprs.iter().any(is_core_policy_clause) {
@@ -1422,6 +1426,75 @@ struct LoweredRel {
     joins: Vec<JoinVia>,
     reachable: Vec<crate::query::ReachableVia>,
     pending_reachable: Option<PendingReachable>,
+}
+
+fn validate_exists_rel_join_conditions(
+    table: &TableName,
+    path: &str,
+    rel: &RelExpr,
+) -> Result<(), SchemaConversionError> {
+    match rel {
+        RelExpr::TableScan { .. } => Ok(()),
+        RelExpr::Filter { input, .. } | RelExpr::Project { input, .. } => {
+            validate_exists_rel_join_conditions(table, path, input)
+        }
+        RelExpr::Union { inputs } => {
+            for input in inputs {
+                validate_exists_rel_join_conditions(table, path, input)?;
+            }
+            Ok(())
+        }
+        RelExpr::Join {
+            left, right, on, ..
+        } => {
+            if on.len() > 1 {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel joins support exactly one column equality",
+                ));
+            }
+            validate_exists_rel_join_conditions(table, path, left)?;
+            validate_exists_rel_join_conditions(table, path, right)
+        }
+        RelExpr::Gather { seed, step, .. } => {
+            validate_exists_rel_join_conditions(table, path, seed)?;
+            validate_exists_rel_join_conditions(table, path, step)
+        }
+    }
+}
+
+fn validate_exists_rel_policy_join_conditions(
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::ExistsRel { rel } => validate_exists_rel_join_conditions(table, path, rel),
+        PolicyExpr::And(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                validate_exists_rel_policy_join_conditions(
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    expr,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Or(exprs) => {
+            for (index, expr) in exprs.iter().enumerate() {
+                validate_exists_rel_policy_join_conditions(
+                    table,
+                    &format!("{path}.Or[{index}]"),
+                    expr,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(expr) => {
+            validate_exists_rel_policy_join_conditions(table, &format!("{path}.Not"), expr)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn append_exists_rel_policy_clause(

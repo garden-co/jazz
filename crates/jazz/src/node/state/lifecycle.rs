@@ -123,7 +123,7 @@ where
                     }
                 }
                 codec::CatalogueRecordKind::SchemaLineageStaged => {
-                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                    let staged = codec::decode_catalogue_staged_lineage(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if staged.publication.id.0
@@ -680,11 +680,12 @@ where
     ) -> Result<Database, Error> {
         debug_assert_lowered_layouts(schema);
         let mut lowered = schema.lower_to_groove();
-        lowered.tables.extend(physical_version_storage_tables(
+        let current_tables = physical_version_storage_tables(
             catalogue_schemas,
             schema_version_aliases,
             physical_mappings,
-        )?);
+        )?;
+        lowered.tables.extend(current_tables);
         let layout = StorageLayout::jazz_class_v1();
         Database::new_with_storage_layout(lowered, storage, layout)
             .await
@@ -1418,8 +1419,9 @@ where
         self.local_chunk_reader
             .refresh_from(&database.local_chunk_reader());
         self.database.replace(database);
-        self.register_physical_history_variant_projections().await?;
-        self.register_physical_current_variant_projections().await?;
+        // A catalogue rebuild must register the same frozen derived indexes as
+        // ordinary open before compiling live query graphs against them.
+        self.synchronize_physical_version_tables().await?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.invalidate_runtime_handles_after_database_rebuild();
         self.parking = parking;
@@ -1572,7 +1574,7 @@ where
                     catalogue_schemas.insert(schema_version.id, schema_version);
                 }
                 codec::CatalogueRecordKind::Lens => {
-                    let lens: MigrationLens = serde_json::from_slice(
+                    let lens = codec::decode_catalogue_lens(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if lens.id
@@ -1586,7 +1588,7 @@ where
                     catalogue_lenses.insert(lens.id, lens);
                 }
                 codec::CatalogueRecordKind::SchemaLineageStaged => {
-                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                    let staged = codec::decode_catalogue_staged_lineage(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if staged.publication.id.0
@@ -1600,7 +1602,7 @@ where
                     staged_lineages_by_id.insert(staged.publication.id, staged);
                 }
                 codec::CatalogueRecordKind::SchemaLineagePending => {
-                    let pending: PendingSchemaLineage = serde_json::from_slice(
+                    let pending = codec::decode_catalogue_pending_lineage(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if pending.publication.id.0
@@ -1757,7 +1759,7 @@ where
             .await?
         {
             let record = raw.record();
-            let mapping: SchemaPhysicalMapping = serde_json::from_slice(
+            let mapping = codec::decode_physical_mapping(
                 record.get_bytes(SchemaVersionAliasRowRecord::FIELD_PHYSICAL_MAPPING_IDX)?,
             )?;
             let schema_version =
@@ -1787,6 +1789,7 @@ where
             physical_mappings.insert(schema_version, mapping);
         }
         validate_physical_variant_cases(&physical_mappings, &schema_version_aliases)?;
+        validate_physical_mapping_registries(&physical_mappings, &schema_version_aliases)?;
         let mut next_physical_table_id = 1;
         let mut next_physical_column_id = 1;
         for mapping in physical_mappings.values() {
@@ -1826,9 +1829,9 @@ where
             }
         }
         match genesis_schema {
-            Some(genesis) if genesis != current_schema_version_id => {
+            Some(_) if !catalogue_schemas.contains_key(&current_schema_version_id) => {
                 return Err(Error::InvalidStoredValue(
-                    "opened schema does not match durable catalogue genesis",
+                    "opened schema is absent from the durable catalogue",
                 ));
             }
             None if !catalogue_schemas.is_empty() => {
@@ -1868,6 +1871,7 @@ where
                 Some(mapping) => mapping.clone(),
                 None => allocate_provisional_physical_mapping(
                     &schema,
+                    PhysicalIdentityManifest::allocate(&schema),
                     &mut next_physical_table_id,
                     &mut next_physical_column_id,
                 )?,
@@ -1919,6 +1923,15 @@ where
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);
         }
+        Self::validate_durable_physical_identity_bindings(
+            &catalogue_schemas,
+            &physical_mappings,
+            &staged_lineages,
+            &active_lineages_by_target,
+            &pending_lineages,
+            genesis_schema,
+            catalogue_bootstrap_state,
+        )?;
         let mut current_write_schema = CurrentWriteSchema {
             revision: 0,
             schema: current_schema_version_id,
@@ -1983,6 +1996,174 @@ where
         .map_err(|_| {
             Error::InvalidStoredValue("staged schema lineage table partition is invalid")
         })?;
+        Ok(())
+    }
+
+    /// Bind every recovered local alias mapping to the one authority manifest
+    /// that published its schema.  The integer aliases are deliberately local;
+    /// the UUID manifest is not.  Recovery must therefore re-check the binding
+    /// instead of merely checking that each independently decoded object looks
+    /// well formed.
+    fn validate_durable_physical_identity_bindings(
+        schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+        mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+        staged: &BTreeMap<u64, StagedSchemaLineage>,
+        active: &BTreeMap<SchemaVersionId, StagedSchemaLineage>,
+        pending: &BTreeMap<u64, PendingSchemaLineage>,
+        genesis: Option<SchemaVersionId>,
+        bootstrap_state: CatalogueBootstrapState,
+    ) -> Result<(), Error> {
+        if bootstrap_state == CatalogueBootstrapState::Uninitialized {
+            return Ok(());
+        }
+        if mappings.len() != schemas.len() {
+            return Err(Error::InvalidStoredValue(
+                "durable schema and physical mapping coverage differs",
+            ));
+        }
+        for (schema_id, schema) in schemas {
+            let mapping = mappings.get(schema_id).ok_or(Error::InvalidStoredValue(
+                "durable schema physical mapping is missing",
+            ))?;
+            mapping
+                .identities
+                .validate_for_schema(&schema.schema)
+                .map_err(|_| Error::InvalidStoredValue("durable physical identity manifest is invalid"))?;
+        }
+        let mut published = BTreeMap::<SchemaVersionId, &SchemaLineagePublication>::new();
+        for lineage in active.values().chain(staged.values()) {
+            if published
+                .insert(lineage.publication.schema.id, &lineage.publication)
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "durable schema has multiple identity publications",
+                ));
+            }
+        }
+        let roots = schemas
+            .keys()
+            .filter(|schema| !published.contains_key(schema))
+            .copied()
+            .collect::<Vec<_>>();
+        let [root] = roots.as_slice() else {
+            return Err(Error::InvalidStoredValue(
+                "durable catalogue must have exactly one genesis schema",
+            ));
+        };
+        if let Some(genesis) = genesis {
+            if genesis != *root {
+                return Err(Error::InvalidStoredValue(
+                    "durable genesis marker disagrees with lineage root",
+                ));
+            }
+        }
+        if published.contains_key(root) {
+            return Err(Error::InvalidStoredValue(
+                "durable genesis is incorrectly published as a lineage target",
+            ));
+        }
+        // Parked descendants may legally retain an identity first minted by
+        // the bundle now being recovered. They are not prior issuance history
+        // for that bundle; unrelated parked/staged bundles remain reserved.
+        let history_for = |candidate: SchemaVersionId,
+                           omit: crate::ids::SchemaLineagePublicationId| {
+            let mut parents = BTreeMap::new();
+            for lineage in active.values().chain(staged.values()) {
+                parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+            }
+            for lineage in pending.values() {
+                parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+            }
+            let is_descendant = |schema: SchemaVersionId| {
+                let mut cursor = schema;
+                let mut visited = BTreeSet::new();
+                while visited.insert(cursor) {
+                    let Some(parent) = parents.get(&cursor).copied() else {
+                        return false;
+                    };
+                    if parent == candidate {
+                        return true;
+                    }
+                    cursor = parent;
+                }
+                false
+            };
+            mappings
+                .iter()
+                .filter(|(schema, _)| {
+                    **schema != candidate && !is_descendant(**schema)
+                })
+                .map(|(_, mapping)| mapping.identities.clone())
+                .chain(staged.values().filter(|lineage| {
+                    lineage.publication.id != omit
+                        && !is_descendant(lineage.publication.schema.id)
+                }).map(|lineage| lineage.publication.physical_identities.clone()))
+                .chain(pending.values().filter(|lineage| {
+                    lineage.publication.id != omit
+                        && !is_descendant(lineage.publication.schema.id)
+                }).map(|lineage| lineage.publication.physical_identities.clone()))
+                .collect::<Vec<_>>()
+        };
+        for (schema_id, mapping) in mappings {
+            if *schema_id == *root {
+                continue;
+            }
+            let publication = published.get(schema_id).ok_or(Error::InvalidStoredValue(
+                "durable non-genesis schema has no identity publication",
+            ))?;
+            if mapping.identities != publication.physical_identities {
+                return Err(Error::InvalidStoredValue(
+                    "durable mapping identities disagree with authority publication",
+                ));
+            }
+            let source = schemas.get(&publication.lens.source).ok_or(Error::InvalidStoredValue(
+                "durable identity publication source schema is missing",
+            ))?;
+            let source_mapping = mappings.get(&publication.lens.source).ok_or(
+                Error::InvalidStoredValue("durable identity publication source mapping is missing"),
+            )?;
+            source_mapping
+                .identities
+                .validate_evolution_to_with_history(
+                    &source.schema,
+                    &publication.physical_identities,
+                    &publication.schema.schema,
+                    &publication.lens,
+                    history_for(publication.schema.id, publication.id),
+                )
+                .map_err(|_| Error::InvalidStoredValue("durable identity publication evolution is invalid"))?;
+        }
+        for lineage in pending.values() {
+            // A pending lineage may be durably parked ahead of the publication
+            // that introduces its source.  There is nothing authoritative to
+            // compare yet, but its self-contained target manifest, exact
+            // content id, and structural bounds are authoritative already.
+            // Validate those before retaining it for ordered replay. Once a source is
+            // known, however, both its manifest and every evolution rule stay
+            // fail-closed (the durable tamper receipt depends on that).
+            Self::validate_schema_lineage_publication(&lineage.publication).map_err(|_| {
+                Error::InvalidStoredValue(
+                    "pending schema lineage violates trusted publication invariants",
+                )
+            })?;
+            let Some(source) = schemas.get(&lineage.publication.lens.source) else {
+                continue;
+            };
+            let source_mapping = mappings.get(&lineage.publication.lens.source).ok_or(
+                Error::InvalidStoredValue("pending identity publication source mapping is missing"),
+            )?;
+            source_mapping
+                .identities
+                .validate_evolution_to_with_history(
+                    &source.schema,
+                    &lineage.publication.physical_identities,
+                    &lineage.publication.schema.schema,
+                    &lineage.publication.lens,
+                    history_for(lineage.publication.schema.id, lineage.publication.id),
+                )
+                .map_err(|_| Error::InvalidStoredValue("pending identity publication evolution is invalid"))?;
+        }
         Ok(())
     }
 }

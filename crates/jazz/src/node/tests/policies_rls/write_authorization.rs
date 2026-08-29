@@ -758,7 +758,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let tx_b = commit_core_owner_fixture(&mut core, row_uuid, author_b, "owned by B", 11);
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        version_bundles,
+        version_carriers,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs, ..
@@ -770,7 +770,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     else {
         panic!("expected view update");
     };
-    assert!(version_bundles.is_empty());
+    assert!(version_carriers.is_empty());
     assert!(complete_tx_payload_refs.is_empty());
     assert!(result_member_adds.is_empty());
     assert_eq!(
@@ -1428,6 +1428,134 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
     assert!(error
         .to_string()
         .contains("nested outer correlation must use its join key"));
+}
+
+#[test]
+fn exists_rel_rejects_compound_joins_in_every_policy_context_before_lowering() {
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    // The unsupported compound equality is deliberately below a nested join
+    // with aliases. This verifies that admission walks the full relation tree
+    // before the lowering implementation can select (and silently retain only)
+    // the first equality.
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("membership".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::TableScan {
+                        table: "grants".into(),
+                        alias: Some("grant".to_owned()),
+                    }),
+                    on: vec![
+                        PublicRelJoinCondition {
+                            left: column("membership", "workspace"),
+                            right: column("grant", "workspace"),
+                        },
+                        PublicRelJoinCondition {
+                            left: column("membership", "subject"),
+                            right: column("grant", "subject"),
+                        },
+                    ],
+                    join_kind: PublicRelJoinKind::Inner,
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("membership", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("blocks", "id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped("block")),
+            },
+        },
+    };
+    let schema_with = |policies: PublicTablePolicies| {
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("workspaces"))
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("grants")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("blocks")
+                    .fk_column("workspace", "workspaces")
+                    .column("owner", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .fk_column("block", "blocks")
+                    .policies(policies),
+            )
+            .build()
+    };
+
+    // Read and each write clause use distinct schema-conversion paths. The
+    // boolean forms prove that compound joins cannot be hidden in And, Or, or
+    // Not before runtime policy evaluation.
+    for (context, policies, expected_path) in [
+        (
+            "read query",
+            PublicTablePolicies::new().with_select(PublicPolicyExpr::And(vec![
+                PublicPolicyExpr::True,
+                policy.clone(),
+            ])),
+            "policies.select.using.And[1]",
+        ),
+        (
+            "insert check",
+            PublicTablePolicies::new().with_insert(PublicPolicyExpr::Or(vec![
+                PublicPolicyExpr::False,
+                policy.clone(),
+            ])),
+            "policies.insert.with_check.Or[1]",
+        ),
+        (
+            "update using",
+            PublicTablePolicies::new().with_update(
+                Some(PublicPolicyExpr::Not(Box::new(policy.clone()))),
+                PublicPolicyExpr::True,
+            ),
+            "policies.update.using.Not",
+        ),
+        (
+            "update check",
+            PublicTablePolicies::new().with_update(None, policy.clone()),
+            "policies.update.with_check",
+        ),
+        (
+            "delete using",
+            PublicTablePolicies::new().with_delete(policy.clone()),
+            "policies.delete.using",
+        ),
+    ] {
+        let error = crate::schema::JazzSchema::new(&schema_with(policies))
+            .expect_err("compound equality must fail closed before runtime evaluation");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "$.tasks.{expected_path}: core schema ExistsRel joins support exactly one column equality"
+            ),
+            "{context} must reject the compound join at schema admission",
+        );
+    }
 }
 
 #[test]

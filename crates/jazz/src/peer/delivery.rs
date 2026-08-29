@@ -186,13 +186,8 @@ pub(super) fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> boo
 
 pub(super) fn view_update_singleton_bundles(
     version_carriers: &[VersionCarrier],
-    version_bundles: &[VersionBundle],
 ) -> Vec<VersionBundle> {
-    let mut bundles = version_bundles.to_vec();
-    if let Ok(mut expanded) = expand_version_carriers(version_carriers) {
-        bundles.append(&mut expanded);
-    }
-    bundles
+    expand_version_carriers(version_carriers).unwrap_or_default()
 }
 
 pub(super) fn storage_read_metrics_buckets(metrics: &StorageReadMetrics) -> String {

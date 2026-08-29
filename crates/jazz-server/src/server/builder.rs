@@ -764,6 +764,51 @@ fn validate_server_config(
     auth_config: &AuthConfig,
     topology: ServerTopology,
 ) -> Result<(), String> {
+    let has_jwt_key = auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
+    if auth_config
+        .jwt_issuer
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("external JWT issuer cannot be empty".to_owned());
+    }
+    if auth_config
+        .jwt_audience
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err("external JWT audience cannot be empty".to_owned());
+    }
+
+    match (
+        auth_config.jwt_issuer.as_ref(),
+        auth_config.jwt_audience.as_ref(),
+    ) {
+        (Some(_), Some(_)) if !has_jwt_key => {
+            return Err(
+                "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
+                    .to_owned(),
+            );
+        }
+        (Some(_), None) => {
+            return Err(
+                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE".to_owned(),
+            );
+        }
+        (None, Some(_)) => {
+            return Err(
+                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
+            );
+        }
+        (None, None) if has_jwt_key && !auth_config.allow_local_first_auth => {
+            return Err(
+                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER and --jwt-audience / JAZZ_JWT_AUDIENCE"
+                    .to_owned(),
+            );
+        }
+        _ => {}
+    }
+
     if topology.is_edge() && auth_config.admin_secret.is_none() {
         return Err("edge mode requires --admin-secret / JAZZ_ADMIN_SECRET when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
     }
@@ -773,11 +818,14 @@ fn validate_server_config(
 
 fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, topology={:?}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}, topology={:?}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
         auth_config.jwt_public_key.is_some(),
+        auth_config.jwt_issuer.is_some(),
+        auth_config.jwt_audience.is_some(),
         auth_config.auth_cookie_name.is_some(),
+        auth_config.trust_forwarded_host,
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
         topology
@@ -829,6 +877,7 @@ mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
     use crate::server::catalogue_entry::CatalogueEntry;
+    use crate::server::catalogue_storage::catalogue_storage_codec_profile;
     use jazz::groove::storage::OrderedKvStorage;
     use jazz::tools::AppId;
     use jazz::tools::metadata::{MetadataKey, ObjectType};
@@ -851,14 +900,25 @@ mod tests {
     }
 
     fn write_raw_catalogue_entry(catalogue_path: &std::path::Path, entry: &CatalogueEntry) {
-        let storage = jazz_storage_rocksdb::RocksDbStorage::open(catalogue_path, &["default"])
-            .expect("open raw catalogue storage");
+        let storage = open_raw_catalogue_storage(catalogue_path);
         jazz::db::block_on(storage.set(
             "default".to_owned(),
-            format!("cat:{}", entry.object_id.uuid().simple()).into_bytes(),
+            crate::server::catalogue_storage::CatalogueKvStorage::entry_key(entry.object_id),
             entry.encode_storage_row().expect("encode catalogue entry"),
         ))
         .expect("write raw catalogue entry");
+    }
+
+    fn open_raw_catalogue_storage(
+        catalogue_path: &std::path::Path,
+    ) -> jazz_storage_rocksdb::RocksDbStorage {
+        jazz_storage_rocksdb::RocksDbStorage::open_with_durability_and_codec_profile(
+            catalogue_path,
+            &["default"],
+            jazz_storage_rocksdb::Durability::WalNoSync,
+            &catalogue_storage_codec_profile().expect("settled catalogue profile"),
+        )
+        .expect("open raw catalogue storage")
     }
 
     struct NoopWireTransport;
@@ -1435,7 +1495,9 @@ mod tests {
         evolved_snapshot.schemas.push(evolved.clone());
         evolved_snapshot.lineages.push((
             1,
-            jazz::protocol::SchemaLineagePublication::new(
+            jazz::protocol::SchemaLineagePublication::author_from_prior(
+                &base.schema,
+                &evolved_snapshot.genesis_physical_identities,
                 evolved.clone(),
                 jazz::protocol::MigrationLens::new(
                     base.id,
@@ -1448,10 +1510,12 @@ mod tests {
                             default: groove::records::Value::String(String::new()),
                         }],
                     }],
-                ),
+                )
+                .expect("snapshot fixture lens is valid"),
                 Vec::<String>::new(),
                 Vec::<String>::new(),
-            ),
+            )
+            .expect("snapshot fixture authors its descendant lineage"),
         ));
         evolved_snapshot.current_write_schema = jazz::protocol::CurrentWriteSchema {
             revision: 1,
@@ -1539,6 +1603,26 @@ mod tests {
         assert!(upstream_http_url("https://core.example.com#cluster-a", app_id).is_err());
     }
 
+    #[test]
+    fn local_first_server_may_start_with_unbound_jwks_but_external_only_may_not() {
+        let local_first = AuthConfig {
+            jwks_url: Some("http://127.0.0.1:9/jwks".to_owned()),
+            allow_local_first_auth: true,
+            ..Default::default()
+        };
+        validate_server_config(&local_first, ServerTopology::Core)
+            .expect("local-first admission does not require external JWT bindings");
+
+        let external_only = AuthConfig {
+            allow_local_first_auth: false,
+            ..local_first
+        };
+        let error = validate_server_config(&external_only, ServerTopology::Core)
+            .expect_err("an external-only verifier must be explicitly bound");
+        assert!(error.contains("--jwt-issuer"), "{error}");
+        assert!(error.contains("--jwt-audience"), "{error}");
+    }
+
     #[tokio::test]
     async fn builder_requires_admin_secret_in_edge_mode() {
         let auth_config = AuthConfig {
@@ -1602,8 +1686,7 @@ mod tests {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
         {
-            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-                .expect("open raw catalogue storage");
+            let storage = open_raw_catalogue_storage(&catalogue_path);
             jazz::db::block_on(storage.set(
                 "default".to_owned(),
                 b"cat:not-a-uuid".to_vec(),
@@ -1626,13 +1709,12 @@ mod tests {
         );
         assert!(
             error.contains(
-                "failed to read durable catalogue: Storage error: IO error: catalogue key uuid"
+                "failed to read durable catalogue: Storage error: IO error: catalogue key uses an unsupported namespace"
             ),
             "startup error retains the catalogue-read context and storage corruption: {error}"
         );
 
-        let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-            .expect("failed startup releases the catalogue RocksDB lock");
+        let storage = open_raw_catalogue_storage(&catalogue_path);
         jazz::db::block_on(storage.delete("default".to_owned(), b"cat:not-a-uuid".to_vec()))
             .expect("remove corrupt catalogue entry");
         drop(storage);
@@ -1704,11 +1786,10 @@ mod tests {
                 "startup error identifies the corrupt durable object: {error}"
             );
 
-            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-                .expect("failed startup releases the catalogue RocksDB lock");
+            let storage = open_raw_catalogue_storage(&catalogue_path);
             jazz::db::block_on(storage.delete(
                 "default".to_owned(),
-                format!("cat:{}", object_id.uuid().simple()).into_bytes(),
+                crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
             ))
             .expect("remove corrupt catalogue entry");
             drop(storage);
@@ -1721,6 +1802,79 @@ mod tests {
                 .await
                 .expect("builder retries after repaired catalogue");
         }
+    }
+
+    #[tokio::test]
+    async fn persistent_builder_rejects_nested_catalogue_codec_corruption_before_recovery() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+        let app_id = AppId::from_name("corrupt-nested-catalogue-codec");
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
+            .table(
+                jazz::tools::public_schema::TableSchema::builder("documents").column(
+                    "payload",
+                    jazz::tools::public_schema::ColumnType::Json {
+                        schema: Some(serde_json::json!({"type": "object"})),
+                    },
+                ),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let object_id = schema_hash.to_object_id();
+        let mut content = crate::server::catalogue_payload_codec::encode_schema(&schema);
+        let nested_version = content
+            .windows(3)
+            .position(|window| window == [12, 1, 1])
+            .expect("nested JSON codec marker");
+        content[nested_version + 2] = 2;
+        write_raw_catalogue_entry(
+            &catalogue_path,
+            &CatalogueEntry {
+                object_id,
+                metadata: std::collections::HashMap::from([
+                    (
+                        MetadataKey::Type.to_string(),
+                        ObjectType::CatalogueSchema.to_string(),
+                    ),
+                    (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
+                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
+                    (MetadataKey::PublishedAt.to_string(), "1".to_owned()),
+                ]),
+                content,
+            },
+        );
+
+        let error = ServerBuilder::new(app_id)
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .err()
+            .expect("nested corruption must reject before catalogue recovery becomes resident");
+        assert!(
+            error.contains("decode schema payload")
+                && error.contains(&object_id.to_string())
+                && error.contains("unsupported version"),
+            "startup error retains the nested-codec failure context: {error}"
+        );
+
+        let storage = open_raw_catalogue_storage(&catalogue_path);
+        jazz::db::block_on(storage.delete(
+            "default".to_owned(),
+            crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
+        ))
+        .expect("remove corrupt nested catalogue entry");
+        drop(storage);
+        ServerBuilder::new(app_id)
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("repair permits a fresh atomic catalogue recovery");
     }
 
     #[test]
@@ -1827,11 +1981,10 @@ mod tests {
                 "startup error identifies the corrupt durable object: {error}"
             );
 
-            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-                .expect("failed startup releases the catalogue RocksDB lock");
+            let storage = open_raw_catalogue_storage(&catalogue_path);
             jazz::db::block_on(storage.delete(
                 "default".to_owned(),
-                format!("cat:{}", object_id.uuid().simple()).into_bytes(),
+                crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
             ))
             .expect("remove corrupt catalogue entry");
             drop(storage);
@@ -1854,7 +2007,7 @@ mod tests {
             let data_dir = tempfile::TempDir::new().expect("temp data dir");
             let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
             let app_id = AppId::from_name("corrupt-schema-publish-time");
-            let object_id = jazz::tools::ObjectId::new();
+            let object_id = schema_hash.to_object_id();
             let mut metadata = std::collections::HashMap::from([
                 (
                     MetadataKey::Type.to_string(),

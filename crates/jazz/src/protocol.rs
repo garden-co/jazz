@@ -237,8 +237,6 @@ pub struct ViewUpdatePayload {
     pub reset_result_set: bool,
     /// Compact carriers for versions referenced by this update.
     pub version_carriers: Vec<VersionCarrier>,
-    /// Explicit version bundles required by this update.
-    pub version_bundles: Vec<VersionBundle>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
     /// Result members added by the update.
@@ -538,6 +536,8 @@ pub enum PermissionAdvice {
 /// Ordered schema lineage metadata shipped ahead of authored row payloads.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CatalogueSnapshot {
+    /// Authority-issued permanent identities for the unique genesis schema.
+    pub genesis_physical_identities: PhysicalIdentityManifest,
     /// Every immutable schema payload known to the sender.
     pub schemas: Vec<SchemaVersion>,
     /// Active non-genesis lineage publications in catalogue order.
@@ -575,9 +575,21 @@ impl SyncMessage {
 
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
-        self.carried_view_update().map_or(Ok(()), |view| {
-            validate_version_carrier_runs(&view.version_carriers)
-        })
+        match self {
+            Self::CommitUnit { versions, .. } => validate_version_records(versions),
+            Self::RowVersionPayloads { version_bundles } => {
+                validate_version_bundles(version_bundles)
+            }
+            _ => self.carried_view_update().map_or(Ok(()), |view| {
+                validate_version_carrier_runs(&view.version_carriers)?;
+                for carrier in &view.version_carriers {
+                    for bundle in carrier.bundle_refs()? {
+                        validate_version_records(bundle.versions)?;
+                    }
+                }
+                Ok(())
+            }),
+        }
     }
 
     fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
@@ -585,20 +597,6 @@ impl SyncMessage {
             Self::ViewUpdate(view) | Self::AuthorizationScopeView { view, .. } => Some(view),
             _ => None,
         }
-    }
-
-    /// Expand packed view-update carriers into `version_bundles` for legacy paths/tests.
-    pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
-        if let Self::ViewUpdate(ViewUpdatePayload {
-            version_carriers,
-            version_bundles,
-            ..
-        }) = &mut self
-        {
-            version_bundles.extend(expand_version_carriers(version_carriers)?);
-            version_carriers.clear();
-        }
-        Ok(self)
     }
 }
 
@@ -609,6 +607,22 @@ fn validate_version_carrier_runs(
         if let VersionCarrier::Run(run) = carrier {
             run.validate()?;
         }
+    }
+    Ok(())
+}
+
+fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBundleRunError> {
+    for bundle in bundles {
+        validate_version_records(&bundle.versions)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_version_records(
+    versions: &[VersionRecord],
+) -> Result<(), VersionBundleRunError> {
+    for version in versions {
+        version.validate_receipt()?;
     }
     Ok(())
 }
@@ -686,6 +700,101 @@ pub struct VersionRecord {
 }
 
 impl VersionRecord {
+    /// Validate the complete immutable receipt without using infallible accessors.
+    ///
+    /// This is the shared inbound/outbound codec boundary. `OwnedRecord`
+    /// deliberately permits deferred decoding, so callers must pass through
+    /// here before treating a deserialized record as trusted.
+    pub(crate) fn validate_receipt(&self) -> Result<(), VersionBundleRunError> {
+        let malformed = || VersionBundleRunError::MalformedVersionRecord {
+            table: self.table().to_owned(),
+        };
+        let fields = self.record.descriptor().fields();
+        let fixed_names = [
+            "row_uuid",
+            "parents",
+            "created_by",
+            "created_at",
+            "updated_by",
+            "updated_at",
+            "_deletion",
+        ];
+        if fields.len() < fixed_names.len()
+            || fields
+                .iter()
+                .zip(fixed_names)
+                .any(|(field, expected)| field.name.as_deref() != Some(expected))
+            || fields[WireRowRecord::USER_CELLS..].iter().any(|field| {
+                !field
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("user_"))
+            })
+        {
+            return Err(malformed());
+        }
+        let borrowed = self.record.borrowed();
+        let row_uuid = RowUuid(
+            borrowed
+                .get_uuid(WireRowRecord::FIELD_ROW_UUID_IDX)
+                .map_err(|_| malformed())?,
+        );
+        let parents = tx_ids_from_value(
+            borrowed
+                .get_idx(WireRowRecord::FIELD_PARENTS_IDX)
+                .map_err(|_| malformed())?,
+        )
+        .map_err(|_| malformed())?;
+        for index in [
+            WireRowRecord::FIELD_CREATED_BY_IDX,
+            WireRowRecord::FIELD_UPDATED_BY_IDX,
+        ] {
+            let encoded = borrowed.get_str(index).map_err(|_| malformed())?;
+            let author = AuthorSubject::from_canonical(encoded).map_err(|_| malformed())?;
+            if author.canonical().as_bytes() != encoded.as_bytes() {
+                return Err(malformed());
+            }
+        }
+        borrowed
+            .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
+            .map_err(|_| malformed())?;
+        borrowed
+            .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
+            .map_err(|_| malformed())?;
+        deletion_from_value(
+            borrowed
+                .get_idx(WireRowRecord::FIELD__DELETION_IDX)
+                .map_err(|_| malformed())?,
+        )
+        .map_err(|_| malformed())?;
+        let typed = WireRowRecord::new(self.record.clone());
+        for index in 0..fields.len() - WireRowRecord::USER_CELLS {
+            typed.cell(index).map_err(|_| malformed())?;
+        }
+
+        // Decode every descriptor field, then reproduce the record. Besides
+        // validating user cells, equality proves that no trailing or alternate
+        // Groove spelling survived deferred `OwnedRecord` construction.
+        let values = (0..fields.len())
+            .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let canonical = self
+            .record
+            .descriptor()
+            .create(&values)
+            .map_err(|_| malformed())?;
+        if canonical.as_slice() != self.record.raw() {
+            return Err(malformed());
+        }
+        if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(VersionBundleRunError::NonCanonicalParents {
+                table: self.table().to_owned(),
+                row_uuid,
+            });
+        }
+        Ok(())
+    }
+
     /// Construct a wire version record from encoded bytes and the table schema.
     pub fn new(
         table: impl Into<String>,
@@ -728,7 +837,7 @@ impl VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
-        parents: Vec<TxId>,
+        mut parents: Vec<TxId>,
         created_by: AuthorSubject,
         created_at_ms: u64,
         updated_by: AuthorSubject,
@@ -737,6 +846,10 @@ impl VersionRecord {
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
         // This path is for data birth only; stored rows project to wire bytes without decoding.
+        // Parents are a causal set. Its permanent wire/storage spelling is
+        // strict TxId order, never author insertion order.
+        parents.sort();
+        parents.dedup();
         let descriptor = table.wire_record_descriptor();
         let values = [
             Value::Uuid(row_uuid.0),
@@ -1081,7 +1194,7 @@ pub struct VersionBundleRef<'a> {
 }
 
 impl<'a> VersionBundleRef<'a> {
-    /// Materialize this borrowed view into the legacy owned bundle shape.
+    /// Materialize this borrowed view into an owned bundle.
     pub fn to_owned_bundle(self) -> VersionBundle {
         VersionBundle {
             tx: self.tx.clone(),
@@ -1365,6 +1478,11 @@ impl VersionBundleRunOverride {
 /// Validation failures for malformed packed version-bundle runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VersionBundleRunError {
+    /// A deferred Groove record failed structural or canonical validation.
+    MalformedVersionRecord {
+        /// Table declared by the enclosing version.
+        table: String,
+    },
     /// Runs must carry at least one body.
     EmptyRun,
     /// The declared body count did not match the actual body vector length.
@@ -1393,11 +1511,21 @@ pub enum VersionBundleRunError {
         /// Table found in a body version.
         actual: String,
     },
+    /// A version's parent set was not encoded in strict `TxId` order.
+    NonCanonicalParents {
+        /// Table containing the version.
+        table: String,
+        /// Row whose parent list was malformed.
+        row_uuid: RowUuid,
+    },
 }
 
 impl std::fmt::Display for VersionBundleRunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::MalformedVersionRecord { table } => {
+                write!(f, "version for {table} has malformed record bytes")
+            }
             Self::EmptyRun => write!(f, "version-bundle run has no bodies"),
             Self::BodyCountMismatch { declared, actual } => write!(
                 f,
@@ -1416,6 +1544,10 @@ impl std::fmt::Display for VersionBundleRunError {
             Self::TableMismatch { expected, actual } => write!(
                 f,
                 "version-bundle run table context {expected} did not match body table {actual}"
+            ),
+            Self::NonCanonicalParents { table, row_uuid } => write!(
+                f,
+                "version for {table}/{row_uuid:?} has non-canonical parents"
             ),
         }
     }
@@ -3026,22 +3158,743 @@ pub struct SchemaLineagePublication {
     pub new_tables: Vec<String>,
     /// Source tables intentionally absent from the target schema.
     pub dropped_tables: Vec<String>,
+    /// Authority-authored permanent physical identities. Names and structural
+    /// paths only locate the entity in this immutable descriptor; they are not
+    /// inputs to the UUID allocation.
+    pub physical_identities: PhysicalIdentityManifest,
 }
 
+/// Immutable globally meaningful physical identities for one published schema
+/// descriptor. UUIDs are allocated by the catalogue authority and replicated
+/// in the publication; receivers may choose unrelated local u64 aliases.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PhysicalIdentityManifest {
+    /// Logical table lookup metadata paired with authority-issued UUIDs.
+    pub tables: BTreeMap<String, PhysicalTableIdentity>,
+}
+
+/// One table's permanent physical identity and its child identities.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PhysicalTableIdentity {
+    /// Permanent table-lineage UUID.
+    pub id: crate::ids::GlobalPhysicalTableId,
+    /// Logical column lookup metadata paired with permanent UUIDs.
+    pub columns: BTreeMap<String, PhysicalColumnIdentity>,
+}
+
+/// One column epoch's permanent physical identity and enum occurrences.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PhysicalColumnIdentity {
+    /// Permanent column-epoch UUID.
+    pub id: crate::ids::GlobalPhysicalColumnId,
+    /// Structural occurrence path -> authored-case-position UUIDs. The path
+    /// and position are lookup coordinates only; the UUID is the identity.
+    pub enum_variants: BTreeMap<String, Vec<crate::ids::GlobalPhysicalEnumVariantId>>,
+}
+
+impl PhysicalIdentityManifest {
+    /// Canonical descriptor bytes used by publication content addressing.
+    /// BTreeMap iteration is lexical and UUIDs are encoded as raw bytes, so
+    /// JSON object ordering and display spellings cannot affect identity.
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        put_len(&mut bytes, self.tables.len());
+        for (table_name, table) in &self.tables {
+            put_str(&mut bytes, table_name);
+            bytes.extend_from_slice(table.id.0.as_bytes());
+            put_len(&mut bytes, table.columns.len());
+            for (column_name, column) in &table.columns {
+                put_str(&mut bytes, column_name);
+                bytes.extend_from_slice(column.id.0.as_bytes());
+                put_len(&mut bytes, column.enum_variants.len());
+                for (path, variants) in &column.enum_variants {
+                    put_str(&mut bytes, path);
+                    put_len(&mut bytes, variants.len());
+                    for variant in variants {
+                        bytes.extend_from_slice(variant.0.as_bytes());
+                    }
+                }
+            }
+        }
+        bytes
+    }
+
+    /// Allocate independent UUIDs once at authority publication. Iteration
+    /// order cannot affect an already serialized manifest; it only enumerates
+    /// descriptor occurrences while minting it.
+    pub fn allocate(schema: &JazzSchema) -> Self {
+        let tables = schema
+            .tables
+            .iter()
+            .map(|table| {
+                let columns = table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        let mut enum_variants = BTreeMap::new();
+                        collect_enum_variant_ids(&column.column_type, "root", &mut enum_variants);
+                        (
+                            column.name.clone(),
+                            PhysicalColumnIdentity {
+                                id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4()),
+                                enum_variants,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    table.name.clone(),
+                    PhysicalTableIdentity {
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::new_v4()),
+                        columns,
+                    },
+                )
+            })
+            .collect();
+        Self { tables }
+    }
+
+    /// Verify this publication's authority-issued manifest completely covers
+    /// the compiled descriptor and cannot collapse two semantic entities onto
+    /// one UUID. Display names and paths are lookup coordinates only.
+    pub fn validate_for_schema(&self, schema: &JazzSchema) -> Result<(), &'static str> {
+        if self.tables.len() != schema.tables.len() {
+            return Err("physical identity manifest table coverage mismatch");
+        }
+        let mut seen = BTreeSet::new();
+        for table in &schema.tables {
+            let table_identity = self
+                .tables
+                .get(&table.name)
+                .ok_or("physical identity manifest table missing")?;
+            if table_identity.id.0.is_nil() || !seen.insert(table_identity.id.0) {
+                return Err("physical identity manifest UUID collision");
+            }
+            if table_identity.columns.len() != table.columns.len() {
+                return Err("physical identity manifest column coverage mismatch");
+            }
+            for column in &table.columns {
+                let column_identity = table_identity
+                    .columns
+                    .get(&column.name)
+                    .ok_or("physical identity manifest column missing")?;
+                if column_identity.id.0.is_nil() || !seen.insert(column_identity.id.0) {
+                    return Err("physical identity manifest UUID collision");
+                }
+                let mut occurrences = BTreeMap::new();
+                collect_enum_variant_counts(&column.column_type, "root", &mut occurrences);
+                if column_identity.enum_variants.len() != occurrences.len() {
+                    return Err("physical identity manifest enum coverage mismatch");
+                }
+                for (path, count) in occurrences {
+                    let variants = column_identity
+                        .enum_variants
+                        .get(&path)
+                        .ok_or("physical identity manifest enum occurrence missing")?;
+                    if variants.len() != count {
+                        return Err("physical identity manifest enum case coverage mismatch");
+                    }
+                    for variant in variants {
+                        if variant.0.is_nil() || !seen.insert(variant.0) {
+                            return Err("physical identity manifest UUID collision");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn evolve(
+        &self,
+        source: &JazzSchema,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        new_tables: &BTreeSet<String>,
+    ) -> Result<Self, &'static str> {
+        self.validate_for_schema(source)?;
+        let mut tables = BTreeMap::new();
+        for target_table in &target.tables {
+            if new_tables.contains(&target_table.name) {
+                tables.insert(
+                    target_table.name.clone(),
+                    allocate_table_identity(target_table),
+                );
+                continue;
+            }
+            let table_lens = lens
+                .table_lenses
+                .iter()
+                .find(|table| table.target_table == target_table.name)
+                .ok_or("physical identity lineage target table missing")?;
+            let source_table = source
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or("physical identity lineage source table missing")?;
+            // Keep the source coordinate while applying name-level lens
+            // operations.  A renamed compatible column retains its permanent
+            // epoch UUID; a transformed/non-additive epoch deliberately does
+            // not, even when its logical name survives the lens.
+            let mut source_name_by_target = source_table
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), Some(column.name.clone())))
+                .collect::<BTreeMap<_, _>>();
+            let mut identity = self
+                .tables
+                .get(&table_lens.source_table)
+                .cloned()
+                .ok_or("physical identity lineage source identity missing")?;
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameColumn { from, to } => {
+                        let column = identity
+                            .columns
+                            .remove(from)
+                            .ok_or("physical identity renamed column missing")?;
+                        identity.columns.insert(to.clone(), column);
+                        for source_name in source_name_by_target.values_mut() {
+                            if source_name.as_deref() == Some(from.as_str()) {
+                                *source_name = Some(to.clone());
+                                break;
+                            }
+                        }
+                    }
+                    LensOp::CopyColumn { to, .. } | LensOp::AddColumn { column: to, .. } => {
+                        let target_column = target_table
+                            .columns
+                            .iter()
+                            .find(|column| column.name == *to)
+                            .ok_or("physical identity added column missing")?;
+                        identity
+                            .columns
+                            .insert(to.clone(), allocate_column_identity(target_column));
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        identity.columns.remove(column);
+                        for source_name in source_name_by_target.values_mut() {
+                            if source_name.as_deref() == Some(column.as_str()) {
+                                *source_name = None;
+                                break;
+                            }
+                        }
+                    }
+                    LensOp::RenameTable { .. }
+                    | LensOp::TransformColumn { .. }
+                    | LensOp::RejectSourceDelta { .. } => {}
+                }
+            }
+            identity.columns.retain(|name, _| {
+                target_table
+                    .columns
+                    .iter()
+                    .any(|column| column.name == *name)
+            });
+            for target_column in &target_table.columns {
+                let column = identity
+                    .columns
+                    .entry(target_column.name.clone())
+                    .or_insert_with(|| allocate_column_identity(target_column));
+                let compatible = source_name_by_target
+                    .iter()
+                    .find_map(|(source_name, target_name)| {
+                        (target_name.as_deref() == Some(target_column.name.as_str()))
+                            .then_some(source_name)
+                    })
+                    .is_some_and(|source_name| {
+                        crate::node::physical::physical_column_epoch_is_compatible(
+                            source_table,
+                            source_name,
+                            target_table,
+                            &target_column.name,
+                        )
+                    });
+                if !compatible {
+                    *column = allocate_column_identity(target_column);
+                }
+                reconcile_enum_variant_identities(column, &target_column.column_type);
+            }
+            // The source descriptor is used above to validate the lineage
+            // coordinate rather than to derive any UUID.
+            let _ = source_table;
+            tables.insert(target_table.name.clone(), identity);
+        }
+        let evolved = Self { tables };
+        evolved.validate_for_schema(target)?;
+        Ok(evolved)
+    }
+
+    /// Mint a descendant descriptor while reserving every UUID ever durably
+    /// observed by this catalogue.  The manifest itself remains the complete
+    /// canonical durable representation: old schema mappings retain the
+    /// retired UUIDs, so no second, lossy "retirement ledger" is necessary.
+    fn evolve_with_history(
+        &self,
+        source: &JazzSchema,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        new_tables: &BTreeSet<String>,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+    ) -> Result<Self, &'static str> {
+        let mut evolved = self.evolve(source, target, lens, new_tables)?;
+        let inherited = self.inherited_uuids(source, &evolved, target, lens)?;
+        let mut reserved = BTreeSet::new();
+        for manifest in history {
+            reserved.extend(manifest.all_identity_uuids());
+        }
+        evolved.remint_fresh_collisions(&inherited, &mut reserved);
+        evolved.validate_for_schema(target)?;
+        Ok(evolved)
+    }
+
+    /// Validate that a target manifest preserves every mapped permanent UUID.
+    /// Fresh UUID values are unconstrained except by target-wide uniqueness.
+    pub fn validate_evolution_to(
+        &self,
+        source: &JazzSchema,
+        target_manifest: &Self,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+    ) -> Result<(), &'static str> {
+        self.validate_evolution_to_with_history(source, target_manifest, target, lens, [])
+    }
+
+    /// Like [`Self::validate_evolution_to`], but also guards against UUIDs
+    /// retired by any older catalogue descriptor.  The caller obtains this
+    /// history by replaying the canonical durable schema mappings and any
+    /// parked/staged publication manifests; no separate mutable allocator
+    /// state may decide identity reuse.
+    pub fn validate_evolution_to_with_history(
+        &self,
+        source: &JazzSchema,
+        target_manifest: &Self,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+    ) -> Result<(), &'static str> {
+        self.validate_for_schema(source)?;
+        target_manifest.validate_for_schema(target)?;
+        // A UUID is a permanent catalogue identity, not an alias that may be
+        // recycled once its current lookup path disappears.  Start by
+        // forbidding every source UUID in the target.  The mapped, compatible
+        // coordinates below explicitly carve out the only permitted reuse.
+        // This includes source tables and columns that the lens dropped or
+        // replaced, and every recursive enum occurrence beneath them.
+        let inherited_uuids = self.inherited_uuids(source, target_manifest, target, lens)?;
+        let mut reserved_uuids = self.all_identity_uuids();
+        for manifest in history {
+            reserved_uuids.extend(manifest.all_identity_uuids());
+        }
+        let target_uuids = target_manifest.all_identity_uuids();
+        if reserved_uuids
+            .intersection(&target_uuids)
+            .any(|uuid| !inherited_uuids.contains(uuid))
+        {
+            return Err("physical retired identity reused across lineage");
+        }
+        Ok(())
+    }
+
+    /// The exact source-to-target coordinates permitted to retain their UUID.
+    /// Any other UUID observed in a target is a new allocation and must not
+    /// collide with the durable catalogue history.
+    fn inherited_uuids(
+        &self,
+        source: &JazzSchema,
+        target_manifest: &Self,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+    ) -> Result<BTreeSet<uuid::Uuid>, &'static str> {
+        let mut inherited_uuids = BTreeSet::new();
+        for table_lens in &lens.table_lenses {
+            let source_table = self
+                .tables
+                .get(&table_lens.source_table)
+                .ok_or("physical identity source table missing")?;
+            let target_table = target_manifest
+                .tables
+                .get(&table_lens.target_table)
+                .ok_or("physical identity target table missing")?;
+            if source_table.id != target_table.id {
+                return Err("physical table identity changed across lineage");
+            }
+            inherited_uuids.insert(source_table.id.0);
+            let source_table_schema = source
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or("physical identity source table schema missing")?;
+            let target_table_schema = target
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.target_table)
+                .ok_or("physical identity target table schema missing")?;
+            // Map each original source name to the target coordinate it still
+            // represents.  This avoids treating a transform (same name) as a
+            // rename-compatible epoch.
+            let mut target_name_by_source = source_table
+                .columns
+                .keys()
+                .map(|name| (name.clone(), Some(name.clone())))
+                .collect::<BTreeMap<_, _>>();
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameColumn { from, to } => {
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(from.as_str()) {
+                                *target_name = Some(to.clone());
+                                break;
+                            }
+                        }
+                    }
+                    LensOp::CopyColumn { to, .. } | LensOp::AddColumn { column: to, .. } => {
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(to.as_str()) {
+                                *target_name = None;
+                            }
+                        }
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(column.as_str()) {
+                                *target_name = None;
+                            }
+                        }
+                    }
+                    LensOp::RenameTable { .. }
+                    | LensOp::TransformColumn { .. }
+                    | LensOp::RejectSourceDelta { .. } => {}
+                }
+            }
+            for (source_name, target_name) in target_name_by_source {
+                let Some(target_name) = target_name else {
+                    continue;
+                };
+                let source_column = &source_table.columns[&source_name];
+                let target_column = target_table
+                    .columns
+                    .get(&target_name)
+                    .ok_or("physical identity inherited column missing")?;
+                let compatible = crate::node::physical::physical_column_epoch_is_compatible(
+                    source_table_schema,
+                    &source_name,
+                    target_table_schema,
+                    &target_name,
+                );
+                if compatible && source_column.id != target_column.id {
+                    return Err("physical compatible column identity changed across lineage");
+                }
+                if !compatible && source_column.id == target_column.id {
+                    return Err("physical incompatible column epoch reused identity");
+                }
+                if !compatible {
+                    // A changed epoch is an entirely new physical subtree.
+                    // It cannot inherit even a recursively nested enum case
+                    // UUID from the prior epoch.
+                    continue;
+                }
+                inherited_uuids.insert(source_column.id.0);
+                for (path, source_variants) in &source_column.enum_variants {
+                    let Some(target_variants) = target_column.enum_variants.get(path) else {
+                        continue;
+                    };
+                    let shared = source_variants.len().min(target_variants.len());
+                    if source_variants[..shared] != target_variants[..shared] {
+                        return Err("physical enum identity changed across lineage");
+                    }
+                    inherited_uuids
+                        .extend(source_variants[..shared].iter().map(|variant| variant.0));
+                }
+            }
+        }
+        Ok(inherited_uuids)
+    }
+
+    fn remint_fresh_collisions(
+        &mut self,
+        inherited: &BTreeSet<uuid::Uuid>,
+        reserved: &mut BTreeSet<uuid::Uuid>,
+    ) {
+        let mint = |reserved: &mut BTreeSet<uuid::Uuid>| loop {
+            let uuid = uuid::Uuid::new_v4();
+            if reserved.insert(uuid) {
+                break uuid;
+            }
+        };
+        for table in self.tables.values_mut() {
+            if !inherited.contains(&table.id.0) && reserved.contains(&table.id.0) {
+                table.id.0 = mint(reserved);
+            } else {
+                reserved.insert(table.id.0);
+            }
+            for column in table.columns.values_mut() {
+                if !inherited.contains(&column.id.0) && reserved.contains(&column.id.0) {
+                    column.id.0 = mint(reserved);
+                } else {
+                    reserved.insert(column.id.0);
+                }
+                for variants in column.enum_variants.values_mut() {
+                    for variant in variants {
+                        if !inherited.contains(&variant.0) && reserved.contains(&variant.0) {
+                            variant.0 = mint(reserved);
+                        } else {
+                            reserved.insert(variant.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// All durable UUIDs in this descriptor, across tables, column epochs,
+    /// and recursive enum case occurrences.  This is deliberately independent
+    /// of the currently visible schema paths so lineage validation can prevent
+    /// reuse after an entity is dropped or replaced.
+    fn all_identity_uuids(&self) -> BTreeSet<uuid::Uuid> {
+        let mut uuids = BTreeSet::new();
+        for table in self.tables.values() {
+            uuids.insert(table.id.0);
+            for column in table.columns.values() {
+                uuids.insert(column.id.0);
+                for variants in column.enum_variants.values() {
+                    uuids.extend(variants.iter().map(|variant| variant.0));
+                }
+            }
+        }
+        uuids
+    }
+}
+
+fn allocate_table_identity(table: &crate::schema::TableSchema) -> PhysicalTableIdentity {
+    PhysicalTableIdentity {
+        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::new_v4()),
+        columns: table
+            .columns
+            .iter()
+            .map(|column| (column.name.clone(), allocate_column_identity(column)))
+            .collect(),
+    }
+}
+
+fn allocate_column_identity(column: &crate::schema::ColumnSchema) -> PhysicalColumnIdentity {
+    let mut enum_variants = BTreeMap::new();
+    collect_enum_variant_ids(&column.column_type, "root", &mut enum_variants);
+    PhysicalColumnIdentity {
+        id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4()),
+        enum_variants,
+    }
+}
+
+fn reconcile_enum_variant_identities(
+    column: &mut PhysicalColumnIdentity,
+    target: &groove::records::ValueType,
+) {
+    let mut counts = BTreeMap::new();
+    collect_enum_variant_counts(target, "root", &mut counts);
+    column
+        .enum_variants
+        .retain(|path, _| counts.contains_key(path));
+    for (path, count) in counts {
+        let variants = column.enum_variants.entry(path).or_default();
+        variants.truncate(count);
+        variants.extend(
+            (variants.len()..count)
+                .map(|_| crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::new_v4())),
+        );
+    }
+}
+
+fn collect_enum_variant_ids(
+    value_type: &groove::records::ValueType,
+    path: &str,
+    output: &mut BTreeMap<String, Vec<crate::ids::GlobalPhysicalEnumVariantId>>,
+) {
+    use groove::records::ValueType;
+    match value_type {
+        ValueType::EnumTag(schema) => {
+            output.insert(
+                path.to_owned(),
+                schema
+                    .variants
+                    .iter()
+                    .map(|_| crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::new_v4()))
+                    .collect(),
+            );
+        }
+        ValueType::Enum(schema) => {
+            output.insert(
+                path.to_owned(),
+                schema
+                    .cases
+                    .iter()
+                    .map(|_| crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::new_v4()))
+                    .collect(),
+            );
+            for (ordinal, case) in schema.cases.iter().enumerate() {
+                collect_enum_variant_ids(
+                    &ValueType::Record(Box::new(case.payload.clone())),
+                    &format!("{path}/case/{ordinal}"),
+                    output,
+                );
+            }
+        }
+        ValueType::Nullable(inner) => {
+            collect_enum_variant_ids(inner, &format!("{path}/nullable"), output)
+        }
+        ValueType::Array(inner) => {
+            collect_enum_variant_ids(inner, &format!("{path}/array"), output)
+        }
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_enum_variant_ids(value, &format!("{path}/tuple/{index}"), output);
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                if let Some(name) = &field.name {
+                    collect_enum_variant_ids(
+                        &field.value_type,
+                        &format!("{path}/record/{name}"),
+                        output,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_enum_variant_counts(
+    value_type: &groove::records::ValueType,
+    path: &str,
+    output: &mut BTreeMap<String, usize>,
+) {
+    use groove::records::ValueType;
+    match value_type {
+        ValueType::EnumTag(schema) => {
+            output.insert(path.to_owned(), schema.variants.len());
+        }
+        ValueType::Enum(schema) => {
+            output.insert(path.to_owned(), schema.cases.len());
+            for (ordinal, case) in schema.cases.iter().enumerate() {
+                collect_enum_variant_counts(
+                    &ValueType::Record(Box::new(case.payload.clone())),
+                    &format!("{path}/case/{ordinal}"),
+                    output,
+                );
+            }
+        }
+        ValueType::Nullable(inner) => {
+            collect_enum_variant_counts(inner, &format!("{path}/nullable"), output)
+        }
+        ValueType::Array(inner) => {
+            collect_enum_variant_counts(inner, &format!("{path}/array"), output)
+        }
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_enum_variant_counts(value, &format!("{path}/tuple/{index}"), output);
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                if let Some(name) = &field.name {
+                    collect_enum_variant_counts(
+                        &field.value_type,
+                        &format!("{path}/record/{name}"),
+                        output,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// Publication validation runs before a node has installed any local physical
+// aliases, so the authority-side permanence rule lives with the wire manifest
+// rather than the local descriptor lowering.  Keep this definition aligned
+// with `node::physical::physical_column_epoch_is_compatible`.
 impl SchemaLineagePublication {
-    /// Construct an atomic schema-lineage publication payload.
-    pub fn new(
+    /// Construct an immutable publication at the catalogue authority. Mapped
+    /// entities inherit UUIDs from the source manifest; genuinely new table,
+    /// column, and enum identities are minted exactly once here.
+    pub fn author_from_prior(
+        source_schema: &JazzSchema,
+        source_identities: &PhysicalIdentityManifest,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, &'static str> {
+        Self::author_from_prior_with_history(
+            source_schema,
+            source_identities,
+            std::iter::once(source_identities.clone()),
+            schema,
+            lens,
+            new_tables,
+            dropped_tables,
+        )
+    }
+
+    /// Authority-only descendant construction with the complete durable
+    /// catalogue history available.  The convenience constructor above is
+    /// deliberately retained for isolated fixtures; live authorities must
+    /// pass all active, staged, and parked manifests here.
+    pub fn author_from_prior_with_history(
+        source_schema: &JazzSchema,
+        source_identities: &PhysicalIdentityManifest,
+        history: impl IntoIterator<Item = PhysicalIdentityManifest>,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, &'static str> {
+        let new_tables = new_tables.into_iter().map(Into::into).collect::<Vec<_>>();
+        let dropped_tables = dropped_tables
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let physical_identities = source_identities.evolve_with_history(
+            source_schema,
+            &schema.schema,
+            &lens,
+            &new_tables.iter().cloned().collect(),
+            history,
+        )?;
+        let mut publication = Self {
+            id: SchemaLineagePublicationId(uuid::Uuid::nil()),
+            schema,
+            lens,
+            new_tables,
+            dropped_tables,
+            physical_identities,
+        };
+        publication.id = publication.content_id();
+        Ok(publication)
+    }
+
+    /// Construct the sole genesis-style publication fixture.  A real
+    /// non-genesis schema must be authored by [`Self::author_from_prior`], so
+    /// its identities inherit from the authority's exact source manifest.
+    ///
+    /// This constructor exists only for isolated protocol fixtures that have
+    /// no preceding catalogue; catalogue/runtime code must never use it.
+    pub fn new_genesis_fixture(
         schema: SchemaVersion,
         lens: MigrationLens,
         new_tables: impl IntoIterator<Item = impl Into<String>>,
         dropped_tables: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        let physical_identities = PhysicalIdentityManifest::allocate(&schema.schema);
         let mut publication = Self {
             id: SchemaLineagePublicationId(uuid::Uuid::nil()),
             schema,
             lens,
             new_tables: new_tables.into_iter().map(Into::into).collect(),
             dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
+            physical_identities,
         };
         publication.id = publication.content_id();
         publication
@@ -3071,6 +3924,7 @@ impl SchemaLineagePublication {
         for table in dropped_tables {
             put_str(&mut bytes, &table);
         }
+        put_bytes(&mut bytes, &self.physical_identities.canonical_bytes());
         SchemaLineagePublicationId(uuid::Uuid::new_v5(
             &SCHEMA_LINEAGE_PUBLICATION_NAMESPACE,
             &bytes,
@@ -3092,25 +3946,100 @@ impl SchemaVersion {
 }
 
 /// Published bidirectional migration lens.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MigrationLens {
     /// Content-addressed lens id.
-    pub id: MigrationLensId,
+    pub(crate) id: MigrationLensId,
     /// Source schema version.
-    pub source: SchemaVersionId,
+    pub(crate) source: SchemaVersionId,
     /// Target schema version.
-    pub target: SchemaVersionId,
+    pub(crate) target: SchemaVersionId,
     /// Per-table lens definitions.
-    pub table_lenses: Vec<TableLens>,
+    pub(crate) table_lenses: Vec<TableLens>,
+}
+
+impl serde::Serialize for MigrationLens {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&canonical_lens_bytes(self))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MigrationLens {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LensBytes;
+        impl<'de> serde::de::Visitor<'de> for LensBytes {
+            type Value = MigrationLens;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a bounded canonical migration-lens byte blob")
+            }
+            fn visit_borrowed_bytes<E>(self, bytes: &'de [u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
+                    return Err(E::custom(
+                        "migration lens blob exceeds aggregate byte budget",
+                    ));
+                }
+                decode_canonical_lens_bytes(bytes).map_err(E::custom)
+            }
+            fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
+                    return Err(E::custom(
+                        "migration lens blob exceeds aggregate byte budget",
+                    ));
+                }
+                decode_canonical_lens_bytes(bytes).map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_bytes(LensBytes)
+    }
 }
 
 impl MigrationLens {
+    /// Immutable content-addressed identity.
+    pub fn id(&self) -> MigrationLensId {
+        self.id
+    }
+    /// Published source schema identity.
+    pub fn source(&self) -> SchemaVersionId {
+        self.source
+    }
+    /// Published target schema identity.
+    pub fn target(&self) -> SchemaVersionId {
+        self.target
+    }
+    /// Canonically ordered, bijective table-lens declarations.
+    pub fn table_lenses(&self) -> &[TableLens] {
+        &self.table_lenses
+    }
     /// Construct a migration lens and derive its content-addressed id.
     pub fn new(
         source: SchemaVersionId,
         target: SchemaVersionId,
-        table_lenses: Vec<TableLens>,
-    ) -> Self {
+        mut table_lenses: Vec<TableLens>,
+    ) -> Result<Self, &'static str> {
+        table_lenses.sort_by(|left, right| {
+            (&left.source_table, &left.target_table)
+                .cmp(&(&right.source_table, &right.target_table))
+        });
+        validate_protocol_lens_defaults(&table_lenses)?;
+        let mut sources = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for table in &table_lenses {
+            if !sources.insert(&table.source_table) || !targets.insert(&table.target_table) {
+                return Err("migration lens table coordinates must be bijective");
+            }
+        }
         let mut lens = Self {
             id: MigrationLensId(uuid::Uuid::nil()),
             source,
@@ -3118,7 +4047,7 @@ impl MigrationLens {
             table_lenses,
         };
         lens.id = lens.content_id();
-        lens
+        Ok(lens)
     }
 
     /// Return the content-addressed id implied by this payload.
@@ -3130,13 +4059,48 @@ impl MigrationLens {
     }
 }
 
-fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
+fn validate_protocol_lens_defaults(table_lenses: &[TableLens]) -> Result<(), &'static str> {
+    fn valid(value: &Value) -> bool {
+        match value {
+            Value::Large(_) | Value::Record(_) | Value::Enum(_) => false,
+            Value::Tuple(values) | Value::Array(values) => values.iter().all(valid),
+            Value::Nullable(Some(value)) => valid(value),
+            _ => true,
+        }
+    }
+    for table in table_lenses {
+        for op in &table.ops {
+            match op {
+                LensOp::AddColumn { default, .. } if !valid(default) => {
+                    return Err(
+                        "migration lens defaults cannot contain storage-only or descriptor-less values",
+                    );
+                }
+                LensOp::DropColumn {
+                    backwards_default, ..
+                } if !valid(backwards_default) => {
+                    return Err(
+                        "migration lens defaults cannot contain storage-only or descriptor-less values",
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, "jazz-migration-lens-v1");
     bytes.extend_from_slice(lens.source.as_bytes());
     bytes.extend_from_slice(lens.target.as_bytes());
-    put_len(&mut bytes, lens.table_lenses.len());
-    for table_lens in &lens.table_lenses {
+    let mut table_lenses = lens.table_lenses.iter().collect::<Vec<_>>();
+    table_lenses.sort_by(|left, right| {
+        (&left.source_table, &left.target_table).cmp(&(&right.source_table, &right.target_table))
+    });
+    put_len(&mut bytes, table_lenses.len());
+    for table_lens in table_lenses {
         put_str(&mut bytes, &table_lens.source_table);
         put_str(&mut bytes, &table_lens.target_table);
         put_len(&mut bytes, table_lens.ops.len());
@@ -3145,6 +4109,196 @@ fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
         }
     }
     bytes
+}
+
+/// Decode the sole canonical protocol-lens grammar used for durable Jazz
+/// catalogue publications. This is intentionally distinct from the server's
+/// schema-editor `LensTransform`: the two carry different operations and must
+/// never be lossily converted into one another.
+pub(crate) fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens, &'static str> {
+    let mut c = ProtocolCodecCursor {
+        bytes,
+        offset: 0,
+        budget: ProtocolCodecCursor::MAX_TOTAL_BYTES,
+        items: 0,
+    };
+    if c.string()? != "jazz-migration-lens-v1" {
+        return Err("invalid migration lens marker");
+    }
+    let source = SchemaVersionId(c.uuid()?);
+    let target = SchemaVersionId(c.uuid()?);
+    let mut table_lenses = Vec::new();
+    for _ in 0..c.count()? {
+        let source_table = c.string()?;
+        let target_table = c.string()?;
+        let mut ops = Vec::new();
+        for _ in 0..c.count()? {
+            ops.push(c.lens_op()?);
+        }
+        table_lenses.push(TableLens {
+            source_table,
+            target_table,
+            ops,
+        });
+    }
+    c.finish()?;
+    let lens =
+        MigrationLens::new(source, target, table_lenses).map_err(|_| "invalid migration lens")?;
+    if canonical_lens_bytes(&lens) != bytes {
+        return Err("noncanonical migration lens");
+    }
+    Ok(lens)
+}
+
+struct ProtocolCodecCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    budget: usize,
+    items: u32,
+}
+impl<'a> ProtocolCodecCursor<'a> {
+    const MAX_COUNT: u32 = 16_384;
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+    const MAX_TOTAL_ITEMS: u32 = 65_536;
+    const MAX_DEPTH: usize = 64;
+    fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+        if n > self.budget {
+            return Err("protocol aggregate byte budget exceeds limit");
+        }
+        let e = self
+            .offset
+            .checked_add(n)
+            .ok_or("truncated protocol codec")?;
+        let out = self
+            .bytes
+            .get(self.offset..e)
+            .ok_or("truncated protocol codec")?;
+        self.offset = e;
+        self.budget -= n;
+        Ok(out)
+    }
+    fn u8(&mut self) -> Result<u8, &'static str> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Result<u64, &'static str> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn i32(&mut self) -> Result<i32, &'static str> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn i64(&mut self) -> Result<i64, &'static str> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn uuid(&mut self) -> Result<uuid::Uuid, &'static str> {
+        Ok(uuid::Uuid::from_bytes(self.take(16)?.try_into().unwrap()))
+    }
+    fn count(&mut self) -> Result<u32, &'static str> {
+        let count = self.u32()?;
+        self.items = self
+            .items
+            .checked_add(count)
+            .ok_or("protocol aggregate item budget exceeds limit")?;
+        if count > Self::MAX_COUNT || self.items > Self::MAX_TOTAL_ITEMS {
+            Err("protocol collection count exceeds limit")
+        } else {
+            Ok(count)
+        }
+    }
+    fn bytes(&mut self) -> Result<Vec<u8>, &'static str> {
+        let n = self.u32()? as usize;
+        if n > Self::MAX_BYTES {
+            return Err("protocol byte length exceeds limit");
+        }
+        Ok(self.take(n)?.to_vec())
+    }
+    fn string(&mut self) -> Result<String, &'static str> {
+        String::from_utf8(self.bytes()?).map_err(|_| "invalid protocol utf8")
+    }
+    fn value(&mut self) -> Result<Value, &'static str> {
+        self.value_at(0)
+    }
+    fn value_at(&mut self, depth: usize) -> Result<Value, &'static str> {
+        if depth >= Self::MAX_DEPTH {
+            return Err("protocol value nesting exceeds limit");
+        }
+        Ok(match self.u8()? {
+            0 => Value::U8(self.u8()?),
+            1 => Value::U16(u16::from_le_bytes(self.take(2)?.try_into().unwrap())),
+            2 => Value::U32(self.u32()?),
+            3 => Value::U64(self.u64()?),
+            4 => Value::F64(f64::from_bits(self.u64()?)),
+            5 => Value::Bool(match self.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err("invalid protocol bool"),
+            }),
+            6 => Value::String(self.string()?),
+            7 => Value::Bytes(self.bytes()?),
+            8 => Value::Uuid(self.uuid()?),
+            9 => Value::EnumTag(self.u8()?),
+            10 => Value::Tuple(self.values_at(depth + 1)?),
+            11 => Value::Array(self.values_at(depth + 1)?),
+            12 => match self.u8()? {
+                0 => Value::Nullable(None),
+                1 => Value::Nullable(Some(Box::new(self.value_at(depth + 1)?))),
+                _ => return Err("invalid protocol nullable"),
+            },
+            13 => Value::I64(self.i64()?),
+            14 => Value::I32(self.i32()?),
+            15 => return Err("large default values are not supported in migration lenses"),
+            _ => return Err("invalid protocol value tag"),
+        })
+    }
+    fn values_at(&mut self, depth: usize) -> Result<Vec<Value>, &'static str> {
+        let mut v = Vec::new();
+        for _ in 0..self.count()? {
+            v.push(self.value_at(depth)?)
+        }
+        Ok(v)
+    }
+    fn lens_op(&mut self) -> Result<LensOp, &'static str> {
+        Ok(match self.u8()? {
+            0 => LensOp::RenameTable {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            1 => LensOp::RenameColumn {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            2 => LensOp::CopyColumn {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            3 => LensOp::AddColumn {
+                column: self.string()?,
+                default: self.value()?,
+            },
+            4 => LensOp::DropColumn {
+                column: self.string()?,
+                backwards_default: self.value()?,
+            },
+            5 => LensOp::TransformColumn {
+                column: self.string()?,
+                transform: self.string()?,
+            },
+            6 => LensOp::RejectSourceDelta {
+                reason: self.string()?,
+            },
+            _ => return Err("invalid migration lens op"),
+        })
+    }
+    fn finish(self) -> Result<(), &'static str> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err("trailing protocol codec bytes")
+        }
+    }
 }
 
 fn put_lens_op(bytes: &mut Vec<u8>, op: &LensOp) {
@@ -3467,10 +4621,310 @@ mod tests {
         ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
         TableSchemaBuilder,
     };
+    use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    /// Forces postcard's `serialize_bytes` representation rather than the
+    /// collection representation used by `Vec<u8>`.
+    struct PostcardByteBlob<'a>(&'a [u8]);
+
+    impl serde::Serialize for PostcardByteBlob<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    #[test]
+    fn protocol_lens_storage_codec_covers_every_declared_operation_and_value_arm() {
+        let values = vec![
+            Value::U8(1),
+            Value::U16(2),
+            Value::U32(3),
+            Value::U64(4),
+            Value::I32(-5),
+            Value::I64(-6),
+            Value::F64(7.5),
+            Value::Bool(true),
+            Value::String("s".into()),
+            Value::Bytes(vec![8]),
+            Value::Uuid(uuid::Uuid::from_bytes([9; 16])),
+            Value::EnumTag(10),
+            Value::Tuple(vec![Value::U8(11)]),
+            Value::Array(vec![Value::U8(12)]),
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::U8(13)))),
+        ];
+        let ops = vec![
+            LensOp::RenameTable {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            LensOp::RenameColumn {
+                from: "c".into(),
+                to: "d".into(),
+            },
+            LensOp::CopyColumn {
+                from: "e".into(),
+                to: "f".into(),
+            },
+            LensOp::TransformColumn {
+                column: "g".into(),
+                transform: "h".into(),
+            },
+            LensOp::RejectSourceDelta { reason: "i".into() },
+        ];
+        let mut all = ops;
+        for (index, value) in values.into_iter().enumerate() {
+            all.push(LensOp::AddColumn {
+                column: format!("add{index}"),
+                default: value.clone(),
+            });
+            all.push(LensOp::DropColumn {
+                column: format!("drop{index}"),
+                backwards_default: value,
+            });
+        }
+        let lens = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![TableLens {
+                source_table: "source".into(),
+                target_table: "target".into(),
+                ops: all,
+            }],
+        )
+        .expect("valid migration lens");
+        let exact = canonical_lens_bytes(&lens);
+        assert_eq!(decode_canonical_lens_bytes(&exact).unwrap(), lens);
+        for malformed in [
+            vec![],
+            exact[..exact.len() - 1].to_vec(),
+            [exact.clone(), vec![0]].concat(),
+            {
+                let mut changed = exact.clone();
+                changed[0] ^= 1;
+                changed
+            },
+        ] {
+            assert!(decode_canonical_lens_bytes(&malformed).is_err());
+        }
+        // Planted sensitivity: accepting an alternate bool tag would make a
+        // malformed durable default indistinguishable from a valid one.
+        let bool_offset = exact.iter().position(|byte| *byte == 5).unwrap();
+        let mut planted = exact.clone();
+        planted[bool_offset + 1] = 2;
+        assert!(decode_canonical_lens_bytes(&planted).is_err());
+    }
+
+    #[test]
+    fn migration_lens_constructor_and_decoder_enforce_bijective_bounded_shape() {
+        let table = |source: &str, target: &str| TableLens {
+            source_table: source.into(),
+            target_table: target.into(),
+            ops: Vec::new(),
+        };
+        assert!(
+            MigrationLens::new(
+                schema_id(1),
+                schema_id(2),
+                vec![table("a", "b"), table("a", "c")]
+            )
+            .is_err()
+        );
+        assert!(
+            MigrationLens::new(
+                schema_id(1),
+                schema_id(2),
+                vec![table("a", "b"), table("c", "b")]
+            )
+            .is_err()
+        );
+
+        let lens = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![table("a", "b"), table("c", "d")],
+        )
+        .unwrap();
+        let exact = canonical_lens_bytes(&lens);
+        // The final target byte is `d`; changing it to `b` plants a repeated
+        // target in otherwise fully well-formed bytes. Decode must return an
+        // error through the fallible constructor, never panic or normalize it.
+        let mut duplicate_target = exact.clone();
+        *duplicate_target.last_mut().unwrap() = b'b';
+        assert!(decode_canonical_lens_bytes(&duplicate_target).is_err());
+
+        // Header count is after marker (4+24), source UUID, and target UUID.
+        let count_offset = 4 + "jazz-migration-lens-v1".len() + 16 + 16;
+        let mut item_bomb = exact.clone();
+        item_bomb[count_offset..count_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_canonical_lens_bytes(&item_bomb).is_err());
+        let mut byte_bomb = exact.clone();
+        byte_bomb[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_canonical_lens_bytes(&byte_bomb).is_err());
+    }
+
+    #[test]
+    fn postcard_migration_lens_wire_cannot_bypass_validated_constructor() {
+        let valid = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![TableLens {
+                source_table: "a".into(),
+                target_table: "b".into(),
+                ops: Vec::new(),
+            }],
+        )
+        .unwrap();
+        let mut malformed = canonical_lens_bytes(&valid);
+        malformed.push(0);
+        assert!(
+            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&malformed).unwrap())
+                .is_err()
+        );
+        // Planted sensitivity: if Deserialize stopped routing through the
+        // canonical parser, this trailing wire would decode and later reach
+        // content_id.
+    }
+
+    /// `MigrationLens` deliberately owns a custom byte-blob serde boundary:
+    /// consumers cannot construct a protocol lens without the canonical parser
+    /// re-checking the same bijection enforced by `MigrationLens::new`.
+    #[test]
+    fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking() {
+        // Build the canonical grammar directly instead of calling the checked
+        // constructor: `a -> b` and `a -> c` have a repeated source but
+        // different targets. The table sequence is already canonical, so this
+        // only fails if wire deserialization actually re-applies bijection.
+        let mut malformed = Vec::new();
+        put_str(&mut malformed, "jazz-migration-lens-v1");
+        malformed.extend_from_slice(schema_id(1).as_bytes());
+        malformed.extend_from_slice(schema_id(2).as_bytes());
+        put_len(&mut malformed, 2);
+        for target in ["b", "c"] {
+            put_str(&mut malformed, "a");
+            put_str(&mut malformed, target);
+            put_len(&mut malformed, 0);
+        }
+        let wire = postcard::to_allocvec(&PostcardByteBlob(&malformed)).expect("wrap lens blob");
+
+        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        assert!(
+            decoded.is_ok(),
+            "malformed lens wire must return an error, not panic"
+        );
+        assert!(
+            decoded.unwrap().is_err(),
+            "duplicate source must not enter the catalogue"
+        );
+
+        // Planted sensitivity: changing one source makes the same canonical
+        // shape valid. This proves the rejection above is about bijection, not
+        // postcard framing or an accidentally malformed grammar.
+        let valid = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![
+                TableLens {
+                    source_table: "a".into(),
+                    target_table: "b".into(),
+                    ops: Vec::new(),
+                },
+                TableLens {
+                    source_table: "d".into(),
+                    target_table: "c".into(),
+                    ops: Vec::new(),
+                },
+            ],
+        )
+        .expect("unique coordinates are valid");
+        assert!(
+            postcard::from_bytes::<MigrationLens>(
+                &postcard::to_allocvec(&valid).expect("wrap valid lens blob")
+            )
+            .is_ok()
+        );
+    }
+
+    /// The serde visitor must reject an oversized byte blob while it is still
+    /// borrowed from the input. This direct deserializer preserves the custom
+    /// error message that postcard's public error type intentionally erases.
+    #[test]
+    fn migration_lens_borrowed_visitor_rejects_oversized_blob_before_parsing() {
+        let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
+        let error = <MigrationLens as serde::Deserialize>::deserialize(
+            serde::de::value::BorrowedBytesDeserializer::<serde::de::value::Error>::new(&oversized),
+        )
+        .expect_err("oversized borrowed blob must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "migration lens blob exceeds aggregate byte budget",
+            "the borrowed visitor must reject the declared blob before parsing"
+        );
+    }
+
+    /// The wire boundary must turn an oversized postcard byte blob into a
+    /// normal decode error rather than a panic.
+    #[test]
+    fn postcard_migration_lens_rejects_oversized_blob_without_panicking() {
+        let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
+        // `serialize_bytes` emits postcard's byte-blob length varint followed
+        // by this data. The payload is intentionally not a lens marker.
+        let wire =
+            postcard::to_allocvec(&PostcardByteBlob(&oversized)).expect("wrap oversized blob");
+        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        assert!(
+            decoded.is_ok(),
+            "oversized lens wire must return an error, not panic"
+        );
+        assert!(decoded.unwrap().is_err(), "oversized blob must be rejected");
+    }
+
+    #[test]
+    fn postcard_rejects_descriptor_less_default_values_before_lens_exists() {
+        let descriptor = RecordDescriptor::new(std::iter::empty::<(String, ValueType)>());
+        let record = OwnedRecord::new(descriptor.create(&[]).unwrap(), descriptor.clone());
+        let enum_value = groove::records::EnumValue::create(0, descriptor, &[]).unwrap();
+        let large = groove::large_values::LargeValueRef {
+            kind: groove::large_values::LargeValueKind::Bytes,
+            format_version: 1,
+            logical_hash: groove::large_values::ContentHash([1; 32]),
+            root: groove::large_values::NodeRef {
+                object_hash: groove::large_values::ContentHash([2; 32]),
+                locator: groove::large_values::Locator::random(),
+            },
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        };
+        for value in [
+            Value::Record(record),
+            Value::Enum(enum_value),
+            Value::Large(large),
+        ] {
+            assert!(
+                MigrationLens::new(
+                    schema_id(1),
+                    schema_id(2),
+                    vec![TableLens {
+                        source_table: "a".into(),
+                        target_table: "b".into(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "x".into(),
+                            default: value
+                        }]
+                    }]
+                )
+                .is_err()
+            );
+        }
     }
 
     // This is intentionally an internal byte-level test: the durable physical
@@ -3542,6 +4996,178 @@ mod tests {
     }
 
     #[test]
+    fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let table = &schema.tables()[0];
+        let low = TxId::new(TxTime(3), NodeUuid::from_bytes([0x11; 16]));
+        let high = TxId::new(TxTime(4), NodeUuid::from_bytes([0x22; 16]));
+        let author = AuthorSubject::for_test_bytes([0x33; 16]);
+        let version = VersionRecord::encode(
+            table,
+            schema_id(0x44),
+            RowUuid::from_bytes([0x55; 16]),
+            vec![high, low, high],
+            author,
+            7,
+            author,
+            8,
+            &[Some(Value::String("receipt".to_owned()))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(version.parents(), vec![low, high]);
+
+        // A peer can construct a VersionRecord without the birth helper, so
+        // receipt validation must reject that alternate parent spelling too.
+        let raw = table
+            .wire_record_descriptor()
+            .create(&[
+                Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
+                Value::Array(vec![tx_id_value(high), tx_id_value(low)]),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(7),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(8),
+                Value::Nullable(None),
+                Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
+            ])
+            .unwrap();
+        let noncanonical = VersionRecord::new(
+            "todos",
+            schema_id(0x44),
+            OwnedRecord::new(raw, table.wire_record_descriptor()),
+        );
+        let message = SyncMessage::CommitUnit {
+            tx: Transaction {
+                tx_id: high,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: author,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            versions: vec![noncanonical],
+        };
+        assert!(message.validate_version_carriers().is_err());
+        assert!(crate::wire::encode_sync_message(&message).is_err());
+
+        // Hostile peers do not use our guarded encoder. Their postcard bytes
+        // must fail closed without reaching the infallible public accessors.
+        let remote = postcard::to_allocvec(&message).unwrap();
+        let decoded = std::panic::catch_unwind(|| crate::wire::decode_sync_message(&remote));
+        assert!(decoded.is_ok(), "malformed remote receipt must not panic");
+        assert!(decoded.unwrap().is_err());
+
+        let mut trailing_raw = version.record().raw().to_vec();
+        trailing_raw.push(0xa5);
+        let trailing_record = VersionRecord::new(
+            "todos",
+            schema_id(0x44),
+            OwnedRecord::new(trailing_raw, table.wire_record_descriptor()),
+        );
+        let trailing_message = SyncMessage::CommitUnit {
+            tx: match &message {
+                SyncMessage::CommitUnit { tx, .. } => tx.clone(),
+                _ => unreachable!(),
+            },
+            versions: vec![trailing_record],
+        };
+        let remote = postcard::to_allocvec(&trailing_message).unwrap();
+        assert!(crate::wire::decode_sync_message(&remote).is_err());
+
+        let make_record = |descriptor: RecordDescriptor, values: Vec<Value>| {
+            VersionRecord::new(
+                "todos",
+                schema_id(0x44),
+                OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+            )
+        };
+        let base_values = || {
+            vec![
+                Value::Uuid(RowUuid::from_bytes([0x55; 16]).0),
+                Value::Array(vec![tx_id_value(low), tx_id_value(high)]),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(7),
+                Value::String(author.canonical().to_owned()),
+                Value::U64(8),
+                Value::Nullable(None),
+                Value::Nullable(Some(Box::new(Value::String("receipt".to_owned())))),
+            ]
+        };
+        let malformed_message = |version| SyncMessage::CommitUnit {
+            tx: Transaction {
+                tx_id: high,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: author,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            versions: vec![version],
+        };
+
+        let mut noncanonical_author = base_values();
+        noncanonical_author[2] = Value::String(r#"[ "issuer", "subject" ]"#.to_owned());
+        let message = malformed_message(make_record(
+            table.wire_record_descriptor(),
+            noncanonical_author,
+        ));
+        assert!(crate::wire::encode_sync_message(&message).is_err());
+        let remote = postcard::to_allocvec(&message).unwrap();
+        assert!(crate::wire::decode_sync_message(&remote).is_err());
+
+        // Correctly encoded values under structurally wrong UUID/deletion
+        // descriptors are still malformed immutable receipts.
+        for (field, replacement, value) in [
+            (0, ValueType::Bytes, Value::Bytes(vec![0x55; 16])),
+            (6, ValueType::U64, Value::U64(0)),
+        ] {
+            let fields = table
+                .wire_record_descriptor()
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(index, descriptor_field)| {
+                    (
+                        descriptor_field.name.clone().unwrap(),
+                        if index == field {
+                            replacement.clone()
+                        } else {
+                            descriptor_field.value_type.clone()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let descriptor = RecordDescriptor::new(fields);
+            let mut values = base_values();
+            values[field] = value;
+            let message = malformed_message(make_record(descriptor, values));
+            let remote = postcard::to_allocvec(&message).unwrap();
+            assert!(crate::wire::decode_sync_message(&remote).is_err());
+        }
+
+        // A valid immutable receipt is closed under the guarded codec.
+        let valid = malformed_message(version);
+        let bytes = crate::wire::encode_sync_message(&valid).unwrap();
+        assert_eq!(crate::wire::decode_sync_message(&bytes).unwrap(), valid);
+    }
+
+    #[test]
     fn schema_version_persists_policy_source_and_recompiles_on_decode() {
         let source = SchemaBuilder::new()
             .table(
@@ -3598,6 +5224,395 @@ mod tests {
         let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
         assert_eq!(decoded.schema.public_schema(), &source);
         assert_eq!(decoded.schema.tables().len(), 1);
+    }
+
+    #[test]
+    fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions() {
+        // This is an internal descriptor test: permanent physical UUIDs are
+        // catalogue metadata, not public row values. The same-shaped text
+        // columns demonstrate why names/order cannot be used as identity.
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("left", PublicColumnType::Text)
+                    .column("right", PublicColumnType::Text),
+            )
+            .build();
+        let schema = crate::schema::JazzSchema::new(&source).unwrap();
+        let manifest = PhysicalIdentityManifest::allocate(&schema);
+        manifest.validate_for_schema(&schema).unwrap();
+        let round_trip: PhysicalIdentityManifest =
+            serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(round_trip, manifest);
+
+        let version = SchemaVersion::new(schema.clone());
+        let lens =
+            MigrationLens::new(version.id, version.id, Vec::new()).expect("valid migration lens");
+        let publication = SchemaLineagePublication::new_genesis_fixture(
+            version,
+            lens,
+            std::iter::empty::<String>(),
+            std::iter::empty::<String>(),
+        );
+        let mut changed_identity = publication.clone();
+        changed_identity
+            .physical_identities
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("left")
+            .unwrap()
+            .id = crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4());
+        assert_ne!(publication.id, changed_identity.content_id());
+
+        let mut collision = manifest.clone();
+        let table = collision.tables.get_mut("items").unwrap();
+        let left = table.columns["left"].id;
+        table.columns.get_mut("right").unwrap().id = left;
+        assert_eq!(
+            collision.validate_for_schema(&schema),
+            Err("physical identity manifest UUID collision")
+        );
+
+        let renamed_source = SchemaVersion::new(schema.clone());
+        let renamed_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("left_renamed", PublicColumnType::Text)
+                        .column("right", PublicColumnType::Text),
+                )
+                .build(),
+        )
+        .unwrap();
+        let renamed_target = SchemaVersion::new(renamed_schema);
+        let rename_lens = MigrationLens::new(
+            renamed_source.id,
+            renamed_target.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::RenameColumn {
+                    from: "left".to_owned(),
+                    to: "left_renamed".to_owned(),
+                }],
+            }],
+        )
+        .expect("valid migration lens");
+        let renamed = SchemaLineagePublication::author_from_prior(
+            &renamed_source.schema,
+            &manifest,
+            renamed_target.clone(),
+            rename_lens.clone(),
+            std::iter::empty::<String>(),
+            std::iter::empty::<String>(),
+        )
+        .unwrap();
+        assert_eq!(
+            renamed.physical_identities.tables["items"].columns["left_renamed"].id,
+            manifest.tables["items"].columns["left"].id,
+            "a compatible rename retains the permanent column UUID"
+        );
+        let mut changed_rename = renamed.physical_identities.clone();
+        changed_rename
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("left_renamed")
+            .unwrap()
+            .id = crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v4());
+        assert_eq!(
+            manifest.validate_evolution_to(
+                &renamed_source.schema,
+                &changed_rename,
+                &renamed_target.schema,
+                &rename_lens,
+            ),
+            Err("physical compatible column identity changed across lineage")
+        );
+    }
+
+    #[test]
+    fn physical_identity_evolution_never_reuses_retired_epochs_or_subtrees() {
+        let scalar_enum = |variants: &[&str]| PublicColumnType::Array {
+            element: Box::new(PublicColumnType::ScalarEnum {
+                name: "phase".to_owned(),
+                variants: variants.iter().map(|value| (*value).to_owned()).collect(),
+            }),
+        };
+        let source_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", scalar_enum(&["draft", "ready"])),
+                )
+                .table(TableSchemaBuilder::new("retired").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let source = SchemaVersion::new(source_schema.clone());
+        let identities = PhysicalIdentityManifest::allocate(&source_schema);
+        let target_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        // This is deliberately an incompatible epoch: the old
+                        // scalar-enum prefix is not retained.
+                        .column("phase", scalar_enum(&["archived"])),
+                )
+                .table(TableSchemaBuilder::new("new_items").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let target = SchemaVersion::new(target_schema.clone());
+        let lens = MigrationLens::new(
+            source.id,
+            target.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "phase".to_owned(),
+                    transform: "replace-enum-epoch".to_owned(),
+                }],
+            }],
+        )
+        .expect("valid migration lens");
+        let authored = SchemaLineagePublication::author_from_prior(
+            &source.schema,
+            &identities,
+            target.clone(),
+            lens.clone(),
+            ["new_items"],
+            ["retired"],
+        )
+        .unwrap();
+        identities
+            .validate_evolution_to(
+                &source.schema,
+                &authored.physical_identities,
+                &target.schema,
+                &lens,
+            )
+            .unwrap();
+
+        let source_phase = &identities.tables["items"].columns["phase"];
+
+        let mut reused_column = authored.physical_identities.clone();
+        reused_column
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("phase")
+            .unwrap()
+            .id = source_phase.id;
+        assert_eq!(
+            identities.validate_evolution_to(&source.schema, &reused_column, &target.schema, &lens),
+            Err("physical incompatible column epoch reused identity")
+        );
+
+        let mut reused_recursive_enum = authored.physical_identities.clone();
+        reused_recursive_enum
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .columns
+            .get_mut("phase")
+            .unwrap()
+            .enum_variants
+            .get_mut("root/array")
+            .unwrap()[0] = source_phase.enum_variants["root/array"][0];
+        assert_eq!(
+            identities.validate_evolution_to(
+                &source.schema,
+                &reused_recursive_enum,
+                &target.schema,
+                &lens,
+            ),
+            Err("physical retired identity reused across lineage")
+        );
+
+        let mut reused_dropped_table = authored.physical_identities.clone();
+        reused_dropped_table.tables.get_mut("new_items").unwrap().id =
+            identities.tables["retired"].id;
+        assert_eq!(
+            identities.validate_evolution_to(
+                &source.schema,
+                &reused_dropped_table,
+                &target.schema,
+                &lens,
+            ),
+            Err("physical retired identity reused across lineage")
+        );
+    }
+
+    #[test]
+    fn physical_identity_history_retires_table_column_and_nested_enum_across_multiple_hops() {
+        let nested_enum = |variants: &[&str]| PublicColumnType::Array {
+            element: Box::new(PublicColumnType::ScalarEnum {
+                name: "phase".to_owned(),
+                variants: variants.iter().map(|value| (*value).to_owned()).collect(),
+            }),
+        };
+        let v1_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", nested_enum(&["draft", "ready"])),
+                )
+                .table(TableSchemaBuilder::new("retired").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let v1 = SchemaVersion::new(v1_schema.clone());
+        let v1_identities = PhysicalIdentityManifest::allocate(&v1_schema);
+        let v2_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", nested_enum(&["archived"])),
+                )
+                .build(),
+        )
+        .unwrap();
+        let v2 = SchemaVersion::new(v2_schema.clone());
+        let lens_12 = MigrationLens::new(
+            v1.id,
+            v2.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "phase".to_owned(),
+                    transform: "replace-enum-epoch".to_owned(),
+                }],
+            }],
+        )
+        .expect("valid migration lens");
+        let publication_2 = SchemaLineagePublication::author_from_prior_with_history(
+            &v1.schema,
+            &v1_identities,
+            [v1_identities.clone()],
+            v2.clone(),
+            lens_12,
+            std::iter::empty::<String>(),
+            ["retired"],
+        )
+        .unwrap();
+
+        let v3_schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("items")
+                        .column("title", PublicColumnType::Text)
+                        .column("phase", nested_enum(&["archived"]))
+                        .column("other", nested_enum(&["new"])),
+                )
+                .table(TableSchemaBuilder::new("returning").column("note", PublicColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let v3 = SchemaVersion::new(v3_schema.clone());
+        let lens_23 = MigrationLens::new(
+            v2.id,
+            v3.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "other".to_owned(),
+                    default: Value::Array(Vec::new()),
+                }],
+            }],
+        )
+        .expect("valid migration lens");
+        let publication_3 = SchemaLineagePublication::author_from_prior_with_history(
+            &v2.schema,
+            &publication_2.physical_identities,
+            [
+                v1_identities.clone(),
+                publication_2.physical_identities.clone(),
+            ],
+            v3.clone(),
+            lens_23.clone(),
+            ["returning"],
+            std::iter::empty::<String>(),
+        )
+        .unwrap();
+
+        // Re-introducing a table, a prior incompatible epoch, or a recursive
+        // child UUID after an intervening publication is invalid even though
+        // none is present in v2's current mapped coordinates.
+        let retired_table = v1_identities.tables["retired"].id;
+        let retired_column = v1_identities.tables["items"].columns["phase"].id;
+        let retired_nested =
+            v1_identities.tables["items"].columns["phase"].enum_variants["root/array"][0];
+        for forged in [
+            {
+                let mut manifest = publication_3.physical_identities.clone();
+                manifest.tables.get_mut("returning").unwrap().id = retired_table;
+                manifest
+            },
+            {
+                let mut manifest = publication_3.physical_identities.clone();
+                manifest
+                    .tables
+                    .get_mut("items")
+                    .unwrap()
+                    .columns
+                    .get_mut("other")
+                    .unwrap()
+                    .id = retired_column;
+                manifest
+            },
+            {
+                let mut manifest = publication_3.physical_identities.clone();
+                manifest
+                    .tables
+                    .get_mut("items")
+                    .unwrap()
+                    .columns
+                    .get_mut("other")
+                    .unwrap()
+                    .enum_variants
+                    .get_mut("root/array")
+                    .unwrap()[0] = retired_nested;
+                manifest
+            },
+        ] {
+            assert_eq!(
+                publication_2
+                    .physical_identities
+                    .validate_evolution_to_with_history(
+                        &v2.schema,
+                        &forged,
+                        &v3.schema,
+                        &lens_23,
+                        [
+                            v1_identities.clone(),
+                            publication_2.physical_identities.clone()
+                        ],
+                    ),
+                Err("physical retired identity reused across lineage")
+            );
+        }
+        publication_2
+            .physical_identities
+            .validate_evolution_to_with_history(
+                &v2.schema,
+                &publication_3.physical_identities,
+                &v3.schema,
+                &lens_23,
+                [v1_identities, publication_2.physical_identities.clone()],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -3716,6 +5731,7 @@ mod tests {
                 ],
             }],
         )
+        .expect("valid migration lens")
     }
 
     #[test]

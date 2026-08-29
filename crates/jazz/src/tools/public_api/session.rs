@@ -183,7 +183,11 @@ pub struct WriteContext {
     pub attribution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
-    #[serde(rename = "batch_id", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "transaction_id",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub transaction_id: Option<OpenTransactionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch_name: Option<String>,
@@ -335,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_context_batch_id_override() {
+    fn test_write_context_transaction_id_override() {
         let transaction_id = OpenTransactionId::new();
         let context = WriteContext::from_session(Session::new("urn:jazz:test", "session-user"))
             .with_transaction_id(transaction_id);

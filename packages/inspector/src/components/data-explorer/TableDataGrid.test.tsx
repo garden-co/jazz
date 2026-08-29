@@ -258,6 +258,21 @@ describe("TableDataGrid", () => {
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
   });
 
+  it("shows subscription errors instead of presenting them as an empty table", () => {
+    mockUseAll.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      error: new Error("worker query failed"),
+    });
+
+    renderGrid();
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Could not load rows: worker query failed",
+    );
+    expect(screen.queryByText("No rows")).toBeNull();
+  });
+
   it("can show creator and updater columns", () => {
     renderGrid();
 
@@ -567,6 +582,22 @@ describe("TableDataGrid", () => {
 
     expect(screen.getByText("local draft")).not.toBeNull();
     expect(screen.queryByText("server pushed update")).toBeNull();
+  });
+
+  it("keeps an active inline editor open when the current row live-updates", async () => {
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), {
+      target: { value: "local draft" },
+    });
+
+    currentRows = [{ ...currentRows[0], title: "server pushed update" }, currentRows[1]!];
+    rerender(renderGridUi());
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Edit title") as HTMLInputElement).value).toBe("local draft");
+    });
   });
 
   it("sets nullable columns to NULL from the inline editor action", async () => {

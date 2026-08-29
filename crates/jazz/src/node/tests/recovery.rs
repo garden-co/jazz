@@ -155,7 +155,7 @@ fn reopening_rejects_a_schema_version_with_two_durable_aliases() {
             vec![
                 Value::U64(999),
                 Value::Uuid(schema_version.0),
-                Value::Bytes(serde_json::to_vec(&mapping).unwrap()),
+                Value::Bytes(codec::encode_physical_mapping(&mapping).unwrap()),
             ],
         );
         let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
@@ -194,7 +194,7 @@ fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
             vec![
                 Value::U64(u64::from(u32::MAX) + 1),
                 Value::Uuid(schema_version.0),
-                Value::Bytes(serde_json::to_vec(&mapping).unwrap()),
+                Value::Bytes(codec::encode_physical_mapping(&mapping).unwrap()),
             ],
         );
         let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
@@ -730,7 +730,7 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

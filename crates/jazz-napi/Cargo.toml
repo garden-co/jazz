@@ -16,7 +16,7 @@ jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-native-transport = { path = "../jazz-native-transport" }
 jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel.workspace = true
-tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
 futures = "0.3"
 base64 = "0.22"
 napi = { version = "3", features = ["napi6", "serde-json", "async"] }

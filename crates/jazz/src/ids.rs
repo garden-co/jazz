@@ -75,6 +75,26 @@ pub struct PhysicalTableId(pub u64);
 )]
 pub struct PhysicalColumnId(pub u64);
 
+/// Authority-allocated permanent identity for a physical table lineage.
+/// Unlike `PhysicalTableId`, this value crosses catalogue replicas and never
+/// serves as a compact local storage alias.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct GlobalPhysicalTableId(pub uuid::Uuid);
+
+/// Authority-allocated permanent identity for one physical column epoch.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct GlobalPhysicalColumnId(pub uuid::Uuid);
+
+/// Authority-allocated permanent identity for one enum variant occurrence.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct GlobalPhysicalEnumVariantId(pub uuid::Uuid);
+
 /// Content-addressed migration-lens identity.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,

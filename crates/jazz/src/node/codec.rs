@@ -499,6 +499,370 @@ const CATALOGUE_SCHEMA_VERSION: u8 = 1;
 const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
 const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
 const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
+const CATALOGUE_PROTOCOL_PUBLICATION_VERSION: u8 = 1;
+const CATALOGUE_STAGED_LINEAGE_VERSION: u8 = 1;
+const CATALOGUE_PENDING_LINEAGE_VERSION: u8 = 1;
+// This is deliberately independent of the catalogue-record payload versions:
+// physical mappings live in the fixed `jazz_schema_versions` carrier rather
+// than in `jazz_catalogue`.
+const PHYSICAL_MAPPING_VERSION: u8 = 1;
+
+/// Encode node-local physical storage metadata as one typed, canonical value.
+///
+/// The mapping is not a wire identity: table and column ids are opaque local
+/// handles.  The schema-qualified enum case identities inside it are semantic,
+/// and their vector order is the already-authoritative physical tag order.
+pub(super) fn encode_physical_mapping(mapping: &SchemaPhysicalMapping) -> Result<Vec<u8>, Error> {
+    let mut payload = vec![PHYSICAL_MAPPING_VERSION];
+    encode_physical_identity_manifest(&mut payload, &mapping.identities)?;
+    put_len(
+        &mut payload,
+        mapping.tables.len(),
+        "physical mapping table count",
+    )?;
+    for (table_name, table) in &mapping.tables {
+        put_string(&mut payload, table_name, "physical mapping table name")?;
+        payload.extend_from_slice(&table.table_id.0.to_le_bytes());
+        put_len(
+            &mut payload,
+            table.columns.len(),
+            "physical mapping column count",
+        )?;
+        for (column_name, column_id) in &table.columns {
+            put_string(&mut payload, column_name, "physical mapping column name")?;
+            payload.extend_from_slice(&column_id.0.to_le_bytes());
+        }
+        put_len(
+            &mut payload,
+            table.variant_cases.len(),
+            "physical mapping variant case count",
+        )?;
+        for case in &table.variant_cases {
+            payload.extend_from_slice(&case.tag.to_le_bytes());
+            put_len(
+                &mut payload,
+                case.fields.len(),
+                "physical mapping variant field count",
+            )?;
+            for field in &case.fields {
+                put_string(&mut payload, field, "physical mapping variant field")?;
+            }
+        }
+        encode_direct_enum_registries(&mut payload, &table.scalar_enum_cases)?;
+        encode_direct_enum_registries(&mut payload, &table.payload_enum_cases)?;
+        encode_nested_enum_registries(&mut payload, &table.nested_scalar_enum_cases)?;
+        encode_nested_enum_registries(&mut payload, &table.nested_payload_enum_cases)?;
+    }
+    Ok(payload)
+}
+
+pub(super) fn decode_physical_mapping(payload: &[u8]) -> Result<SchemaPhysicalMapping, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let mut cursor = CataloguePayloadCursor::new(payload, PHYSICAL_MAPPING_VERSION, CONTEXT)?;
+    let identities = decode_physical_identity_manifest(&mut cursor)?;
+    let table_count = cursor.u32()?;
+    let mut tables = BTreeMap::new();
+    let mut previous_table = None;
+    for _ in 0..table_count {
+        let table_name = cursor.string()?;
+        require_strictly_increasing(previous_table.as_deref(), &table_name, CONTEXT)?;
+        previous_table = Some(table_name.clone());
+        let table_id = PhysicalTableId(cursor.u64()?);
+        if table_id.0 == 0 {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        let column_count = cursor.u32()?;
+        let mut columns = BTreeMap::new();
+        let mut previous_column = None;
+        for _ in 0..column_count {
+            let name = cursor.string()?;
+            require_strictly_increasing(previous_column.as_deref(), &name, CONTEXT)?;
+            previous_column = Some(name.clone());
+            let id = PhysicalColumnId(cursor.u64()?);
+            if id.0 == 0 || columns.insert(name, id).is_some() {
+                return Err(Error::InvalidStoredValue(CONTEXT));
+            }
+        }
+        let variant_count = cursor.u32()?;
+        // Do not reserve an attacker-controlled count before checking that
+        // the corresponding entries exist in the exact-consumed payload.
+        let mut variant_cases = Vec::new();
+        for _ in 0..variant_count {
+            let tag = cursor.u32()?;
+            let field_count = cursor.u32()?;
+            let mut fields = BTreeSet::new();
+            let mut previous_field = None;
+            for _ in 0..field_count {
+                let field = cursor.string()?;
+                require_strictly_increasing(previous_field.as_deref(), &field, CONTEXT)?;
+                previous_field = Some(field.clone());
+                if !fields.insert(field) {
+                    return Err(Error::InvalidStoredValue(CONTEXT));
+                }
+            }
+            variant_cases.push(PhysicalVariantCase { tag, fields });
+        }
+        let scalar_enum_cases = decode_direct_enum_registries(&mut cursor)?;
+        let payload_enum_cases = decode_direct_enum_registries(&mut cursor)?;
+        let nested_scalar_enum_cases = decode_nested_enum_registries(&mut cursor)?;
+        let nested_payload_enum_cases = decode_nested_enum_registries(&mut cursor)?;
+        if tables
+            .insert(
+                table_name,
+                TablePhysicalMapping {
+                    table_id,
+                    columns,
+                    variant_cases,
+                    scalar_enum_cases,
+                    payload_enum_cases,
+                    nested_scalar_enum_cases,
+                    nested_payload_enum_cases,
+                },
+            )
+            .is_some()
+        {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+    }
+    cursor.finish()?;
+    Ok(SchemaPhysicalMapping { identities, tables })
+}
+
+fn encode_physical_identity_manifest(
+    payload: &mut Vec<u8>,
+    manifest: &PhysicalIdentityManifest,
+) -> Result<(), Error> {
+    put_len(
+        payload,
+        manifest.tables.len(),
+        "physical identity table count",
+    )?;
+    for (table_name, table) in &manifest.tables {
+        put_string(payload, table_name, "physical identity table name")?;
+        payload.extend_from_slice(table.id.0.as_bytes());
+        put_len(
+            payload,
+            table.columns.len(),
+            "physical identity column count",
+        )?;
+        for (column_name, column) in &table.columns {
+            put_string(payload, column_name, "physical identity column name")?;
+            payload.extend_from_slice(column.id.0.as_bytes());
+            put_len(
+                payload,
+                column.enum_variants.len(),
+                "physical identity enum occurrence count",
+            )?;
+            for (path, variants) in &column.enum_variants {
+                put_string(payload, path, "physical identity enum path")?;
+                put_len(payload, variants.len(), "physical identity enum case count")?;
+                for variant in variants {
+                    payload.extend_from_slice(variant.0.as_bytes());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_physical_identity_manifest(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<PhysicalIdentityManifest, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let table_count = cursor.u32()?;
+    let mut tables = BTreeMap::new();
+    let mut previous_table = None;
+    for _ in 0..table_count {
+        let table_name = cursor.string()?;
+        require_strictly_increasing(previous_table.as_deref(), &table_name, CONTEXT)?;
+        previous_table = Some(table_name.clone());
+        let id = crate::ids::GlobalPhysicalTableId(cursor.uuid()?);
+        let column_count = cursor.u32()?;
+        let mut columns = BTreeMap::new();
+        let mut previous_column = None;
+        for _ in 0..column_count {
+            let column_name = cursor.string()?;
+            require_strictly_increasing(previous_column.as_deref(), &column_name, CONTEXT)?;
+            previous_column = Some(column_name.clone());
+            let id = crate::ids::GlobalPhysicalColumnId(cursor.uuid()?);
+            let occurrence_count = cursor.u32()?;
+            let mut enum_variants = BTreeMap::new();
+            let mut previous_path = None;
+            for _ in 0..occurrence_count {
+                let path = cursor.string()?;
+                require_strictly_increasing(previous_path.as_deref(), &path, CONTEXT)?;
+                previous_path = Some(path.clone());
+                let case_count = cursor.u32()?;
+                let mut variants = Vec::new();
+                for _ in 0..case_count {
+                    variants.push(crate::ids::GlobalPhysicalEnumVariantId(cursor.uuid()?));
+                }
+                enum_variants.insert(path, variants);
+            }
+            columns.insert(column_name, PhysicalColumnIdentity { id, enum_variants });
+        }
+        tables.insert(table_name, PhysicalTableIdentity { id, columns });
+    }
+    Ok(PhysicalIdentityManifest { tables })
+}
+
+fn put_len(payload: &mut Vec<u8>, length: usize, context: &'static str) -> Result<(), Error> {
+    let length = u32::try_from(length).map_err(|_| Error::InvalidStoredValue(context))?;
+    payload.extend_from_slice(&length.to_le_bytes());
+    Ok(())
+}
+
+fn put_string(payload: &mut Vec<u8>, value: &str, context: &'static str) -> Result<(), Error> {
+    put_len(payload, value.len(), context)?;
+    payload.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn encode_case_id(payload: &mut Vec<u8>, case: &GlobalScalarEnumCaseId) {
+    payload.extend_from_slice(case.id.0.as_bytes());
+    payload.extend_from_slice(case.introducing_schema.0.as_bytes());
+    payload.push(case.introducing_ordinal);
+}
+
+fn encode_cases(payload: &mut Vec<u8>, cases: &[GlobalScalarEnumCaseId]) -> Result<(), Error> {
+    put_len(payload, cases.len(), "physical mapping enum case count")?;
+    for case in cases {
+        encode_case_id(payload, case);
+    }
+    Ok(())
+}
+
+fn encode_direct_enum_registries(
+    payload: &mut Vec<u8>,
+    registries: &BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>,
+) -> Result<(), Error> {
+    put_len(
+        payload,
+        registries.len(),
+        "physical mapping direct registry count",
+    )?;
+    for (column_id, cases) in registries {
+        payload.extend_from_slice(&column_id.0.to_le_bytes());
+        encode_cases(payload, cases)?;
+    }
+    Ok(())
+}
+
+fn encode_nested_enum_registries(
+    payload: &mut Vec<u8>,
+    registries: &BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>,
+) -> Result<(), Error> {
+    put_len(
+        payload,
+        registries.len(),
+        "physical mapping nested registry count",
+    )?;
+    for (column_id, paths) in registries {
+        payload.extend_from_slice(&column_id.0.to_le_bytes());
+        put_len(
+            payload,
+            paths.len(),
+            "physical mapping nested registry path count",
+        )?;
+        for (path, cases) in paths {
+            put_string(payload, path, "physical mapping nested registry path")?;
+            encode_cases(payload, cases)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_case_id(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<GlobalScalarEnumCaseId, Error> {
+    Ok(GlobalScalarEnumCaseId {
+        id: crate::ids::GlobalPhysicalEnumVariantId(cursor.uuid()?),
+        introducing_schema: SchemaVersionId(cursor.uuid()?),
+        introducing_ordinal: cursor.bytes(1)?[0],
+    })
+}
+
+fn decode_cases(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let count = cursor.u32()?;
+    // The count is untrusted durable input; grow only after each full case is
+    // present rather than reserving arbitrary memory for a truncated payload.
+    let mut cases = Vec::new();
+    let mut unique = BTreeSet::new();
+    for _ in 0..count {
+        let case = decode_case_id(cursor)?;
+        if !unique.insert(case.clone()) {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        cases.push(case);
+    }
+    Ok(cases)
+}
+
+fn decode_direct_enum_registries(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<BTreeMap<PhysicalColumnId, Vec<GlobalScalarEnumCaseId>>, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let count = cursor.u32()?;
+    let mut registries = BTreeMap::new();
+    let mut previous = None;
+    for _ in 0..count {
+        let id = PhysicalColumnId(cursor.u64()?);
+        if id.0 == 0 || previous.is_some_and(|previous| id <= previous) {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        previous = Some(id);
+        if registries.insert(id, decode_cases(cursor)?).is_some() {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+    }
+    Ok(registries)
+}
+
+fn decode_nested_enum_registries(
+    cursor: &mut CataloguePayloadCursor<'_>,
+) -> Result<BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalScalarEnumCaseId>>>, Error> {
+    const CONTEXT: &str = "invalid physical mapping payload";
+    let count = cursor.u32()?;
+    let mut registries = BTreeMap::new();
+    let mut previous_column = None;
+    for _ in 0..count {
+        let id = PhysicalColumnId(cursor.u64()?);
+        if id.0 == 0 || previous_column.is_some_and(|previous| id <= previous) {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+        previous_column = Some(id);
+        let path_count = cursor.u32()?;
+        let mut paths = BTreeMap::new();
+        let mut previous_path = None;
+        for _ in 0..path_count {
+            let path = cursor.string()?;
+            require_strictly_increasing(previous_path.as_deref(), &path, CONTEXT)?;
+            previous_path = Some(path.clone());
+            if paths.insert(path, decode_cases(cursor)?).is_some() {
+                return Err(Error::InvalidStoredValue(CONTEXT));
+            }
+        }
+        if registries.insert(id, paths).is_some() {
+            return Err(Error::InvalidStoredValue(CONTEXT));
+        }
+    }
+    Ok(registries)
+}
+
+fn require_strictly_increasing(
+    previous: Option<&str>,
+    value: &str,
+    context: &'static str,
+) -> Result<(), Error> {
+    if previous.is_some_and(|previous| previous >= value) {
+        Err(Error::InvalidStoredValue(context))
+    } else {
+        Ok(())
+    }
+}
 
 pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>, Error> {
     let public_schema = serde_json::to_vec(schema.schema.public_schema())
@@ -615,6 +979,196 @@ pub(super) fn decode_catalogue_lineage_activation(
     Ok(SchemaLineageActivation { id, catalogue_seq })
 }
 
+/// The protocol lens has a dedicated canonical grammar because it is a durable
+/// sync/publication fact.  It is deliberately not the jazz-server schema
+/// editor's `LensTransform`: those types have different operations.
+pub(super) fn encode_catalogue_lens(lens: &MigrationLens) -> Vec<u8> {
+    let mut payload = vec![1];
+    payload.extend_from_slice(&crate::protocol::canonical_lens_bytes(lens));
+    payload
+}
+
+pub(super) fn decode_catalogue_lens(payload: &[u8]) -> Result<MigrationLens, Error> {
+    let bytes = payload
+        .strip_prefix(&[1])
+        .ok_or(Error::InvalidStoredValue("invalid catalogue lens payload"))?;
+    crate::protocol::decode_canonical_lens_bytes(bytes)
+        .map_err(|_| Error::InvalidStoredValue("invalid catalogue lens payload"))
+}
+
+fn encode_catalogue_publication(publication: &SchemaLineagePublication) -> Result<Vec<u8>, Error> {
+    let schema = encode_catalogue_schema(&publication.schema)?;
+    let lens = encode_catalogue_lens(&publication.lens);
+    let mut payload = vec![CATALOGUE_PROTOCOL_PUBLICATION_VERSION];
+    payload.extend_from_slice(publication.id.0.as_bytes());
+    put_len(
+        &mut payload,
+        schema.len(),
+        "catalogue publication schema length",
+    )?;
+    payload.extend_from_slice(&schema);
+    put_len(
+        &mut payload,
+        lens.len(),
+        "catalogue publication lens length",
+    )?;
+    payload.extend_from_slice(&lens);
+    let mut new_tables = publication.new_tables.clone();
+    new_tables.sort();
+    if new_tables.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::InvalidStoredValue(
+            "catalogue publication duplicate new table",
+        ));
+    }
+    put_len(
+        &mut payload,
+        new_tables.len(),
+        "catalogue publication new table count",
+    )?;
+    for table in new_tables {
+        put_string(&mut payload, &table, "catalogue publication table")?;
+    }
+    let mut dropped_tables = publication.dropped_tables.clone();
+    dropped_tables.sort();
+    if dropped_tables.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::InvalidStoredValue(
+            "catalogue publication duplicate dropped table",
+        ));
+    }
+    put_len(
+        &mut payload,
+        dropped_tables.len(),
+        "catalogue publication dropped table count",
+    )?;
+    for table in dropped_tables {
+        put_string(&mut payload, &table, "catalogue publication table")?;
+    }
+    encode_physical_identity_manifest(&mut payload, &publication.physical_identities)?;
+    Ok(payload)
+}
+
+fn decode_catalogue_publication(payload: &[u8]) -> Result<SchemaLineagePublication, Error> {
+    const CONTEXT: &str = "invalid catalogue protocol publication";
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, CATALOGUE_PROTOCOL_PUBLICATION_VERSION, CONTEXT)?;
+    let id = SchemaLineagePublicationId(cursor.uuid()?);
+    let schema = decode_catalogue_schema(cursor.sized_bytes()?)?;
+    let lens = decode_catalogue_lens(cursor.sized_bytes()?)?;
+    let new_tables = decode_sorted_strings(&mut cursor, CONTEXT)?;
+    let dropped_tables = decode_sorted_strings(&mut cursor, CONTEXT)?;
+    let physical_identities = decode_physical_identity_manifest(&mut cursor)?;
+    cursor.finish()?;
+    let publication = SchemaLineagePublication {
+        id,
+        schema,
+        lens,
+        new_tables,
+        dropped_tables,
+        physical_identities,
+    };
+    if publication.id != publication.content_id()
+        || encode_catalogue_publication(&publication)? != payload
+    {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    Ok(publication)
+}
+
+fn decode_sorted_strings(
+    cursor: &mut CataloguePayloadCursor<'_>,
+    context: &'static str,
+) -> Result<Vec<String>, Error> {
+    let mut values = Vec::new();
+    let mut previous = None;
+    for _ in 0..cursor.u32()? {
+        let value = cursor.string()?;
+        require_strictly_increasing(previous.as_deref(), &value, context)?;
+        previous = Some(value.clone());
+        values.push(value);
+    }
+    Ok(values)
+}
+
+pub(super) fn encode_catalogue_staged_lineage(
+    staged: &StagedSchemaLineage,
+) -> Result<Vec<u8>, Error> {
+    let publication = encode_catalogue_publication(&staged.publication)?;
+    let mapping = encode_physical_mapping(&staged.mapping)?;
+    let mut payload = vec![CATALOGUE_STAGED_LINEAGE_VERSION];
+    payload.extend_from_slice(&staged.catalogue_seq.to_le_bytes());
+    put_len(
+        &mut payload,
+        publication.len(),
+        "staged catalogue publication length",
+    )?;
+    payload.extend_from_slice(&publication);
+    payload.extend_from_slice(&staged.alias.0.to_le_bytes());
+    put_len(
+        &mut payload,
+        mapping.len(),
+        "staged catalogue mapping length",
+    )?;
+    payload.extend_from_slice(&mapping);
+    Ok(payload)
+}
+
+pub(super) fn decode_catalogue_staged_lineage(
+    payload: &[u8],
+) -> Result<StagedSchemaLineage, Error> {
+    const CONTEXT: &str = "invalid staged catalogue lineage";
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, CATALOGUE_STAGED_LINEAGE_VERSION, CONTEXT)?;
+    let catalogue_seq = cursor.u64()?;
+    let publication = decode_catalogue_publication(cursor.sized_bytes()?)?;
+    let alias = SchemaVersionAlias(cursor.u64()?);
+    let mapping = decode_physical_mapping(cursor.sized_bytes()?)?;
+    cursor.finish()?;
+    let staged = StagedSchemaLineage {
+        catalogue_seq,
+        publication,
+        alias,
+        mapping,
+    };
+    if encode_catalogue_staged_lineage(&staged)? != payload {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    Ok(staged)
+}
+
+pub(super) fn encode_catalogue_pending_lineage(
+    pending: &PendingSchemaLineage,
+) -> Result<Vec<u8>, Error> {
+    let publication = encode_catalogue_publication(&pending.publication)?;
+    let mut payload = vec![CATALOGUE_PENDING_LINEAGE_VERSION];
+    payload.extend_from_slice(&pending.catalogue_seq.to_le_bytes());
+    put_len(
+        &mut payload,
+        publication.len(),
+        "pending catalogue publication length",
+    )?;
+    payload.extend_from_slice(&publication);
+    Ok(payload)
+}
+
+pub(super) fn decode_catalogue_pending_lineage(
+    payload: &[u8],
+) -> Result<PendingSchemaLineage, Error> {
+    const CONTEXT: &str = "invalid pending catalogue lineage";
+    let mut cursor =
+        CataloguePayloadCursor::new(payload, CATALOGUE_PENDING_LINEAGE_VERSION, CONTEXT)?;
+    let catalogue_seq = cursor.u64()?;
+    let publication = decode_catalogue_publication(cursor.sized_bytes()?)?;
+    cursor.finish()?;
+    let pending = PendingSchemaLineage {
+        catalogue_seq,
+        publication,
+    };
+    if encode_catalogue_pending_lineage(&pending)? != payload {
+        return Err(Error::InvalidStoredValue(CONTEXT));
+    }
+    Ok(pending)
+}
+
 struct CataloguePayloadCursor<'a> {
     payload: &'a [u8],
     offset: usize,
@@ -656,9 +1210,21 @@ impl<'a> CataloguePayloadCursor<'a> {
         Ok(u64::from_le_bytes(bytes))
     }
 
-    fn sized_bytes(&mut self) -> Result<&'a [u8], Error> {
+    fn u32(&mut self) -> Result<u32, Error> {
         let bytes: [u8; 4] = self.bytes(4)?.try_into().expect("exact u32 width");
-        self.bytes(u32::from_le_bytes(bytes) as usize)
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn string(&mut self) -> Result<String, Error> {
+        let bytes = self.sized_bytes()?;
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| Error::InvalidStoredValue(self.context))
+    }
+
+    fn sized_bytes(&mut self) -> Result<&'a [u8], Error> {
+        let length = self.u32()? as usize;
+        self.bytes(length)
     }
 
     fn finish(self) -> Result<(), Error> {
@@ -683,6 +1249,228 @@ mod catalogue_payload_tests {
 
     fn schema_id(value: u128) -> SchemaVersionId {
         SchemaVersionId(uuid::Uuid::from_u128(value))
+    }
+
+    fn mapping_fixture() -> SchemaPhysicalMapping {
+        let case = |byte, ordinal| GlobalScalarEnumCaseId {
+            id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_bytes([byte; 16])),
+            introducing_schema: SchemaVersionId(uuid::Uuid::from_bytes([byte; 16])),
+            introducing_ordinal: ordinal,
+        };
+        SchemaPhysicalMapping {
+            identities: PhysicalIdentityManifest {
+                tables: BTreeMap::from([(
+                    "items".to_owned(),
+                    PhysicalTableIdentity {
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x71; 16])),
+                        columns: BTreeMap::from([(
+                            "state".to_owned(),
+                            PhysicalColumnIdentity {
+                                id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::from_bytes(
+                                    [0x72; 16],
+                                )),
+                                enum_variants: BTreeMap::new(),
+                            },
+                        )]),
+                    },
+                )]),
+            },
+            tables: BTreeMap::from([(
+                "items".to_owned(),
+                TablePhysicalMapping {
+                    table_id: PhysicalTableId(7),
+                    columns: BTreeMap::from([("state".to_owned(), PhysicalColumnId(11))]),
+                    variant_cases: vec![PhysicalVariantCase {
+                        tag: 3,
+                        fields: BTreeSet::from(["state".to_owned()]),
+                    }],
+                    scalar_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        vec![case(0x11, 2)],
+                    )]),
+                    payload_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        vec![case(0x22, 1)],
+                    )]),
+                    nested_scalar_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        BTreeMap::from([("root/array".to_owned(), vec![case(0x33, 0)])]),
+                    )]),
+                    nested_payload_enum_cases: BTreeMap::from([(
+                        PhysicalColumnId(11),
+                        BTreeMap::from([("root/case/canonical".to_owned(), vec![case(0x44, 3)])]),
+                    )]),
+                },
+            )]),
+        }
+    }
+
+    fn staged_fixture() -> StagedSchemaLineage {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let lens =
+            MigrationLens::new(schema.id, schema.id, Vec::new()).expect("valid migration lens");
+        let publication = SchemaLineagePublication::new_genesis_fixture(
+            schema,
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        );
+        StagedSchemaLineage {
+            catalogue_seq: 7,
+            publication,
+            alias: SchemaVersionAlias(3),
+            mapping: SchemaPhysicalMapping {
+                identities: PhysicalIdentityManifest {
+                    tables: BTreeMap::new(),
+                },
+                tables: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn staged_and_pending_lineage_payloads_are_exact_versioned_and_fail_closed() {
+        let staged = staged_fixture();
+        let exact = encode_catalogue_staged_lineage(&staged).unwrap();
+        assert_eq!(&exact[..9], &[1, 7, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            decode_catalogue_staged_lineage(&exact)
+                .unwrap()
+                .catalogue_seq,
+            7
+        );
+        let pending = PendingSchemaLineage {
+            catalogue_seq: 8,
+            publication: staged.publication.clone(),
+        };
+        let pending_exact = encode_catalogue_pending_lineage(&pending).unwrap();
+        assert_eq!(&pending_exact[..9], &[1, 8, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            decode_catalogue_pending_lineage(&pending_exact).unwrap(),
+            pending
+        );
+        for malformed in [
+            vec![],
+            vec![2],
+            exact[..exact.len() - 1].to_vec(),
+            [exact.clone(), vec![0]].concat(),
+            {
+                let mut future = exact.clone();
+                future[0] = 2;
+                future
+            },
+            {
+                let mut huge = exact[..13].to_vec();
+                huge[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+                huge
+            },
+            // Planted: changing the stored publication ID must fail before
+            // a lineage can become resident.
+            {
+                let mut wrong = exact.clone();
+                // staged v1 + sequence + publication length precede the
+                // publication's own version byte; byte 14 is its first ID
+                // byte, not byte 13.
+                wrong[14] ^= 1;
+                wrong
+            },
+        ] {
+            assert!(decode_catalogue_staged_lineage(&malformed).is_err());
+        }
+        for malformed in [
+            vec![],
+            pending_exact[..pending_exact.len() - 1].to_vec(),
+            [pending_exact.clone(), vec![0]].concat(),
+            {
+                let mut x = pending_exact.clone();
+                x[0] = 2;
+                x
+            },
+        ] {
+            assert!(decode_catalogue_pending_lineage(&malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_mapping_payload_has_exact_typed_v1_fixture_and_round_trips() {
+        let mapping = mapping_fixture();
+        let mut expected = [
+            &[1, 1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"items",
+            &[7, 0, 0, 0, 0, 0, 0, 0],
+            &[1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"state",
+            &[11, 0, 0, 0, 0, 0, 0, 0],
+            &[1, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"state",
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
+            &[0x11; 16],
+            &[0x11; 16],
+            &[2],
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
+            &[0x22; 16],
+            &[0x22; 16],
+            &[1],
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 10, 0, 0, 0][..],
+            b"root/array",
+            &[1, 0, 0, 0][..],
+            &[0x33; 16],
+            &[0x33; 16],
+            &[0],
+            &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 19, 0, 0, 0][..],
+            b"root/case/canonical",
+            &[1, 0, 0, 0][..],
+            &[0x44; 16],
+            &[0x44; 16],
+            &[3],
+        ]
+        .concat();
+        let identity_prefix = [
+            &[1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"items",
+            &[0x71; 16],
+            &[1, 0, 0, 0, 5, 0, 0, 0][..],
+            b"state",
+            &[0x72; 16],
+            &[0, 0, 0, 0],
+        ]
+        .concat();
+        expected.splice(1..1, identity_prefix);
+        let encoded = encode_physical_mapping(&mapping).unwrap();
+        assert_eq!(encoded, expected);
+        assert_eq!(decode_physical_mapping(&encoded).unwrap(), mapping);
+    }
+
+    #[test]
+    fn physical_mapping_payload_rejects_unknown_malformed_trailing_and_noncanonical_forms() {
+        let valid = encode_physical_mapping(&mapping_fixture()).unwrap();
+        for malformed in [
+            vec![],
+            vec![2],
+            valid[..valid.len() - 1].to_vec(),
+            [valid.clone(), vec![0]].concat(),
+        ] {
+            assert!(
+                decode_physical_mapping(&malformed).is_err(),
+                "{malformed:?}"
+            );
+        }
+
+        // Two otherwise empty tables deliberately appear in reverse byte order.
+        // Decoder rejection is sensitive to replacing its strict-order check
+        // with BTreeMap insertion (which would silently normalize the bytes).
+        let noncanonical = [
+            &[1, 2, 0, 0, 0, 1, 0, 0, 0][..],
+            b"z",
+            &[1, 0, 0, 0, 0, 0, 0, 0],
+            &[0; 20],
+            &[1, 0, 0, 0],
+            b"a",
+            &[2, 0, 0, 0, 0, 0, 0, 0],
+            &[0; 20],
+        ]
+        .concat();
+        assert!(decode_physical_mapping(&noncanonical).is_err());
     }
 
     #[test]
@@ -1962,6 +2750,7 @@ struct ResultMemberStorageLayout {
     occurrence: records::RecordDescriptor,
     union_arm: records::RecordDescriptor,
     real_row: records::RecordDescriptor,
+    settled_value: records::RecordDescriptor,
 }
 
 fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
@@ -2165,6 +2954,14 @@ fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
                 "member",
                 records::ValueType::Enum(Box::new(member_schema.clone())),
             )]);
+            // The descriptor and value payloads are each normal canonical
+            // Groove encodings. Keeping them as fields of a fixed record
+            // avoids smuggling a serde/postcard representation into a durable
+            // result-member key while retaining their dynamic type boundary.
+            let settled_value = records::RecordDescriptor::new([
+                ("descriptor", records::ValueType::Bytes),
+                ("value", records::ValueType::Bytes),
+            ]);
             ResultMemberStorageLayout {
                 member_envelope,
                 member_schema,
@@ -2173,6 +2970,7 @@ fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
                 occurrence,
                 union_arm,
                 real_row,
+                settled_value,
             }
         });
     &LAYOUT
@@ -2244,6 +3042,72 @@ fn decode_result_member_envelope(
         return Err(Error::InvalidStoredValue(context));
     }
     Ok(value.clone())
+}
+
+/// Encode one dynamically typed synthetic identity value as a fixed outer
+/// Groove record. The nested descriptor is itself a canonical Groove record
+/// descriptor, and the nested bytes are a record under that exact descriptor.
+/// There is deliberately no serde/postcard payload in settled keys.
+pub(super) fn settled_result_value_storage_bytes(
+    value: &Value,
+    value_type: &records::ValueType,
+) -> Result<Vec<u8>, Error> {
+    let value_descriptor = records::RecordDescriptor::new([("value", value_type.clone())]);
+    let descriptor = records::encode_record_descriptor(&value_descriptor)?;
+    let value = value_descriptor.create(std::slice::from_ref(value))?;
+    let layout = result_member_storage_layout();
+    let encoded = layout
+        .settled_value
+        .create(&[Value::Bytes(descriptor), Value::Bytes(value)])?;
+    if encoded.len() > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is too large",
+        ));
+    }
+    Ok(encoded)
+}
+
+fn validate_settled_result_value_storage_bytes(encoded: &[u8]) -> Result<(), Error> {
+    if encoded.len() > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is too large",
+        ));
+    }
+    let layout = result_member_storage_layout();
+    let values = layout.settled_value.bind(encoded).to_values()?;
+    if layout.settled_value.create(&values)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is not canonical",
+        ));
+    }
+    let [Value::Bytes(descriptor), Value::Bytes(value)] = values.as_slice() else {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is invalid",
+        ));
+    };
+    let descriptor = records::decode_record_descriptor(descriptor)?;
+    let [field] = descriptor.fields() else {
+        return Err(Error::InvalidStoredValue(
+            "settled result value descriptor is invalid",
+        ));
+    };
+    if field.name.as_deref() != Some("value") {
+        return Err(Error::InvalidStoredValue(
+            "settled result value descriptor is invalid",
+        ));
+    }
+    let decoded = descriptor.bind(value).to_values()?;
+    if descriptor.create(&decoded)? != *value {
+        return Err(Error::InvalidStoredValue(
+            "settled result value is not canonical",
+        ));
+    }
+    if settled_result_value_storage_bytes(&decoded[0], &field.value_type)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result value encoding is not canonical",
+        ));
+    }
+    Ok(())
 }
 
 fn result_member_case_descriptor(
@@ -2641,6 +3505,8 @@ fn result_member_storage_value(member: &ResultMemberEntry) -> Result<records::En
             row,
             replacement,
         } => {
+            validate_settled_result_value_storage_bytes(row)?;
+            validate_settled_result_value_storage_bytes(replacement.encoded_record())?;
             let tag = RESULT_MEMBER_SYNTHETIC_TAG;
             let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
             let record = ResultMemberSyntheticStorageRecord::encode(
@@ -2976,6 +3842,28 @@ fn program_fact_put_tier(bytes: &mut Vec<u8>, value: DurabilityTier) {
     });
 }
 
+fn validate_result_member_payload_storage(payload: &ResultMemberPayloadEntry) -> Result<(), Error> {
+    let descriptor = records::decode_record_descriptor(&payload.descriptor)
+        .map_err(|_| Error::InvalidStoredValue("settled result payload descriptor is invalid"))?;
+    if descriptor.fields().iter().any(|field| field.name.is_none()) {
+        return Err(Error::InvalidStoredValue(
+            "settled result payload descriptor field must be named",
+        ));
+    }
+    let values = descriptor
+        .bind(&payload.record)
+        .to_values()
+        .map_err(|_| Error::InvalidStoredValue("settled result payload record is invalid"))?;
+    if descriptor.create(&values)? != payload.record
+        || records::encode_record_descriptor(&descriptor)? != payload.descriptor
+    {
+        return Err(Error::InvalidStoredValue(
+            "settled result payload encoding is not canonical",
+        ));
+    }
+    Ok(())
+}
+
 /// Explicit versioned canonical codec for settled-program-fact durable keys.
 /// Nested result-member values use their own Groove-record codec; no serde
 /// representation of `ProgramFactEntry` is durable.
@@ -2985,6 +3873,7 @@ pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<
     bytes.push(PROGRAM_FACT_STORAGE_VERSION);
     match fact {
         ProgramFactEntry::ResultPayload(v) => {
+            validate_result_member_payload_storage(v)?;
             bytes.push(0);
             program_fact_put_member(&mut bytes, &v.member, 1)?;
             program_fact_put_bytes(&mut bytes, &v.descriptor)?;
@@ -4713,11 +5602,27 @@ mod result_member_storage_codec_tests {
         row
     }
 
+    fn settled_value(value: Value, value_type: records::ValueType) -> Vec<u8> {
+        settled_result_value_storage_bytes(&value, &value_type).unwrap()
+    }
+
+    fn result_payload(value: Value, value_type: records::ValueType) -> ResultMemberPayloadEntry {
+        let descriptor = records::RecordDescriptor::new([("value", value_type)]);
+        ResultMemberPayloadEntry {
+            member: fixture_member(),
+            descriptor: records::encode_record_descriptor(&descriptor).unwrap(),
+            record: descriptor.create(&[value]).unwrap(),
+        }
+    }
+
     fn fixture_member() -> ResultMemberEntry {
         ResultMemberEntry::Synthetic {
             table: "facts".to_owned(),
-            row: vec![0x11],
-            replacement: SyntheticReplacementToken::from_encoded_record(vec![0x12]),
+            row: settled_value(Value::U8(0x11), records::ValueType::U8),
+            replacement: SyntheticReplacementToken::from_encoded_record(settled_value(
+                Value::U8(0x12),
+                records::ValueType::U8,
+            )),
         }
     }
 
@@ -4742,8 +5647,7 @@ mod result_member_storage_codec_tests {
         let facts = vec![
             ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
                 member: member.clone(),
-                descriptor: vec![1],
-                record: vec![2],
+                ..result_payload(Value::U8(2), records::ValueType::U8)
             }),
             ProgramFactEntry::RelationEdge(RelationEdgeEntry {
                 path: "p".into(),
@@ -4857,17 +5761,17 @@ mod result_member_storage_codec_tests {
                 .map(|bytes| blake3::hash(bytes).to_hex().to_string())
                 .collect::<Vec<_>>(),
             [
-                "eaabad908cc2f66ff0a302dccfd8aacbf619a6b78098a4e22037c4c4befa90e2",
+                "fb01d1bbceee0c2e0ad7e77005cb9b73bb2d9203e4951ea8e045b9614a8c4051",
                 "fd88aa550022a04bc6775b5e997d15b8f4e75f9cb26f62b7cb6d9d9aac6c4212",
                 "cc05966da0ecfb3ddbbeb437c3f0466c9757211b4718e005ed98109d0d9e24b0",
                 "090b02e75b1028e4b732d2a1eb56da8d22cac67015ca4b223c3914b62338c753",
                 "85f2bab0a0f503066f669f9482b887b177e3a68cc1e6f7af69343d31795135c2",
                 "cbdf98c6f111efb8b9ffaae39160150cddd7f4ca4b10d7e211e8d23d59104584",
-                "2713fd886f4afc0760389640c4328ef461da65b9371335a71132b7f27dcd01c1",
+                "90b3bda57c07eeda03fc389e0287f93627085ab0dfc2db66ea30eea9d7352a44",
                 "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
-                "83a2dca82e25b669343ca731c45e9c7872681bd83b7c81180a5feceeb0e69b9e",
-                "eb80886502cf23a0fb3d8bf41679188e5a5f763214c444fa1c44eddc703dd48a",
-                "1a49359e08e4eb9956a55ba4523f511ba0a2b4d3e4edeec6c6399f42a369ba45",
+                "f19b832022c7623e85f35a321908882ac8d54d685ecdd7b892c041c217b467b9",
+                "0e3395f68049bf529f1e5014170d4aa5f55ac6d45daf6998e9f3376fefce4a47",
+                "67e1ab722ba171d14ab66f5fc31bc948344a75f936865330aebb222c10161be6",
                 "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",
                 "ceca71b78f841cf8ca9387c9cc0c616fd043a5ce5698fb7098c9c5d6a148ad8e",
                 "73b584cebffb48801a204b0c1e5d57e7b1dddc1c40180ffa5497d8981ad5d1b1",
@@ -4918,6 +5822,86 @@ mod result_member_storage_codec_tests {
         assert!(program_fact_from_storage_bytes(&noncanonical).is_err());
     }
 
+    #[test]
+    fn nested_settled_result_values_are_canonical_groove_records_and_reject_corruption() {
+        // This is intentionally an internal durable-boundary receipt: the
+        // descriptor and synthetic identity bytes are not application values,
+        // but they become part of persistent JPFK/JRME keys.  Pinning the
+        // complete enclosing bytes below makes an accidental return to a
+        // Rust-private serializer observable; these targeted corruptions prove
+        // the production readers fail before accepting a different spelling.
+        let descriptor = records::RecordDescriptor::new([
+            ("name", records::ValueType::String),
+            (
+                "labels",
+                records::ValueType::Array(Box::new(records::ValueType::String)),
+            ),
+            (
+                "optional_count",
+                records::ValueType::Nullable(Box::new(records::ValueType::U64)),
+            ),
+        ]);
+        let descriptor_bytes = records::encode_record_descriptor(&descriptor).unwrap();
+        assert_eq!(
+            blake3::hash(&descriptor_bytes).to_hex().as_str(),
+            "e7fcf66bb23dd514678c3b3960b69f020935d01a366c83d7b6fda963d2346e0a"
+        );
+        let decoded_descriptor = records::decode_record_descriptor(&descriptor_bytes).unwrap();
+        assert_eq!(
+            records::encode_record_descriptor(&decoded_descriptor).unwrap(),
+            descriptor_bytes
+        );
+        let mut descriptor_trailing = descriptor_bytes.clone();
+        descriptor_trailing.push(0);
+        assert!(records::decode_record_descriptor(&descriptor_trailing).is_err());
+
+        let payload = ResultMemberPayloadEntry {
+            member: fixture_member(),
+            descriptor: descriptor_bytes.clone(),
+            record: descriptor
+                .create(&[
+                    Value::String("synth".to_owned()),
+                    Value::Array(vec![Value::String("a".to_owned())]),
+                    Value::Nullable(Some(Box::new(Value::U64(7)))),
+                ])
+                .unwrap(),
+        };
+        let encoded_fact =
+            program_fact_storage_bytes(&ProgramFactEntry::ResultPayload(payload.clone())).unwrap();
+        assert_eq!(
+            blake3::hash(&encoded_fact).to_hex().as_str(),
+            "266952cded111efe3209e4a478835693924f09c52d18b01293057d5307b2e3c8"
+        );
+        let descriptor_offset = encoded_fact
+            .windows(payload.descriptor.len())
+            .position(|window| window == payload.descriptor)
+            .expect("payload descriptor appears once in its durable fact");
+        let mut corrupt_descriptor = encoded_fact.clone();
+        corrupt_descriptor[descriptor_offset] ^= 1;
+        assert!(program_fact_from_storage_bytes(&corrupt_descriptor).is_err());
+
+        let replacement = settled_value(Value::U8(2), records::ValueType::U8);
+        let layout = result_member_storage_layout();
+        let synthetic = ResultMemberSyntheticStorageRecord::encode(
+            &result_member_case_descriptor(&layout.member_schema, RESULT_MEMBER_SYNTHETIC_TAG)
+                .unwrap(),
+            "facts".to_owned(),
+            vec![0],
+            replacement,
+        )
+        .unwrap()
+        .record()
+        .clone();
+        let encoded_member = encode_result_member_envelope(
+            RESULT_MEMBER_STORAGE_MAGIC,
+            RESULT_MEMBER_STORAGE_VERSION,
+            layout.member_envelope,
+            records::EnumValue::new(RESULT_MEMBER_SYNTHETIC_TAG, synthetic),
+        )
+        .unwrap();
+        assert!(result_member_from_storage_bytes(&encoded_member).is_err());
+    }
+
     // These stay internal because exact physical key bytes and malformed
     // engine-owned payloads cannot be observed through Jazz's public API.
     // The ordinary persisted/reopen behavior is covered by the known-state
@@ -4932,8 +5916,11 @@ mod result_member_storage_codec_tests {
             ResultMemberEntry::Row(ordinary_row()),
             ResultMemberEntry::Synthetic {
                 table: "totals".to_owned(),
-                row: vec![1, 2],
-                replacement: SyntheticReplacementToken::from_encoded_record(vec![3, 4]),
+                row: settled_value(Value::U16(0x0201), records::ValueType::U16),
+                replacement: SyntheticReplacementToken::from_encoded_record(settled_value(
+                    Value::U16(0x0403),
+                    records::ValueType::U16,
+                )),
             },
             ResultMemberEntry::PathTuple {
                 path: "owner".to_owned(),
@@ -4977,7 +5964,7 @@ mod result_member_storage_codec_tests {
                 .collect::<Vec<_>>(),
             [
                 "0e1d541c58211d93e04f7f53eff924c639ce7640989384430236be315222072b",
-                "ea51cdbe5077c2236ddb62f192dc50a5e9b9e5306d4d1ec8a5935b73cc016de6",
+                "ef1b7386b6f019471e6b96f2c233d1862b933301c107bc5347db2786a720660a",
                 "67b1049e3ab2654cac0076a2894e16f97667cee5bd9defa51f86dd4dd890fb49",
                 "64d9489980bb8678717621a02b7518748e019a2a55104cbb9a0614498d7ed01f",
             ]

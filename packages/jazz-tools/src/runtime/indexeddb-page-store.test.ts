@@ -6,7 +6,11 @@ import {
   INDEXEDDB_BTREE_FORMAT_MAGIC,
   INDEXEDDB_BTREE_FORMAT_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
+  INDEXEDDB_BTREE_PAGE_SIZE,
   INDEXEDDB_BTREE_PAGES_STORE,
+  INDEXEDDB_STORAGE_MANIFEST,
+  INDEXEDDB_STORAGE_MANIFEST_KEY,
+  INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
 } from "./indexeddb-page-store.js";
 
@@ -30,7 +34,7 @@ describe("IndexedDbPageStore", () => {
 
     const metadata = await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 16 * 1024, rootPageId: 7, nextPageId: 8 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 7, nextPageId: 8 },
       pages: new Map([
         [7, new Uint8Array([1, 2, 3])],
         [3, new Uint8Array([4, 5])],
@@ -49,7 +53,7 @@ describe("IndexedDbPageStore", () => {
     let store = await IndexedDbPageStore.open(name);
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 3 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 3 },
       pages: new Map([
         [1, new Uint8Array([1])],
         [2, new Uint8Array([2])],
@@ -57,7 +61,7 @@ describe("IndexedDbPageStore", () => {
     });
     await store.commit({
       expectedGeneration: 1,
-      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 3 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 3 },
       pages: new Map([[1, new Uint8Array([9])]]),
       deletedPageIds: [2],
     });
@@ -75,14 +79,14 @@ describe("IndexedDbPageStore", () => {
     const store = await IndexedDbPageStore.open(name);
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
       pages: new Map([[1, new Uint8Array([1])]]),
     });
 
     await expect(
       store.commit({
         expectedGeneration: 0,
-        metadata: { pageSize: 4096, rootPageId: 2, nextPageId: 3 },
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 2, nextPageId: 3 },
         pages: new Map([[2, new Uint8Array([2])]]),
       }),
     ).rejects.toThrow("expected 0, found 1");
@@ -107,7 +111,7 @@ describe("IndexedDbPageStore", () => {
     await expect(
       store.commit({
         expectedGeneration: 0,
-        metadata: { pageSize: 4096, rootPageId: 2, nextPageId: 3 },
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 2, nextPageId: 3 },
         pages: new Map([[1, new Uint8Array([1])]]),
       }),
     ).rejects.toThrow("root page 2 is missing");
@@ -130,13 +134,13 @@ describe("IndexedDbPageStore", () => {
     const store = await IndexedDbPageStore.open(name);
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
       pages: new Map([[1, new Uint8Array([1])]]),
     });
     await expect(
       store.commit({
         expectedGeneration: 1,
-        metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
         pages: new Map(),
         deletedPageIds: [1],
       }),
@@ -151,7 +155,7 @@ describe("IndexedDbPageStore", () => {
     const store = await IndexedDbPageStore.open(name);
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
       pages: new Map([[1, new Uint8Array([1])]]),
     });
     const raw = await openRawDatabase(name);
@@ -159,7 +163,16 @@ describe("IndexedDbPageStore", () => {
     expect([...raw.objectStoreNames]).toEqual([
       INDEXEDDB_BTREE_METADATA_STORE,
       INDEXEDDB_BTREE_PAGES_STORE,
+      INDEXEDDB_STORAGE_MANIFEST_STORE,
     ]);
+    const manifestTx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    expect(
+      await requestResult(
+        manifestTx
+          .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
+          .get(INDEXEDDB_STORAGE_MANIFEST_KEY),
+      ),
+    ).toEqual(INDEXEDDB_STORAGE_MANIFEST);
     const tx = raw.transaction(INDEXEDDB_BTREE_METADATA_STORE, "readonly");
     const value = await requestResult(
       tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE).get("current"),
@@ -167,7 +180,7 @@ describe("IndexedDbPageStore", () => {
     expect(value).toEqual({
       formatMagic: INDEXEDDB_BTREE_FORMAT_MAGIC,
       formatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
-      pageSize: 4096,
+      pageSize: INDEXEDDB_BTREE_PAGE_SIZE,
       generation: 1,
       rootPageId: 1,
       nextPageId: 2,
@@ -176,12 +189,67 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
+  it("rejects missing, unknown, and inconsistent manifests before touching pages", async () => {
+    for (const manifest of [
+      undefined,
+      { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 99 },
+      { ...INDEXEDDB_STORAGE_MANIFEST, pageChecksum: "none" },
+      { ...INDEXEDDB_STORAGE_MANIFEST, adapterFormatVersion: 2 },
+      { ...INDEXEDDB_STORAGE_MANIFEST, pageFormatVersion: 2 },
+      { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds: ["groove.ordered-kv.v1"] },
+      {
+        ...INDEXEDDB_STORAGE_MANIFEST,
+        requiredCodecIds: [...INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds, "jazz.future.v2"],
+      },
+      { ...INDEXEDDB_STORAGE_MANIFEST, futureDecodeParameter: "unknown" },
+    ]) {
+      const name = databaseName();
+      await installRawEpochOneFixture(name, manifest);
+      await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
+        "Missing or invalid IndexedDB storage epoch manifest",
+      );
+      const raw = await openRawDatabase(name);
+      const tx = raw.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
+      expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+        new Uint8Array([1]).buffer,
+      );
+      raw.close();
+    }
+  });
+
+  it("does not mutate a pre-settlement version-two namespace when rejecting its missing manifest", async () => {
+    const name = databaseName();
+    const raw = await createLegacyVersionTwoDatabase(name);
+    const tx = raw.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readwrite");
+    tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).put(new Uint8Array([7]).buffer, 1);
+    await transactionDone(tx);
+    raw.close();
+
+    await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
+      "Missing or invalid IndexedDB storage epoch manifest",
+    );
+    const reopened = await openRawDatabase(name);
+    try {
+      expect(reopened.version).toBe(2);
+      expect([...reopened.objectStoreNames]).toEqual([
+        INDEXEDDB_BTREE_METADATA_STORE,
+        INDEXEDDB_BTREE_PAGES_STORE,
+      ]);
+      const check = reopened.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
+      expect(await requestResult(check.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+        new Uint8Array([7]).buffer,
+      );
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("accepts the typed-array wasm bridge without re-encoding page bodies", async () => {
     const name = databaseName();
     const store = await IndexedDbPageStore.open(name);
     const metadata = await store.commitPages(
       0,
-      4096,
+      INDEXEDDB_BTREE_PAGE_SIZE,
       4,
       5,
       [4],
@@ -193,10 +261,10 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
-  it("persists the Rust-owned v2 page fixture byte-for-byte", async () => {
+  it("persists the Rust-owned v1 page fixture byte-for-byte", async () => {
     const fixture = hexBytes(
       await readFile(
-        new URL("../../../../crates/idb-tree/fixtures/page-v2-leaf.hex", import.meta.url),
+        new URL("../../../../crates/idb-tree/fixtures/page-v1-leaf.hex", import.meta.url),
         "utf8",
       ),
     );
@@ -204,7 +272,7 @@ describe("IndexedDbPageStore", () => {
     const store = await IndexedDbPageStore.open(name);
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
       pages: new Map([[1, fixture]]),
     });
     expect(await store.readPage(1)).toEqual(fixture);
@@ -217,7 +285,7 @@ describe("IndexedDbPageStore", () => {
     const store = await IndexedDbPageStore.open(name, (error) => invalidations.push(error));
     await store.commit({
       expectedGeneration: 0,
-      metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
       pages: new Map([[1, new Uint8Array([1])]]),
     });
 
@@ -230,7 +298,7 @@ describe("IndexedDbPageStore", () => {
     await expect(
       store.commit({
         expectedGeneration: 1,
-        metadata: { pageSize: 4096, rootPageId: 1, nextPageId: 2 },
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
         pages: new Map([[1, new Uint8Array([2])]]),
       }),
     ).rejects.toThrow("storage was invalidated");
@@ -247,10 +315,64 @@ function openRawDatabase(name: string): Promise<IDBDatabase> {
   return requestResult(fakeIndexedDb.open(name));
 }
 
+async function installRawEpochOneFixture(name: string, manifest: unknown): Promise<void> {
+  const raw = await createRawEpochDatabase(name);
+  const tx = raw.transaction(
+    [INDEXEDDB_BTREE_PAGES_STORE, INDEXEDDB_BTREE_METADATA_STORE, INDEXEDDB_STORAGE_MANIFEST_STORE],
+    "readwrite",
+  );
+  tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).put(new Uint8Array([1]).buffer, 1);
+  tx.objectStore(INDEXEDDB_BTREE_METADATA_STORE).put(
+    {
+      formatMagic: INDEXEDDB_BTREE_FORMAT_MAGIC,
+      formatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
+      pageSize: INDEXEDDB_BTREE_PAGE_SIZE,
+      generation: 1,
+      rootPageId: 1,
+      nextPageId: 2,
+    },
+    "current",
+  );
+  if (manifest !== undefined) {
+    tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
+  }
+  await transactionDone(tx);
+  raw.close();
+}
+
+function createRawEpochDatabase(name: string): Promise<IDBDatabase> {
+  const request = fakeIndexedDb.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
+  request.onupgradeneeded = () => {
+    const db = request.result;
+    db.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
+    db.createObjectStore(INDEXEDDB_BTREE_METADATA_STORE);
+    db.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+  };
+  return requestResult(request);
+}
+
+function createLegacyVersionTwoDatabase(name: string): Promise<IDBDatabase> {
+  const request = fakeIndexedDb.open(name, 2);
+  request.onupgradeneeded = () => {
+    const db = request.result;
+    db.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
+    db.createObjectStore(INDEXEDDB_BTREE_METADATA_STORE);
+  };
+  return requestResult(request);
+}
+
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function transactionDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
+    tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
   });
 }
 

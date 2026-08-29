@@ -166,7 +166,6 @@ fn run_rung(source_rows: usize) {
 fn update_counts(update: &SyncMessage) -> (usize, usize, usize) {
     let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
         version_carriers,
-        version_bundles,
         result_member_adds,
         result_member_removes,
         ..
@@ -174,10 +173,9 @@ fn update_counts(update: &SyncMessage) -> (usize, usize, usize) {
     else {
         panic!("expected one view update");
     };
-    let bundles = version_bundles.len()
-        + expand_version_carriers(version_carriers)
-            .expect("expand PERF-5 version carriers")
-            .len();
+    let bundles = expand_version_carriers(version_carriers)
+        .expect("expand PERF-5 version carriers")
+        .len();
     (
         result_member_adds.len(),
         result_member_removes.len(),

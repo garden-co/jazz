@@ -26,7 +26,7 @@ fn table_and_column_rename_reuses_the_existing_physical_identities() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -65,7 +65,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -186,7 +186,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -332,7 +332,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -508,7 +508,7 @@ fn changed_merge_semantics_start_a_new_physical_column_epoch() {
                 target_table: "counts".to_owned(),
                 ops: vec![],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -589,7 +589,7 @@ fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

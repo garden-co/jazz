@@ -27,6 +27,7 @@ use jazz_sim::fixture::{
     commit_mergeable_unit_settled, ingest_commit_unit_settled, settle_outcome,
 };
 use jazz_sim::public_schema_fixture::compile_public_schema;
+use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PauseMode, PeerProfile, SimulatorTransportCodec,
     ThreadedDriver, Topology, bench_profile, emit_json_line, metadata_fields, profiling,
@@ -1661,15 +1662,14 @@ fn result_output_count(update: &SyncMessage, table: &str) -> usize {
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles,
+            version_carriers,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
         }) => {
-            let bundle_bytes = version_bundles
-                .iter()
-                .flat_map(|bundle| bundle.versions.iter())
+            let bundle_bytes = version_bundle_refs(version_carriers)
+                .flat_map(|bundle| bundle.versions)
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>();
             let complete_tx_refs = &peer_payload_inventory.complete_tx_payloads;
@@ -1684,10 +1684,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles, ..
-        }) => version_bundles
-            .iter()
-            .flat_map(|bundle| bundle.versions.iter())
+            version_carriers, ..
+        }) => version_bundle_refs(version_carriers)
+            .flat_map(|bundle| bundle.versions)
             .map(|version| version.record().raw().len() as u64)
             .sum(),
         _ => 0,

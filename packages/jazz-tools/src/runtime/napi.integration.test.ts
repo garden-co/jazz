@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
-import { type BatchId, type Row } from "./client.js";
+import { type TxId, type Row } from "./client.js";
 import type { Session } from "./context.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
@@ -21,7 +21,7 @@ import {
 
 type RuntimeCommittedRow = Row & {
   kind: "committed";
-  batchId: BatchId | Promise<BatchId>;
+  txId: TxId | Promise<TxId>;
 };
 
 type TestRuntimeWithTransport = {
@@ -463,7 +463,7 @@ describe("NAPI integration", () => {
         table: string,
         objectId: string,
         updates: Record<string, unknown>,
-      ): { kind: "committed"; batchId: BatchId | Promise<BatchId> };
+      ): { kind: "committed"; txId: TxId | Promise<TxId> };
       query(queryJson: string): Promise<Row[]>;
       close(): void;
     };
@@ -477,7 +477,7 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: oversizedTitle },
         done: { type: "Boolean", value: false },
       });
-      expect(await insertedRow.batchId).toEqual(expect.any(String));
+      expect(await insertedRow.txId).toEqual(expect.any(String));
 
       let rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(1);
@@ -489,12 +489,12 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: "kept title" },
         done: { type: "Boolean", value: false },
       });
-      expect(await secondRow.batchId).toEqual(expect.any(String));
+      expect(await secondRow.txId).toEqual(expect.any(String));
 
       const updateResult = runtime.update("todos", secondRow.id, {
         title: { type: "Text", value: updatedOversizedTitle },
       });
-      expect(await updateResult.batchId).toEqual(expect.any(String));
+      expect(await updateResult.txId).toEqual(expect.any(String));
 
       rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(2);
@@ -937,6 +937,8 @@ describe("NAPI integration", () => {
       adminSecret,
       schema: encodeNativeSchema(policyGraphSchema),
       jwksUrl: jwtIssuer.jwksUrl,
+      jwtIssuer: jwtIssuer.issuer,
+      jwtAudience: jwtIssuer.audience,
     });
     let context: {
       asBackend(): Db;
@@ -957,6 +959,8 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
         env: "test",
         tier: "global",
       });
@@ -1169,6 +1173,8 @@ describe("NAPI integration", () => {
         adminSecret,
         dataDir,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
       });
       await deployProject({
         serverUrl: server.url,
@@ -1185,6 +1191,8 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
         env: "test",
         tier: "global",
       });
@@ -1270,6 +1278,8 @@ describe("NAPI integration", () => {
         adminSecret,
         dataDir,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
       });
       context = createJazzContext({
         appId,
@@ -1280,6 +1290,8 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         jwksUrl: jwtIssuer.jwksUrl,
+        jwtIssuer: jwtIssuer.issuer,
+        jwtAudience: jwtIssuer.audience,
         env: "test",
         tier: "global",
       });

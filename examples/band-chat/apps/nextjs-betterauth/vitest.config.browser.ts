@@ -8,6 +8,7 @@ import {
   blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
+  stopJazzServerByUrl,
   unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
@@ -37,6 +38,7 @@ export default defineConfig({
       commands: {
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>

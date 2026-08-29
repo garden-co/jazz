@@ -130,7 +130,7 @@ async fn create_todo(
     let values = todo_values(request.title.clone(), description.clone());
 
     match state.client.insert("todos", values).await {
-        Ok((row_id, row_values, _batch_id)) => {
+        Ok((row_id, row_values, _transaction_id)) => {
             let todo = row_to_todo(row_id, &row_values);
 
             // Broadcast to SSE connections
@@ -216,7 +216,7 @@ async fn update_todo(
     }
 
     match state.client.update(object_id, updates).await {
-        Ok(_batch_id) => {
+        Ok(_transaction_id) => {
             // Broadcast to SSE connections
             broadcast_todos(&state).await;
 
@@ -261,7 +261,7 @@ async fn delete_todo(
     let object_id = ObjectId::from_uuid(id);
 
     match state.client.delete(object_id).await {
-        Ok(_batch_id) => {
+        Ok(_transaction_id) => {
             // Broadcast to SSE connections
             broadcast_todos(&state).await;
             StatusCode::NO_CONTENT.into_response()

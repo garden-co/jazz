@@ -654,6 +654,12 @@ interface Rule {
   action: PolicyAction;
   using?: Condition;
   withCheck?: Condition;
+  /**
+   * A builder that supplied distinct old and new predicates. These rules cannot
+   * safely be OR-merged with another update rule: lowering would otherwise
+   * independently combine their USING and WITH CHECK halves.
+   */
+  asymmetricUpdate?: boolean;
 }
 
 type RuleLike = Rule | UpdateRuleBuilder<unknown, unknown>;
@@ -843,6 +849,15 @@ class UpdateRuleBuilder<WhereInput, Row> {
       action: "update",
       using: this.oldCondition ?? this.newCondition,
       withCheck: this.newCondition ?? this.oldCondition,
+      // A rule with just one side intentionally uses that predicate for both
+      // halves. Two separately supplied predicates are conservatively treated
+      // as asymmetric, even when their eventual lowered form happens to look
+      // alike: that keeps policy composition fail-closed without requiring a
+      // lossy or exception-prone serialization of policy values.
+      asymmetricUpdate:
+        this.oldCondition !== undefined &&
+        this.newCondition !== undefined &&
+        this.oldCondition !== this.newCondition,
     };
   }
 }
@@ -2434,6 +2449,7 @@ function compileRules(
   relationsByTable: Map<string, Relation[]>,
 ): CompiledPermissions {
   const compiled: CompiledPermissions = {};
+  const updateRuleAsymmetry = new Map<string, boolean>();
   for (const ruleLike of rules) {
     const rule = isUpdateRuleBuilder(ruleLike) ? ruleLike.toRule() : ruleLike;
     if (!compiled[rule.table]) {
@@ -2456,8 +2472,8 @@ function compileRules(
           ),
         });
         break;
-      case "update":
-        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
+      case "update": {
+        const incoming = {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
           with_check: compileCondition(
             rule.withCheck,
@@ -2465,8 +2481,18 @@ function compileRules(
             fkReferencesByTable,
             relationsByTable,
           ),
-        });
+        };
+        const previousIsAsymmetric = updateRuleAsymmetry.get(rule.table);
+        const isAsymmetric = rule.asymmetricUpdate === true;
+        if (previousIsAsymmetric !== undefined && (previousIsAsymmetric || isAsymmetric)) {
+          throw new Error(
+            `Multiple asymmetric update rules for table "${rule.table}" are unsupported because their USING and WITH CHECK clauses would be ORed independently. Use one symmetric condition, model each transition as a separate record/action, or mediate the transition on a trusted backend.`,
+          );
+        }
+        updateRuleAsymmetry.set(rule.table, previousIsAsymmetric ?? isAsymmetric);
+        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, incoming);
         break;
+      }
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),

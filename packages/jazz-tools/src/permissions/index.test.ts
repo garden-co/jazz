@@ -456,6 +456,55 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("rejects multiple asymmetric update rules before they form an old/new cross product", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowUpdate.whereOld({ archived: false }).whereNew({ done: true }),
+        policy.todos.allowUpdate.whereOld({ archived: true }).whereNew({ done: false }),
+      ]),
+    ).toThrow(/multiple asymmetric update rules.*todos.*USING and WITH CHECK.*ORed independently/i);
+  });
+
+  it("still OR-merges multiple symmetric update rules", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowUpdate.where({ archived: false }),
+      policy.todos.allowUpdate.where({ done: true }),
+    ]);
+
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Or",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "archived",
+          op: "Eq",
+          value: { type: "Literal", value: false },
+        },
+        {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: { type: "Literal", value: true },
+        },
+      ],
+    });
+    expect(compiled.todos!.update?.with_check).toEqual(compiled.todos!.update?.using);
+  });
+
+  it("accepts a symmetric update rule containing a BigInt literal", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowUpdate.where({ ownerId: 1n } as unknown as TodoWhere),
+    ]);
+
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Cmp",
+      column: "ownerId",
+      op: "Eq",
+      value: { type: "Literal", value: 1n },
+    });
+    expect(compiled.todos!.update?.with_check).toEqual(compiled.todos!.update?.using);
+  });
+
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowRead.where({ $createdBy: session.user }),

@@ -130,7 +130,45 @@ where
             .map(|lineage| (lineage.catalogue_seq, lineage.publication.clone()))
             .collect::<Vec<_>>();
         lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        // The write pointer is deliberately independent of the authority's
+        // unique genesis.  Once a lineage is active it normally points at a
+        // descendant, whose manifest must never be re-labelled as genesis in
+        // a snapshot (doing so lets a receiver allocate a different physical
+        // root for the real genesis schema).
+        let lineage_targets = self
+            .catalogue
+            .active_lineages_by_target
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let genesis = self
+            .catalogue
+            .catalogue_schemas
+            .keys()
+            .find(|schema| !lineage_targets.contains(schema))
+            .copied()
+            .ok_or(Error::InvalidStoredValue("catalogue genesis schema is missing"))?;
+        if self
+            .catalogue
+            .catalogue_schemas
+            .keys()
+            .filter(|schema| !lineage_targets.contains(schema))
+            .nth(1)
+            .is_some()
+        {
+            return Err(Error::InvalidStoredValue(
+                "catalogue has multiple genesis schemas",
+            ));
+        }
+        let genesis_physical_identities = self
+            .catalogue
+            .physical_mappings
+            .get(&genesis)
+            .ok_or(Error::InvalidStoredValue("genesis physical mapping missing"))?
+            .identities
+            .clone();
         Ok(crate::protocol::CatalogueSnapshot {
+            genesis_physical_identities,
             schemas,
             lineages,
             current_write_schema: self.catalogue.current_write_schema,

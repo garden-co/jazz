@@ -23,7 +23,7 @@ fn commit_arrival_preserves_known_noncurrent_authored_variant() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -74,7 +74,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -135,7 +135,7 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    ).expect("valid migration lens");
     publish_schema_lineage(
         &mut core,
         evolved_payload.clone(),
@@ -212,7 +212,7 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
                 target_table: "todos".to_owned(),
                 ops: vec![],
             }],
-        ),
+        ).expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )
@@ -248,7 +248,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -289,7 +289,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
                 target_table: "todos".to_owned(),
                 ops: vec![],
             }],
-        ),
+        ).expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )
@@ -382,7 +382,7 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
                 target_table: "todos".to_owned(),
                 ops: vec![],
             }],
-        ),
+        ).expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )

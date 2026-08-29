@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 import test from "node:test";
 import packageJson from "../package.json" with { type: "json" };
 
 const cwd = fileURLToPath(new URL("..", import.meta.url));
+const browserConfig = readFileSync(path.join(cwd, "vitest.config.browser.ts"), "utf8");
 
 function listedTests(config) {
   return execFileSync("pnpm", ["exec", "vitest", "list", "--config", config], {
@@ -23,13 +26,26 @@ test("browser and provider gates select disjoint receipts", () => {
   assert.doesNotMatch(provider, /tests\/browser\/topology\.e2e\.test\.ts/);
 });
 
-test("the maintained package gate includes every RecordPlayer receipt", () => {
+test("the Node package gate excludes the browser-only topology receipt", () => {
   assert.match(packageJson.scripts.test, /test:unit/);
   assert.match(packageJson.scripts.test, /test:provider/);
   assert.match(packageJson.scripts.test, /test:selection/);
-  assert.match(packageJson.scripts.test, /test:topology/);
+  assert.doesNotMatch(packageJson.scripts.test, /test:topology/);
   assert.equal(
     packageJson.scripts["test:topology"],
     "vitest run --config vitest.config.browser.ts",
   );
+  assert.equal(packageJson.scripts["test:browser"], "pnpm test:topology");
+});
+
+test("the topology browser project provides the complete Jazz server command contract", () => {
+  for (const command of [
+    "jazzServerInfo",
+    "jazzServerStop",
+    "jazzServerBlockNetwork",
+    "jazzServerUnblockNetwork",
+    "jazzServerJwtForUser",
+  ]) {
+    assert.match(browserConfig, new RegExp(`\\b${command}\\b`));
+  }
 });

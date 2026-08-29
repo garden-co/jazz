@@ -304,15 +304,15 @@ impl Lens {
     /// Returns the transformed row values.
     pub fn apply(
         &self,
+        table: &str,
         values: &[Value],
         source_desc: &RowDescriptor,
         target_desc: &RowDescriptor,
         direction: Direction,
     ) -> Vec<Value> {
         let transform = self.transform(direction);
+        let mut current_table = table;
         let mut result: Vec<Option<Value>> = values.iter().cloned().map(Some).collect();
-
-        // Track column name mappings
         let mut column_names: Vec<String> = source_desc
             .columns
             .iter()
@@ -321,45 +321,54 @@ impl Lens {
 
         for op in &transform.ops {
             match op {
-                LensOp::RenameTable { .. } => {
-                    // Table renames do not change row values directly.
+                LensOp::RenameTable { old_name, new_name } => {
+                    if current_table == old_name {
+                        current_table = new_name;
+                    }
                 }
                 LensOp::AddColumn {
-                    column, default, ..
+                    table,
+                    column,
+                    default,
+                    ..
                 } => {
-                    // Add new column with default value
-                    result.push(Some(default.clone()));
-                    column_names.push(column.clone());
+                    if current_table == table {
+                        result.push(Some(default.clone()));
+                        column_names.push(column.clone());
+                    }
                 }
-                LensOp::RemoveColumn { column, .. } => {
-                    // Remove column by name
-                    if let Some(idx) = column_names.iter().position(|n| n == column) {
-                        result.remove(idx);
-                        column_names.remove(idx);
+                LensOp::RemoveColumn { table, column, .. } => {
+                    if current_table == table {
+                        if let Some(idx) = column_names.iter().position(|name| name == column) {
+                            result.remove(idx);
+                            column_names.remove(idx);
+                        }
                     }
                 }
                 LensOp::RenameColumn {
-                    old_name, new_name, ..
+                    table,
+                    old_name,
+                    new_name,
                 } => {
-                    // Rename column
-                    if let Some(idx) = column_names.iter().position(|n| n == old_name) {
-                        column_names[idx] = new_name.clone();
+                    if current_table == table {
+                        if let Some(idx) = column_names.iter().position(|name| name == old_name) {
+                            column_names[idx] = new_name.clone();
+                        }
                     }
                 }
-                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {
-                    // Table-level ops don't affect row transformation
-                }
+                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {}
             }
         }
 
-        // Reorder to match target descriptor
         let mut final_result = Vec::with_capacity(target_desc.columns.len());
         for target_col in &target_desc.columns {
             let name = target_col.name.as_str();
-            if let Some(idx) = column_names.iter().position(|n| n == name) {
+            if let Some(idx) = column_names
+                .iter()
+                .position(|column_name| column_name == name)
+            {
                 final_result.push(result[idx].clone().unwrap_or(Value::Null));
             } else {
-                // Column not found - use Null (shouldn't happen with correct lens)
                 final_result.push(Value::Null);
             }
         }
@@ -638,7 +647,13 @@ mod tests {
         let lens = Lens::new(source, target, transform);
 
         let input = vec![Value::Uuid(ObjectId::new())];
-        let output = lens.apply(&input, &source_desc, &target_desc, Direction::Forward);
+        let output = lens.apply(
+            "users",
+            &input,
+            &source_desc,
+            &target_desc,
+            Direction::Forward,
+        );
 
         assert_eq!(output.len(), 2);
         assert_eq!(output[1], Value::Text("unknown".to_string()));
@@ -673,15 +688,61 @@ mod tests {
             Value::Uuid(ObjectId::new()),
             Value::Text("value".to_string()),
         ];
-        let output = lens.apply(&input, &source_desc, &target_desc, Direction::Forward);
+        let output = lens.apply(
+            "users",
+            &input,
+            &source_desc,
+            &target_desc,
+            Direction::Forward,
+        );
 
         assert_eq!(output.len(), 1);
         // Only id remains
 
         // Now test backward
-        let output_backward = lens.apply(&output, &target_desc, &source_desc, Direction::Backward);
+        let output_backward = lens.apply(
+            "users",
+            &output,
+            &target_desc,
+            &source_desc,
+            Direction::Backward,
+        );
         assert_eq!(output_backward.len(), 2);
         assert_eq!(output_backward[1], Value::Text("default".to_string()));
+    }
+
+    #[test]
+    fn lens_apply_ignores_column_operations_for_other_tables() {
+        let source = make_hash(1);
+        let target = make_hash(2);
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Uuid),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ]);
+        let lens = Lens::new(
+            source,
+            target,
+            LensTransform::with_ops(vec![LensOp::RemoveColumn {
+                table: "posts".to_string(),
+                column: "name".to_string(),
+                column_type: ColumnType::Text,
+                default: Value::Null,
+            }]),
+        );
+        let input = vec![
+            Value::Uuid(ObjectId::new()),
+            Value::Text("Alice".to_string()),
+        ];
+
+        let output = lens.apply(
+            "users",
+            &input,
+            &descriptor,
+            &descriptor,
+            Direction::Forward,
+        );
+
+        assert_eq!(output, input);
     }
 
     #[test]

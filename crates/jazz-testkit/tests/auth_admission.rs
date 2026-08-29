@@ -10,22 +10,28 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 
 #[test]
-fn auth_handshake_accepts_upstream_bearer_aliases() {
-    for alias in [
-        "admin_secret",
-        "backend_secret",
-        "jwt_token",
-        "backend_session",
-    ] {
+fn auth_handshake_only_accepts_explicit_bearer_aliases() {
+    for alias in ["jwt_token", "backend_session"] {
         let handshake: AuthHandshake = serde_json::from_value(serde_json::json!({
             alias: "alias-token",
             "sub": "alias-subject",
             "claims": {},
         }))
         .unwrap();
-
         assert_eq!(handshake.bearer_jwt.as_deref(), Some("alias-token"));
-        assert_eq!(handshake.sub, "alias-subject");
+    }
+
+    for privileged_name in ["admin_secret", "backend_secret"] {
+        let handshake: AuthHandshake = serde_json::from_value(serde_json::json!({
+            privileged_name: "privileged-secret",
+            "sub": "alias-subject",
+            "claims": {},
+        }))
+        .unwrap();
+        assert!(
+            handshake.bearer_jwt.is_none(),
+            "{privileged_name} must not become an ordinary bearer credential"
+        );
     }
 }
 
@@ -156,14 +162,22 @@ fn local_first_jwt_wrong_issuer_rejects() {
 
 #[test]
 fn external_jwt_rejects_every_jazz_reserved_issuer_with_typed_error() {
-    let config = local_first_config(false);
     for issuer in [
         AuthorSubject::SYSTEM_ISSUER,
         AuthorSubject::LOCAL_FIRST_ISSUER,
         AuthorSubject::STATIC_BEARER_ISSUER,
         AuthorSubject::ANONYMOUS_ISSUER,
     ] {
-        let token = local_first_token("alice", expires_in(60), Some(issuer), None, None);
+        let config = local_first_config(false)
+            .with_expected_issuer(issuer)
+            .with_expected_audience("auth-app");
+        let token = local_first_token(
+            "alice",
+            expires_in(60),
+            Some(issuer),
+            Some("auth-app"),
+            None,
+        );
         assert_eq!(
             admit_bearer_jwt(&config, Some(&token), AdmissionSource::AuthorizationHeader),
             Err(AuthAdmissionError::InvalidAuthorSubject(

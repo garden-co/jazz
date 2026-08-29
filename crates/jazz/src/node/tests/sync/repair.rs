@@ -174,7 +174,6 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let mut update = core.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
-        version_bundles,
         result_member_adds,
         ..
     }) = &mut update
@@ -182,7 +181,6 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         panic!("expected view update");
     };
     version_carriers.clear();
-    version_bundles.clear();
     assert_eq!(
         result_member_adds,
         &vec![("todos".to_owned().into(), row_uuid, tx_id)]
@@ -306,7 +304,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )
@@ -339,7 +337,6 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         settled_through: GlobalTime(1),
         reset_result_set: false,
         version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
         peer_payload_inventory: Default::default(),
         result_member_adds: vec![("tasks".to_owned().into(), row_uuid, tx_id).into()],
         result_member_removes: Vec::new(),
@@ -386,13 +383,14 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     assert_eq!(version_bundles[0].versions[0].schema_version(), base_version);
     let mut inline_update = update.clone();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        version_bundles: inline_bundles,
+        version_carriers: inline_carriers,
         ..
     }) = &mut inline_update
     else {
         unreachable!();
     };
-    *inline_bundles = version_bundles.clone();
+    *inline_carriers =
+        crate::protocol::build_version_carriers_from_singletons(version_bundles.clone()).unwrap();
     assert!(
         reader
             .missing_known_state_row_version_refs(&inline_update)
@@ -532,7 +530,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             original.version_id(),
             without_tasks_version.id,
             Vec::new(),
-        ),
+        ).expect("valid migration lens"),
         ["notes"],
         ["tasks"],
     )
@@ -548,7 +546,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
                 target_table: "notes".to_owned(),
                 ops: Vec::new(),
             }],
-        ),
+        ).expect("valid migration lens"),
         ["tasks"],
         Vec::<String>::new(),
     )
@@ -612,15 +610,14 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         },
         settled_through: GlobalTime::default(),
         reset_result_set: false,
-        version_carriers: Vec::new(),
-        version_bundles: vec![VersionBundle {
+        version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: transaction,
             versions: vec![old_inline_task],
             fate: Fate::Accepted,
             global_time: Some(GlobalTime(1)),
             durability: DurabilityTier::Global,
-        }],
+        })],
         peer_payload_inventory: Default::default(),
         result_member_adds: vec![("tasks".to_owned().into(), task_row, tx_id).into()],
         result_member_removes: Vec::new(),

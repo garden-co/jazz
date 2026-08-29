@@ -1,7 +1,8 @@
 //! Shared simulation accounting for sync-message row delivery payloads.
 
 use jazz::protocol::{
-    ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord, ViewUpdatePayload,
+    ResultMemberEntry, SyncMessage, VersionBundleRef, VersionCarrier, VersionRecord,
+    ViewUpdatePayload,
 };
 use jazz::tx::Transaction;
 
@@ -9,16 +10,13 @@ use jazz::tx::Transaction;
 pub fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(ViewUpdatePayload {
-            version_bundles,
+            version_carriers,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
         }) => {
-            version_bundles
-                .iter()
-                .map(version_bundle_bytes)
-                .sum::<u64>()
+            version_carriers_bytes(version_carriers)
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
                 + result_rows_bytes(result_member_adds)
                 + result_rows_bytes(result_member_removes)
@@ -63,37 +61,50 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
 pub fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(ViewUpdatePayload {
-            version_bundles, ..
-        }) => version_bundles
-            .iter()
-            .flat_map(|bundle| &bundle.versions)
-            .map(version_record_bytes)
-            .sum(),
+            version_carriers, ..
+        }) => version_carriers_bytes_floor(version_carriers),
         SyncMessage::AuthorizationScopeView { view, .. } => scope_view_bytes_floor(view),
         _ => 0,
     }
 }
 
 fn scope_view_update_bytes(view: &ViewUpdatePayload) -> u64 {
-    view.version_bundles
-        .iter()
-        .map(version_bundle_bytes)
-        .sum::<u64>()
+    version_carriers_bytes(&view.version_carriers)
         + (view.peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
         + result_rows_bytes(&view.result_member_adds)
         + result_rows_bytes(&view.result_member_removes)
 }
 
 fn scope_view_bytes_floor(view: &ViewUpdatePayload) -> u64 {
-    view.version_bundles
-        .iter()
-        .flat_map(|bundle| &bundle.versions)
+    version_carriers_bytes_floor(&view.version_carriers)
+}
+
+/// Borrow the logical singleton bundles represented by a carrier stream.
+pub fn version_bundle_refs(
+    carriers: &[VersionCarrier],
+) -> impl Iterator<Item = VersionBundleRef<'_>> {
+    carriers.iter().flat_map(|carrier| {
+        carrier
+            .bundle_refs()
+            .expect("simulation accounting requires valid version carriers")
+    })
+}
+
+fn version_carriers_bytes(carriers: &[VersionCarrier]) -> u64 {
+    version_bundle_refs(carriers)
+        .map(version_bundle_bytes)
+        .sum()
+}
+
+fn version_carriers_bytes_floor(carriers: &[VersionCarrier]) -> u64 {
+    version_bundle_refs(carriers)
+        .flat_map(|bundle| bundle.versions)
         .map(version_record_bytes)
         .sum()
 }
 
-fn version_bundle_bytes(bundle: &VersionBundle) -> u64 {
-    transaction_wire_bytes(&bundle.tx)
+fn version_bundle_bytes(bundle: VersionBundleRef<'_>) -> u64 {
+    transaction_wire_bytes(bundle.tx)
         + bundle
             .versions
             .iter()
@@ -134,7 +145,7 @@ mod tests {
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol::{
         AuthorizationSupportScopeKey, PeerPayloadInventory, PermissionAdviceRequestId, ReadViewKey,
-        SubscriptionKey,
+        SubscriptionKey, VersionBundle,
     };
     use jazz::query::{BindingId, ShapeId};
     use jazz::time::{GlobalTime, TxTime};
@@ -174,8 +185,7 @@ mod tests {
             },
             settled_through: GlobalTime::default(),
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles: vec![VersionBundle {
+            version_carriers: vec![jazz::protocol::VersionCarrier::Bundle(VersionBundle {
                 tx: Transaction {
                     tx_id,
                     kind: TxKind::Mergeable,
@@ -194,7 +204,7 @@ mod tests {
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(1)),
                 durability: DurabilityTier::Global,
-            }],
+            })],
             peer_payload_inventory: PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),

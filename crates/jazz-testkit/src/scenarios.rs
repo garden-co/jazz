@@ -9,7 +9,7 @@ use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
     SubscriptionStream, SubscriptionStreamItem, TransactionId, Value,
 };
-use jazz_server::JazzServer;
+use jazz_server::{JazzServer, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -55,6 +55,7 @@ fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::err
 struct JwtClaims {
     sub: String,
     iss: String,
+    aud: String,
     claims: JsonValue,
     exp: u64,
 }
@@ -337,7 +338,11 @@ pub async fn connect_ready_claims(
 fn make_jwt(sub: &str, claims: JsonValue) -> String {
     let jwt_claims = JwtClaims {
         sub: sub.to_string(),
-        iss: "urn:jazz:test".to_owned(),
+        // These values deliberately mirror the server's configured external
+        // issuer and audience. A signed token without either claim must still
+        // be rejected by the fail-closed server admission boundary.
+        iss: TEST_JWT_ISSUER.to_owned(),
+        aud: TEST_JWT_AUDIENCE.to_owned(),
         claims,
         exp: SystemTime::now()
             .duration_since(UNIX_EPOCH)

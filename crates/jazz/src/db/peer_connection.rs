@@ -867,7 +867,14 @@ where
                         &update,
                     )
                 });
-                send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
+                send_subscriber_with_sync_context(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    &self.local_fate_routes,
+                    &self.downstream_fates,
+                    update,
+                )?;
                 if let Some((subscription, receipt)) = receipt {
                     queue_direct_control(
                         &mut self.pending_control_responses,
@@ -884,7 +891,14 @@ where
                 let mut node = self.node.lock().await;
                 peer.current_rows_update(&mut node, table).await?
             };
-            send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
+            send_subscriber_with_sync_context(
+                &self.node,
+                peer,
+                self.transport.as_mut(),
+                &self.local_fate_routes,
+                &self.downstream_fates,
+                update,
+            )?;
         }
 
         self.observed_session_claim_revision.set(current_revision);
@@ -1070,7 +1084,14 @@ where
                         &update,
                     )
                 });
-                send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
+                send_subscriber_with_sync_context(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    &self.local_fate_routes,
+                    &self.downstream_fates,
+                    update,
+                )?;
                 if let Some((subscription, receipt)) = receipt {
                     queue_direct_control(
                         &mut self.pending_control_responses,
@@ -3130,21 +3151,12 @@ where
                                 self.node.borrow().permissions_ready(),
                                 ingest_context.trust,
                             );
-                            let local_waiting_for_upstream_settlement = local_subscriber
-                                && opts.propagate_upstream
-                                && opts.tier > DurabilityTier::Local
-                                && !self.node.borrow().has_settled_result_set(BindingViewKey {
-                                    shape_id: shape.shape_id(),
-                                    binding_id: binding.binding_id(),
-                                    read_view: upstream_opts.read_view_key(),
-                                });
                             let opening_pending = if !permissions_ready {
                                 Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                     subscription,
                                     settled_through: self.node.borrow().committed_global_time(),
                                     reset_result_set: true,
                                     version_carriers: Vec::new(),
-                                    version_bundles: Vec::new(),
                                     peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                                         opening_pending: true,
                                         ..Default::default()
@@ -3170,6 +3182,25 @@ where
                                 .await
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))
                                 .await?;
+                            let upstream_binding_view = BindingViewKey {
+                                shape_id: shape.shape_id(),
+                                binding_id: binding.binding_id(),
+                                read_view: upstream_opts.read_view_key(),
+                            };
+                            if local_subscriber
+                                && upstream_opts.binding_source
+                                    == BindingSource::RelayAuthoritySession
+                            {
+                                // Settled authority membership survives a
+                                // RocksDB reopen, while its wire registration
+                                // does not. Do not let that ownerless result
+                                // settle this fresh Edge usage site before the
+                                // new relay authority registration receives a
+                                // current reset from upstream.
+                                self.node
+                                    .borrow_mut()
+                                    .invalidate_ownerless_settled_result_view(upstream_binding_view);
+                            }
                             let (_, changed, published) = finish_peer_publication_outcome_with_refresh(
                                 &self.node,
                                 &self.subscriptions,
@@ -3181,6 +3212,10 @@ where
                             .await?;
                             stats.subscription_events += changed;
                             needs_subscription_refresh |= published;
+                            let local_waiting_for_upstream_settlement = local_subscriber
+                                && opts.propagate_upstream
+                                && opts.tier > DurabilityTier::Local
+                                && !self.node.borrow().has_settled_result_set(upstream_binding_view);
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())
@@ -3264,10 +3299,12 @@ where
                                             &update,
                                         )
                                     });
-                                send_with_sync_context(
+                                send_subscriber_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
+                                    &self.local_fate_routes,
+                                    &self.downstream_fates,
                                     update,
                                 )?;
                                 if let Some((subscription, receipt)) = receipt {
@@ -3711,10 +3748,12 @@ where
                                     &update,
                                 )
                             });
-                            send_with_sync_context(
+                            send_subscriber_with_sync_context(
                                 &self.node,
                                 peer,
                                 self.transport.as_mut(),
+                                &self.local_fate_routes,
+                                &self.downstream_fates,
                                 update,
                             )?;
                             if let Some((subscription, receipt)) = receipt {
@@ -3807,10 +3846,12 @@ where
                                     "subscriber send group delta {}",
                                     summarize_sync_message(&update)
                                 ));
-                                send_with_sync_context(
+                                send_subscriber_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
+                                    &self.local_fate_routes,
+                                    &self.downstream_fates,
                                     update,
                                 )?;
                                 if let Some((subscription, receipt)) = receipt {
@@ -3833,10 +3874,12 @@ where
                             peer.current_rows_update(&mut node, table).await?
                         };
                         if !view_update_is_empty(&update) {
-                            send_with_sync_context(
+                            send_subscriber_with_sync_context(
                                 &self.node,
                                 peer,
                                 self.transport.as_mut(),
+                                &self.local_fate_routes,
+                                &self.downstream_fates,
                                 update,
                             )?;
                             sent_view_update = true;
@@ -3938,7 +3981,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             settled_through,
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -3951,7 +3993,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             defer_settlement: false,
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: peer_payload_inventory.authorization_progress,
             opening_pending: peer_payload_inventory.opening_pending,
@@ -4739,7 +4780,6 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             settled_through,
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -4751,10 +4791,9 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
-            version_bundles.len()
-                + expand_version_carriers(version_carriers)
-                    .map(|bundles| bundles.len())
-                    .unwrap_or_default(),
+            expand_version_carriers(version_carriers)
+                .map(|bundles| bundles.len())
+                .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
             result_member_adds.len(),
             result_member_removes.len(),
@@ -4815,6 +4854,38 @@ where
         summarize_sync_message(&message)
     ));
     send_sync_message_chunked(transport, message)
+}
+
+fn send_subscriber_with_sync_context<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    local_fate_routes: &LocalFateRoutes,
+    downstream_fates: &PendingDownstreamFates,
+    message: SyncMessage,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let mut pending_tx_ids = BTreeSet::new();
+    if let SyncMessage::ViewUpdate(payload) = &message {
+        for carrier in &payload.version_carriers {
+            for bundle in carrier
+                .bundle_refs()
+                .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?
+            {
+                if matches!(bundle.fate, Fate::Pending) {
+                    pending_tx_ids.insert(bundle.tx.tx_id);
+                }
+            }
+        }
+    }
+
+    send_with_sync_context(node, peer, transport, message)?;
+    for tx_id in pending_tx_ids {
+        register_local_fate_observer(local_fate_routes, tx_id, downstream_fates);
+    }
+    Ok(())
 }
 
 /// Deliver terminal/local fate updates in FIFO order without letting a bounded
@@ -5197,7 +5268,6 @@ pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             reset_result_set,
             version_carriers,
-            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -5207,7 +5277,6 @@ pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
         }) => {
             !reset_result_set
                 && version_carriers.is_empty()
-                && version_bundles.is_empty()
                 && peer_payload_inventory.complete_tx_payloads.is_empty()
                 && result_member_adds.is_empty()
                 && result_member_removes.is_empty()

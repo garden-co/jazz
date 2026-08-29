@@ -121,14 +121,14 @@ impl Database {
             let key = staged_large_value_key(*staged_id);
             let encoded = self
                 .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key)
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await?
                 .ok_or_else(|| {
                     Error::InvalidLargeValueMetadata(
                         "accepted staging id is missing or already consumed".to_owned(),
                     )
                 })?;
-            let staged = decode_staged_large_value(&encoded)?;
+            let staged = decode_staged_large_value_at_key(&key, &encoded)?;
             accepted_staging.push(staged);
         }
         for staged in &accepted_staging {

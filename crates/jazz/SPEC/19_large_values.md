@@ -141,6 +141,18 @@ identity, and omitted or irreversibly redacted from logs, traces, analytics,
 error messages and metrics labels. Unknown, expired and unauthorized locator
 lookups expose indistinguishable public failure details.
 
+The fixed 256-bit locator is a private Groove capability, not a Jazz identifier,
+wire-visible storage key, hash lookup, or authorization token that Jazz can
+mint. Its paired object hash authenticates exact encoded locator-bearing bytes;
+neither a logical hash nor an object hash alone authorizes retrieval. A backend
+may internally deduplicate exact bytes, but its atomic immutable mapping accepts
+only an identical existing `(locator, object_hash, bytes)` mapping. A different
+mapping at the same locator is a fail-closed integrity result: Jazz must not
+retry it by rewriting the locator or treat it as an alias. Groove V1's object,
+leaf-grouping, branch-grouping, and kind/format-mask hash domains are fixed in
+Groove §9.2; Jazz never computes, substitutes, or serializes a second hash
+domain.
+
 `INV-CONTENT-2`: a subject authorized to observe a concrete row version may
 receive that version's root locator and may recursively request locators learned
 from successfully fetched, Groove-verified nodes beneath it.
@@ -212,7 +224,10 @@ the receipt; ordinary orphan reclamation may then collect nodes whose last
 retainer disappeared. Completion bindings are not independently TTL-expired.
 Every completed binding, reverse binding, receipt key, and receipt value MUST
 agree on the exact upload and receipt identities as well as descriptor and
-accounting; recovery fails closed on any disagreement.
+accounting; specifically the fixed-width suffix of each `completed-upload/` or
+`completed-receipt/` Groove key is authoritative and must equal the respective
+embedded upload or receipt ID. Recovery, staging preflight, retry lookup, and
+acceptance/eviction cleanup fail closed before mutation on any disagreement.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
 version nor root reachability.
@@ -281,6 +296,28 @@ Maintenance is the only TTL enforcement point and bounds retention of abandoned
 uploads. Its eviction is serialized with upload continuation and receipt
 consumption, so an operation observes either a present journal/receipt or its
 absence rather than racing eviction into recreation.
+
+The persisted `staged/<id>` and `upload/<id>` records have a fixed opaque
+16-byte key suffix and duplicate that exact ID in their canonical Groove record
+value. Groove rejects a copied/mismatched, malformed, alternate, truncated, or
+trailing journal before recovery, acceptance, continuation, finalization, or
+eviction mutates anything. Receipt IDs are not row IDs or authority: a matching
+receipt is consumed only by the same atomic owner-row batch containing its exact
+descriptor. The initial descriptor upload key is a Groove-only BLAKE3
+derive-key identity over canonical descriptor bytes using the frozen context
+`"groove pending descriptor upload v1"`; it supports replay/resume of that
+descriptor only. The creation timestamp is never a synchronous admission
+deadline: while the journal exists, an otherwise authorized operation may
+continue or accept it; maintenance is the sole expiry authority. The named
+Groove reopen/corruption receipts in §9.8 prove the record remains unchanged on
+rejection.
+
+This lifecycle freeze leaves Jazz's configured TTL/rate policy, host timer
+cadence, public error mapping, and row-authorization decision unchanged. It
+also does not add a cross-backend locator compatibility protocol, a shared-DAG
+upload optimization, a resident-cache policy, migration, or backcompat reader.
+Those remain explicit follow-on storage/sync work rather than behavior inferred
+from a locator or receipt codec.
 
 The initial unconfigured policy admits 256 MiB of pushed bytes per one-second
 window and expires unaccepted completed roots after ten minutes. The byte bound

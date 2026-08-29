@@ -87,7 +87,7 @@ where
         .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
         .await?
     {
-        let existing = decode_staged_large_value(&encoded)?;
+        let existing = decode_staged_large_value_at_key(&staged_key, &encoded)?;
         if existing.value_ref == value_ref && existing.accounting == accounting {
             return Ok((existing, Vec::new()));
         }
@@ -149,48 +149,63 @@ where
     Ok((staged, operations))
 }
 
-async fn completed_large_value_upload<S>(
+/// Read one completed upload's bidirectional journals, binding both embedded
+/// identities to their selected keys before any caller treats completion as a
+/// reason to skip staging or mutate lifecycle state.
+async fn completed_large_value_upload_journal<S>(
     storage: &S,
     upload_id: crate::large_values::StagedLargeValueId,
-    value_ref: &crate::large_values::LargeValueRef,
-) -> Result<Option<crate::large_values::StagedLargeValue>, Error>
+) -> Result<Option<crate::large_values::PendingLargeValueUpload>, Error>
 where
     S: OrderedKvStorage + ?Sized,
 {
+    let upload_key = completed_large_value_upload_key(upload_id);
     let Some(encoded) = storage
-        .get(
-            LARGE_VALUE_METADATA_CF.to_owned(),
-            completed_large_value_upload_key(upload_id),
-        )
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
         .await?
     else {
         return Ok(None);
     };
-    let completed = decode_pending_large_value_upload(&encoded)?;
-    if completed.id != upload_id || completed.descriptor.as_ref() != Some(value_ref) {
-        return Err(Error::InvalidLargeValueMetadata(
-            "completed upload is bound to a different descriptor".to_owned(),
-        ));
-    }
+    let completed = decode_completed_large_value_upload_at_key(&upload_key, &encoded)?;
     let receipt_id = completed.receipt_id.ok_or_else(|| {
         Error::InvalidLargeValueMetadata("completed upload has no receipt id".to_owned())
     })?;
+    let receipt_key = completed_large_value_receipt_key(receipt_id);
     let reverse = storage
-        .get(
-            LARGE_VALUE_METADATA_CF.to_owned(),
-            completed_large_value_receipt_key(receipt_id),
-        )
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key.clone())
         .await?
         .ok_or_else(|| {
             Error::InvalidLargeValueMetadata(
                 "completed upload has no receipt reverse binding".to_owned(),
             )
         })?;
-    if reverse != encoded {
+    let reverse_completed = decode_completed_large_value_receipt_at_key(&receipt_key, &reverse)?;
+    if reverse != encoded || reverse_completed != completed {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
     }
+    Ok(Some(completed))
+}
+
+/// Resolve a completed upload only after its bidirectional journal and the
+/// durable staging receipt agree. This is intentionally separate from the
+/// caller's requested descriptor: raw chunk staging does not have a descriptor
+/// to compare, but it must still not report a corrupt incomplete promotion as
+/// an idempotent completed upload.
+async fn completed_large_value_upload_receipt<S>(
+    storage: &S,
+    upload_id: crate::large_values::StagedLargeValueId,
+) -> Result<Option<crate::large_values::StagedLargeValue>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let Some(completed) = completed_large_value_upload_journal(storage, upload_id).await? else {
+        return Ok(None);
+    };
+    let receipt_id = completed
+        .receipt_id
+        .expect("completed journal requires a receipt id");
     let encoded = storage
         .get(
             LARGE_VALUE_METADATA_CF.to_owned(),
@@ -202,13 +217,33 @@ where
                 "completed upload points to a missing staged receipt".to_owned(),
             )
         })?;
-    let staged = decode_staged_large_value(&encoded)?;
+    let staged_key = staged_large_value_key(receipt_id);
+    let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
     if staged.id != receipt_id
-        || staged.value_ref != *value_ref
+        || completed.descriptor.as_ref() != Some(&staged.value_ref)
         || staged.accounting != completed.accounting
     {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload receipt does not match its binding".to_owned(),
+        ));
+    }
+    Ok(Some(staged))
+}
+
+async fn completed_large_value_upload<S>(
+    storage: &S,
+    upload_id: crate::large_values::StagedLargeValueId,
+    value_ref: &crate::large_values::LargeValueRef,
+) -> Result<Option<crate::large_values::StagedLargeValue>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let Some(staged) = completed_large_value_upload_receipt(storage, upload_id).await? else {
+        return Ok(None);
+    };
+    if staged.value_ref != *value_ref {
+        return Err(Error::InvalidLargeValueMetadata(
+            "completed upload is bound to a different descriptor".to_owned(),
         ));
     }
     Ok(Some(staged))
@@ -228,12 +263,7 @@ where
     else {
         return Ok(Vec::new());
     };
-    let completed = decode_pending_large_value_upload(&encoded)?;
-    if completed.receipt_id != Some(receipt_id) {
-        return Err(Error::InvalidLargeValueMetadata(
-            "completed receipt reverse binding is inconsistent".to_owned(),
-        ));
-    }
+    let completed = decode_completed_large_value_receipt_at_key(&receipt_key, &encoded)?;
     let upload_key = completed_large_value_upload_key(completed.id);
     let forward = storage
         .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key.clone())
@@ -241,7 +271,8 @@ where
         .ok_or_else(|| {
             Error::InvalidLargeValueMetadata("completed receipt has no upload binding".to_owned())
         })?;
-    if forward != encoded {
+    let forward_completed = decode_completed_large_value_upload_at_key(&upload_key, &forward)?;
+    if forward != encoded || forward_completed != completed {
         return Err(Error::InvalidLargeValueMetadata(
             "completed upload bindings disagree".to_owned(),
         ));
@@ -565,12 +596,7 @@ impl Database {
         pending_limit: Option<usize>,
     ) -> Result<bool, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
-        if self
-            .storage
-            .get(
-                LARGE_VALUE_METADATA_CF.to_owned(),
-                completed_large_value_upload_key(upload_id),
-            )
+        if completed_large_value_upload_receipt(&self.storage, upload_id)
             .await?
             .is_some()
         {
@@ -587,7 +613,7 @@ impl Database {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
             .await?
         {
-            decode_pending_large_value_upload(&encoded)?
+            decode_pending_large_value_upload_at_key(&key, &encoded)?
         } else {
             if require_existing {
                 return Ok(false);
@@ -716,7 +742,7 @@ impl Database {
         let encoded = crate::large_values::encode_large_value_ref(value_ref).map_err(|error| {
             Error::InvalidLargeValueMetadata(format!("cannot encode upload descriptor: {error}"))
         })?;
-        let digest = blake3::derive_key("groove pending descriptor upload v2", &encoded);
+        let digest = blake3::derive_key("groove pending descriptor upload v1", &encoded);
         let mut id = [0_u8; 16];
         id.copy_from_slice(&digest[..16]);
         Ok(crate::large_values::StagedLargeValueId(id))
@@ -795,7 +821,7 @@ impl Database {
             .ok_or_else(|| {
                 Error::InvalidLargeValueMetadata("pending upload is missing".to_owned())
             })?;
-        let mut upload = decode_pending_large_value_upload(&encoded)?;
+        let mut upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
         if let Some(bound) = &upload.descriptor {
             if bound == value_ref {
                 return Ok(());
@@ -1120,7 +1146,7 @@ impl Database {
         else {
             return Ok(None);
         };
-        let upload = decode_pending_large_value_upload(&encoded)?;
+        let upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
         if let Some(bound) = &upload.descriptor
             && bound != &value_ref
         {
@@ -1226,8 +1252,8 @@ impl Database {
             .await?;
         let mut uploads = Vec::new();
         while let Some(batch) = cursor.next_batch().await? {
-            for (_, encoded) in batch {
-                uploads.push(decode_pending_large_value_upload(&encoded)?);
+            for (key, encoded) in batch {
+                uploads.push(decode_pending_large_value_upload_at_key(&key, &encoded)?);
             }
         }
         Ok(uploads)
@@ -1248,7 +1274,7 @@ impl Database {
         else {
             return Ok(false);
         };
-        let upload = decode_pending_large_value_upload(&encoded)?;
+        let upload = decode_pending_large_value_upload_at_key(&key, &encoded)?;
         self.release_pending_large_value_upload(key, upload).await?;
         Ok(true)
     }
@@ -1266,8 +1292,8 @@ impl Database {
             .await?;
         let mut staged = Vec::new();
         while let Some(batch) = cursor.next_batch().await? {
-            for (_, encoded) in batch {
-                staged.push(decode_staged_large_value(&encoded)?);
+            for (key, encoded) in batch {
+                staged.push(decode_staged_large_value_at_key(&key, &encoded)?);
             }
         }
         Ok(staged)
@@ -1289,7 +1315,7 @@ impl Database {
         else {
             return Ok(false);
         };
-        let staged = decode_staged_large_value(&encoded)?;
+        let staged = decode_staged_large_value_at_key(&staged_key, &encoded)?;
         let root_key = large_value_root_key(&staged.value_ref.root)?;
         let encoded = self
             .storage

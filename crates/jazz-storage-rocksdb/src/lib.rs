@@ -23,8 +23,9 @@ use serde::Serialize;
 
 use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
-    ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageEpochManifest,
-    StorageFactory, StorageFuture, StorageScan, Value, validate_physical_storage_names,
+    ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCodecProfile, StorageCursor,
+    StorageEpochManifest, StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
+    validate_physical_storage_names,
 };
 
 trait RocksResultExt<T> {
@@ -95,6 +96,7 @@ impl StorageFactory for RocksDbStorageFactory {
         &self,
         path: PathBuf,
         column_families: Vec<String>,
+        codec_profile: StorageCodecProfile,
     ) -> StorageFuture<'_, Result<BoxedStorage, Error>> {
         Box::pin(async move {
             if let Some(parent) = path.parent() {
@@ -107,10 +109,14 @@ impl StorageFactory for RocksDbStorageFactory {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            Ok(BoxedStorage::new(RocksDbStorage::open(
-                path,
-                &column_families,
-            )?))
+            Ok(BoxedStorage::new(
+                RocksDbStorage::open_with_durability_and_codec_profile(
+                    path,
+                    &column_families,
+                    Durability::WalNoSync,
+                    &codec_profile,
+                )?,
+            ))
         })
     }
 }
@@ -223,13 +229,35 @@ impl RocksDbStorage {
     /// durability opt in via [`Self::open_with_durability`] with
     /// [`Durability::FullSync`].
     pub fn open(path: impl AsRef<Path>, column_families: &[&str]) -> Result<Self, Error> {
-        Self::open_with_durability(path, column_families, Durability::WalNoSync)
+        Self::open_with_durability_and_codec_profile(
+            path,
+            column_families,
+            Durability::WalNoSync,
+            &StorageCodecProfile::groove_epoch_1(),
+        )
     }
 
     pub fn open_with_durability(
         path: impl AsRef<Path>,
         column_families: &[&str],
         durability: Durability,
+    ) -> Result<Self, Error> {
+        Self::open_with_durability_and_codec_profile(
+            path,
+            column_families,
+            durability,
+            &StorageCodecProfile::groove_epoch_1(),
+        )
+    }
+
+    /// Open with the caller's closed persistent-codec profile. This is the
+    /// only adapter input that changes the shared `JSM1` registry; RocksDB
+    /// itself does not interpret higher-layer codec IDs.
+    pub fn open_with_durability_and_codec_profile(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+        durability: Durability,
+        codec_profile: &StorageCodecProfile,
     ) -> Result<Self, Error> {
         validate_physical_storage_names(column_families)?;
         let path = path.as_ref().to_path_buf();
@@ -256,7 +284,13 @@ impl RocksDbStorage {
         let initialize_format = match &listed_column_families {
             Some(existing) => {
                 validate_physical_storage_names(existing)?;
-                validate_raw_v3_store(&path, existing, &block_cache, &write_buffer_manager)?
+                validate_raw_v3_store(
+                    &path,
+                    existing,
+                    &block_cache,
+                    &write_buffer_manager,
+                    codec_profile,
+                )?
             }
             None => true,
         };
@@ -301,7 +335,7 @@ impl RocksDbStorage {
             batch.put_cf(
                 internal_cf,
                 ROCKSDB_EPOCH_MANIFEST_KEY,
-                rocksdb_manifest()?.encode()?,
+                rocksdb_manifest(codec_profile)?.encode()?,
             );
             db.write_opt(&batch, &write_options).storage()?;
         }
@@ -449,6 +483,7 @@ fn validate_raw_v3_store(
     column_families: &[String],
     block_cache: &Cache,
     write_buffer_manager: &WriteBufferManager,
+    codec_profile: &StorageCodecProfile,
 ) -> Result<bool, Error> {
     let mut options = rocksdb_options(block_cache, write_buffer_manager);
     options.create_if_missing(false);
@@ -477,7 +512,7 @@ fn validate_raw_v3_store(
                     .ok_or_else(|| {
                         Error::InvalidStorageLayout("missing RocksDB epoch manifest".to_owned())
                     })?;
-                rocksdb_manifest()?.admit_existing(&manifest)?;
+                rocksdb_manifest(codec_profile)?.admit_existing(&manifest)?;
                 return Ok(false);
             }
             Some(_) => {
@@ -510,8 +545,8 @@ fn validate_raw_v3_store(
     }
 }
 
-fn rocksdb_manifest() -> Result<StorageEpochManifest, Error> {
-    StorageEpochManifest::epoch_1(
+fn rocksdb_manifest(codec_profile: &StorageCodecProfile) -> Result<StorageEpochManifest, Error> {
+    StorageEpochManifest::epoch_1_with_codec_profile(
         "rocksdb",
         3,
         BTreeMap::from([
@@ -526,6 +561,7 @@ fn rocksdb_manifest() -> Result<StorageEpochManifest, Error> {
             ),
             ("value-format".to_owned(), ROCKSDB_VALUE_FORMAT_V3.to_vec()),
         ]),
+        codec_profile,
     )
 }
 
@@ -817,9 +853,7 @@ impl OrderedKvStorage for RocksDbStorage {
             let (start, upper_bound, prefix) = match bounds {
                 ScanBounds::Range { start, end } => (start, Some(end), None),
                 ScanBounds::Prefix(prefix) => {
-                    let mut upper_bound = prefix.clone();
-                    let upper_bound =
-                        advance_prefix_upper_bound(&mut upper_bound).then_some(upper_bound);
+                    let upper_bound = groove::storage::prefix_successor(&prefix);
                     (prefix.clone(), upper_bound, Some(prefix))
                 }
             };
@@ -921,38 +955,255 @@ impl OrderedKvStorage for RocksDbStorage {
         })
     }
 
+    fn write_many_outcome(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, WriteManyOutcome> {
+        Box::pin(async move {
+            for operation in &operations {
+                let cf = match operation {
+                    OwnedWriteOperation::Set { cf, .. }
+                    | OwnedWriteOperation::Delete { cf, .. } => cf,
+                };
+                if cf != "default"
+                    && let Err(error) = self.cf_handle(cf)
+                {
+                    return WriteManyOutcome::Uncommitted(error);
+                }
+            }
+            match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
+        })
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         Some(self.column_families.iter().cloned().collect())
     }
 }
 
-fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
-    for byte in prefix.iter_mut().rev() {
-        if *byte != u8::MAX {
-            *byte += 1;
-            return true;
-        }
-        *byte = 0;
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
-    use groove::storage::{Error, OrderedKvStorage, ReopenableStorage};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use flate2::read::GzDecoder;
+    use groove::storage::{Error, OrderedKvStorage, ReopenableStorage, StorageCodecProfile};
+    use sha2::{Digest, Sha256};
     use std::future::Future;
+    use std::io::Cursor;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
+    use tar::Archive;
 
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
-        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, ROCKSDB_EPOCH_MANIFEST_KEY,
+        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, Durability, ROCKSDB_EPOCH_MANIFEST_KEY,
         ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY, ROCKSDB_VALUE_FORMAT_V3,
         RocksDbClassProfile, RocksDbStorage, any_available, inspect_existing_column_families,
         rocksdb_class_profile, rocksdb_manifest, sum_available,
     };
-    use rocksdb::{ColumnFamilyDescriptor, DB, Options};
+    use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options};
+
+    const EPOCH_1_ROCKSDB_FIXTURE_BASE64: &str =
+        include_str!("../fixtures/epoch-1-historical.tar.gz.base64");
+    const EPOCH_1_ROCKSDB_FIXTURE_SHA256: &str =
+        "58c9198a4eb2373b6cd475177f7cbbbc0482ce5c037d388630565fd000659202";
+    const EPOCH_1_ORDERED_KV_PACK: &str =
+        include_str!("../../groove/fixtures/epoch-1-ordered-kv.pack");
+    const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
+        "5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7";
+
+    fn decode_historical_epoch_1_rocksdb_fixture(base64: &str) -> Result<Vec<u8>, String> {
+        let archive = STANDARD
+            .decode(base64.lines().collect::<String>())
+            .map_err(|error| format!("committed RocksDB fixture is not base64: {error}"))?;
+        if !historical_epoch_1_rocksdb_checksum_matches(&archive) {
+            return Err("committed RocksDB fixture checksum does not match".to_owned());
+        }
+        Ok(archive)
+    }
+
+    fn historical_epoch_1_rocksdb_checksum_matches(archive: &[u8]) -> bool {
+        format!("{:x}", Sha256::digest(archive)) == EPOCH_1_ROCKSDB_FIXTURE_SHA256
+    }
+
+    fn unpack_historical_epoch_1_rocksdb(
+        root: &std::path::Path,
+        base64: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        // Check the immutable corpus before creating the extraction root.
+        let archive = decode_historical_epoch_1_rocksdb_fixture(base64)?;
+        Archive::new(GzDecoder::new(Cursor::new(archive)))
+            .unpack(root)
+            .map_err(|error| format!("committed RocksDB fixture is not a safe archive: {error}"))?;
+        Ok(root.join("rocksdb-epoch-1"))
+    }
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0, "fixture hex is byte aligned");
+        (0..value.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn parse_epoch_1_ordered_kv_pack(
+        pack: &str,
+        expected_sha256: &str,
+    ) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> {
+        if format!("{:x}", Sha256::digest(pack)) != expected_sha256 {
+            return Err("authoritative logical pack checksum does not match".to_owned());
+        }
+        let mut lines = pack.lines();
+        if lines.next() != Some("JAZZ-ORDERED-KV-PACK-1") {
+            return Err("authoritative logical pack has an unsupported header".to_owned());
+        }
+        Ok(lines
+            .map(|line| {
+                let mut fields = line.split('\t');
+                let family = fields.next().unwrap().to_owned();
+                let key = decode_hex(fields.next().unwrap());
+                let value = decode_hex(fields.next().unwrap());
+                assert!(
+                    fields.next().is_none(),
+                    "fixture pack has exactly three fields"
+                );
+                (family, key, value)
+            })
+            .collect())
+    }
+
+    fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
+        parse_epoch_1_ordered_kv_pack(EPOCH_1_ORDERED_KV_PACK, EPOCH_1_ORDERED_KV_PACK_SHA256)
+            .expect("the authoritative logical pack must be canonical")
+    }
+
+    fn settled_epoch_1_rocksdb_manifest_bytes() -> Vec<u8> {
+        // This is intentionally spelled as fixed wire bytes instead of
+        // calling the current manifest encoder: the fixture proves a release
+        // baseline, not that the current implementation agrees with itself.
+        let mut bytes = b"JSM1\0\x01\0\x03\x07rocksdb\x03".to_vec();
+        for codec in [
+            "groove.large-value.v1",
+            "groove.ordered-chunk-storage.v1",
+            "groove.ordered-kv.v1",
+        ] {
+            bytes.push(codec.len() as u8);
+            bytes.extend_from_slice(codec.as_bytes());
+        }
+        bytes.push(4);
+        for (key, value) in [
+            ("internal-cf", b"__groove_storage_internal_v3".as_slice()),
+            ("key-order", b"unsigned-lexicographic".as_slice()),
+            ("rocksdb-comparator", b"rocksdb.bytewise.v1".as_slice()),
+            ("value-format", b"raw-v3".as_slice()),
+        ] {
+            bytes.push(key.len() as u8);
+            bytes.extend_from_slice(key.as_bytes());
+            bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            bytes.extend_from_slice(value);
+        }
+        bytes
+    }
+
+    #[test]
+    fn historical_epoch_1_rocksdb_fixture_is_checksum_guarded_before_extraction() {
+        let corrupted = EPOCH_1_ROCKSDB_FIXTURE_BASE64.replacen('H', "I", 1);
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("must-not-exist");
+        assert!(
+            unpack_historical_epoch_1_rocksdb(&root, &corrupted).is_err(),
+            "planted source-payload corruption must fail in the extractor"
+        );
+        assert!(!root.exists(), "checksum rejection must precede extraction");
+    }
+
+    #[test]
+    fn historical_epoch_1_ordered_kv_pack_requires_its_exact_header() {
+        let corrupt_header =
+            EPOCH_1_ORDERED_KV_PACK.replacen("JAZZ-ORDERED-KV-PACK-1", "JAZZ-ORDERED-KV-PACK-0", 1);
+        let corrupt_header_sha256 = format!("{:x}", Sha256::digest(&corrupt_header));
+        assert!(parse_epoch_1_ordered_kv_pack(&corrupt_header, &corrupt_header_sha256).is_err());
+    }
+
+    #[test]
+    fn historical_epoch_1_rocksdb_fixture_read_only_snapshot_mixed_write_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let historical_path =
+            unpack_historical_epoch_1_rocksdb(directory.path(), EPOCH_1_ROCKSDB_FIXTURE_BASE64)
+                .unwrap();
+
+        // The first open cannot create a file or column family. It reads the
+        // released physical store before the current adapter sees it.
+        let read_only = DB::open_cf_for_read_only(
+            &Options::default(),
+            &historical_path,
+            ["indices", "records", ROCKSDB_INTERNAL_CF],
+            false,
+        )
+        .unwrap();
+        let internal = read_only.cf_handle(ROCKSDB_INTERNAL_CF).unwrap();
+        assert_eq!(
+            read_only
+                .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)
+                .unwrap(),
+            Some(ROCKSDB_VALUE_FORMAT_V3.to_vec())
+        );
+        assert_eq!(
+            read_only
+                .get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY)
+                .unwrap(),
+            Some(settled_epoch_1_rocksdb_manifest_bytes())
+        );
+        let mut snapshot = Vec::new();
+        for family in ["indices", "records"] {
+            let handle = read_only.cf_handle(family).unwrap();
+            snapshot.extend(
+                read_only
+                    .iterator_cf(handle, IteratorMode::Start)
+                    .map(|entry| {
+                        let (key, value) = entry.unwrap();
+                        (family.to_owned(), key.to_vec(), value.to_vec())
+                    }),
+            );
+        }
+        assert_eq!(snapshot, epoch_1_ordered_kv_pack());
+        drop(read_only);
+
+        let current = RocksDbStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        ready(current.write_many(vec![
+            groove::storage::OwnedWriteOperation::Set {
+                cf: "records".into(),
+                key: b"user:3".to_vec(),
+                value: b"Lin".to_vec(),
+            },
+            groove::storage::OwnedWriteOperation::Delete {
+                cf: "indices".into(),
+                key: b"name:Ada".to_vec(),
+            },
+            groove::storage::OwnedWriteOperation::Set {
+                cf: "indices".into(),
+                key: b"name:Lin".to_vec(),
+                value: b"3".to_vec(),
+            },
+        ]))
+        .unwrap();
+        drop(current);
+
+        let reopened = RocksDbStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        assert_eq!(
+            ready(reopened.get("records".into(), b"user:3".to_vec())).unwrap(),
+            Some(b"Lin".to_vec())
+        );
+        assert_eq!(
+            ready(reopened.get("indices".into(), b"name:Ada".to_vec())).unwrap(),
+            None
+        );
+        assert_eq!(
+            ready(reopened.get("indices".into(), b"name:Lin".to_vec())).unwrap(),
+            Some(b"3".to_vec())
+        );
+    }
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
@@ -1109,11 +1360,58 @@ mod tests {
         );
         assert_eq!(
             db.get_cf(internal, ROCKSDB_EPOCH_MANIFEST_KEY).unwrap(),
-            Some(rocksdb_manifest().unwrap().encode().unwrap())
+            Some(
+                rocksdb_manifest(&StorageCodecProfile::groove_epoch_1())
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+            )
         );
         let families = DB::list_cf(&Options::default(), dir.path()).unwrap();
         assert!(families.contains(&CLASS_HISTORY_CF.to_owned()));
         assert!(families.contains(&ROCKSDB_INTERNAL_CF.to_owned()));
+    }
+
+    #[test]
+    fn caller_selected_codec_profile_is_pinned_and_required_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["jazz.example-opaque.v1"])
+            .unwrap();
+        drop(
+            RocksDbStorage::open_with_durability_and_codec_profile(
+                dir.path(),
+                &["records"],
+                Durability::WalNoSync,
+                &profile,
+            )
+            .unwrap(),
+        );
+
+        let db = DB::open_cf(
+            &Options::default(),
+            dir.path(),
+            ["records", ROCKSDB_INTERNAL_CF],
+        )
+        .unwrap();
+        let bytes = db
+            .get_cf(
+                db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap(),
+                ROCKSDB_EPOCH_MANIFEST_KEY,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, rocksdb_manifest(&profile).unwrap().encode().unwrap());
+        drop(db);
+
+        RocksDbStorage::open_with_durability_and_codec_profile(
+            dir.path(),
+            &["records"],
+            Durability::WalNoSync,
+            &profile,
+        )
+        .unwrap();
+        assert!(RocksDbStorage::open(dir.path(), &["records"]).is_err());
     }
 
     #[test]
@@ -1310,6 +1608,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rocks = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         let memory = MemoryStorage::new(&["records"]).expect("valid memory storage families");
+        ready(groove::storage::conformance::persistence_order_and_batch_atomicity(&rocks));
+        ready(
+            groove::storage::conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(
+                &rocks,
+            ),
+        );
+        ready(groove::storage::conformance::invalid_batch_is_proven_uncommitted(&rocks));
         assert_eq!(
             ready(rocks.put_if_absent(
                 "records".to_owned(),
@@ -1419,6 +1724,13 @@ mod tests {
             ready(reopened.get("records".to_owned(), b"must-not-leak".to_vec())).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn generic_reopen_conformance_preserves_data_and_adds_families() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(groove::storage::conformance::reopen_preserves_data_and_adds_families(storage));
     }
 
     #[test]

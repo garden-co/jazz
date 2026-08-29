@@ -242,12 +242,22 @@ test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () 
   assert.equal(expectedManifest(root, "napi", "release").packageInputs, before);
   assert.equal(verifyManifest(root, "napi", "release"), null);
 
+  // napi-rs writes this ignored target manifest next to the binding. It is a
+  // post-build receipt, not a source input for the artifact it describes.
+  writeFileSync(
+    join(root, "crates/jazz-napi/jazz-napi.linux-x64-gnu.manifest.json"),
+    '{"generated":true}\n',
+  );
+  assert.equal(expectedManifest(root, "napi", "release").packageInputs, before);
+  assert.equal(verifyManifest(root, "napi", "release"), null);
+
   // Near misses are ordinary inputs: accepting any made-up binding name,
   // suffix, or appended extension would let generated source evade freshness.
   for (const path of [
     "jazz-napi.linux-x64-gnu.node.staged-123-456.rs",
     "jazz-napi.attacker.node.staged-123-456",
     "jazz-napi.linux-x64-gnu.node.staged-not-a-wrapper",
+    "jazz-napi.attacker.manifest.json",
   ]) {
     const file = join(root, "crates/jazz-napi", path);
     writeFileSync(file, "must remain an input");

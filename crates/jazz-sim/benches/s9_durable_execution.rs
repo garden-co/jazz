@@ -26,6 +26,7 @@ use jazz_sim::fixture::{
     apply_sync_message_settled, commit_mergeable_unit_settled, settle_outcome,
 };
 use jazz_sim::public_schema_fixture::compile_public_schema;
+use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -1175,15 +1176,14 @@ fn storage_bytes(path: &std::path::Path) -> u64 {
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_bundles,
+            version_carriers,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
         }) => {
-            version_bundles
-                .iter()
-                .flat_map(|bundle| bundle.versions.iter())
+            version_bundle_refs(version_carriers)
+                .flat_map(|bundle| bundle.versions)
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)

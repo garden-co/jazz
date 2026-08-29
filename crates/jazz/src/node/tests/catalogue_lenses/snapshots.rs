@@ -104,7 +104,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
                 default: v(""),
             }],
         }],
-    );
+    ).expect("valid migration lens");
     let (_authority_dir, mut authority) = open_node_with_schema(node(0x35), base.clone());
     publish_schema_lineage(
         &mut authority,
@@ -132,7 +132,25 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
         )
         .unwrap();
 
-    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base);
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x37), base.clone());
+    let subscription = receiver
+        .subscribe_history("todos")
+        .expect("subscribe before historical snapshot import");
+    assert!(subscription
+        .recv()
+        .expect("initial history snapshot")
+        .is_empty());
+    let runtime_before_snapshot = receiver.groove_runtime_token();
+    let history_table = physical_history_table_name(
+        receiver
+            .physical_table_id_for_schema(base.version_id(), "todos")
+            .expect("base physical table"),
+    );
+    let history_registry_before = receiver
+        .database
+        .table_schema(&history_table)
+        .expect("base history registry")
+        .clone();
     let snapshot = authority.catalogue_snapshot().unwrap();
     assert!(matches!(
         receiver.apply_sync_message_settled(SyncMessage::CatalogueSnapshot(Box::new(snapshot.clone()))),
@@ -140,9 +158,74 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
             "catalogue snapshot requires a trusted upstream link"
         ))
     ));
+
+    // First fail after physical variants have been installed but before their
+    // projections.  The synchronizer itself must roll that prefix back.
+    receiver.set_catalogue_activation_failpoint(
+        CatalogueActivationFailpoint::AfterPhysicalRegistryRegistration,
+    );
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    assert_eq!(receiver.groove_runtime_token(), runtime_before_snapshot);
+    assert_eq!(receiver.active_catalogue_seq(), 0);
+    assert_eq!(receiver.catalogue_schemas().len(), 1);
+    assert_eq!(
+        receiver
+            .database
+            .table_schema(&history_table)
+            .expect("rolled-back history registry"),
+        &history_registry_before,
+        "partial variant registration must not leak a new runtime capability"
+    );
+
+    // Registration has already added the evolved physical variants and their
+    // projection cases by this point.  The activation receipt is still the
+    // visibility boundary: a failure immediately before it must restore the
+    // complete old registry, not merely the in-memory catalogue.
+    receiver.set_catalogue_activation_failpoint(
+        CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
+    );
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    assert_eq!(receiver.groove_runtime_token(), runtime_before_snapshot);
+    assert_eq!(receiver.active_catalogue_seq(), 0);
+    assert_eq!(receiver.catalogue_schemas().len(), 1);
+    assert_eq!(
+        receiver
+            .database
+            .table_schema(&history_table)
+            .expect("rolled-back history registry"),
+        &history_registry_before,
+        "activation failure restores the complete registry, not only catalogue metadata"
+    );
+    assert_eq!(
+        receiver.query_all_versions().expect("old history remains readable"),
+        Vec::new(),
+        "a failed snapshot leaves rows and their old registry interpretation untouched"
+    );
+
     receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    assert_eq!(
+        receiver.groove_runtime_token(),
+        runtime_before_snapshot,
+        "a historical/write-schema import extends the live physical registry in place"
+    );
     assert_eq!(receiver.current_write_schema().unwrap().schema, evolved.id);
     receiver.apply_sync_message_settled(authored).unwrap();
+    assert_eq!(
+        subscription
+            .recv()
+            .expect("the pre-import history stream receives the new authored variant")
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .count(),
+        1,
+        "the in-place registry extension preserves the existing subscription"
+    );
     let versions = receiver.query_all_versions().unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(
@@ -151,6 +234,29 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
             .unwrap(),
         evolved.id
     );
+}
+
+/// A pre-activation failpoint is wholly in-memory and may be retried. By
+/// contrast, once the catalogue batch has reached the storage persistence
+/// boundary, its failure has publication-order consequences that cannot be
+/// rolled back by restoring only the registry. This internal receipt injects
+/// that boundary directly; public callers can only observe the fail-closed
+/// node afterwards.
+#[test]
+fn trusted_catalogue_snapshot_persistence_failure_keeps_runtime_poisoned() {
+    let (mut receiver, storage) = fail_write_many_node();
+    let snapshot = catalogue_snapshot_fixture();
+    storage.fail_nth_following_write_many(1);
+
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot.clone()),
+        Err(Error::CatalogueActivationFailed)
+    ));
+    assert_poisoned_node_exposes_nothing(&mut receiver);
+    assert!(matches!(
+        receiver.apply_trusted_catalogue_snapshot_settled(snapshot),
+        Err(Error::CatalogueActivationFailed)
+    ));
 }
 
 #[test]
@@ -174,7 +280,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -193,6 +299,9 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
         open_node_with_schema(node(0x61), evolved.schema.clone());
     let local_alias = receiver.catalogue.current_schema_version_alias.unwrap();
     let local_mapping = receiver.catalogue.physical_mappings[&evolved.id].clone();
+    let authority_identities = authority.catalogue.physical_mappings[&evolved.id]
+        .identities
+        .clone();
     let (tx_id, _) = receiver
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x62), 10).cells(BTreeMap::from([
@@ -201,19 +310,104 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
             ])),
         )
         .unwrap();
+    let subscription = receiver
+        .subscribe_history("todos")
+        .expect("subscribe before authority bootstrap");
+    assert_eq!(
+        subscription
+            .recv()
+            .expect("initial history snapshot")
+            .deltas
+            .len(),
+        1,
+        "the live subscription starts on the locally authored version"
+    );
+    let runtime_before_snapshot = receiver.groove_runtime_token();
     receiver
         .apply_trusted_catalogue_snapshot_settled(authority.catalogue_snapshot().unwrap())
         .unwrap();
 
     assert_eq!(
+        receiver.groove_runtime_token(),
+        runtime_before_snapshot,
+        "learning historical authority lineage and permanent identities must not rebuild the active runtime"
+    );
+    receiver
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x6a), 11).cells(BTreeMap::from([
+                ("title".to_owned(), v("after-snapshot")),
+                ("body".to_owned(), v("still-live")),
+            ])),
+        )
+        .unwrap();
+    assert_eq!(
+        subscription
+            .recv()
+            .expect("live subscription after authority bootstrap")
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .count(),
+        1,
+        "the pre-bootstrap subscription remains attached to the live runtime"
+    );
+
+    assert_eq!(
         receiver.catalogue.current_schema_version_alias,
         Some(local_alias)
     );
-    assert_eq!(receiver.catalogue.physical_mappings[&evolved.id], local_mapping);
+    let received_mapping = &receiver.catalogue.physical_mappings[&evolved.id];
+    assert_eq!(received_mapping.tables, local_mapping.tables);
+    assert_eq!(received_mapping.identities, authority_identities);
+    assert_ne!(received_mapping.identities, local_mapping.identities);
     let stored = receiver.query_versions_for_tx(tx_id).unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].schema_version_alias(), local_alias);
     receiver.physical_table_id_for_version(&stored[0]).unwrap();
+
+    // The converse is deliberately not a no-op: policy is part of the active
+    // read schema even though it does not change that schema version's hash.
+    // A trusted same-version semantic change must retire live runtime handles.
+    let mut active_policy_change = authority.catalogue_snapshot().unwrap();
+    active_policy_change
+        .schemas
+        .iter_mut()
+        .find(|schema| schema.id == evolved.id)
+        .expect("authority snapshot contains active schema")
+        .schema
+        .runtime_mut_for_testing()
+        .tables[0]
+        .read_policy = Some(Query::from("todos").filter(eq(col("title"), lit("after-snapshot"))));
+    let runtime_before_active_change = receiver.groove_runtime_token();
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(active_policy_change)
+        .expect("install active-schema semantic change");
+    assert_ne!(
+        receiver.groove_runtime_token(),
+        runtime_before_active_change,
+        "an active read-schema semantic change must rebuild the Groove runtime"
+    );
+
+    // This is a planted runtime-layout change: the authority may never choose
+    // this node-local alias itself, but any path which does change it must
+    // force the same rebuild rather than retaining graphs compiled against the
+    // old record descriptor.
+    let mut changed_active_layout = receiver.catalogue.clone();
+    changed_active_layout
+        .physical_mappings
+        .get_mut(&evolved.id)
+        .expect("active mapping")
+        .tables
+        .get_mut("todos")
+        .expect("active table mapping")
+        .columns
+        .insert("title".to_owned(), PhysicalColumnId(0xfeed));
+    assert!(
+        !super::super::catalogue_ingest::active_runtime_layouts_equal(
+            &receiver.catalogue,
+            &changed_active_layout,
+        ),
+        "a changed active physical column layout is rebuild-relevant"
+    );
 }
 
 #[test]
@@ -246,7 +440,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -265,7 +459,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -362,7 +556,7 @@ fn authored_columns_follow_a_renamed_column_through_wire_and_reopen() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -440,7 +634,7 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
                     default: v("default-body"),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -536,7 +730,7 @@ fn mergeable_commit_rejects_unadmitted_authored_schema() {
 }
 
 #[test]
-fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefixes() {
+fn trusted_catalogue_snapshot_imports_historical_lineage_without_rebuilding_active_runtime() {
     // A trusted snapshot is a complete authoritative prefix, not a delta. Once
     // its activation commits, reopening must retain enough canonical lineage
     // identity to recognize that same prefix on the next upstream connection.
@@ -549,10 +743,10 @@ fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefi
         .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .unwrap();
     assert_eq!(receiver.active_catalogue_seq(), 1);
-    assert_ne!(
+    assert_eq!(
         receiver.groove_runtime_token(),
         runtime_before_transition,
-        "a v1-to-v2 catalogue transition reconstructs local IVM projections"
+        "a new historical lineage does not alter the active local runtime layout"
     );
 
     let evolved = catalogue_evolved_schema();
@@ -870,7 +1064,7 @@ fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &St
         node,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(staged).unwrap(),
     );
     write_catalogue_record(
         node,
@@ -885,10 +1079,13 @@ fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &St
 
 fn duplicate_schema_destination_lineage(
     base: &JazzSchema,
+    source_identities: &PhysicalIdentityManifest,
     original: &StagedSchemaLineage,
     catalogue_seq: u64,
 ) -> StagedSchemaLineage {
-    let duplicate_publication = SchemaLineagePublication::new(
+    let duplicate_publication = SchemaLineagePublication::author_from_prior(
+        base,
+        source_identities,
         original.publication.schema.clone(),
         MigrationLens::new(
             base.version_id(),
@@ -901,10 +1098,11 @@ fn duplicate_schema_destination_lineage(
                     default: Value::String("different-default".to_owned()),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    )
+    .expect("corruption fixture authors a valid competing descendant");
     assert_ne!(duplicate_publication.id, original.publication.id);
     StagedSchemaLineage {
         catalogue_seq,
@@ -946,7 +1144,7 @@ fn assert_staged_corruption_rejected(
         &mut receiver,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(&staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
     );
     drop(receiver);
 
@@ -962,8 +1160,9 @@ fn assert_catalogue_reopen_rejected(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = NodeState::new(node_uuid, schema, storage).resolve();
     assert!(matches!(
-        NodeState::new(node_uuid, schema, storage).resolve(),
+        reopened,
         Err(Error::InvalidStoredValue(message)) if message == expected
     ));
 }
@@ -1015,7 +1214,7 @@ fn reopen_rejects_active_catalogue_marker_with_mismatched_payload_sequence() {
         &mut receiver,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(&staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
     );
     drop(receiver);
 
@@ -1057,7 +1256,7 @@ fn reopen_rejects_gapped_active_catalogue_sequences() {
                     default: Value::Bool(false),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1088,7 +1287,12 @@ fn reopen_rejects_duplicate_active_catalogue_targets() {
         .next()
         .unwrap()
         .clone();
-    let duplicate = duplicate_schema_destination_lineage(&base, &original, 2);
+    let duplicate = duplicate_schema_destination_lineage(
+        &base,
+        &receiver.catalogue.physical_mappings[&base.version_id()].identities,
+        &original,
+        2,
+    );
     write_active_lineage_record(&mut receiver, &duplicate);
     drop(receiver);
 
@@ -1113,12 +1317,17 @@ fn reopen_rejects_inactive_catalogue_target_already_active() {
         .next()
         .unwrap()
         .clone();
-    let duplicate = duplicate_schema_destination_lineage(&base, &original, 2);
+    let duplicate = duplicate_schema_destination_lineage(
+        &base,
+        &receiver.catalogue.physical_mappings[&base.version_id()].identities,
+        &original,
+        2,
+    );
     write_catalogue_record(
         &mut receiver,
         b"schema_lineage_staged",
         duplicate.publication.id.0,
-        serde_json::to_vec(&duplicate).unwrap(),
+        codec::encode_catalogue_staged_lineage(&duplicate).unwrap(),
     );
     drop(receiver);
 
@@ -1144,7 +1353,12 @@ fn reopen_rejects_duplicate_inactive_catalogue_targets() {
         .unwrap()
         .clone();
     first.catalogue_seq = 1;
-    let duplicate = duplicate_schema_destination_lineage(&base, &first, 2);
+    let duplicate = duplicate_schema_destination_lineage(
+        &base,
+        &receiver.catalogue.physical_mappings[&base.version_id()].identities,
+        &first,
+        2,
+    );
     delete_catalogue_record(
         &mut receiver,
         b"schema_lineage_active",
@@ -1154,13 +1368,13 @@ fn reopen_rejects_duplicate_inactive_catalogue_targets() {
         &mut receiver,
         b"schema_lineage_staged",
         first.publication.id.0,
-        serde_json::to_vec(&first).unwrap(),
+        codec::encode_catalogue_staged_lineage(&first).unwrap(),
     );
     write_catalogue_record(
         &mut receiver,
         b"schema_lineage_staged",
         duplicate.publication.id.0,
-        serde_json::to_vec(&duplicate).unwrap(),
+        codec::encode_catalogue_staged_lineage(&duplicate).unwrap(),
     );
     drop(receiver);
 
@@ -1190,7 +1404,7 @@ fn reopen_rejects_zero_sequence_staged_lineage() {
         &mut receiver,
         b"schema_lineage_staged",
         staged.publication.id.0,
-        serde_json::to_vec(&staged).unwrap(),
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
     );
     drop(receiver);
 
@@ -1207,7 +1421,7 @@ fn reopen_rejects_staged_schema_payload_identity_mismatch() {
     let base_id = schema().version_id();
     assert_staged_corruption_rejected(
         0x47,
-        "staged schema lineage violates trusted publication invariants",
+        "catalogue schema content id mismatch",
         |staged| {
             staged.publication.schema.id = base_id;
             staged.publication.id = staged.publication.content_id();
@@ -1216,14 +1430,41 @@ fn reopen_rejects_staged_schema_payload_identity_mismatch() {
 }
 
 #[test]
-fn reopen_rejects_staged_lens_content_identity_mismatch() {
-    assert_staged_corruption_rejected(
-        0x48,
-        "staged schema lineage violates trusted publication invariants",
-        |staged| {
-            staged.publication.lens.id = MigrationLensId(uuid::Uuid::nil());
-            staged.publication.id = staged.publication.content_id();
-        },
+fn reopen_derives_staged_lens_identity_from_canonical_payload() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x48), base.clone());
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    let mut staged = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let expected_lens_id = staged.publication.lens.content_id();
+    // `MigrationLens::id` is derived, never serialized: stale in-memory
+    // bookkeeping cannot become a distinct durable identity.
+    staged.publication.lens.id = MigrationLensId(uuid::Uuid::nil());
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        staged.publication.id.0,
+        codec::encode_catalogue_staged_lineage(&staged).unwrap(),
+    );
+    drop(receiver);
+
+    let reopened = reopen_node_at(&dir, node(0x48), base);
+    let recovered = reopened
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .expect("recovered staged lineage");
+    assert_eq!(recovered.publication.lens.id(), expected_lens_id);
+    assert_eq!(
+        recovered.publication.lens.id(),
+        recovered.publication.lens.content_id()
     );
 }
 
@@ -1260,6 +1501,45 @@ fn reopen_rejects_staged_table_partition_mismatch() {
             staged.publication.id = staged.publication.content_id();
         },
     );
+}
+
+/// Local integer aliases are intentionally node-owned, but the UUID manifest
+/// carried alongside them is authority-owned.  This planted reopen mutation
+/// replaces the descendant's manifest with a separately valid one: recovery
+/// must bind it back to the exact lineage publication rather than accepting
+/// two individually well-formed durable records.
+#[test]
+fn reopen_rejects_mapping_manifest_smuggled_under_active_lineage() {
+    let snapshot = catalogue_snapshot_fixture();
+    let dir = tempfile::tempdir().expect("create dynamic edge store");
+    let mut receiver = fresh_dynamic_edge_open(dir.path(), node(0x4e))
+        .expect("open uninitialized edge");
+    receiver.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    let active = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .expect("fixture activates one descendant")
+        .clone();
+    let mut smuggled = receiver.catalogue.physical_mappings[&active.publication.schema.id].clone();
+    smuggled.identities = PhysicalIdentityManifest::allocate(&active.publication.schema.schema);
+    write_schema_mapping_record(
+        &mut receiver,
+        active.alias,
+        active.publication.schema.id,
+        &smuggled,
+    );
+    drop(receiver);
+
+    let empty = empty_public_test_schema();
+    let cfs = empty.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        NodeState::new_catalogue_uninitialized(node(0x4e), storage).resolve(),
+        Err(Error::InvalidStoredValue("durable mapping identities disagree with authority publication"))
+    ));
 }
 
 /// A schema row is independently durable from its activation receipt. Reopen
@@ -1311,7 +1591,7 @@ fn reopen_rejects_standalone_lens_semantic_tamper() {
         &mut receiver,
         b"lens",
         tampered.id.0,
-        serde_json::to_vec(&tampered).unwrap(),
+        codec::encode_catalogue_lens(&tampered),
     );
     drop(receiver);
 
@@ -1397,7 +1677,6 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
     assert_eq!(edge.current_write_schema().unwrap(), snapshot.current_write_schema);
     assert_eq!(edge.active_catalogue_seq(), 1);
     assert_eq!(edge.catalogue_schemas().len(), 2);
-
     drop(edge);
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1616,6 +1895,7 @@ fn dynamic_edge_reopen_rejects_smuggled_schema_and_mapping() {
     let mut next_column_id = 100;
     let mapping = allocate_provisional_physical_mapping(
         &smuggled.schema,
+        PhysicalIdentityManifest::allocate(&smuggled.schema),
         &mut next_table_id,
         &mut next_column_id,
     )
@@ -1654,6 +1934,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     let mut edge = NodeState::new_catalogue_uninitialized(node(0xa1), storage)
         .expect("open explicit uninitialized edge");
     edge.apply_trusted_catalogue_snapshot_settled(crate::protocol::CatalogueSnapshot {
+        genesis_physical_identities: PhysicalIdentityManifest::allocate(&base),
         schemas: vec![SchemaVersion::new(base.clone())],
         lineages: Vec::new(),
         current_write_schema: CurrentWriteSchema {
@@ -1664,7 +1945,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     .unwrap();
 
     let target = SchemaVersion::new(catalogue_evolved_schema());
-    let publication = SchemaLineagePublication::new(
+    let publication = edge.author_schema_lineage_publication(
         target.clone(),
         MigrationLens::new(
             base.version_id(),
@@ -1677,10 +1958,10 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    ).unwrap();
     edge.set_catalogue_activation_failpoint(CatalogueActivationFailpoint::AfterStaged);
     assert!(matches!(
         edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
@@ -1862,7 +2143,10 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
-    let publication = SchemaLineagePublication::new(
+    let genesis_physical_identities = PhysicalIdentityManifest::allocate(&base);
+    let publication = SchemaLineagePublication::author_from_prior(
+        &base,
+        &genesis_physical_identities,
         evolved.clone(),
         MigrationLens::new(
             base.version_id(),
@@ -1875,11 +2159,13 @@ fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
-    );
+    )
+    .expect("fixture authors descendant identities from the genesis authority manifest");
     crate::protocol::CatalogueSnapshot {
+        genesis_physical_identities,
         schemas: vec![SchemaVersion::new(base), evolved.clone()],
         lineages: vec![(1, publication)],
         current_write_schema: CurrentWriteSchema {

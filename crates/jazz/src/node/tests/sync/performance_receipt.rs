@@ -338,14 +338,16 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let serve_elapsed = serve_start.elapsed();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
-        version_bundles,
+        version_carriers,
         ..
     }) = &update
     else {
         panic!("expected view update");
     };
     let result_member_count = result_member_adds.len();
-    let version_bundle_count = version_bundles.len();
+    let version_bundle_count = crate::protocol::expand_version_carriers(version_carriers)
+        .expect("performance receipt carriers should expand")
+        .len();
     assert!(result_member_count >= entry_count);
 
     let mut memory_reader = open_policy_graph_memory_node(node(0x23), schema.clone());

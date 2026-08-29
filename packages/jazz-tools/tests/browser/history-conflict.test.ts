@@ -359,11 +359,11 @@ describe("History & Conflict Management", () => {
     expect(aliceConflictTitle).not.toBe(bobConflictTitle);
     const aliceConflict = dbAlice.update(todos, id, { title: aliceConflictTitle });
     const bobConflict = dbBob.update(todos, id, { title: bobConflictTitle });
-    const [aliceConflictBatchId, bobConflictBatchId] = await Promise.all([
-      aliceConflict.transactionId,
-      bobConflict.transactionId,
+    const [aliceConflictTxId, bobConflictTxId] = await Promise.all([
+      aliceConflict.txId,
+      bobConflict.txId,
     ]);
-    expect(aliceConflictBatchId).not.toBe(bobConflictBatchId);
+    expect(aliceConflictTxId).not.toBe(bobConflictTxId);
     await Promise.all([aliceConflict.wait({ tier: "edge" }), bobConflict.wait({ tier: "edge" })]);
 
     // Compare edge-tier reads: a local tier may still intentionally include a

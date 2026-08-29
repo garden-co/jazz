@@ -15,13 +15,17 @@ use jazz::tools::AppContext;
 use jazz::tools::AppId;
 use jazz::tools::public_schema::Schema;
 
-use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
+use super::{BuiltServer, ServerBuilder, ServerState, ShutdownPhase, StorageBackend};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
+/// The issuer configured by the embedded external-JWT test server.
+pub const TEST_JWT_ISSUER: &str = "urn:jazz:test";
+/// The audience configured by the embedded external-JWT test server.
+pub const TEST_JWT_AUDIENCE: &str = "urn:jazz:test-audience";
 
 /// Builder for configuring and starting a [`JazzServer`].
 #[derive(Default)]
@@ -142,6 +146,7 @@ struct JwtClaims {
     sub: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     iss: Option<String>,
+    aud: String,
     claims: JsonValue,
     exp: u64,
 }
@@ -157,7 +162,7 @@ impl Default for TestJwtOptions {
             expires_in: Duration::from_secs(3600),
             // Test helpers mint ordinary external sessions unless a test
             // explicitly exercises a missing or reserved issuer.
-            issuer: Some("urn:jazz:test".to_owned()),
+            issuer: Some(TEST_JWT_ISSUER.to_owned()),
         }
     }
 }
@@ -209,6 +214,7 @@ impl TestJwtIssuer {
         let claims = JwtClaims {
             sub: sub.to_string(),
             iss: options.issuer,
+            aud: TEST_JWT_AUDIENCE.to_owned(),
             claims,
             exp: now
                 .duration_since(UNIX_EPOCH)
@@ -237,8 +243,8 @@ impl Drop for TestJwtIssuer {
 
 pub struct JazzServer {
     state: Arc<ServerState>,
-    task: Option<JoinHandle<()>>,
-    shutdown_task: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<std::io::Result<()>>>,
+    shutdown_task: Option<JoinHandle<ShutdownPhase>>,
     port: u16,
     app_id: AppId,
     data_dir: ServerDataDir,
@@ -305,6 +311,8 @@ impl JazzServer {
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_url),
+            jwt_issuer: Some(TEST_JWT_ISSUER.to_owned()),
+            jwt_audience: Some(TEST_JWT_AUDIENCE.to_owned()),
             allow_local_first_auth: true,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
@@ -363,8 +371,9 @@ impl JazzServer {
         let shutdown_task = tokio::spawn(async move {
             shutdown_state.shutdown.wait_requested().await;
             tokio::time::sleep(Duration::from_millis(50)).await;
-            shutdown_state.run_shutdown_finalization().await;
+            let phase = shutdown_state.run_shutdown_finalization().await;
             let _ = serve_shutdown_tx.send(());
+            phase
         });
         let task = tokio::spawn(async move {
             axum::serve(listener, built.app)
@@ -372,7 +381,6 @@ impl JazzServer {
                     let _ = serve_shutdown_rx.await;
                 })
                 .await
-                .expect("serve jazz server");
         });
 
         let server = Self {
@@ -474,31 +482,50 @@ impl JazzServer {
         self.data_dir.path()
     }
 
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(mut self) -> ShutdownPhase {
         self.state.shutdown.request_shutdown();
         let shutdown_budget = self.state.shutdown.timeout() * 2 + Duration::from_secs(5);
 
-        let mut finalization_completed = false;
-        if let Some(mut shutdown_task) = self.shutdown_task.take()
-            && tokio::time::timeout(shutdown_budget, &mut shutdown_task)
-                .await
-                .is_ok()
-        {
-            finalization_completed = true;
+        let phase = if let Some(mut shutdown_task) = self.shutdown_task.take() {
+            match tokio::time::timeout(shutdown_budget, &mut shutdown_task).await {
+                Ok(Ok(phase)) => phase,
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "embedded shutdown finalization task failed");
+                    return ShutdownPhase::Failed;
+                }
+                Err(_) => {
+                    shutdown_task.abort();
+                    tracing::error!("embedded shutdown finalization timed out");
+                    return ShutdownPhase::Failed;
+                }
+            }
+        } else {
+            self.state.shutdown.phase()
+        };
+        if phase != ShutdownPhase::StorageClosed {
+            return phase;
         }
 
-        if !finalization_completed {
-            return;
+        if let Some(mut task) = self.task.take() {
+            match tokio::time::timeout(shutdown_budget, &mut task).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => {
+                    tracing::error!(%error, "embedded server task failed during shutdown");
+                    return ShutdownPhase::Failed;
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "embedded server task join failed during shutdown");
+                    return ShutdownPhase::Failed;
+                }
+                Err(_) => {
+                    task.abort();
+                    let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
+                    tracing::error!("embedded server task timed out during shutdown");
+                    return ShutdownPhase::Failed;
+                }
+            }
         }
-
-        if let Some(mut task) = self.task.take()
-            && tokio::time::timeout(shutdown_budget, &mut task)
-                .await
-                .is_err()
-        {
-            task.abort();
-            let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
-        }
+        ShutdownPhase::StorageClosed
     }
 
     async fn wait_ready(&self) {
@@ -682,7 +709,7 @@ mod tests {
         assert!(context.jwt_token.is_some());
         assert!(context.admin_secret.is_none());
 
-        server.shutdown().await;
+        assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
     }
 
     #[tokio::test]
@@ -716,6 +743,34 @@ mod tests {
             "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
         );
 
-        server.shutdown().await;
+        assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
+    }
+
+    #[tokio::test]
+    async fn embedded_shutdown_reports_finalization_failure() {
+        let app_id = JazzServer::default_app_id();
+        let built = ServerBuilder::new(app_id)
+            .with_storage(StorageBackend::InMemory)
+            .with_shutdown_timeout(Duration::from_millis(1))
+            .build()
+            .await
+            .expect("build embedded server");
+        let active_request = built
+            .state
+            .shutdown
+            .try_enter_app_request()
+            .expect("enter active request");
+        let server = JazzServer::from_built(
+            built,
+            None,
+            app_id,
+            ServerDataDir::in_memory(),
+            JazzServer::ADMIN_SECRET.to_owned(),
+            JazzServer::BACKEND_SECRET.to_owned(),
+        )
+        .await;
+
+        assert_eq!(server.shutdown().await, ShutdownPhase::Failed);
+        drop(active_request);
     }
 }

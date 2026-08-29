@@ -2050,6 +2050,12 @@ export default s.defineMigration({
       if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersEmailSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedUsersEmailAddressSchema("email_address"));
+      }
 
       const body = JSON.parse(String(init?.body));
       expect(body.fromHash).toBe(fromHash);
@@ -2078,7 +2084,7 @@ export default s.defineMigration({
       toHash: toShortHash,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("pushes a reviewed migration from a CommonJS-compiled TypeScript module", async () => {
@@ -2137,6 +2143,12 @@ export default s.defineMigration({
       if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersEmailSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedUsersEmailAddressSchema("email_address"));
+      }
 
       const body = JSON.parse(String(init?.body));
       expect(body.fromHash).toBe(fromHash);
@@ -2165,7 +2177,7 @@ export default s.defineMigration({
       toHash: toShortHash,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("pushes an empty no-op migration from a CommonJS-compiled TypeScript module", async () => {
@@ -2423,6 +2435,12 @@ export default s.defineMigration({
       if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersEmailSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedPeopleEmailAddressSchema());
+      }
 
       const body = JSON.parse(String(init?.body));
       expect(body.fromHash).toBe(fromHash);
@@ -2452,7 +2470,7 @@ export default s.defineMigration({
       toHash: toShortHash,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("pushes explicit createTables and dropTables via the admin migrations payload", async () => {
@@ -2507,6 +2525,12 @@ export default s.defineMigration({
       if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
+        return storedSchemaResponse(storedUsersWithLegacyProfilesSchema());
+      }
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
+        return storedSchemaResponse(storedUsersWithProfilesSchema());
+      }
 
       const body = JSON.parse(String(init?.body));
       expect(body.fromHash).toBe(fromHash);
@@ -2535,7 +2559,7 @@ export default s.defineMigration({
       toHash: toShortHash,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -3211,8 +3235,8 @@ export default s.defineMigration({
     );
     await writeFile(
       join(migrationsDir, `20260319-second-${short(middleHash)}-${short(releaseHash)}.ts`),
-      // Witness ordering is intentionally different from the stored schemas.
-      // Reviewed filename hashes, not witness serialization, identify the edge.
+      // Witness ordering is intentionally different from the stored schemas;
+      // canonical witness comparison is insensitive to declaration order.
       renameMigration(short(middleHash), short(releaseHash), "ownerId", "owner", true),
     );
 

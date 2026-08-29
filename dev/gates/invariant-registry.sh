@@ -165,8 +165,9 @@ citation_matches_test_source() {
         jazz) [[ $source_path == crates/jazz/* ]] || return 1 ;;
         groove) [[ $source_path == crates/groove/* ]] || return 1 ;;
         jazz_tools) [[ $source_path == crates/jazz-testkit/* ]] || return 1 ;;
+        jazz_server) [[ $source_path == crates/jazz-server/* ]] || return 1 ;;
     esac
-    if [[ $crate != jazz && $crate != groove && $crate != jazz_tools ]]; then
+    if [[ $crate != jazz && $crate != groove && $crate != jazz_tools && $crate != jazz_server ]]; then
         [[ $source_path == "crates/"*"/tests/$crate.rs" ]] && return 0
         return 1
     fi

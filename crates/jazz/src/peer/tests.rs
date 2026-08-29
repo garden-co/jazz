@@ -24,7 +24,7 @@ use crate::tools::{
 };
 use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
-use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
+use groove::records::{BorrowedRecord, Value};
 use jazz_storage_rocksdb::RocksDbStorage;
 
 fn node(byte: u8) -> NodeUuid {
@@ -538,7 +538,6 @@ fn incremental_delivery_keeps_terminal_children_with_their_root() {
         settled_through: GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
         peer_payload_inventory: Default::default(),
         result_member_adds: adds,
         result_member_removes: removes,
@@ -598,7 +597,6 @@ fn maintained_delivery_does_not_leak_intermediate_replacement_refcounts() {
         settled_through: GlobalTime(0),
         reset_result_set: false,
         version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
         peer_payload_inventory: Default::default(),
         result_member_adds: adds,
         result_member_removes: removes,
@@ -638,7 +636,6 @@ fn maintained_delivery_rekeys_delta_and_reset_by_output_occurrence() {
         settled_through: GlobalTime(0),
         reset_result_set,
         version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
         peer_payload_inventory: Default::default(),
         result_member_adds: adds,
         result_member_removes: removes,
@@ -1259,16 +1256,9 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
-            version_bundles,
             ..
-        }) => {
-            let mut bundles = version_bundles.clone();
-            bundles.extend(
-                crate::protocol::expand_version_carriers(version_carriers)
-                    .expect("test update carriers should expand"),
-            );
-            bundles
-        }
+        }) => crate::protocol::expand_version_carriers(version_carriers)
+            .expect("test update carriers should expand"),
         _ => Vec::new(),
     }
 }
@@ -1327,13 +1317,8 @@ fn aggregate_payload_count(fact: &ProgramFactEntry) -> Value {
     let ProgramFactEntry::ResultPayload(payload) = fact else {
         panic!("expected result payload fact");
     };
-    let fields: Vec<(Option<String>, ValueType)> =
-        postcard::from_bytes(&payload.descriptor).unwrap();
-    let descriptor = RecordDescriptor::new(
-        fields
-            .into_iter()
-            .map(|(name, value_type)| (name.unwrap(), value_type)),
-    );
+    let descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
+        .expect("maintained aggregate payload descriptor uses the canonical Groove codec");
     let record = BorrowedRecord::new(&payload.record, &descriptor);
     // Aggregate aliases are logical app names, but maintained-program
     // payload descriptors use the dedicated physical aggregate namespace
@@ -2987,7 +2972,6 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
             settled_through: crate::time::GlobalTime(0),
             reset_result_set: false,
             version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),

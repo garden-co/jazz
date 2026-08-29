@@ -358,6 +358,10 @@ where
         requests: &[RowVersionRef],
         version_bundles: Vec<VersionBundle>,
     ) -> Result<(), Error> {
+        for bundle in &version_bundles {
+            crate::protocol::validate_version_records(&bundle.versions)
+                .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
+        }
         let requested_physical = requests
             .iter()
             .map(|request| {
@@ -458,30 +462,24 @@ where
             subscription,
             result_member_adds,
             version_carriers,
-            version_bundles,
             program_fact_adds,
         ) = match message {
             SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 result_member_adds,
                 version_carriers,
-                version_bundles,
                 program_fact_adds,
                 ..
             }) => (
                 *subscription,
                 result_member_adds,
                 version_carriers,
-                version_bundles,
                 program_fact_adds,
             ),
             _ => return Ok(Vec::new()),
         };
-        let mut normalized_bundles = version_bundles.clone();
-        normalized_bundles.extend(
-            expand_version_carriers(version_carriers)
-                .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?,
-        );
+        let normalized_bundles = expand_version_carriers(version_carriers)
+            .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         let incoming_versions = normalized_bundles
             .iter()
             .flat_map(|bundle| {

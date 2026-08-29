@@ -198,23 +198,27 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            evolved.clone(),
-            MigrationLens::new(
-                base.version_id(),
-                evolved.id,
-                vec![TableLens {
-                    source_table: "todos".to_owned(),
-                    target_table: "todos".to_owned(),
-                    ops: vec![LensOp::AddColumn {
-                        column: "body".to_owned(),
-                        default: Value::String("from-lens-default".to_owned()),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String("from-lens-default".to_owned()),
+                        }],
                     }],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish v2 lens");
 
@@ -268,29 +272,33 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            evolved.clone(),
-            MigrationLens::new(
-                base.version_id(),
-                evolved.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![
-                        LensOp::RenameTable {
-                            from: "users".to_owned(),
-                            to: "people".to_owned(),
-                        },
-                        LensOp::AddColumn {
-                            column: "label".to_owned(),
-                            default: Value::String("migrated".to_owned()),
-                        },
-                    ],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "label".to_owned(),
+                                default: Value::String("migrated".to_owned()),
+                            },
+                        ],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish people lens");
 
@@ -369,23 +377,27 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
-            v2.clone(),
-            MigrationLens::new(
-                v1.version_id(),
-                v2.id,
-                vec![TableLens {
-                    source_table: "users".to_owned(),
-                    target_table: "people".to_owned(),
-                    ops: vec![LensOp::RenameTable {
-                        from: "users".to_owned(),
-                        to: "people".to_owned(),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
                     }],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish v2 rename");
 
@@ -401,33 +413,37 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorSubject::SYSTEM,
         catalogue_seq: 2,
-        publication: Box::new(SchemaLineagePublication::new(
-            v3.clone(),
-            MigrationLens::new(
-                v2.id,
-                v3.id,
-                vec![TableLens {
-                    source_table: "people".to_owned(),
-                    target_table: "members".to_owned(),
-                    ops: vec![
-                        LensOp::RenameTable {
-                            from: "people".to_owned(),
-                            to: "members".to_owned(),
-                        },
-                        LensOp::RenameColumn {
-                            from: "name".to_owned(),
-                            to: "display_name".to_owned(),
-                        },
-                        LensOp::AddColumn {
-                            column: "origin".to_owned(),
-                            default: Value::String("v1".to_owned()),
-                        },
-                    ],
-                }],
-            ),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )),
+        publication: Box::new(
+            node.author_schema_lineage_publication(
+                v3.clone(),
+                MigrationLens::new(
+                    v2.id,
+                    v3.id,
+                    vec![TableLens {
+                        source_table: "people".to_owned(),
+                        target_table: "members".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "people".to_owned(),
+                                to: "members".to_owned(),
+                            },
+                            LensOp::RenameColumn {
+                                from: "name".to_owned(),
+                                to: "display_name".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "origin".to_owned(),
+                                default: Value::String("v1".to_owned()),
+                            },
+                        ],
+                    }],
+                )
+                .expect("valid migration lens"),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap(),
+        ),
     })
     .expect("publish v3 rename");
 
@@ -535,6 +551,9 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf6; 16]), v1.clone());
     let (_client_dir, mut client) =
         open_node_with_uuid(NodeUuid::from_bytes([0xf9; 16]), v1.clone());
+    client
+        .apply_trusted_catalogue_snapshot_settled(node.catalogue_snapshot().unwrap())
+        .expect("install authority genesis identities before incremental lineage");
     let author = row(0xf7);
     let post = row(0xf8);
     let mismatched_author_row = row(0xf9);
@@ -605,10 +624,8 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         Some(DurabilityTier::Global),
     )
     .expect("settle mismatched v1 post");
-    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorSubject::SYSTEM,
-        catalogue_seq: 1,
-        publication: Box::new(SchemaLineagePublication::new(
+    let publication = node
+        .author_schema_lineage_publication(
             v2.clone(),
             MigrationLens::new(
                 v1.version_id(),
@@ -628,40 +645,23 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
                         ops: Vec::new(),
                     },
                 ],
-            ),
+            )
+            .expect("valid migration lens"),
             Vec::<String>::new(),
             Vec::<String>::new(),
-        )),
+        )
+        .unwrap();
+    node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+        author: AuthorSubject::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication.clone()),
     })
     .expect("publish users to people lens");
     client
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                v2.clone(),
-                MigrationLens::new(
-                    v1.version_id(),
-                    v2.id,
-                    vec![
-                        TableLens {
-                            source_table: "users".to_owned(),
-                            target_table: "people".to_owned(),
-                            ops: vec![LensOp::RenameTable {
-                                from: "users".to_owned(),
-                                to: "people".to_owned(),
-                            }],
-                        },
-                        TableLens {
-                            source_table: "posts".to_owned(),
-                            target_table: "posts".to_owned(),
-                            ops: Vec::new(),
-                        },
-                    ],
-                ),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+            publication: Box::new(publication),
         })
         .expect("publish users to people lens to client");
     node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
@@ -817,7 +817,6 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         version_carriers,
-        version_bundles,
         result_member_adds,
         result_member_removes,
         program_fact_adds,
@@ -863,11 +862,8 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         .count();
     assert_eq!(outgoing_contributor_adds, 1);
     assert_eq!(outgoing_contributor_removes, 1);
-    let mut replacement_bundles = version_bundles.clone();
-    replacement_bundles.extend(
-        crate::protocol::expand_version_carriers(version_carriers)
-            .expect("expand replacement contributor bundles"),
-    );
+    let replacement_bundles = crate::protocol::expand_version_carriers(version_carriers)
+        .expect("expand replacement contributor bundles");
     assert_eq!(
         replacement_bundles
             .iter()

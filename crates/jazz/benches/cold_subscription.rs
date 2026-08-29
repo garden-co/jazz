@@ -110,11 +110,8 @@ fn current_state_history_depth_contract() {
         let SyncMessage::ViewUpdate(payload) = &update else {
             panic!("current-row subscription must produce a view update");
         };
-        let mut bundles = payload.version_bundles.clone();
-        bundles.extend(
-            expand_version_carriers(&payload.version_carriers)
-                .expect("current-row version carriers must expand"),
-        );
+        let bundles = expand_version_carriers(&payload.version_carriers)
+            .expect("current-row version carriers must expand");
         assert_eq!(bundles.len(), 1, "depth {depth}: one current winner bundle");
         assert_eq!(
             bundles[0].tx.tx_id, winner,

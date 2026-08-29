@@ -18,6 +18,7 @@ Invariant digest:
 - `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
 - `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
 - `INV-STORAGE-33`: A payload `EnumValue` MUST persist its declaration-order `u32` case tag as a minimal little-endian base-128 varint followed immediately by the selected case's canonical record payload; unknown, truncated, overflowing, and non-minimal tags are invalid.
+- `INV-STORAGE-35`: The epoch-1 Jazz class-CF layout MUST use its one frozen marker, classifier precedence, class-family names, and length-framed mapped-key grammar; a missing, malformed, old, or future marker in a nonempty class store fails closed before a logical read or write.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -129,13 +130,22 @@ ordinary ordered-KV data plane. Before creating a table, column family, page,
 or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
 canonical manifest bytes begin with `JSM1` and contain the storage epoch,
 adapter ID and format version, the sorted set of required authoritative codec
-IDs, and sorted decode-relevant adapter parameters. The epoch-1 payload registry
-is exactly `groove.ordered-kv.v1`; omission, addition, or substitution of a
-codec ID is invalid even when the rest of the manifest is canonical. The
-manifest envelope is the root boundary rather than an entry in its own
-registry. Adding an authoritative opaque byte payload requires a stable ID, a
-corpus entry, and a new epoch rather than an adapter-local postcard/`Bytes`
-exception. Missing, truncated,
+IDs, and sorted decode-relevant adapter parameters. Groove contributes the
+mandatory base IDs `groove.ordered-kv.v1`, `groove.large-value.v1`, and
+`groove.ordered-chunk-storage.v1`; every profile and decoded manifest MUST
+contain all three before an adapter may mutate. `groove.large-value.v1` covers
+the inseparable V1 descriptor/`NodeRef` records and authenticated immutable-node
+envelopes; `groove.ordered-chunk-storage.v1` covers that adapter's independent
+install-receipt wrapper. The caller composes this closed base with its own
+persistent codec profile before opening the adapter. The adapter treats
+higher-layer IDs as opaque and never learns their semantics. A Jazz root, for
+example, supplies the complete profile in `jazz::storage_codec_profile`, while
+a Groove-only root uses exactly the mandatory Groove base. Omission, addition,
+duplication, or substitution of a codec ID is invalid for the selected profile
+even when the rest of the manifest is canonical. The manifest envelope is the
+root boundary rather than an entry in its own registry. Adding an authoritative
+opaque byte payload requires a stable ID, a corpus entry, and a new epoch rather
+than an adapter-local postcard/`Bytes` exception. Missing, truncated,
 noncanonical, corrupt, unknown, or inconsistent manifests fail closed before
 any mutation (`INV-STORAGE-31`).
 
@@ -156,13 +166,18 @@ Memory storage has no durable manifest and is used solely for semantic
 conformance. Backend files are not interchange formats.
 
 **Implementation-status note.** RocksDB and SQLite persist and validate this
-shared `JSM1` manifest. IndexedDB currently validates its adapter-private
-`jazz-idb-tree` page metadata but does not yet persist the shared epoch
-manifest; therefore it is not covered by the epoch-1 physical-open receipt.
-That remaining acceptance item stays explicitly tracked by #2160.
+shared `JSM1` manifest. IndexedDB persists the equivalent structured-clone
+epoch-one manifest at its fixed `storage-manifest`/`epoch` location before the
+caller receives a page-store handle. It includes the caller-selected closed
+codec profile, epoch, adapter/page versions, fixed 16 KiB page size, and
+`xxh3-64-le` page checksum identity. The browser physical-open receipt installs
+the committed page-v1 fixture by raw IndexedDB transaction, opens it read-only,
+writes current data, reopens it, and proves corrupt/unknown manifests fail
+without changing pages.
 
-The only ordering property groove requires from the backing store is
-lexicographic byte order. A range `ScanRequest` returns keys in that order and
+The only ordering property groove requires from the backing store is unsigned
+lexicographic byte order: bytes compare as `0x00 < ... < 0xff`, never as signed
+integers, locale text, or a backend-native collation. A range `ScanRequest` returns keys in that order and
 includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
 writes are atomic: `write_many` applies every operation in the batch or none of
 them; if any operation is invalid, no operation partially applies
@@ -228,6 +243,14 @@ batches and stops physical traversal rather than merely truncating a materialize
 result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families.
 
+For a finite prefix bound, the exclusive upper key is the exact unsigned-byte
+successor: increment the rightmost byte below `0xff` and truncate every later
+byte. Thus `[0x12, 0xff]` has upper bound `[0x13]`; an all-`0xff` prefix has no
+finite upper bound and must be filtered by its prefix predicate through the end
+of the family. Raw storage cursors are not snapshots: concurrent writes may
+affect later cursor batches. Repeatable evaluation is a higher-level session
+guarantee and is intentionally not imposed on this backend seam.
+
 ### Column-family namespace admission
 
 Application table names and directly exposed record-store names share one
@@ -278,6 +301,56 @@ delta. The manifest deliberately does **not** freeze SST, block, memtable,
 compaction, or WAL file bytes. A successfully WAL-synced write is durable;
 close-time memtable flush is performance maintenance, not a second commit.
 
+### Jazz class-CF layout (epoch 1)
+
+Jazz uses the `JazzClassV1` view above the ordered-KV adapter to keep the
+logical table name at the Groove boundary while grouping known Jazz logical
+families into a small, fixed set of physical families. This is a durable
+layout, not a RocksDB-only tuning: the same keys are stored in SQLite's `kv`
+table and are the bytes that a future logical export/import must preserve.
+
+The class-layout marker is exactly one entry in
+`__groove_class_meta`: key ASCII `groove-storage-layout`, value ASCII
+`class-cf-v1`. A fresh store may create precisely that entry. Every other
+marker value (including `class-cf-v0`, `class-cf-v2`, a prefix/suffix, or empty
+bytes) is invalid. A missing marker is valid only when no classifier-matching
+legacy logical family exists and every class family is empty; otherwise open
+fails closed before a logical read or write. This deliberately rejects even an
+empty legacy logical family, because its existence proves the store was opened
+under a different physical layout. Epoch 1 has no legacy-layout migration or
+dual read.
+
+The classifier runs in this exact precedence order. `JazzClassV1` maps every
+classified logical family; it has no caller-selected subset or alternate
+interpretation under the same marker. Unclassified names remain their own
+physical family with their unmodified keys. V1 requires the adapter to
+enumerate its physical family catalogue before marker creation. An adapter that
+cannot provide that catalogue fails closed: it cannot prove that an apparently
+empty class store is not a legacy logical-family store.
+
+| classifier, in order                                                                                        | physical family                 |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| starts `jazz_`, ends `_history`                                                                             | `__groove_class_history`        |
+| starts `jazz_`, ends `_register`, but not `_register_global_current` or `_register_ahead_current`           | `__groove_class_register`       |
+| starts `jazz_`, ends `_global_current` or `_register_global_current`, and does not contain `_ahead_current` | `__groove_class_global_current` |
+| starts `jazz_`, ends `_ahead_current` or `_register_ahead_current`                                          | `__groove_class_ahead_current`  |
+| exactly `jazz_global_changes`                                                                               | `__groove_class_changes`        |
+| exactly `indices`                                                                                           | `__groove_class_indices`        |
+| starts `jazz_`                                                                                              | `__groove_class_meta`           |
+
+For a mapped logical family `L` and its logical key `K`, the physical key is
+exactly `u32be(len(utf8(L))) | utf8(L) | K`. `len` is the UTF-8 byte length,
+not Unicode scalar or UTF-16 length, and `L` is admitted by the portable
+column-family-name rules before this framing. There is no tag, separator,
+escaping, checksum, or second table prefix. Prefix/range scans frame their
+logical boundary the same way and strip exactly `4 + len(utf8(L))` bytes after
+the physical adapter returns a key. Thus two logical families cannot alias even
+when one name is a prefix of the other. The exact marker, classifier, order,
+and key grammar are part of epoch 1 (`INV-STORAGE-35`); changing any requires
+a new storage epoch rather than a fallback decoder. The layout validates a
+logical family against the portable no-NUL/`u16::MAX` UTF-8 bound before it
+calculates the framing length on every mapped operation.
+
 SQLite v1 freezes header `application_id = 0x4a415a5a` (`JAZZ`),
 `user_version = 1`, the `meta`, `column_families`, and `kv` DDL, and the Jazz
 metadata blobs `format = jazz-groove-ordered-kv`, big-endian
@@ -291,6 +364,20 @@ Backend stores are never file-level interchange. A separately versioned,
 canonical logical export/import transfers global identities and authoritative
 history, then rebuilds derived state on the receiving backend. It cannot bypass
 epoch validation or make an unknown physical manifest decodable.
+
+`MemoryStorage::export_snapshot` is a narrower restart/test harness boundary:
+it captures the complete ordered-KV map rather than a logical interchange and
+therefore has no compatibility decoder for alpha bytes. Its sole V1 spelling is
+`"GMS1" | version:u16be | family_count:u32be | family*`; a family is
+`name_len:u16be | UTF-8 name | entry_count:u32be | entry*`, and an entry is
+`key_len:u32be | key | value_len:u32be | value`. Family names and entries use
+their unsigned B-tree order. The decoder consumes exactly one snapshot, rejects
+invalid UTF-8, truncation, trailing bytes, duplicate or alternate ordering, and
+re-encodes the semantic map byte-identically before replacing resident state.
+Physical-name validation still occurs before replacement. This explicit codec
+is not serde, postcard, or a durable-adapter manifest; a future incompatible
+snapshot requires a new magic/version and an explicit epoch decision
+(`INV-STORAGE-35`).
 
 An ordered cursor is **not** a snapshot-isolation primitive. A backend may
 observe committed changes between batches; in particular, `MemoryStorage`
@@ -306,25 +393,36 @@ clear the bound and let a backend materialize its ordinary unbounded batch.
 
 **Implementation-status note.** The shared storage conformance tests exercise
 ordering, prefix upper-bound handling, and failed-batch atomicity on the host
-memory backend. The wasm-only IndexedDB adapter compiles against an in-memory B-tree
-fixture; coverage of persistence across closing and reopening a real IndexedDB
-namespace remains a browser-harness gap.
+memory backend. `jazz-tools` also runs a real-browser IndexedDB physical-open
+receipt against the production page store; it does not substitute
+`MemoryPageStore` for this boundary.
 
 ### IndexedDB page-store physical format
 
 IndexedDB is one durable adapter, not a second logical Groove layout. Its
-database name, the `pages` and `metadata` object-store names, and the `current`
-metadata key are fixed within a storage epoch. `current` is a structured-clone
-record with magic `jazz-idb-tree`, format version `2`, a power-of-two page size
-between 1024 and `2^31` bytes, generation, nullable root page id, and next page
-id. Missing, malformed, or unknown magic/version metadata fails closed before
-a mutation; a new incompatible layout uses a new epoch instead of guessing at
-these bytes. Browser page ids are JavaScript safe integers, so root, child, and
-next ids are bounded to `0..=2^53-1`; exhaustion fails instead of rounding an
-identity. The stored page size is validated before page write or decode.
+database name; `pages`, `metadata`, and `storage-manifest` object-store names;
+and the `current` and `epoch` keys are fixed within storage epoch 1. Before a
+caller receives a handle, `storage-manifest`/`epoch` must be the exact
+structured-clone manifest: epoch `1`, adapter `jazz-idb-tree`, adapter format
+`1`, the mandatory Groove base plus the complete caller-composed Jazz codec
+profile, page size `16384`, page checksum `xxh3-64-le`, page magic
+`IDBTREE\\0`, and page format `1`. Missing,
+unknown, extra, or inconsistent fields fail closed before a mutation. Epoch-one
+starts at the settlement baseline: a browser schema-generation-2 database receives the new store
+but no manifest and is unsupported rather than adopted. `current` is a
+structured-clone record with magic `jazz-idb-tree`, format version `1`, fixed
+16 KiB page size, generation, nullable root page id, and next page id. Missing,
+malformed, or unknown magic/version metadata fails closed before a mutation; a
+new incompatible layout uses a new epoch instead of guessing at these bytes.
+The browser's IndexedDB schema generation is separately `3`: that number only
+selects the object-store layout containing `storage-manifest`, and is not a
+Jazz adapter, metadata, or page-codec version.
+Browser page ids are JavaScript safe integers, so root, child, and next ids are
+bounded to `0..=2^53-1`; exhaustion fails instead of rounding an identity. The
+stored page size is validated before page write or decode.
 
 The IndexedDB B-tree page body is adapter-private but durable. A page is exactly
-`"IDBTREE\\0" | version:u8(2) | xxh3_64(payload):u64le | payload`. The first
+`"IDBTREE\\0" | version:u8(1) | xxh3_64(payload):u64le | payload`. The first
 payload byte is a fixed page tag: leaf `0`, internal `1`, or overflow `2`. All
 collection and byte lengths are `u32le`; page ids and logical overflow lengths
 are `u64le`. The logical overflow length stays `u64` in memory until a host

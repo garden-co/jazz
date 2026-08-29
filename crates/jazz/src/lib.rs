@@ -472,6 +472,7 @@ pub mod schema;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;
+pub mod storage_codec_profile;
 #[cfg(test)]
 mod test_public_schema;
 /// Logical time and sequence counters.

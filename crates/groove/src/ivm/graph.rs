@@ -7,7 +7,10 @@
 //! [`super::op_types`]; lowering from queries lives in [`super::planner`]; the
 //! tick loop that evaluates the graph lives in [`super::runtime`].
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::{
+    hash::{BuildHasher, Hash, Hasher},
+    sync::Arc,
+};
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -21,6 +24,10 @@ use super::op_types::*;
 /// Builders refer to table and field names directly; the runtime resolves those
 /// names against the database schema when a graph is subscribed, queried, or
 /// prepared.
+///
+/// Recursive child edges are immutable shared allocations. This keeps copies
+/// of a deeply lowered graph shallow while preserving the builder's ordinary
+/// value semantics for callers that replace an enclosing node.
 ///
 /// ```rust
 /// # futures::executor::block_on(async {
@@ -171,77 +178,77 @@ pub enum GraphBuilder {
         output: RecordDescriptor,
     },
     Recursive {
-        seed: Box<GraphBuilder>,
-        step: Box<GraphBuilder>,
+        seed: Arc<GraphBuilder>,
+        step: Arc<GraphBuilder>,
         frontier: FrontierName,
         max_iters: usize,
     },
     Filter {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         predicate: PredicateExpr,
         comparison: ValueComparison,
     },
     UnwrapNullable {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         field: FieldRef,
     },
     Unnest {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         array_field: FieldRef,
         element_field: String,
     },
     VariantProject {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         field: FieldRef,
         case: String,
     },
     Project {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         fields: Vec<ProjectField>,
     },
     StreamingChecksum {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         field: FieldRef,
         output_field: String,
         window_bytes: usize,
         max_bytes_per_turn: usize,
     },
     Union {
-        inputs: Vec<GraphBuilder>,
+        inputs: Vec<Arc<GraphBuilder>>,
     },
     Join {
-        left: Box<GraphBuilder>,
-        right: Box<GraphBuilder>,
+        left: Arc<GraphBuilder>,
+        right: Arc<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
     SemiJoin {
-        left: Box<GraphBuilder>,
-        right: Box<GraphBuilder>,
+        left: Arc<GraphBuilder>,
+        right: Arc<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
     AntiJoin {
-        left: Box<GraphBuilder>,
-        right: Box<GraphBuilder>,
+        left: Arc<GraphBuilder>,
+        right: Arc<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
         comparison: ValueComparison,
     },
     ArgMaxBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<FieldRef>,
     },
     ArgMinBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<FieldRef>,
     },
     TopBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<TopByOrder>,
         tie_cols: Vec<FieldRef>,
@@ -249,11 +256,11 @@ pub enum GraphBuilder {
         limit: TopByLimit,
     },
     CollectBy {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         collect: Box<CollectByBuilder>,
     },
     Aggregate {
-        input: Box<GraphBuilder>,
+        input: Arc<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         aggregates: Vec<AggregateExpr>,
     },
@@ -532,8 +539,8 @@ impl GraphBuilder {
         max_iters: usize,
     ) -> Self {
         Self::Recursive {
-            seed: Box::new(seed),
-            step: Box::new(step),
+            seed: Arc::new(seed),
+            step: Arc::new(step),
             frontier: FrontierName(frontier.into()),
             max_iters,
         }
@@ -541,7 +548,7 @@ impl GraphBuilder {
 
     pub fn union(inputs: impl IntoIterator<Item = GraphBuilder>) -> Self {
         Self::Union {
-            inputs: inputs.into_iter().collect(),
+            inputs: inputs.into_iter().map(Arc::new).collect(),
         }
     }
 
@@ -570,7 +577,7 @@ impl GraphBuilder {
                 | Self::CollectBy { input, .. }
                 | Self::Aggregate { input, .. } => pending.push((input, false)),
                 Self::Union { inputs } => {
-                    pending.extend(inputs.iter().rev().map(|input| (input, false)));
+                    pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
                 }
                 Self::Join { left, right, .. }
                 | Self::SemiJoin { left, right, .. }
@@ -599,8 +606,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::Join {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
@@ -615,8 +622,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::Join {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Policy,
@@ -630,8 +637,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::SemiJoin {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
@@ -645,8 +652,8 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::AntiJoin {
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Arc::new(left),
+            right: Arc::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
             comparison: ValueComparison::Exact,
@@ -659,7 +666,7 @@ impl GraphBuilder {
         order_cols: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::ArgMaxBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             order_cols: order_cols.into_iter().map(FieldRef::name).collect(),
         }
@@ -671,7 +678,7 @@ impl GraphBuilder {
         order_cols: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::ArgMinBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             order_cols: order_cols.into_iter().map(FieldRef::name).collect(),
         }
@@ -686,7 +693,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::TopBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             order_cols: order_cols.into_iter().collect(),
             tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
@@ -708,7 +715,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Collect,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -760,7 +767,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Collect,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -790,7 +797,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Root,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -826,7 +833,7 @@ impl GraphBuilder {
         limit: TopByLimit,
     ) -> Self {
         Self::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(CollectByBuilder {
                 mode: CollectByMode::Expand,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
@@ -874,7 +881,7 @@ impl GraphBuilder {
         aggregates: impl IntoIterator<Item = AggregateExpr>,
     ) -> Self {
         Self::Aggregate {
-            input: Box::new(input),
+            input: Arc::new(input),
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
             aggregates: aggregates.into_iter().collect(),
         }
@@ -882,7 +889,7 @@ impl GraphBuilder {
 
     pub fn filter(self, predicate: PredicateExpr) -> Self {
         Self::Filter {
-            input: Box::new(self),
+            input: Arc::new(self),
             predicate,
             comparison: ValueComparison::Exact,
         }
@@ -891,7 +898,7 @@ impl GraphBuilder {
     /// Filter using policy value comparison semantics.
     pub fn policy_filter(self, predicate: PredicateExpr) -> Self {
         Self::Filter {
-            input: Box::new(self),
+            input: Arc::new(self),
             predicate,
             comparison: ValueComparison::Policy,
         }
@@ -899,14 +906,14 @@ impl GraphBuilder {
 
     pub fn unwrap_nullable(self, field: impl Into<String>) -> Self {
         Self::UnwrapNullable {
-            input: Box::new(self),
+            input: Arc::new(self),
             field: FieldRef::name(field),
         }
     }
 
     pub fn unnest(self, array_field: impl Into<String>, element_field: impl Into<String>) -> Self {
         Self::Unnest {
-            input: Box::new(self),
+            input: Arc::new(self),
             array_field: FieldRef::name(array_field),
             element_field: element_field.into(),
         }
@@ -916,7 +923,7 @@ impl GraphBuilder {
     /// delta; matching rows emit the case's fixed payload descriptor.
     pub fn variant_project(self, field: impl Into<String>, case: impl Into<String>) -> Self {
         Self::VariantProject {
-            input: Box::new(self),
+            input: Arc::new(self),
             field: FieldRef::name(field),
             case: case.into(),
         }
@@ -924,14 +931,14 @@ impl GraphBuilder {
 
     pub fn project(self, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self::Project {
-            input: Box::new(self),
+            input: Arc::new(self),
             fields: fields.into_iter().map(ProjectField::named).collect(),
         }
     }
 
     pub fn project_fields(self, fields: impl IntoIterator<Item = ProjectField>) -> Self {
         Self::Project {
-            input: Box::new(self),
+            input: Arc::new(self),
             fields: fields.into_iter().collect(),
         }
     }
@@ -949,7 +956,7 @@ impl GraphBuilder {
         max_bytes_per_turn: usize,
     ) -> Self {
         Self::StreamingChecksum {
-            input: Box::new(self),
+            input: Arc::new(self),
             field: FieldRef::name(field),
             output_field: output_field.into(),
             window_bytes,
@@ -1615,6 +1622,12 @@ impl NodeDescriptor {
                         });
                     }
                 }
+                for &field_idx in &top_by.sort_field_indices {
+                    if !collect_by_ordered_scalar(&input_outputs[0].fields()[field_idx].value_type)
+                    {
+                        return Err(GraphValidationError::TopBySortFieldMustBeOrderable);
+                    }
+                }
                 Ok(())
             }
             OpType::CollectBy(collect_by) => {
@@ -2056,6 +2069,8 @@ pub enum GraphValidationError {
     CollectByOutputDescriptorMismatch,
     #[error("collect_by group, order, and tie fields must be scalar and non-record-valued")]
     CollectByKeyFieldMustBeScalar,
+    #[error("top_by order and tie fields must be orderable scalar values")]
+    TopBySortFieldMustBeOrderable,
     #[error("collect_by is terminal-only and cannot be an input node")]
     CollectByInputIsTerminal,
 }
@@ -2161,6 +2176,28 @@ mod tests {
 
     fn string_output() -> RecordDescriptor {
         RecordDescriptor::new([("f0", ValueType::String)])
+    }
+
+    #[test]
+    fn cloning_a_deep_builder_is_stack_bounded() {
+        // Lowering policy graphs can compose many unary operators. Keep this
+        // far beyond the depth that recursive `Box` cloning can handle on the
+        // ordinary 2 MiB test-thread stack, and assert immutable child arcs
+        // keep a clone shallow.
+        const DEPTH: usize = 4_096;
+        let mut graph = GraphBuilder::table("rows");
+        for _ in 0..DEPTH {
+            graph = graph.project(["id"]);
+        }
+
+        let cloned = graph.clone();
+        assert_eq!(cloned.postorder().len(), DEPTH + 1);
+
+        // The owned builder's derived recursive destructor is a separate
+        // concern from cloning. Avoid making this regression receipt depend
+        // on that destructor while it validates the clone boundary directly.
+        std::mem::forget(graph);
+        std::mem::forget(cloned);
     }
 
     #[test]
@@ -2340,6 +2377,42 @@ mod tests {
         assert_eq!(
             descriptor.validate(&[NodeOutput::Records(input)]),
             Err(GraphValidationError::FieldIndexOutOfBounds { index: 1, len: 1 })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_top_by_unorderable_tie_fields() {
+        let input = RecordDescriptor::new([
+            ("rank", ValueType::U64),
+            ("tie", ValueType::Array(Box::new(ValueType::U64))),
+        ]);
+        let descriptor = NodeDescriptor::new(
+            OpType::TopBy(TopByOp {
+                group_fields: Vec::new(),
+                group_field_indices: Vec::new(),
+                order_fields: vec![TopByOrderField {
+                    field: "rank".to_owned(),
+                    direction: TopByDirection::Asc,
+                }],
+                tie_fields: vec!["tie".to_owned()],
+                // `sort_field_indices` is deliberately the concatenation of
+                // order and tie fields. Validate every member, not only the
+                // user-visible order prefix, because both are compared by the
+                // runtime's TopBy key.
+                sort_field_indices: vec![0, 1],
+                sort_directions: vec![TopByDirection::Asc, TopByDirection::Asc],
+                offset: 0,
+                limit: TopByLimit::Finite(1),
+            }),
+            [NodeId(1)],
+            input,
+        );
+
+        assert_eq!(
+            descriptor.validate(&[NodeOutput::Arrangement(ArrangementDescriptor {
+                records: input,
+            })]),
+            Err(GraphValidationError::TopBySortFieldMustBeOrderable),
         );
     }
 

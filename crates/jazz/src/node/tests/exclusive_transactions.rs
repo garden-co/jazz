@@ -1415,8 +1415,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
             subscription,
             settled_through,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles: vec![bundle],
+            version_carriers: vec![VersionCarrier::Bundle(bundle)],
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds,
             result_member_removes: Vec::new(),
@@ -1492,8 +1491,10 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
             subscription,
             settled_through,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                version_bundles,
+            )
+            .unwrap(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
             result_member_removes: Vec::new(),

@@ -1424,6 +1424,119 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
 }
 
 #[test]
+fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct() {
+    let (_template, schema) = open_db();
+    let directory = tempfile::tempdir().unwrap();
+    let base = selector(0xd1);
+    let head = selector(0xd2);
+    let copied = RowUuid::from_bytes([0xd3; 16]);
+    let inherited = RowUuid::from_bytes([0xd4; 16]);
+    let needle = Value::String("needle".to_owned());
+    let branch_view =
+        ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
+
+    {
+        let db = open_rocks_db(directory.path(), &schema);
+        for row in [copied, inherited] {
+            db.insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), needle.clone())]),
+                jazz::db::InsertOptions {
+                    row_id: Some(row),
+                    target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        db.update(
+            "todos",
+            copied,
+            BTreeMap::from([("title".to_owned(), Value::String("draft".to_owned()))]),
+            jazz::db::UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_branch_view_copy_on_write_receipt(
+            &db,
+            &schema,
+            &base,
+            copied,
+            inherited,
+            &branch_view,
+        );
+    }
+
+    let db = open_rocks_db(directory.path(), &schema);
+    assert_branch_view_copy_on_write_receipt(&db, &schema, &base, copied, inherited, &branch_view);
+}
+
+fn assert_branch_view_copy_on_write_receipt(
+    db: &Db<RocksDbStorage>,
+    schema: &JazzSchema,
+    base: &BranchSelector,
+    copied: RowUuid,
+    inherited: RowUuid,
+    branch_view: &ReadOpts,
+) {
+    let needle_query = db
+        .prepare_query(&Query::from("todos").filter(eq(
+            col("title"),
+            jazz::query::lit(Value::String("needle".to_owned())),
+        )))
+        .unwrap();
+    let needle_rows = block_on(db.all(&needle_query, branch_view.clone())).unwrap();
+    assert_eq!(
+        needle_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![inherited],
+        "the head copy must mask the base index hit before the title predicate"
+    );
+
+    let all = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(&all, branch_view.clone())).unwrap();
+    assert_eq!(rows.len(), 2);
+    let table = &schema.tables[0];
+    let by_row = rows
+        .iter()
+        .map(|row| (row.row_uuid(), row))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        by_row[&copied].cell(table, "title"),
+        Some(Value::String("draft".to_owned()))
+    );
+    for row in by_row.values() {
+        assert_eq!(
+            row.cell(table, "branch_id"),
+            Some(Value::Uuid(uuid::Uuid::from_bytes([0xd2; 16]))),
+            "ordinary branch cells project the requested head, including inherited content"
+        );
+    }
+
+    let base_rows = block_on(db.all(
+        &needle_query,
+        ReadOpts::default().branch_view(base.clone(), None),
+    ))
+    .unwrap();
+    assert_eq!(
+        base_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![copied, inherited],
+        "copy-on-write must not rewrite the inherited branch-local row"
+    );
+}
+
+#[test]
 fn inherited_delete_is_a_head_register_and_can_be_restored() {
     let (db, schema) = open_db();
     let row = RowUuid::from_bytes([0x67; 16]);

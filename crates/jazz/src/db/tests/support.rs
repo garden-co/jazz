@@ -1775,6 +1775,23 @@ pub(super) fn open_core_with_claims(
 }
 
 impl CoreDb {
+    /// Test authority counterpart to `Db::author_schema_lineage_publication`.
+    /// Descendant fixtures must obtain the active source manifest here rather
+    /// than minting an unrelated identity descriptor.
+    pub(super) fn author_schema_lineage_publication(
+        &self,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<SchemaLineagePublication, Error> {
+        Ok(self
+            .server
+            .node()
+            .borrow()
+            .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)?)
+    }
+
     pub(super) fn node(&self) -> SharedNodeState<RocksDbStorage> {
         self.server.node()
     }

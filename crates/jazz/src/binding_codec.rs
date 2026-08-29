@@ -13,6 +13,12 @@ use crate::tools::ResultKey;
 use groove::ivm::TerminalOperation;
 use groove::records::RecordDescriptor;
 
+/// Rust-owned frozen v1 binding corpus. Test harnesses may expose this through
+/// a generated host artifact, but consumers must still decode its payloads
+/// through their ordinary production readers.
+pub const BINDING_CODEC_GOLDEN_FIXTURE: &str =
+    include_str!("../fixtures/binding_codec_golden.json");
+
 /// A contiguous run of rows with one table and physical record descriptor.
 #[derive(Clone, Debug, Serialize)]
 pub struct RowBatch<'a> {

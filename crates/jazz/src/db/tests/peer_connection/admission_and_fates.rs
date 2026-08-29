@@ -746,19 +746,26 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
                 default: Value::String(String::new()),
             }],
         }],
-    );
+    )
+    .expect("valid migration lens");
+    let publication = core
+        .server
+        .node()
+        .borrow()
+        .author_schema_lineage_publication(
+            evolved.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .expect("core authority authors evolved lineage");
     core.server
         .node()
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
-            publication: Box::new(SchemaLineagePublication::new(
-                evolved.clone(),
-                lens,
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )),
+            publication: Box::new(publication),
         })
         .unwrap();
 

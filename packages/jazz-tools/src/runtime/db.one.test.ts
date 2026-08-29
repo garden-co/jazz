@@ -109,7 +109,7 @@ describe("Db.one", () => {
     expect(beginTransaction).toHaveBeenCalledWith("mergeable", undefined, undefined);
     expect(rootLimit(firstQueryJson(query))).toBe(1);
     expect(query.mock.calls[0]?.[1]).toMatchObject({
-      openBatchId: "00000000000070008000000000000001",
+      openTransactionId: "00000000000070008000000000000001",
     });
   });
 });

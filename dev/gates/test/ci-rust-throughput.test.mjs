@@ -1415,6 +1415,10 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /public export surface is incomplete/);
   assert.match(runner, /Test children only\s+# consume those immutable artifacts/);
   assert.match(runner, /--concurrency=2/);
+  assert.match(
+    runner,
+    /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth test:browser/,
+  );
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
   assert.match(
     runner,
@@ -1433,6 +1437,22 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /Browser test suite exit status:/);
   assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
+});
+
+test("TypeScript CI runs the inspector's freshly built embedded browser receipt", () => {
+  const inspectorPackage = JSON.parse(
+    fs.readFileSync(path.join(root, "packages/inspector/package.json"), "utf8"),
+  );
+  const browserCommand = inspectorPackage.scripts["test:browser"];
+
+  assert.equal(
+    browserCommand,
+    "pnpm run build:embedded && playwright test --config playwright.config.ts",
+  );
+  assert.throws(
+    () => assert.match(browserCommand.replace("pnpm run build:embedded && ", ""), /build:embedded/),
+    /build:embedded/,
+  );
 });
 
 test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {

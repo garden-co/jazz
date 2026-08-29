@@ -31,7 +31,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -162,7 +162,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
                 },
             ],
         }],
-    );
+    ).expect("valid migration lens");
     let long_second = MigrationLens::new(
         v2_payload.id,
         v3_payload.id,
@@ -180,7 +180,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
                 },
             ],
         }],
-    );
+    ).expect("valid migration lens");
     let shortest = MigrationLens::new(
         v1.version_id(),
         v3_payload.id,
@@ -198,7 +198,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
                 },
             ],
         }],
-    );
+    ).expect("valid migration lens");
     publish_schema_lineage(
         &mut core,
         v2_payload.clone(),
@@ -261,7 +261,7 @@ fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -368,7 +368,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -471,7 +471,7 @@ fn registered_transform_column_identity_is_accepted_and_projected() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -524,7 +524,7 @@ fn transform_column_rejects_unregistered_transform_at_publish() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
@@ -577,7 +577,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -649,7 +649,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -724,7 +724,7 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
                     default: v(""),
                 }],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

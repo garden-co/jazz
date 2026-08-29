@@ -22,11 +22,11 @@ function fixture() {
   );
   writeFileSync(
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.d.ts"),
-    `export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames?: number, max_bytes?: number): Array<any>;\n}`,
+    `export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames?: number, max_bytes?: number): Array<any>;\n}\nexport class WasmWrite {\nreadonly txId: string;\n}\nexport interface InitOutput {\nreadonly wasmwrite_txId: (a: number) => [number, number];\n}`,
   );
   writeFileSync(
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
-    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames, max_bytes) {}\n}`,
+    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames, max_bytes) {}\n}\nexport class WasmWrite {\nget txId() { return wasm.wasmwrite_txId(); }\n}`,
   );
   writeFileSync(
     join(root, "crates/jazz/src/wire.rs"),
@@ -69,11 +69,31 @@ test("reports stale generated bounded auxiliary transport arguments", () => {
   const root = fixture();
   writeFileSync(
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
-    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames() {}\n}`,
+    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames() {}\n}\nexport class WasmWrite {\nget txId() { return wasm.wasmwrite_txId(); }\n}`,
   );
   assert.match(
     verifyCorrectnessTestArtifacts(root).join("\n"),
     /WasmTransport\.recvAuxiliaryWireFrames: consumer=2, d\.ts=2, glue=0/,
   );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("rejects stale generated WASM write identity exports", () => {
+  const root = fixture();
+  writeFileSync(
+    join(root, "crates/jazz-wasm/pkg/jazz_wasm.d.ts"),
+    `export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames?: number, max_bytes?: number): Array<any>;\n}\nexport class WasmWrite {\nreadonly batchId: string;\n}\nexport interface InitOutput {\nreadonly wasmwrite_batchId: (a: number) => [number, number];\n}`,
+  );
+  writeFileSync(
+    join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
+    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames, max_bytes) {}\n}\nexport class WasmWrite {\nget batchId() { return wasm.wasmwrite_batchId(); }\n}`,
+  );
+  const failures = verifyCorrectnessTestArtifacts(root).join("\n");
+  assert.match(failures, /WasmWrite declaration is missing txId/);
+  assert.match(failures, /WasmWrite declaration still exposes batchId/);
+  assert.match(failures, /WasmWrite glue is missing txId/);
+  assert.match(failures, /WasmWrite glue still exposes batchId/);
+  assert.match(failures, /write export is missing wasmwrite_txId/);
+  assert.match(failures, /write export still exposes wasmwrite_batchId/);
   rmSync(root, { recursive: true, force: true });
 });

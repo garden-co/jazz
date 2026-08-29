@@ -10,6 +10,7 @@ import {
   blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
+  stopJazzServerByUrl,
   unblockJazzServerNetwork,
 } from "./tests/browser/testing-server-node.js";
 import {
@@ -99,6 +100,7 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>

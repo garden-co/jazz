@@ -5,32 +5,32 @@ use super::*;
 type SourceRecord = (Vec<u8>, Bytes);
 pub(super) type WindowedRecord = (Bytes, i64);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TopBySortKey {
+    Null,
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    I32(i32),
+    I64(i64),
+    F64(u64),
+    Bool(bool),
+    String(String),
+    Bytes(Vec<u8>),
+    Uuid([u8; 16]),
+    EnumTag(u8),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TopBySortPart {
-    pub(super) key: Value,
+    key: TopBySortKey,
     pub(super) direction: TopByDirection,
 }
 
-impl PartialEq for TopBySortPart {
-    fn eq(&self, other: &Self) -> bool {
-        self.direction == other.direction && self.cmp(other) == std::cmp::Ordering::Equal
-    }
-}
-
-impl Eq for TopBySortPart {}
-
 impl Ord for TopBySortPart {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let ordering = match (is_sql_null_value(&self.key), is_sql_null_value(&other.key)) {
-            // Windows need a total order, unlike SQL predicates where any
-            // comparison involving NULL is unknown. Keep NULL first for the
-            // canonical ascending order, then apply the declared direction.
-            (true, true) => std::cmp::Ordering::Equal,
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            (false, false) => compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
-                .expect("non-null TopBy values must be comparable"),
-        };
+        let ordering = self.key.cmp(&other.key);
         match self.direction {
             TopByDirection::Asc => ordering,
             TopByDirection::Desc => ordering.reverse(),
@@ -969,15 +969,76 @@ fn collect_by_sort_key_for_fields(
         .iter()
         .zip(sort_directions)
         .map(|(field_idx, direction)| {
+            let field = descriptor
+                .fields()
+                .get(*field_idx)
+                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
+            let value = values
+                .get(*field_idx)
+                .cloned()
+                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
             Ok(TopBySortPart {
-                key: values
-                    .get(*field_idx)
-                    .cloned()
-                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?,
+                key: top_by_sort_value(&field.value_type, value)?,
                 direction: *direction,
             })
         })
         .collect()
+}
+
+fn top_by_sort_value(
+    value_type: &ValueType,
+    mut value: Value,
+) -> Result<TopBySortKey, IvmRuntimeError> {
+    if !collect_by_ordered_scalar(value_type) {
+        return Err(IvmRuntimeError::InvalidTopBy(
+            "sort field value must be an orderable scalar".to_owned(),
+        ));
+    }
+    if is_sql_null_value(&value) {
+        return Ok(TopBySortKey::Null);
+    }
+    let mut value_type = value_type;
+    while let ValueType::Nullable(inner) = value_type {
+        value_type = inner;
+    }
+    loop {
+        match value {
+            Value::Nullable(Some(inner)) => value = *inner,
+            other => {
+                value = other;
+                break;
+            }
+        }
+    }
+    let key = match (value_type, value) {
+        (ValueType::U8, Value::U8(value)) => TopBySortKey::U8(value),
+        (ValueType::U16, Value::U16(value)) => TopBySortKey::U16(value),
+        (ValueType::U32, Value::U32(value)) => TopBySortKey::U32(value),
+        (ValueType::U64, Value::U64(value)) => TopBySortKey::U64(value),
+        (ValueType::I32, Value::I32(value)) => TopBySortKey::I32(value),
+        (ValueType::I64, Value::I64(value)) => TopBySortKey::I64(value),
+        (ValueType::F64, Value::F64(value)) if !value.is_nan() => {
+            let value = if value == 0.0 { 0.0 } else { value };
+            let bits = value.to_bits();
+            let ordered = if bits & (1 << 63) == 0 {
+                bits ^ (1 << 63)
+            } else {
+                !bits
+            };
+            TopBySortKey::F64(ordered)
+        }
+        (ValueType::Bool, Value::Bool(value)) => TopBySortKey::Bool(value),
+        (ValueType::String, Value::String(value)) => TopBySortKey::String(value),
+        (ValueType::Bytes, Value::Bytes(value)) => TopBySortKey::Bytes(value),
+        (ValueType::Uuid, Value::Uuid(value)) => TopBySortKey::Uuid(*value.as_bytes()),
+        (ValueType::EnumTag(_), Value::EnumTag(value)) => TopBySortKey::EnumTag(value),
+        _ => {
+            return Err(IvmRuntimeError::InvalidTopBy(
+                "sort field value must match its orderable scalar type".to_owned(),
+            ));
+        }
+    };
+    Ok(key)
 }
 
 pub(super) fn top_by_sort_key(

@@ -24,6 +24,7 @@ import {
   blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  stopJazzServer,
   type JazzServerInfo,
   unblockJazzServerNetwork,
 } from "./testing-server.js";
@@ -1128,15 +1129,75 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken, syncServer);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      transactionId: batchId,
+      transactionId: txId,
       code: "permission_denied",
     });
 
     const todosAfterRevert = await db.all(allTodos, { tier: "local" });
     expect(todosAfterRevert.length).toBe(0);
+  });
+
+  /**
+   * 1. Two in-memory `Db`s attach to the same persistent browser worker.
+   * 2. One DB inserts a row.
+   * 3. The other DB receives the optimistic row through its subscription.
+   * 4. The server rejects the transaction.
+   * 5. The persistent worker rolls back.
+   * 6. The writer DB rolls back.
+   * 7. The other in-memory DB rolls back as well.
+   */
+  it("rejected write from one live peer reverts every attached peer", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-cross-peer-rejection",
+      readOnlyPermissions,
+    );
+    const secret = generateAuthSecret();
+    const dbName = uniqueDbName("sync-cross-peer-rejection");
+    const config = {
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+      schema: app,
+    };
+    // Both `Db`s attach to the same persistent worker
+    const appPeer = track(await createDb(config));
+    const writerPeer = track(await createDb(config));
+
+    await Promise.all([
+      appPeer.all(allTodos, { tier: "edge" }),
+      writerPeer.all(allTodos, { tier: "edge" }),
+    ]);
+    // Disconnect from server so both in-memory `Db`s receive the optimistic insert
+    // before the server rejection
+    await appPeer.disconnect();
+
+    const rejected = writerPeer.insert(todos, {
+      title: "Rejected from the other peer",
+      done: false,
+    });
+    await rejected.wait({ tier: "local" });
+    await waitForCondition(
+      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 1,
+      5000,
+      "non-originating app peer should observe the optimistic insert",
+    );
+
+    await appPeer.reconnect();
+    await expect(rejected.wait({ tier: "edge" })).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "permission_denied",
+    });
+    expect(await writerPeer.all(allTodos, { tier: "local" })).toEqual([]);
+    expect(await appPeer.all(allTodos, { tier: "edge" })).toEqual([]);
+    await waitForCondition(
+      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 0,
+      5000,
+      "non-originating app peer should receive the rejection rollback",
+    );
   });
 
   it("server permissions check rejects client optimistic insert - onMutationError notification", async () => {
@@ -1152,7 +1213,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     db.onMutationError(mutationErrorSpy);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
       5000,
@@ -1162,12 +1223,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        transactionId: batchId,
+        transactionId: txId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          transactionId: batchId,
+          transactionId: txId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1194,7 +1255,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      transactionId: insertResult.transactionId,
+      transactionId: insertResult.txId,
       code: "permission_denied",
     });
     expect(mutationErrorSpy).not.toHaveBeenCalled();
@@ -1230,7 +1291,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       title: "Rejected across restart",
       done: false,
     });
-    const batchId = await insertResult.transactionId;
+    const txId = await insertResult.txId;
 
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
@@ -1241,12 +1302,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        transactionId: batchId,
+        transactionId: txId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          transactionId: batchId,
+          transactionId: txId,
           code: "permission_denied",
           reason: "Write rejected by server authorization",
         },
@@ -1401,7 +1462,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const insertResult = db.insert(todos, { title: "Rejected", done: false });
       await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: insertResult.transactionId,
+        transactionId: insertResult.txId,
         code: "permission_denied",
       });
 
@@ -1427,7 +1488,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const updateResult = db.update(todos, todo.id, { title: "Updated task" });
       await expect(updateResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: updateResult.transactionId,
+        transactionId: updateResult.txId,
         code: "permission_denied",
       });
 
@@ -1453,7 +1514,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const deleteResult = db.delete(todos, todo.id);
       await expect(deleteResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        transactionId: deleteResult.transactionId,
+        transactionId: deleteResult.txId,
         code: "permission_denied",
       });
 
@@ -1659,6 +1720,49 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     expect(rowsOnB.some((row) => row.title === recoveredTitle)).toBe(true);
   }, 60000);
+
+  it("keeps a local subscription live after an unexpected server shutdown", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("local-after-server-shutdown");
+    const db = await createSyncedDb(
+      ctx,
+      "local-after-server-shutdown",
+      generateAuthSecret(),
+      syncServer,
+    );
+    const snapshots: Todo[][] = [];
+    trackSubscription(db.subscribe(allTodos, (rows) => snapshots.push(rows), { tier: "local" }));
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      5000,
+      "local subscription did not publish its opening snapshot",
+    );
+
+    await stopJazzServer(syncServer.serverUrl);
+    const edgeError = await withTimeout(
+      db.all(allTodos, { tier: "edge" }),
+      5000,
+      "edge read did not observe the stopped server",
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(edgeError).toBeInstanceOf(Error);
+    expect((edgeError as Error).message).not.toContain(
+      "edge read did not observe the stopped server",
+    );
+
+    const title = `local-after-server-shutdown-${Date.now()}`;
+    await withTimeout(
+      db.insert(todos, { title, done: false }).wait({ tier: "local" }),
+      5000,
+      "offline insert did not become locally durable",
+    );
+    await waitForCondition(
+      async () => snapshots.some((rows) => rows.some((row) => row.title === title)),
+      5000,
+      "local subscription did not publish the offline insert",
+    );
+  });
 
   /**
    *   writer ──baseline write──► server

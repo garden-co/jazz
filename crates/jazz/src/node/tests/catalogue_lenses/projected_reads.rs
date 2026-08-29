@@ -39,7 +39,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -129,7 +129,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
                     ops: vec![],
                 },
             ],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -210,7 +210,7 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -322,7 +322,7 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
                     }],
                 },
             ],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -427,7 +427,7 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -531,7 +531,7 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
                     }],
                 },
             ],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -640,7 +640,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
                     }],
                 },
             ],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -755,7 +755,7 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -874,7 +874,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -1029,7 +1029,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
                     }],
                 },
             ],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

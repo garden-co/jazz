@@ -12,7 +12,7 @@ import {
 const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v1";
 // Coupled to IndexedDbPageStore's durable epoch. Keeping it in the database
 // scope prevents an old worker from opening incompatible root metadata.
-const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v2";
+const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v1";
 const inMemoryWasmAssetIds = new WeakMap<object, string>();
 
 /** Resolve the exact script URL that identifies the origin-wide SharedWorker. */

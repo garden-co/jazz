@@ -17,6 +17,10 @@ export function getJazzServerInfo(appId?: string, schema?: Uint8Array): Promise<
   return jazzServerBrowserCommands().jazzServerInfo(appId, schema ? [...schema] : undefined);
 }
 
+export function stopJazzServer(serverUrl: string): Promise<void> {
+  return jazzServerBrowserCommands().jazzServerStop(serverUrl);
+}
+
 export function blockJazzServerNetwork(serverUrl: string): Promise<void> {
   return jazzServerBrowserCommands().jazzServerBlockNetwork(serverUrl);
 }

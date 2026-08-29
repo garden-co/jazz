@@ -256,7 +256,7 @@ pub async fn write_todo_crud(
 pub async fn write_todo_with_default_durability(
     client: &JazzClient,
 ) -> jazz::tools::Result<ObjectId> {
-    let (id, _row_values, _batch_id) = client.insert(
+    let (id, _row_values, _transaction_id) = client.insert(
         "todos",
         todo_values("Write docs with default durability behavior", ""),
     )?;

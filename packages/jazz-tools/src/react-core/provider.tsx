@@ -209,7 +209,7 @@ export function JazzProvider({
   // Keep the framework-level lease distinct from createJazzClient's own shared
   // client lease. Both use the generic registry; sharing an unqualified key
   // makes provider teardown recursively release itself instead of the runtime.
-  const configKey = createClientConfigKey("react", config);
+  const configKey = createClientConfigKey("react", config, [createJazzClient]);
 
   const [clientLease, setClientLease] = useState<{
     configKey: string;

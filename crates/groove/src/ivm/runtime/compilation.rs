@@ -477,6 +477,19 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| resolve_field_ref(&output, field))
                     .collect::<Result<Vec<_>, _>>()?;
+                for &field_idx in order_field_indices.iter().chain(&tie_field_indices) {
+                    let value_type = &output
+                        .fields()
+                        .get(field_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?
+                        .value_type;
+                    if !collect_by_ordered_scalar(value_type) {
+                        return Err(IvmRuntimeError::InvalidTopBy(format!(
+                            "sort field {} must be an orderable scalar",
+                            field_name_at(&output, field_idx)?
+                        )));
+                    }
+                }
                 let group_field_names = group_field_indices
                     .iter()
                     .map(|field| field_name_at(&output, *field))

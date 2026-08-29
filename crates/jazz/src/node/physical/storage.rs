@@ -607,7 +607,7 @@ where
             PhysicalWriteTarget::History,
         )?;
         // The authored row carries declaration-local enum ordinals.  Rewrite
-        // those cells through their durable schema-qualified identities before
+        // those cells through their durable global UUID identities before
         // giving the record to the physical table; raw-copying would alias two
         // concurrent siblings which both authored ordinal 2.
         let mut values = version.record.to_values()?;

@@ -5,7 +5,7 @@ use xxhash_rust::xxh3::xxh3_64;
 pub type PageId = u64;
 
 const MAGIC: &[u8; 8] = b"IDBTREE\0";
-const FORMAT_VERSION: u8 = 2;
+const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 
 const PAGE_LEAF_TAG: u8 = 0;
@@ -53,7 +53,7 @@ impl Page {
     }
 }
 
-/// Encode one page using the fixed IDBTree v2 storage format.
+/// Encode one page using the fixed IDBTree v1 storage format.
 ///
 /// All integers are little-endian. Page, value-cell, and option tags are the
 /// permanent constants above; collections and byte strings carry `u32`
@@ -359,7 +359,7 @@ mod tests {
     // malformed-page rejection are below the public B-tree API. Public reopen
     // behavior remains covered by the engine contract tests in `lib.rs`.
     #[test]
-    fn page_v2_encoding_has_golden_bytes_for_every_variant() {
+    fn page_v1_encoding_has_golden_bytes_for_every_variant() {
         let fixtures = [
             Page::Leaf {
                 entries: vec![
@@ -405,16 +405,16 @@ mod tests {
                 .map(|bytes| to_hex(bytes))
                 .collect::<Vec<_>>(),
             [
-                "494442545245450002da359ee721015e03000200000001000000610002000000787901000000620108070605040302010900000000000000",
-                "49444254524545000236071af932f362cf0101000000010000006d0200000003000000000000000500000000000000",
-                "494442545245450002f716bc5b181bbaec0201090000000000000002000000aabb",
-                "494442545245450002d6ccf3da52f0ff30020001000000cc",
-                "494442545245450002f5cd4e6dc50a39de000100000004000000776964650111000000000000000000000001000000",
+                "494442545245450001da359ee721015e03000200000001000000610002000000787901000000620108070605040302010900000000000000",
+                "49444254524545000136071af932f362cf0101000000010000006d0200000003000000000000000500000000000000",
+                "494442545245450001f716bc5b181bbaec0201090000000000000002000000aabb",
+                "494442545245450001d6ccf3da52f0ff30020001000000cc",
+                "494442545245450001f5cd4e6dc50a39de000100000004000000776964650111000000000000000000000001000000",
             ]
         );
         assert_eq!(
             to_hex(&encoded[4]),
-            include_str!("../fixtures/page-v2-leaf.hex").trim()
+            include_str!("../fixtures/page-v1-leaf.hex").trim()
         );
         for (page, encoded) in fixtures.iter().zip(encoded) {
             assert_eq!(decode_page(&encoded).unwrap(), *page);
@@ -422,17 +422,17 @@ mod tests {
     }
 
     #[test]
-    fn page_v2_decoder_rejects_noncanonical_or_malformed_payloads() {
+    fn page_v1_decoder_rejects_noncanonical_or_malformed_payloads() {
         let valid = encode_page(&Page::Leaf {
             entries: Vec::new(),
         })
         .unwrap();
 
-        let mut old_version = valid.clone();
-        old_version[MAGIC.len()] = FORMAT_VERSION - 1;
+        let mut wrong_version = valid.clone();
+        wrong_version[MAGIC.len()] = FORMAT_VERSION + 1;
         assert_eq!(
-            decode_page(&old_version).unwrap_err(),
-            "unsupported format version 1"
+            decode_page(&wrong_version).unwrap_err(),
+            "unsupported format version 2"
         );
         assert_eq!(
             decode_page(&envelope(&[9])).unwrap_err(),

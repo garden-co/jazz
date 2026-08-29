@@ -12,6 +12,7 @@ import {
   link,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   readdir,
@@ -40,6 +41,7 @@ import {
 import { renderMigrationStub } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import {
+  assertMigrationMatchesCanonicalBundle,
   computeSchemaHash,
   deploy as deployCatalogue,
   MissingMigrationError,
@@ -1348,26 +1350,35 @@ function isDefinedMigration(value: unknown): value is DefinedMigration {
   );
 }
 
-let importCounter = 0;
-
-async function bundleToTempFile(filePath: string): Promise<string> {
+async function bundleToPrivateTempFile(
+  filePath: string,
+): Promise<{ outFile: string; tempDir: string }> {
+  // A migration is executable local source.  Keep the same project-storage
+  // boundary as snapshots and publication journals: do not follow a replaced
+  // migration entry while preparing the private bundle.
+  await assertNoSymlinkComponents(filePath);
   const sourceDir = dirname(resolve(filePath));
-  const outFile = join(sourceDir, `.jazz-bundle-${++importCounter}.mjs`);
+  const tempDir = await mkdtemp(join(sourceDir, ".jazz-bundle-"));
+  const outFile = join(tempDir, "migration.mjs");
 
-  await build({
-    entryPoints: [resolve(filePath)],
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    outfile: outFile,
-    packages: "external",
-  });
-
-  return outFile;
+  try {
+    await build({
+      entryPoints: [resolve(filePath)],
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      outfile: outFile,
+      packages: "external",
+    });
+    return { outFile, tempDir };
+  } catch (error) {
+    await rm(tempDir, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
-  const outFile = await bundleToTempFile(filePath);
+  const { outFile, tempDir } = await bundleToPrivateTempFile(filePath);
   try {
     const loaded = (await import(pathToFileURL(outFile).href)) as {
       default?: unknown;
@@ -1381,7 +1392,7 @@ async function loadDefinedMigration(filePath: string): Promise<DefinedMigration>
     }
     return migration;
   } finally {
-    await rm(outFile, { force: true }).catch(() => undefined);
+    await rm(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -1526,6 +1537,11 @@ async function resolveRemoteHistoricalSchema(
  * only if the schema transition does not require row transformations.
  */
 export async function pushMigration(options: PushMigrationOptions): Promise<PushMigrationResult> {
+  // `push` reads executable migration source as well as the snapshot/create
+  // commands' durable files.  Initialize the common storage boundary first so
+  // it cannot silently follow a symlinked migrations directory.
+  const storage = new MigrationStorage(options.migrationsDir);
+  await storage.initialize();
   const { hashes } = await fetchSchemaHashes(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
@@ -1649,6 +1665,7 @@ async function hasLocalMigrationFiles(migrationsDir: string): Promise<boolean> {
     return false;
   }
 
+  await assertNoSymlinkComponents(migrationsDir);
   return (await readdir(migrationsDir)).some((fileName) => fileName.endsWith(".ts"));
 }
 
@@ -1703,13 +1720,64 @@ async function resolveProjectDeployMigrationChain(
   const knownHashes = [
     ...new Set([...stored.hashes, ...snapshots.map(({ hash }) => hash), toHash]),
   ];
+  const canonicalSchemas = new Map<string, Promise<WasmSchema>>(
+    snapshots.map(({ hash, schema }) => [hash, Promise.resolve(schema)]),
+  );
+  canonicalSchemas.set(toHash, Promise.resolve(compiled.wasmSchema));
+  const loadCanonicalSchema = (hash: string): Promise<WasmSchema> => {
+    const cached = canonicalSchemas.get(hash);
+    if (cached) return cached;
+    const loading = fetchStoredWasmSchema(options.serverUrl, {
+      appId: options.appId,
+      adminSecret: options.adminSecret,
+      schemaHash: hash,
+    }).then((storedSchema) => storedSchema.schema);
+    canonicalSchemas.set(hash, loading);
+    return loading;
+  };
   const edges = await Promise.all(
     files.map(async (fileName) => {
       const filePath = join(migrationsDir, fileName);
       const migration = await loadDefinedMigration(filePath);
+      if (migration.fromHash === undefined || migration.toHash === undefined) {
+        throw new Error(
+          `Migration ${fileName} must embed fromHash and toHash metadata; regenerate the migration before deployment.`,
+        );
+      }
+
+      const fromHash = resolveKnownSchemaHash(
+        migration.fromHash,
+        `embedded fromHash in ${fileName}`,
+        knownHashes,
+      );
+      const toHash = resolveKnownSchemaHash(
+        migration.toHash,
+        `embedded toHash in ${fileName}`,
+        knownHashes,
+      );
       const named = migrationHashesFromFileName(fileName);
-      const fromHash = resolveKnownSchemaHash(named.from, `fromHash in ${fileName}`, knownHashes);
-      const toHash = resolveKnownSchemaHash(named.to, `toHash in ${fileName}`, knownHashes);
+      const namedFromHash = resolveKnownSchemaHash(
+        named.from,
+        `fromHash in ${fileName}`,
+        knownHashes,
+      );
+      const namedToHash = resolveKnownSchemaHash(named.to, `toHash in ${fileName}`, knownHashes);
+      if (namedFromHash !== fromHash || namedToHash !== toHash) {
+        throw new Error(
+          `Migration filename ${fileName} does not match its embedded ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} edge.`,
+        );
+      }
+
+      const [fromSchema, toSchema] = await Promise.all([
+        loadCanonicalSchema(fromHash),
+        loadCanonicalSchema(toHash),
+      ]);
+      assertMigrationMatchesCanonicalBundle(migration, {
+        fromHash,
+        toHash,
+        fromSchema,
+        toSchema,
+      });
 
       return { migration, filePath, fromHash, toHash };
     }),

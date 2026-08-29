@@ -7,7 +7,10 @@ mod variant_case_tests {
     }
 
     fn case(schema: SchemaVersionId, ordinal: u8) -> GlobalScalarEnumCaseId {
+        let mut bytes = *schema.0.as_bytes();
+        bytes[15] ^= ordinal;
         GlobalScalarEnumCaseId {
+            id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_bytes(bytes)),
             introducing_schema: schema,
             introducing_ordinal: ordinal,
         }
@@ -15,6 +18,26 @@ mod variant_case_tests {
 
     fn mapping(table_id: u64, columns: &[(&str, u64)]) -> SchemaPhysicalMapping {
         SchemaPhysicalMapping {
+            identities: PhysicalIdentityManifest {
+                tables: BTreeMap::from([(
+                    "entries".to_owned(),
+                    PhysicalTableIdentity {
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(table_id as u128 + 1)),
+                        columns: columns
+                            .iter()
+                            .map(|(name, id)| {
+                                (
+                                    name.to_string(),
+                                    PhysicalColumnIdentity {
+                                        id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::from_u128(*id as u128 + 100)),
+                                        enum_variants: BTreeMap::new(),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                )]),
+            },
             tables: BTreeMap::from([(
                 "entries".to_owned(),
                 TablePhysicalMapping {
@@ -63,11 +86,15 @@ mod variant_case_tests {
         assert_eq!(second.iter().map(|case| case.tag).collect::<Vec<_>>(), [2]);
         validate_physical_variant_cases(&mappings, &aliases).unwrap();
 
-        // The mapping is the payload durably written in jazz_schema_versions;
-        // a JSON round trip models close/reopen of the catalogue row.
-        let encoded = serde_json::to_vec(&mappings).unwrap();
-        let reopened: BTreeMap<SchemaVersionId, SchemaPhysicalMapping> =
-            serde_json::from_slice(&encoded).unwrap();
+        // The mapping is the canonical typed payload durably written in
+        // jazz_schema_versions; its exact round trip models close/reopen.
+        let reopened = mappings
+            .iter()
+            .map(|(version, mapping)| {
+                Ok((*version, codec::decode_physical_mapping(&codec::encode_physical_mapping(mapping)?)?))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()
+            .unwrap();
         assert_eq!(reopened, mappings);
         validate_physical_variant_cases(&reopened, &aliases).unwrap();
     }
@@ -106,6 +133,58 @@ mod variant_case_tests {
             validate_physical_variant_cases(&mappings, &aliases),
             Err(Error::InvalidStoredValue(
                 "physical table maps multiple columns to one id"
+            ))
+        ));
+    }
+
+    #[test]
+    fn reopen_validation_rejects_nil_global_enum_case_identity() {
+        // Internal recovery-boundary test: no public catalogue operation can
+        // author a registry case without its schema, but a corrupt durable
+        // payload must never turn that unknown identity into a local tag.
+        let known = schema(1);
+        let mut corrupt = mapping(7, &[("state", 1)]);
+        corrupt.tables.get_mut("entries").unwrap().scalar_enum_cases.insert(
+            PhysicalColumnId(1),
+            vec![GlobalScalarEnumCaseId {
+                id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::nil()),
+                introducing_schema: known,
+                introducing_ordinal: 0,
+            }],
+        );
+        assert!(matches!(
+            validate_physical_mapping_registries(
+                &BTreeMap::from([(known, corrupt)]),
+                &BTreeMap::from([(known, SchemaVersionAlias(1))]),
+            ),
+            Err(Error::InvalidStoredValue(
+                "physical enum registry contains a nil global identity"
+            ))
+        ));
+
+        let identity = case(known, 0);
+        let mut duplicate = mapping(8, &[("state", 2)]);
+        duplicate.tables.get_mut("entries").unwrap().scalar_enum_cases.insert(
+            PhysicalColumnId(2),
+            vec![
+                identity.clone(),
+                GlobalScalarEnumCaseId {
+                    id: identity.id,
+                    introducing_schema: schema(2),
+                    introducing_ordinal: 9,
+                },
+            ],
+        );
+        assert!(matches!(
+            validate_physical_mapping_registries(
+                &BTreeMap::from([(known, duplicate)]),
+                &BTreeMap::from([
+                    (known, SchemaVersionAlias(1)),
+                    (schema(2), SchemaVersionAlias(2)),
+                ]),
+            ),
+            Err(Error::InvalidStoredValue(
+                "physical enum registry repeats a case identity"
             ))
         ));
     }
@@ -233,30 +312,18 @@ mod variant_case_tests {
         let archived = schema(2);
         let snoozed = schema(3);
         let base_cases = [
-            GlobalScalarEnumCaseId {
-                introducing_schema: base,
-                introducing_ordinal: 0,
-            },
-            GlobalScalarEnumCaseId {
-                introducing_schema: base,
-                introducing_ordinal: 1,
-            },
+            case(base, 0),
+            case(base, 1),
         ];
         let archived_cases = base_cases
             .iter()
             .cloned()
-            .chain(std::iter::once(GlobalScalarEnumCaseId {
-                introducing_schema: archived,
-                introducing_ordinal: 2,
-            }))
+            .chain(std::iter::once(case(archived, 2)))
             .collect::<Vec<_>>();
         let snoozed_cases = base_cases
             .iter()
             .cloned()
-            .chain(std::iter::once(GlobalScalarEnumCaseId {
-                introducing_schema: snoozed,
-                introducing_ordinal: 2,
-            }))
+            .chain(std::iter::once(case(snoozed, 2)))
             .collect::<Vec<_>>();
         let physical_cases = archived_cases
             .iter()
@@ -351,26 +418,14 @@ mod variant_case_tests {
         let archived_schema = schema(2);
         let snoozed_schema = schema(3);
         let archived_cases = vec![
-            GlobalScalarEnumCaseId {
-                introducing_schema: base,
-                introducing_ordinal: 0,
-            },
-            GlobalScalarEnumCaseId {
-                introducing_schema: base,
-                introducing_ordinal: 1,
-            },
-            GlobalScalarEnumCaseId {
-                introducing_schema: archived_schema,
-                introducing_ordinal: 2,
-            },
+            case(base, 0),
+            case(base, 1),
+            case(archived_schema, 2),
         ];
         let snoozed_cases = vec![
             archived_cases[0].clone(),
             archived_cases[1].clone(),
-            GlobalScalarEnumCaseId {
-                introducing_schema: snoozed_schema,
-                introducing_ordinal: 2,
-            },
+            case(snoozed_schema, 2),
         ];
         let physical_cases = archived_cases
             .iter()
@@ -454,24 +509,36 @@ mod variant_case_tests {
                 ),
             ))))
         };
+        let base_ids = BTreeMap::from([(
+            "root/array/nullable".to_owned(),
+            vec![case(base, 0).id, case(base, 1).id],
+        )]);
         let mut cases = BTreeMap::new();
         hydrate_nested_scalar_enum_cases(
             &nested(&["draft", "published"]),
+            &base_ids,
             base,
+            "root",
             "root",
             &mut cases,
         )
         .unwrap();
-        reconcile_nested_scalar_enum_cases(
+        let evolved_ids = BTreeMap::from([(
+            "root/array/nullable".to_owned(),
+            vec![case(base, 0).id, case(base, 1).id, case(child, 2).id],
+        )]);
+        hydrate_nested_scalar_enum_cases(
             &nested(&["draft", "published", "archived"]),
+            &evolved_ids,
             child,
+            "root",
             "root",
             &mut cases,
         )
         .unwrap();
         assert_eq!(cases["root/array/nullable"].len(), 3);
-        assert_eq!(cases["root/array/nullable"][0].introducing_schema, base);
-        assert_eq!(cases["root/array/nullable"][2].introducing_schema, child);
+        assert_eq!(cases["root/array/nullable"][0].id, case(base, 0).id);
+        assert_eq!(cases["root/array/nullable"][2].id, case(child, 2).id);
     }
 
     #[test]
@@ -483,18 +550,9 @@ mod variant_case_tests {
         let archived = schema(2);
         let snoozed = schema(3);
         let root = "root/record/event";
-        let base_case = GlobalScalarEnumCaseId {
-            introducing_schema: base,
-            introducing_ordinal: 0,
-        };
-        let archived_case = GlobalScalarEnumCaseId {
-            introducing_schema: archived,
-            introducing_ordinal: 1,
-        };
-        let snoozed_case = GlobalScalarEnumCaseId {
-            introducing_schema: snoozed,
-            introducing_ordinal: 1,
-        };
+        let base_case = case(base, 0);
+        let archived_case = case(archived, 1);
+        let snoozed_case = case(snoozed, 1);
         let inner = |name: &str| {
             records::ValueType::Enum(Box::new(
                 records::EnumSchema::new(
@@ -537,10 +595,7 @@ mod variant_case_tests {
         ] {
             payload_registries.insert(
                 format!("{}/record/detail", global_case_path(root, parent)),
-                vec![GlobalScalarEnumCaseId {
-                    introducing_schema: child,
-                    introducing_ordinal: 0,
-                }],
+                vec![case(child, 0)],
             );
         }
         let mut layouts = BTreeMap::from([
@@ -551,14 +606,15 @@ mod variant_case_tests {
             ),
             ((root.to_owned(), snoozed_case.clone()), payload("snoozed")),
         ]);
-        for parent in [&base_case, &archived_case, &snoozed_case] {
+        for (parent, child) in [
+            (&base_case, base),
+            (&archived_case, archived),
+            (&snoozed_case, snoozed),
+        ] {
             layouts.insert(
                 (
                     format!("{}/record/detail", global_case_path(root, parent)),
-                    GlobalScalarEnumCaseId {
-                        introducing_schema: parent.introducing_schema,
-                        introducing_ordinal: 0,
-                    },
+                    case(child, 0),
                 ),
                 records::RecordDescriptor::new([("value", records::ValueType::String)]),
             );

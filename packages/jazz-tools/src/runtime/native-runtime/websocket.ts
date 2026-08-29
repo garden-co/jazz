@@ -47,7 +47,11 @@ export type BrowserWebSocket = {
   ): void;
 };
 
-export const WIRE_PROTOCOL_VERSION = 14;
+/**
+ * The sole Jazz wire-protocol version. This is distinct from independently
+ * versioned v1 storage, catalogue, and binding formats.
+ */
+export const WIRE_PROTOCOL_VERSION = 1;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
@@ -85,7 +89,9 @@ export function encodeWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8A
 
 export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
   const reader = new PostcardReader(batch);
-  return reader.readVec((itemReader) => itemReader.bytes());
+  const frames = reader.readVec((itemReader) => itemReader.bytes());
+  assertReaderDone(reader, "websocket frame batch");
+  return frames;
 }
 
 export function encodeWireClientHello(): Uint8Array {
@@ -103,26 +109,45 @@ export function encodeWireClientHello(): Uint8Array {
 }
 
 export function isWireHello(frame: Uint8Array): boolean {
-  return new PostcardReader(frame).u64() === 0;
+  const reader = new PostcardReader(frame);
+  if (reader.u64() !== 0) return false;
+  readWireHelloBodyExact(reader);
+  return true;
 }
 
 export function isWireMessage(frame: Uint8Array): boolean {
-  return new PostcardReader(frame).u64() === 1;
+  const reader = new PostcardReader(frame);
+  if (reader.u64() !== 1) return false;
+  reader.u64(); // protocol_version
+  reader.u64(); // features
+  reader.option(readWireSession);
+  reader.bytes(); // semantic payload
+  assertReaderDone(reader, "WireFrame::Message");
+  return true;
 }
 
 export function isWireError(frame: Uint8Array): boolean {
-  return new PostcardReader(frame).u64() === 2;
+  const reader = new PostcardReader(frame);
+  if (reader.u64() !== 2) return false;
+  readWireErrorBodyExact(reader);
+  return true;
 }
 
 export function decodeWireError(frame: Uint8Array): WireError {
   const reader = new PostcardReader(frame);
   const tag = reader.u64();
   if (tag !== 2) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
-  return {
+  return readWireErrorBodyExact(reader);
+}
+
+function readWireErrorBodyExact(reader: PostcardReader): WireError {
+  const error = {
     code: wireErrorCodeName(reader.u64()),
     retry: wireRetryName(reader.u64()),
     message: reader.string(),
   };
+  assertReaderDone(reader, "WireFrame::Error");
+  return error;
 }
 
 export function wireAuthFailureReason(error: WireError): AuthFailureReason | null {
@@ -295,21 +320,51 @@ export class WebSocketCarrier {
 function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
-  const min = reader.u64();
-  const max = reader.u64();
-  if (min > WIRE_PROTOCOL_VERSION || max < WIRE_PROTOCOL_VERSION) {
-    throw new Error(`server does not support wire protocol ${WIRE_PROTOCOL_VERSION}`);
+  const hello = readWireHelloBodyExact(reader);
+  const { min, max, features, role, authority } = hello;
+  if (min !== WIRE_PROTOCOL_VERSION || max !== WIRE_PROTOCOL_VERSION) {
+    throw new Error(
+      `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${min}..=${max}`,
+    );
   }
-  const features = reader.u64();
-  if (features & ~CLIENT_WIRE_FEATURES) {
+  const unsupportedFeatures = features & ~BigInt(CLIENT_WIRE_FEATURES);
+  if (unsupportedFeatures !== 0n) {
     throw new Error(`server accepted unsupported wire features 0x${features.toString(16)}`);
   }
-  if (reader.u64() !== 1) throw new Error("expected WirePeerRole::Core server hello");
-  const authority = reader.option((value) => ({
-    node: value.bytes(false),
-    epoch: value.u64BigInt(),
-  }));
-  return { protocolVersion: WIRE_PROTOCOL_VERSION, features, authority };
+  if (role !== 1) throw new Error("expected WirePeerRole::Core server hello");
+  return { protocolVersion: WIRE_PROTOCOL_VERSION, features: Number(features), authority };
+}
+
+function readWireHelloBodyExact(reader: PostcardReader): {
+  min: number;
+  max: number;
+  features: bigint;
+  role: number;
+  authority?: { node: Uint8Array; epoch: bigint };
+} {
+  const min = reader.u64();
+  const max = reader.u64();
+  const features = reader.u64BigInt();
+  const role = reader.u64();
+  const authority = reader.option((value) => {
+    const node = value.bytes();
+    if (node.byteLength !== 16) {
+      throw new Error(`WireHello.authority.node must be exactly 16 bytes, got ${node.byteLength}`);
+    }
+    return { node, epoch: value.u64BigInt() };
+  });
+  assertReaderDone(reader, "WireFrame::Hello");
+  return { min, max, features, role, authority };
+}
+
+function readWireSession(reader: PostcardReader): void {
+  reader.string(); // session_id
+  reader.u64BigInt(); // epoch
+  reader.option((identity) => identity.string()); // canonical AuthorSubject
+}
+
+function assertReaderDone(reader: PostcardReader, payload: string): void {
+  if (!reader.done()) throw new Error(`${payload} has trailing postcard bytes`);
 }
 
 function websocketCloseDetails(event: unknown): { code?: number; reason?: string } {

@@ -372,7 +372,11 @@ fn closure_membership_graph_for_path(
                 "__closure_root_row_uuid",
             )]),
     );
-    let mut current_source = root_source.clone();
+    // Closure lowering only needs source shape metadata while it walks the
+    // path.  Keep references rather than cloning whole resolved sources
+    // (which include the complete table schema and graph) into this
+    // synchronous compiler stack.
+    let mut current_source = root_source;
     let mut outputs = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         let target = resolved_sources.get(&segment.target).ok_or_else(|| {
@@ -431,11 +435,17 @@ fn closure_membership_graph_for_path(
                     ),
             )
         };
+        if index + 1 == segments.len() {
+            // The terminal graph is only consumed by the result-member
+            // collector, so moving it avoids recursively cloning the entire
+            // assembled closure graph on the deepest path.
+            outputs.push((index, segment.target.clone(), joined));
+            break;
+        }
         outputs.push((index, segment.target.clone(), joined.clone()));
         current_graph = joined;
-        current_source = target.clone();
+        current_source = target;
     }
-    let _ = current_source;
     Ok(outputs)
 }
 

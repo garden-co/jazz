@@ -26,6 +26,7 @@ use jazz::wire::{
     WireStreamEncoder, compress_sync_payload, current_wire_features,
 };
 use jazz_sim::public_schema_fixture::{compile_public_schema, seeded_recursive_access_policy};
+use jazz_sim::view_accounting::version_bundle_refs;
 use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
@@ -758,7 +759,7 @@ impl Transport for DuplexTransport {
         if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription,
             reset_result_set,
-            version_bundles,
+            version_carriers,
             result_member_adds,
             ..
         }) = &message
@@ -775,7 +776,7 @@ impl Transport for DuplexTransport {
                 });
             entry.messages += 1;
             entry.resets += u64::from(*reset_result_set);
-            let bundles = version_bundles.len() as u64;
+            let bundles = version_bundle_refs(version_carriers).count() as u64;
             entry.bundles += bundles;
             if *reset_result_set {
                 entry.reset_bundles += bundles;

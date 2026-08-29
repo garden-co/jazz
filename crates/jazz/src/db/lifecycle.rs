@@ -365,14 +365,16 @@ where
             )
         };
         let (lens, new_tables, dropped_tables) = direct_schema_view_lens(&source, schema)?;
-        let publication = SchemaLineagePublication::new(
-            SchemaVersion::new(schema.clone()),
-            lens,
-            new_tables,
-            dropped_tables,
-        );
         let outcome = {
             let mut node = self.node.node.lock().await;
+            let publication = node
+                .author_schema_lineage_publication(
+                    SchemaVersion::new(schema.clone()),
+                    lens,
+                    new_tables,
+                    dropped_tables,
+                )
+                .map_err(Error::from)?;
             node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: AuthorSubject::SYSTEM,
                 catalogue_seq,

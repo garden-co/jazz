@@ -5,13 +5,17 @@ use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
-use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{
+    AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, MigrationLensId, NodeUuid,
+    RowUuid, SchemaVersionId,
+};
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
-    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
-    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
-    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
-    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
+    RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
+    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
+    build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -24,14 +28,21 @@ use jazz::tools::{
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    FEATURE_AUTHORIZATION_SCOPE_RECEIPTS, FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+    FEATURE_AUXILIARY_CHUNKS, FEATURE_MESSAGE_FRAGMENTATION, FEATURE_PAYLOAD_LZ4,
+    FEATURE_PAYLOAD_ZSTD, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD,
+    WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, WireHello, WirePeerRole, decode_sync_message,
+    encode_frame, encode_sync_message,
 };
 use serde::{Deserialize, Serialize};
 
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/wire_message_frames.json"
+);
+const HELLO_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/wire_hello_frames.json"
 );
 const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -62,6 +73,33 @@ struct Fixture {
     frame_hex: String,
     frame_base64: String,
     payload_hex: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HelloManifest {
+    fixture_set: &'static str,
+    codec: &'static str,
+    fixtures: Vec<HelloFixture>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HelloFixture {
+    name: &'static str,
+    min_protocol_version: u16,
+    max_protocol_version: u16,
+    features: u64,
+    role: u64,
+    authority_node_hex: Option<String>,
+    authority_epoch: Option<FixtureU64>,
+    frame_hex: String,
+    frame_base64: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum FixtureU64 {
+    Number(u64),
+    Decimal(String),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -129,6 +167,44 @@ fn compiled_todos_schema(columns: &[&str]) -> JazzSchema {
     jazz::schema::JazzSchema::new(&source).expect("wire fixture source schema compiles")
 }
 
+/// Wire goldens must be repeatable: these are authority-issued values in a
+/// single synthetic lineage, not production allocations.  The snapshot and
+/// descendant publication deliberately share this exact source manifest.
+fn fixture_physical_manifest(schema: &JazzSchema) -> PhysicalIdentityManifest {
+    let mut next = 0x80_u8;
+    let tables = schema
+        .tables
+        .iter()
+        .map(|table| {
+            let table_id = GlobalPhysicalTableId(uuid::Uuid::from_bytes([next; 16]));
+            next = next.wrapping_add(1);
+            let columns = table
+                .columns
+                .iter()
+                .map(|column| {
+                    let id = GlobalPhysicalColumnId(uuid::Uuid::from_bytes([next; 16]));
+                    next = next.wrapping_add(1);
+                    (
+                        column.name().to_owned(),
+                        PhysicalColumnIdentity {
+                            id,
+                            enum_variants: BTreeMap::new(),
+                        },
+                    )
+                })
+                .collect();
+            (
+                table.name.clone(),
+                PhysicalTableIdentity {
+                    id: table_id,
+                    columns,
+                },
+            )
+        })
+        .collect();
+    PhysicalIdentityManifest { tables }
+}
+
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let node = NodeUuid::from_bytes([0x11; 16]);
     let tx_id = TxId::new(TxTime(12), node);
@@ -163,13 +239,31 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
             ],
         }],
-    );
-    let lineage_publication = SchemaLineagePublication::new(
-        lineage_target.clone(),
-        lineage_lens,
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    );
+    )
+    .expect("valid migration lens");
+    // This is an isolated codec fixture rather than a live catalogue, but the
+    // non-genesis payload still starts from an explicit authority manifest so
+    // inherited identities cannot be minted by accident.
+    let lineage_source_identities = fixture_physical_manifest(&lineage_source.schema);
+    let mut lineage_target_identities = fixture_physical_manifest(&lineage_target.schema);
+    lineage_target_identities
+        .tables
+        .get_mut("todos")
+        .unwrap()
+        .columns
+        .insert(
+            "title".to_owned(),
+            lineage_source_identities.tables["todos"].columns["title"].clone(),
+        );
+    let mut lineage_publication = SchemaLineagePublication {
+        id: jazz::ids::SchemaLineagePublicationId(uuid::Uuid::nil()),
+        schema: lineage_target.clone(),
+        lens: lineage_lens,
+        new_tables: Vec::new(),
+        dropped_tables: Vec::new(),
+        physical_identities: lineage_target_identities,
+    };
+    lineage_publication.id = lineage_publication.content_id();
     let mut large_value = groove::large_values::prepare(
         groove::large_values::LargeValueKind::Bytes,
         &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
@@ -296,7 +390,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 settled_through: GlobalTime(7),
                 reset_result_set: true,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: Some(9),
@@ -317,7 +410,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 settled_through: GlobalTime(8),
                 reset_result_set: false,
                 version_carriers: mixed_version_carriers(schema_version, author),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -334,7 +426,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 settled_through: GlobalTime(9),
                 reset_result_set: false,
                 version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -403,7 +494,8 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                             },
                         ],
                     }],
-                ),
+                )
+                .expect("valid migration lens"),
             },
         ),
         (
@@ -440,6 +532,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "catalogue_snapshot_todos_lineage",
             "CatalogueSnapshot",
             SyncMessage::CatalogueSnapshot(Box::new(CatalogueSnapshot {
+                genesis_physical_identities: lineage_source_identities,
                 schemas: vec![lineage_source, lineage_target],
                 lineages: vec![(9, lineage_publication)],
                 current_write_schema: CurrentWriteSchema {
@@ -555,11 +648,170 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v14",
+        fixture_set: "jazz-wire-message-frames-v1",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
         fixtures,
+    }
+}
+
+fn hello_fixture_manifest() -> HelloManifest {
+    let cases = [
+        ("client_without_authority", WirePeerRole::Client, 0, None),
+        (
+            "client_with_authority",
+            WirePeerRole::Client,
+            FEATURE_SYNC_MESSAGE_PAYLOAD,
+            Some(300),
+        ),
+        (
+            "core_without_authority",
+            WirePeerRole::Core,
+            FEATURE_STRUCTURED_ERRORS,
+            None,
+        ),
+        (
+            "core_with_authority",
+            WirePeerRole::Core,
+            FEATURE_SYNC_MESSAGE_PAYLOAD
+                | FEATURE_STRUCTURED_ERRORS
+                | FEATURE_PAYLOAD_ZSTD
+                | FEATURE_MESSAGE_FRAGMENTATION
+                | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | FEATURE_AUTHORIZATION_SCOPE_VIEWS
+                | FEATURE_AUXILIARY_CHUNKS,
+            Some(300),
+        ),
+        (
+            "core_with_max_u64_authority_epoch",
+            WirePeerRole::Core,
+            0,
+            Some(u64::MAX),
+        ),
+        (
+            "edge_without_authority",
+            WirePeerRole::Edge,
+            FEATURE_MESSAGE_FRAGMENTATION,
+            None,
+        ),
+        (
+            "edge_with_authority",
+            WirePeerRole::Edge,
+            FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+            Some(300),
+        ),
+        (
+            "relay_without_authority",
+            WirePeerRole::Relay,
+            FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+            None,
+        ),
+        (
+            "relay_with_authority",
+            WirePeerRole::Relay,
+            FEATURE_AUXILIARY_CHUNKS | FEATURE_PAYLOAD_LZ4,
+            Some(300),
+        ),
+    ];
+    let authority_node = NodeUuid::from_bytes([0x5e; 16]);
+    let fixtures = cases
+        .into_iter()
+        .map(|(name, role, features, authority_epoch)| {
+            let mut hello = WireHello::current(role, features);
+            if let Some(authority_epoch) = authority_epoch {
+                hello = hello.with_authority(authority_node, authority_epoch);
+            }
+            let frame_bytes =
+                encode_frame(&WireFrame::Hello(hello)).expect("hello fixture frame encodes");
+            HelloFixture {
+                name,
+                min_protocol_version: WIRE_PROTOCOL_VERSION,
+                max_protocol_version: WIRE_PROTOCOL_VERSION,
+                features,
+                role: match role {
+                    WirePeerRole::Client => 0,
+                    WirePeerRole::Core => 1,
+                    WirePeerRole::Edge => 2,
+                    WirePeerRole::Relay => 3,
+                },
+                authority_node_hex: authority_epoch.map(|_| hex(authority_node.as_bytes())),
+                authority_epoch: authority_epoch.map(|epoch| {
+                    if epoch == u64::MAX {
+                        FixtureU64::Decimal(epoch.to_string())
+                    } else {
+                        FixtureU64::Number(epoch)
+                    }
+                }),
+                frame_hex: hex(&frame_bytes),
+                frame_base64: base64(&frame_bytes),
+            }
+        })
+        .collect();
+
+    HelloManifest {
+        fixture_set: "jazz-wire-hello-frames-v1",
+        codec: "postcard WireFrame::Hello(WireHello)",
+        fixtures,
+    }
+}
+
+#[test]
+fn wire_hello_frame_fixtures_are_current() {
+    let actual = serde_json::to_string_pretty(&hello_fixture_manifest())
+        .expect("hello fixture manifest serializes")
+        + "\n";
+
+    if std::env::var_os("JAZZ_UPDATE_WIRE_FIXTURES").is_some() {
+        std::fs::write(HELLO_FIXTURE_PATH, actual).expect("hello fixture manifest writes");
+        return;
+    }
+
+    let expected = include_str!("../fixtures/wire_hello_frames.json");
+    assert_eq!(actual, expected, "wire Hello fixtures changed");
+}
+
+#[test]
+fn wire_hello_frame_fixtures_decode_exactly() {
+    let fixture_manifest: HelloManifest =
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
+            .expect("wire Hello fixture manifest deserializes");
+    for fixture in fixture_manifest.fixtures {
+        let frame_bytes = parse_hex(&fixture.frame_hex);
+        assert_eq!(base64(&frame_bytes), fixture.frame_base64);
+        let WireFrame::Hello(hello) =
+            jazz::wire::decode_frame(&frame_bytes).expect("hello fixture frame decodes")
+        else {
+            panic!("expected Hello fixture {}", fixture.name);
+        };
+        assert_eq!(hello.min_protocol_version, fixture.min_protocol_version);
+        assert_eq!(hello.max_protocol_version, fixture.max_protocol_version);
+        assert_eq!(hello.features, fixture.features);
+        assert_eq!(hello.role as u64, fixture.role);
+        assert_eq!(
+            hello
+                .authority
+                .map(|authority| hex(authority.node.as_bytes())),
+            fixture.authority_node_hex
+        );
+        let expected_epoch = fixture.authority_epoch.map(|epoch| match epoch {
+            FixtureU64::Number(epoch) => epoch,
+            FixtureU64::Decimal(epoch) => epoch.parse().expect("authority epoch fits u64"),
+        });
+        assert_eq!(
+            hello.authority.map(|authority| authority.epoch),
+            expected_epoch
+        );
+        assert_eq!(
+            encode_frame(&WireFrame::Hello(hello)).expect("Hello fixture frame re-encodes"),
+            frame_bytes,
+            "{}: semantic Hello re-encodes to its frozen exact bytes",
+            fixture.name
+        );
+
+        let mut suffixed = frame_bytes;
+        suffixed.push(0);
+        assert!(jazz::wire::decode_frame(&suffixed).is_err());
     }
 }
 
@@ -611,6 +863,29 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
         let decoded = decode_sync_message(&envelope.payload)
             .unwrap_or_else(|error| panic!("fixture {name} fails to decode: {error}"));
         assert_eq!(decoded, expected);
+        assert_eq!(
+            encode_frame(&WireFrame::Message(envelope.clone())).expect("fixture frame reencodes"),
+            frame_bytes,
+            "{name}: semantic frame re-encodes to its frozen exact bytes"
+        );
+        assert_eq!(
+            encode_sync_message(&decoded).expect("fixture payload reencodes"),
+            envelope.payload,
+            "{name}: semantic payload re-encodes to its frozen exact bytes"
+        );
+
+        let mut trailing_frame = frame_bytes;
+        trailing_frame.push(0);
+        assert!(
+            jazz::wire::decode_frame(&trailing_frame).is_err(),
+            "{name}: a canonical frame must reject a suffix"
+        );
+        let mut trailing_payload = envelope.payload;
+        trailing_payload.push(0);
+        assert!(
+            decode_sync_message(&trailing_payload).is_err(),
+            "{name}: a canonical payload must reject a suffix"
+        );
     }
 }
 

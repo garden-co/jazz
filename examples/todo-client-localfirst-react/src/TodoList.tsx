@@ -2,20 +2,13 @@ import { useState } from "react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
 import { toast } from "sonner";
 import { app } from "../schema.js";
+import { WriteResult } from "jazz-tools";
 
-type LocalDurabilityHandle = {
-  wait(options: { tier: "local" }): Promise<unknown>;
-};
-
-type MaybeAsyncWrite = LocalDurabilityHandle | Promise<LocalDurabilityHandle>;
-
-function notifyLocalWriteDurable(write: MaybeAsyncWrite) {
-  void Promise.resolve(write)
-    .then((handle) => handle.wait({ tier: "local" }))
+function notifyLocalWriteDurable(write: WriteResult<unknown>) {
+  void write
+    .wait({ tier: "local" })
     .then(() => window.dispatchEvent(new CustomEvent("todo-app:local-write-durable")))
-    .catch(() => {
-      toast.error("Could not save this task locally");
-    });
+    .catch(() => toast.error("Could not save this task locally"));
 }
 
 export function TodoList() {

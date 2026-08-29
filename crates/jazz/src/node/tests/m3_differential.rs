@@ -1709,13 +1709,7 @@ fn aggregate_payload_value(
     ) {
         return None;
     }
-    let fields: Vec<(Option<String>, groove::records::ValueType)> =
-        postcard::from_bytes(&payload.descriptor).unwrap();
-    let descriptor = groove::records::RecordDescriptor::new(
-        fields
-            .into_iter()
-            .map(|(name, value_type)| (name.unwrap(), value_type)),
-    );
+    let descriptor = groove::records::decode_record_descriptor(&payload.descriptor).unwrap();
     let record = groove::records::BorrowedRecord::new(&payload.record, &descriptor);
     let Value::U64(bucket) = record.get("user_bucket").unwrap() else {
         panic!("aggregate bucket must be U64");

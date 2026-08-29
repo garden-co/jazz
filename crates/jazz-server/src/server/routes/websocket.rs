@@ -23,9 +23,8 @@ use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::tools::Session;
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint, WireError,
-    WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, current_wire_features,
-    encode_frame, negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
+    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
@@ -250,6 +249,14 @@ async fn ws_admission(
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|value| value.to_str().ok());
+    let has_authenticated_backend_session = has_session_header
+        && matches!(
+            (
+                state.auth_config.backend_secret.as_deref(),
+                backend_secret,
+            ),
+            (Some(expected), Some(provided)) if expected == provided
+        );
     if backend_secret.is_some() && !has_jwt && !has_session_header {
         crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
@@ -262,10 +269,10 @@ async fn ws_admission(
     }
 
     if !has_jwt
-        && !has_session_header
+        && !has_authenticated_backend_session
         && ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
     {
-        validate_ws_cookie_origin(&headers)?;
+        validate_ws_cookie_origin(&headers, state.auth_config.trust_forwarded_host)?;
     }
 
     let session = crate::middleware::auth::extract_session(
@@ -347,12 +354,15 @@ fn ws_has_auth_cookie(headers: &HeaderMap, cookie_name: Option<&str>) -> bool {
         })
 }
 
-fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
+fn validate_ws_cookie_origin(
+    headers: &HeaderMap,
+    trust_forwarded_host: bool,
+) -> Result<(), String> {
     let origin = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "cookie websocket auth requires Origin header".to_owned())?;
-    let host = ws_cookie_origin_host(headers)
+    let host = ws_cookie_origin_host(headers, trust_forwarded_host)
         .ok_or_else(|| "cookie websocket auth requires Host header".to_owned())?;
 
     if ws_origin_matches_host(origin, host) {
@@ -361,18 +371,22 @@ fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
     Err("cookie websocket auth Origin does not match Host".to_owned())
 }
 
-fn ws_cookie_origin_host(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("X-Forwarded-Host")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
+fn ws_cookie_origin_host(headers: &HeaderMap, trust_forwarded_host: bool) -> Option<&str> {
+    let forwarded_host = trust_forwarded_host
+        .then(|| {
             headers
-                .get(axum::http::header::HOST)
+                .get("X-Forwarded-Host")
                 .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
         })
+        .flatten();
+    forwarded_host.or_else(|| {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+    })
 }
 
 fn ws_origin_matches_host(origin: &str, host: &str) -> bool {
@@ -540,12 +554,7 @@ async fn handle_ws_connection(
         return;
     };
 
-    let negotiated = match negotiate_wire(
-        &remote_hello,
-        WIRE_PROTOCOL_VERSION,
-        WIRE_PROTOCOL_VERSION,
-        current_wire_features(),
-    ) {
+    let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
         Ok(negotiated) if negotiated.features & WS_REQUIRED_FEATURES != 0 => negotiated,
         Ok(_) => {
             send_ws_error(
@@ -1007,7 +1016,7 @@ mod tests {
     use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
-        WireMessageFragment, WireTransport,
+        WIRE_PROTOCOL_VERSION, WireMessageFragment, WireTransport,
     };
     use jazz::wire::{WireStreamDecoder, decode_frame, decode_sync_message};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -1164,23 +1173,23 @@ mod tests {
     }
 
     #[test]
-    fn ws_cookie_origin_uses_forwarded_host_before_host() {
+    fn bug_302_cookie_origin_ignores_forwarded_host_without_trusted_proxy() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
-            "https://app.example".parse().unwrap(),
+            "https://evil.example".parse().unwrap(),
         );
-        headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
-        headers.insert("X-Forwarded-Host", "app.example".parse().unwrap());
-
-        assert!(validate_ws_cookie_origin(&headers).is_ok());
-
+        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
         headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+
+        assert!(
+            validate_ws_cookie_origin(&headers, false).is_err(),
+            "an untrusted forwarded host must not bypass the cookie origin guard"
+        );
     }
 
     #[test]
-    fn ws_cookie_origin_uses_first_forwarded_host() {
+    fn ws_cookie_origin_uses_first_forwarded_host_when_trusted_proxy_enabled() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
@@ -1192,7 +1201,7 @@ mod tests {
             "app.example, proxy.local".parse().unwrap(),
         );
 
-        assert!(validate_ws_cookie_origin(&headers).is_ok());
+        assert!(validate_ws_cookie_origin(&headers, true).is_ok());
     }
 
     #[test]
@@ -1204,13 +1213,67 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers, false).is_err());
 
         headers.insert(
             axum::http::header::ORIGIN,
             "https://evil.example".parse().unwrap(),
         );
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+        assert!(validate_ws_cookie_origin(&headers, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn bug_302_orphan_backend_session_cannot_bypass_cookie_origin_check() {
+        let app_id = AppId::random();
+        let state = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                auth_cookie_name: Some("jazz-auth".to_owned()),
+                allow_local_first_auth: true,
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .build()
+            .await
+            .expect("build cookie auth websocket state")
+            .state;
+        let seed = [0x42; 32];
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3_600,
+        )
+        .expect("mint local-first cookie token");
+        let user_id = jazz::tools::identity::derive_user_id(&seed).to_string();
+        let peer_identity = AuthorSubject::from_canonical(
+            &serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, user_id))
+                .expect("encode local-first author"),
+        )
+        .expect("local-first peer identity");
+        let prelude = WebSocketPrelude {
+            peer_identity: peer_identity.canonical().to_owned(),
+            bootstrap_catalogue: false,
+            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_session: Some(serde_json::json!({ "attacker": true })),
+                ..Default::default()
+            },
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("jazz-auth={token}").parse().unwrap(),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example".parse().unwrap(),
+        );
+        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
+
+        let error = ws_admission(prelude, &headers, &state)
+            .await
+            .expect_err("orphan backend session must not suppress cookie origin enforcement");
+        assert!(error.contains("Origin does not match Host"), "{error}");
     }
 
     #[test]
@@ -1713,12 +1776,6 @@ mod tests {
         .to_string()
         .into_bytes();
         (identity, prelude)
-    }
-
-    fn ws_client_hello_batch() -> Vec<u8> {
-        ws_client_hello_batch_with_features(
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        )
     }
 
     fn ws_client_hello_batch_with_features(features: u64) -> Vec<u8> {

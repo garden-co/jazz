@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
+use std::{future::Future, pin::Pin};
 pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
@@ -42,11 +43,13 @@ pub(super) enum CurrentAccessPath {
     },
 }
 
-impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
+impl<S> JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
-    async fn prepare_source_graph(
+    /// The complete source-family dispatcher. Keep uncommon historical and
+    /// branch paths out of the ordinary inline policy-evaluation frame.
+    async fn prepare_source_graph_dispatch(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
@@ -1222,6 +1225,375 @@ where
             content_version,
             deletion_register,
         })
+    }
+
+    /// Prepare the ordinary current-row source without constructing the
+    /// historical/branch source-state machine.  This is the hot path for
+    /// regular reads and policy admission, where keeping the async frame
+    /// bounded matters because it can run beneath a peer tick.
+    async fn prepare_unprojected_visible_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        tier: DurabilityTier,
+    ) -> Result<ResolvedSource, SourceResolutionError> {
+        let projection = match self.read_view.sources.get(&request.source) {
+            Some(SourceExpr::VisibleCurrent {
+                projection,
+                data: DataSource::Current,
+                ..
+            }) => projection.clone(),
+            _ => return Err(source_resolution_error(request, SourceGap::Coverage)),
+        };
+        if !matches!(projection.schema_family, SchemaFamilySelection::Current)
+            || !matches!(
+                projection.storage,
+                StorageSchemaSelection::Single(_) | StorageSchemaSelection::CompatiblePartitions
+            )
+            || !matches!(projection.lens, LensSelection::Canonical)
+        {
+            return Err(source_resolution_error(
+                request,
+                SourceGap::SchemaProjection,
+            ));
+        }
+        let table = self
+            .node
+            .table_in_schema(&request.source.table, self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        // Policy-proof dependencies are raw evidence for the outer policy.
+        // Re-applying their own read policy recursively both changes the
+        // outer predicate's meaning and can manufacture a proof cycle.
+        let authorization = if matches!(
+            request.authorization,
+            SourceAuthorizationRequest::PolicyProof { .. }
+        ) {
+            SourceAuthorizationRequest::System
+        } else {
+            request.authorization.clone()
+        };
+        let selected_base = self
+            .selected_global_current_source_graph(request, &table, tier)
+            .await?;
+        let selected_base = match selected_base {
+            Some(selected_base) => Some(selected_base),
+            None => match self.cached_policy_authorization_access_path(request)? {
+                Some(access_path) => {
+                    self.selected_global_current_source_graph_for_access_path(
+                        request,
+                        &table,
+                        tier,
+                        access_path,
+                    )
+                    .await?
+                }
+                None => None,
+            },
+        };
+        if selected_base.is_none() {
+            self.node.query_engine_read_metrics.source_full_scans += 1;
+        }
+        let (graph, descriptor, metadata, routing_fields) = resolved_current_source_graph(
+            self.node,
+            &table,
+            tier,
+            &request.requirements,
+            &authorization,
+            self.read_view.policy_schema,
+            Some(self.read_view),
+            None,
+            selected_base,
+        )
+        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
+        let deletion_register =
+            self.deletion_register_source_for_request(request, &table, Some(tier), None, None)?;
+        let content_version = self
+            .content_version_source_for_request(request, &table, Some(tier), None, None)
+            .await?;
+        Ok(ResolvedSource {
+            table_schema: table,
+            graph,
+            row_shape: SourceRowShape {
+                source: request.source.clone(),
+                descriptor,
+                row_uuid_field: "row_uuid".to_owned(),
+                metadata,
+            },
+            routing_fields,
+            requires_result_payload: false,
+            content_version,
+            deletion_register,
+        })
+    }
+
+    /// Prepare a current-row source whose storage layout needs the projected
+    /// source path.  Kept separate from historical and branch preparation so
+    /// peer admission does not inherit their async frame.
+    async fn prepare_projected_visible_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        tier: DurabilityTier,
+    ) -> Result<ResolvedSource, SourceResolutionError> {
+        let projection = match self.read_view.sources.get(&request.source) {
+            Some(SourceExpr::VisibleCurrent {
+                projection,
+                data: DataSource::Current,
+                ..
+            }) => projection.clone(),
+            _ => return Err(source_resolution_error(request, SourceGap::Coverage)),
+        };
+        if !matches!(projection.schema_family, SchemaFamilySelection::Current)
+            || !matches!(
+                projection.storage,
+                StorageSchemaSelection::Single(_) | StorageSchemaSelection::CompatiblePartitions
+            )
+            || !matches!(projection.lens, LensSelection::Canonical)
+        {
+            return Err(source_resolution_error(
+                request,
+                SourceGap::SchemaProjection,
+            ));
+        }
+        let table = self
+            .node
+            .table_in_schema(&request.source.table, self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let authorization = if matches!(
+            request.authorization,
+            SourceAuthorizationRequest::PolicyProof { .. }
+        ) {
+            SourceAuthorizationRequest::System
+        } else {
+            request.authorization.clone()
+        };
+        let (graph, descriptor, metadata, routing_fields) =
+            if !request.requirements.metadata.is_empty() {
+                let source = self
+                    .projected_maintained_visible_current_source_graph(request, &table, tier)
+                    .await?;
+                resolved_current_source_graph(
+                    self.node,
+                    &table,
+                    tier,
+                    &request.requirements,
+                    &authorization,
+                    self.read_view.policy_schema,
+                    Some(self.read_view),
+                    None,
+                    Some(source.graph),
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            } else {
+                let selected_policy_base = if self.access_paths.contains_key(&request.source) {
+                    None
+                } else if let Some(access_path) =
+                    self.cached_policy_authorization_access_path(request)?
+                {
+                    self.selected_global_current_source_graph_for_access_path(
+                        request,
+                        &table,
+                        tier,
+                        access_path,
+                    )
+                    .await?
+                } else {
+                    None
+                };
+                let source = if let Some(graph) = selected_policy_base {
+                    CurrentSourceGraph {
+                        graph: graph.project_fields(storage_to_canonical_current_source_fields(
+                            &table, true, false,
+                        )),
+                        descriptor: current_row_descriptor(&table),
+                        metadata: BTreeMap::new(),
+                    }
+                } else {
+                    self.projected_visible_current_source_graph(request, &table, tier)
+                        .await?
+                };
+                let graph = match &authorization {
+                    SourceAuthorizationRequest::System => source.graph,
+                    SourceAuthorizationRequest::PolicyFiltered {
+                        permission_subject,
+                        plan,
+                    }
+                    | SourceAuthorizationRequest::PolicyProof {
+                        permission_subject,
+                        plan,
+                    } => {
+                        if plan.protected_source.table != table.name
+                            || plan.role != PolicyDecisionRole::Read
+                            || plan.protected_row_field != "row_uuid"
+                        {
+                            return Err(source_resolution_error(request, SourceGap::Coverage));
+                        }
+                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
+                        let policy_request = self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            param_binding_mode,
+                            tier,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                        );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = policy_read_view_projected_through(
+                                &request.reads.primary,
+                                self.read_view,
+                            );
+                            request
+                        });
+                        self.node
+                            .compose_policy_filtered_current_source_graph(
+                                policy_request,
+                                source.graph,
+                                &current_row_fields(&table),
+                            )
+                            .map_err(|error| {
+                                source_resolution_error_from_policy_proof(request, error)
+                            })?
+                            .graph
+                    }
+                };
+                (graph, source.descriptor, source.metadata, BTreeSet::new())
+            };
+        let deletion_register =
+            self.deletion_register_source_for_request(request, &table, Some(tier), None, None)?;
+        let content_version = self
+            .content_version_source_for_request(request, &table, Some(tier), None, None)
+            .await?;
+        Ok(ResolvedSource {
+            table_schema: table,
+            graph,
+            row_shape: SourceRowShape {
+                source: request.source.clone(),
+                descriptor,
+                row_uuid_field: "row_uuid".to_owned(),
+                metadata,
+            },
+            routing_fields,
+            requires_result_payload: false,
+            content_version,
+            deletion_register,
+        })
+    }
+}
+
+impl<S> JazzSourceGraphPreparer<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    async fn prepare_inline_visible_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<ResolvedSource, SourceResolutionError> {
+        let Some(SourceExpr::VisibleCurrent {
+            projection,
+            data: DataSource::Current,
+            ..
+        }) = self.read_view.sources.get(&request.source)
+        else {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        };
+        let Some(rows) = self.inline_sources.get(&request.source) else {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        };
+        if !matches!(projection.schema_family, SchemaFamilySelection::Current)
+            || !matches!(
+                projection.storage,
+                StorageSchemaSelection::Single(_) | StorageSchemaSelection::CompatiblePartitions
+            )
+            || !matches!(projection.lens, LensSelection::Canonical)
+        {
+            return Err(source_resolution_error(
+                request,
+                SourceGap::SchemaProjection,
+            ));
+        }
+        let authorization = if matches!(
+            request.authorization,
+            SourceAuthorizationRequest::PolicyProof { .. }
+        ) {
+            SourceAuthorizationRequest::System
+        } else {
+            request.authorization.clone()
+        };
+        if request.visibility != RowVisibility::Visible
+            || !matches!(authorization, SourceAuthorizationRequest::System)
+        {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        }
+        let table = self
+            .node
+            .table_in_schema(&request.source.table, self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let schema_version_alias = self
+            .node
+            .ensure_schema_version_alias(self.read_view.read_schema)
+            .await
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+        let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+            &table,
+            rows.clone(),
+            schema_version_alias,
+            "inline-current",
+            &request.requirements,
+        )
+        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+        Ok(ResolvedSource {
+            table_schema: table,
+            graph,
+            row_shape: SourceRowShape {
+                source: request.source.clone(),
+                descriptor,
+                row_uuid_field: "row_uuid".to_owned(),
+                metadata,
+            },
+            routing_fields: BTreeSet::new(),
+            requires_result_payload: false,
+            content_version: None,
+            deletion_register: None,
+        })
+    }
+}
+
+impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn prepare_source_graph<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+        let visible_current = match self.read_view.sources.get(&request.source) {
+            Some(SourceExpr::VisibleCurrent {
+                projection,
+                data: DataSource::Current,
+                tier,
+            }) => Some((projection.clone(), *tier)),
+            _ => None,
+        };
+        if let Some((_projection, tier)) = visible_current {
+            if self.inline_sources.contains_key(&request.source) {
+                return Box::pin(self.prepare_inline_visible_current_source_graph(request));
+            }
+            if request.visibility == RowVisibility::Visible {
+                if self.needs_projected_current_source(&request.source.table) {
+                    return Box::pin(
+                        self.prepare_projected_visible_current_source_graph(request, tier),
+                    );
+                }
+                return Box::pin(
+                    self.prepare_unprojected_visible_current_source_graph(request, tier),
+                );
+            }
+        }
+        Box::pin(self.prepare_source_graph_dispatch(request))
     }
 }
 
@@ -3185,14 +3557,31 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
+        // Root reads address the shared (empty) branch coordinate. Physical
+        // current indexes include that coordinate first so identical user keys
+        // from branch-local rows cannot alias the shared index domain.
+        let index_prefix = |prefix: &[Value]| {
+            std::iter::once(Value::Bytes(BranchKey::default().canonical_bytes()))
+                .chain(prefix.iter().cloned())
+                .collect::<Vec<_>>()
+        };
+        let scan_prefix = index_prefix(prefix);
         let scan = match source_limit {
             Some(max_items) => StaticScanSpec::PrefixLimit {
-                prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                prefix: scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
                 max_items,
             },
-            None => {
-                StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
-            }
+            None => StaticScanSpec::Prefix(
+                scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
+            ),
         };
         let intersections = intersections
             .iter()
@@ -3208,7 +3597,10 @@ where
                 Ok((
                     physical_current_index_name(column_id),
                     StaticScanSpec::Prefix(
-                        prefix.iter().cloned().map(LiteralValue::from).collect(),
+                        index_prefix(prefix)
+                            .into_iter()
+                            .map(LiteralValue::from)
+                            .collect(),
                     ),
                 ))
             })

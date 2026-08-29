@@ -1341,15 +1341,14 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
             },
             settled_through: jazz::time::GlobalTime(0),
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles: vec![VersionBundle {
+            version_carriers: vec![jazz::protocol::VersionCarrier::Bundle(VersionBundle {
                 tx,
                 versions,
                 scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
                 fate: Fate::Accepted,
                 global_time: None,
                 durability: DurabilityTier::Edge,
-            }],
+            })],
             peer_payload_inventory: PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),

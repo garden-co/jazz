@@ -1,4 +1,5 @@
 use super::*;
+use std::{future::Future, pin::Pin};
 
 /// Logical source request made by query, policy, or fact lowering.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,10 +118,10 @@ pub(crate) enum FieldRequirement {
 /// trait on the preparation side of `lower_resolved_query_program`.
 pub(crate) trait SourceGraphPreparer {
     /// Prepare one source request into a concrete Groove graph and row shape.
-    async fn prepare_source_graph(
-        &mut self,
-        request: &SourceRequest,
-    ) -> Result<ResolvedSource, SourceResolutionError>;
+    fn prepare_source_graph<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>>;
 }
 
 /// Concrete source selected for one logical source request.

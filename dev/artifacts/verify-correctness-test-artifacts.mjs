@@ -47,6 +47,35 @@ function methodParameters(body, method, error) {
   throw new Error(`unterminated WasmDb.${method} parameters`);
 }
 
+function hasProperty(body, property) {
+  return new RegExp(`(?:^|\\n)\\s*(?:readonly\\s+)?${property}\\s*(?::|\\()`, "m").test(body);
+}
+
+function hasGetter(body, property) {
+  return new RegExp(`(?:^|\\n)\\s*get\\s+${property}\\s*\\(`, "m").test(body);
+}
+
+function verifyWasmWriteSurface(generatedTypes, generatedGlue, failures) {
+  const generatedWriteTypes = classBody(generatedTypes, "WasmWrite");
+  const generatedWriteGlue = classBody(generatedGlue, "WasmWrite");
+  if (!hasProperty(generatedWriteTypes, "txId"))
+    failures.push("generated WASM WasmWrite declaration is missing txId");
+  if (hasProperty(generatedWriteTypes, "batchId"))
+    failures.push("generated WASM WasmWrite declaration still exposes batchId");
+  if (hasProperty(generatedWriteTypes, "transactionId"))
+    failures.push("generated WASM WasmWrite declaration still exposes transactionId");
+  if (!hasGetter(generatedWriteGlue, "txId"))
+    failures.push("generated WASM WasmWrite glue is missing txId");
+  if (hasGetter(generatedWriteGlue, "batchId"))
+    failures.push("generated WASM WasmWrite glue still exposes batchId");
+  if (hasGetter(generatedWriteGlue, "transactionId"))
+    failures.push("generated WASM WasmWrite glue still exposes transactionId");
+  if (!/\bwasmwrite_txId\b/.test(generatedTypes) || !/\bwasmwrite_txId\b/.test(generatedGlue))
+    failures.push("generated WASM write export is missing wasmwrite_txId");
+  if (/\bwasmwrite_batchId\b/.test(generatedTypes) || /\bwasmwrite_batchId\b/.test(generatedGlue))
+    failures.push("generated WASM write export still exposes wasmwrite_batchId");
+}
+
 // TypeScript parameter types may contain commas in generic, tuple, function,
 // or object types. Count only commas at the parameter-list top level, so an
 // ABI check measures runtime arguments rather than type syntax.
@@ -111,6 +140,11 @@ export function verifyCorrectnessTestArtifacts(rootDir = root) {
           `WASM ABI drift for WasmDb.${method}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
         );
     }
+    verifyWasmWriteSurface(
+      readFileSync(resolve(wasmPackage, "jazz_wasm.d.ts"), "utf8"),
+      readFileSync(resolve(wasmPackage, "jazz_wasm.js"), "utf8"),
+      failures,
+    );
     const expectedTransport = classBody(
       text("packages/jazz-tools/src/types/jazz-wasm.d.ts", rootDir),
       "WasmTransport",

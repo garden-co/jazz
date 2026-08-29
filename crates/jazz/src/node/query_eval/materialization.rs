@@ -775,19 +775,17 @@ where
         member: &ResultMemberEntry,
         payload: &ResultMemberPayloadEntry,
     ) -> Result<CurrentRow, Error> {
-        let fields: Vec<(Option<String>, ValueType)> = postcard::from_bytes(&payload.descriptor)
+        let payload_descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
             .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
-        let payload_descriptor = RecordDescriptor::new(
-            fields
-                .into_iter()
-                .map(|(name, value_type)| {
-                    name.map(|name| (name, value_type))
-                        .ok_or(Error::InvalidStoredValue(
-                            "result payload descriptor field must be named",
-                        ))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        if payload_descriptor
+            .fields()
+            .iter()
+            .any(|field| field.name.is_none())
+        {
+            return Err(Error::InvalidStoredValue(
+                "result payload descriptor field must be named",
+            ));
+        }
         let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
         aggregate_current_row_from_record(
             query.table.as_str(),
@@ -801,19 +799,17 @@ where
         table: &TableSchema,
         payload: &ResultMemberPayloadEntry,
     ) -> Result<CurrentRow, Error> {
-        let fields: Vec<(Option<String>, ValueType)> = postcard::from_bytes(&payload.descriptor)
+        let payload_descriptor = groove::records::decode_record_descriptor(&payload.descriptor)
             .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
-        let payload_descriptor = RecordDescriptor::new(
-            fields
-                .into_iter()
-                .map(|(name, value_type)| {
-                    name.map(|name| (name, value_type))
-                        .ok_or(Error::InvalidStoredValue(
-                            "result payload descriptor field must be named",
-                        ))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        if payload_descriptor
+            .fields()
+            .iter()
+            .any(|field| field.name.is_none())
+        {
+            return Err(Error::InvalidStoredValue(
+                "result payload descriptor field must be named",
+            ));
+        }
         let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
         let row_uuid_idx = payload_descriptor
             .field_index("row_uuid")

@@ -13,6 +13,7 @@ fn signed_test_jwt(issuer: &str, subject: &str) -> String {
         &Header::new(Algorithm::HS256),
         &json!({
             "iss": issuer,
+            "aud": "jazz-audience",
             "sub": subject,
             "exp": 4_102_444_800_u64,
             "claims": {
@@ -24,18 +25,20 @@ fn signed_test_jwt(issuer: &str, subject: &str) -> String {
     .unwrap()
 }
 
-fn test_jwt_config() -> AuthAdmissionConfig {
+fn test_jwt_config(issuer: &str) -> AuthAdmissionConfig {
     AuthAdmissionConfig::jwt(JwtVerifierConfig::hmac_secret(
         Algorithm::HS256,
         TEST_JWT_SECRET,
     ))
+    .with_expected_issuer(issuer)
+    .with_expected_audience("jazz-audience")
 }
 
 #[test]
 fn signed_external_jwt_preserves_exact_issuer_and_subject() {
     let token = signed_test_jwt(" https://issuer.example ", " user ");
     let admitted = admit_bearer_jwt(
-        &test_jwt_config(),
+        &test_jwt_config(" https://issuer.example "),
         Some(&token),
         AdmissionSource::AuthorizationHeader,
     )
@@ -74,7 +77,7 @@ fn signed_external_jwt_rejects_reserved_issuers_during_resolution() {
         let token = signed_test_jwt(issuer, "user");
         assert_eq!(
             admit_bearer_jwt(
-                &test_jwt_config(),
+                &test_jwt_config(issuer),
                 Some(&token),
                 AdmissionSource::AuthorizationHeader,
             ),

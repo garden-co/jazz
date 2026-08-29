@@ -535,6 +535,59 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
     assert!(chunks.len() < before);
 }
 
+// Timestamp mutation is intentionally internal because Jazz's host-maintenance
+// policy owns expiry. The public batch path proves that a still-present receipt
+// is not rejected merely because its persisted observation time is old.
+#[futures_test::test]
+async fn present_staged_receipt_has_no_implicit_ttl_and_is_accepted_atomically() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![0x71; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .await
+        .unwrap();
+    let key = staged_large_value_key(staged.id);
+    let encoded = database
+        .storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut aged = decode_staged_large_value_at_key(&key, &encoded).unwrap();
+    aged.created_at_ms = 0;
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key,
+            value: encode_staged_large_value(&aged).unwrap(),
+        }])
+        .await
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+    );
+    batch.accept_large_value(staged.id);
+    database.commit_batch(batch).await.unwrap();
+    assert!(database.staged_large_values().await.unwrap().is_empty());
+}
+
 #[futures_test::test]
 async fn direct_consolidation_stages_a_derived_descriptor_with_reused_base_nodes() {
     let schema = DatabaseSchema::new([TableSchema::new(
@@ -1180,7 +1233,7 @@ async fn completed_upload_retry_rejects_substituted_receipt_id_after_reopen() {
             .finalize_large_value_upload(upload_id, prepared.value_ref)
             .await,
         Err(Error::InvalidLargeValueMetadata(message))
-            if message.contains("receipt does not match")
+            if message.contains("key and receipt id differ")
     ));
 }
 

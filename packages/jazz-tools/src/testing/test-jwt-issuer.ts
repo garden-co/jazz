@@ -2,6 +2,10 @@ import { TestJwtIssuer } from "jazz-napi";
 
 export interface TestJwtIssuerHandle {
   jwksUrl: string;
+  /** Exact issuer configured for tokens minted by this test endpoint. */
+  issuer: string;
+  /** Exact audience configured for tokens minted by this test endpoint. */
+  audience: string;
   jwtForUser: (
     userId: string,
     claims?: Record<string, unknown>,
@@ -16,8 +20,9 @@ export interface TestJwtIssuerHandle {
 /**
  * Start a local JWKS endpoint for tests and mint JWTs signed by its key.
  *
- * Use the returned `jwksUrl` with {@link startLocalJazzServer} to exercise
- * external JWT auth without depending on a real identity provider.
+ * Pair the returned `jwksUrl`, `issuer`, and `audience` with
+ * {@link startLocalJazzServer} to exercise fail-closed external JWT auth
+ * without depending on a real identity provider.
  */
 export async function startTestJwtIssuer(): Promise<TestJwtIssuerHandle> {
   const issuer = await TestJwtIssuer.start();
@@ -32,6 +37,8 @@ export async function startTestJwtIssuer(): Promise<TestJwtIssuerHandle> {
 
   return {
     jwksUrl: issuer.jwksUrl,
+    issuer: issuer.issuer,
+    audience: issuer.audience,
     jwtForUser: (userId, claims, options) => issuer.jwtForUser(userId, claims, options),
     stop,
   };

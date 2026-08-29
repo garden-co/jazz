@@ -4,7 +4,7 @@ use super::evaluation_session::EvaluationInputs;
 use super::*;
 use crate::storage::OwnedStorage;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 /// Stable handle returned to callers for subscription management.
@@ -688,12 +688,509 @@ pub(super) struct RoutedMultisinkTerminalState {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct BindingKey(pub(super) Vec<u8>);
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub(super) struct AutoDirectFamilyKey {
     pub(super) graph: GraphBuilder,
     pub(super) binding_descriptor: RecordDescriptor,
     pub(super) binding_field: String,
     pub(super) public_fields: Vec<String>,
+}
+
+impl std::fmt::Debug for AutoDirectFamilyKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AutoDirectFamilyKey")
+            .field("graph_fingerprint", &graph_builder_fingerprint(&self.graph))
+            .field("binding_descriptor", &self.binding_descriptor)
+            .field("binding_field", &self.binding_field)
+            .field("public_fields", &self.public_fields)
+            .finish()
+    }
+}
+
+impl PartialEq for AutoDirectFamilyKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.binding_descriptor == other.binding_descriptor
+            && self.binding_field == other.binding_field
+            && self.public_fields == other.public_fields
+            && graph_builders_equal(&self.graph, &other.graph)
+    }
+}
+
+impl Eq for AutoDirectFamilyKey {}
+
+impl Hash for AutoDirectFamilyKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        graph_builder_fingerprint(&self.graph).hash(state);
+        self.binding_descriptor.hash(state);
+        self.binding_field.hash(state);
+        self.public_fields.hash(state);
+    }
+}
+
+/// Bounded structural fingerprint for auto-direct family lookup. Hash-map
+/// collisions are resolved by [`graph_builders_equal`], so this hash never
+/// carries semantic identity by itself.
+fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
+    let mut hashes = HashMap::<*const GraphBuilder, u64>::default();
+    macro_rules! child {
+        ($child:expr) => {
+            *hashes
+                .get(&($child.as_ref() as *const GraphBuilder))
+                .expect("postorder visits graph children before their parent")
+        };
+    }
+    for node in graph.postorder() {
+        let node_ptr = node as *const GraphBuilder;
+        if hashes.contains_key(&node_ptr) {
+            continue;
+        }
+        let mut hasher = DefaultHasher::new();
+        std::mem::discriminant(node).hash(&mut hasher);
+        match node {
+            GraphBuilder::Table {
+                table,
+                scan,
+                variant_projection,
+            } => {
+                table.hash(&mut hasher);
+                scan.hash(&mut hasher);
+                variant_projection.hash(&mut hasher);
+            }
+            GraphBuilder::InlineRecords { output, records } => {
+                output.hash(&mut hasher);
+                records.hash(&mut hasher);
+            }
+            GraphBuilder::Index {
+                table,
+                index,
+                scan,
+                intersections,
+                row_projection,
+            } => {
+                table.hash(&mut hasher);
+                index.hash(&mut hasher);
+                scan.hash(&mut hasher);
+                intersections.hash(&mut hasher);
+                row_projection.hash(&mut hasher);
+            }
+            GraphBuilder::FrontierSource { binding, output } => {
+                binding.hash(&mut hasher);
+                output.hash(&mut hasher);
+            }
+            GraphBuilder::BindingSource { shape, output } => {
+                shape.hash(&mut hasher);
+                output.hash(&mut hasher);
+            }
+            GraphBuilder::Recursive {
+                seed,
+                step,
+                frontier,
+                max_iters,
+            } => {
+                child!(seed).hash(&mut hasher);
+                child!(step).hash(&mut hasher);
+                frontier.hash(&mut hasher);
+                max_iters.hash(&mut hasher);
+            }
+            GraphBuilder::Filter {
+                input,
+                predicate,
+                comparison,
+            } => {
+                child!(input).hash(&mut hasher);
+                predicate.hash(&mut hasher);
+                comparison.hash(&mut hasher);
+            }
+            GraphBuilder::UnwrapNullable { input, field } => {
+                child!(input).hash(&mut hasher);
+                field.hash(&mut hasher);
+            }
+            GraphBuilder::Unnest {
+                input,
+                array_field,
+                element_field,
+            } => {
+                child!(input).hash(&mut hasher);
+                array_field.hash(&mut hasher);
+                element_field.hash(&mut hasher);
+            }
+            GraphBuilder::VariantProject { input, field, case } => {
+                child!(input).hash(&mut hasher);
+                field.hash(&mut hasher);
+                case.hash(&mut hasher);
+            }
+            GraphBuilder::Project { input, fields } => {
+                child!(input).hash(&mut hasher);
+                fields.hash(&mut hasher);
+            }
+            GraphBuilder::StreamingChecksum {
+                input,
+                field,
+                output_field,
+                window_bytes,
+                max_bytes_per_turn,
+            } => {
+                child!(input).hash(&mut hasher);
+                field.hash(&mut hasher);
+                output_field.hash(&mut hasher);
+                window_bytes.hash(&mut hasher);
+                max_bytes_per_turn.hash(&mut hasher);
+            }
+            GraphBuilder::Union { inputs } => {
+                for input in inputs {
+                    child!(input).hash(&mut hasher);
+                }
+            }
+            GraphBuilder::Join {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            }
+            | GraphBuilder::SemiJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            }
+            | GraphBuilder::AntiJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            } => {
+                child!(left).hash(&mut hasher);
+                child!(right).hash(&mut hasher);
+                left_on.hash(&mut hasher);
+                right_on.hash(&mut hasher);
+                comparison.hash(&mut hasher);
+            }
+            GraphBuilder::ArgMaxBy {
+                input,
+                group_cols,
+                order_cols,
+            }
+            | GraphBuilder::ArgMinBy {
+                input,
+                group_cols,
+                order_cols,
+            } => {
+                child!(input).hash(&mut hasher);
+                group_cols.hash(&mut hasher);
+                order_cols.hash(&mut hasher);
+            }
+            GraphBuilder::TopBy {
+                input,
+                group_cols,
+                order_cols,
+                tie_cols,
+                offset,
+                limit,
+            } => {
+                child!(input).hash(&mut hasher);
+                group_cols.hash(&mut hasher);
+                order_cols.hash(&mut hasher);
+                tie_cols.hash(&mut hasher);
+                offset.hash(&mut hasher);
+                limit.hash(&mut hasher);
+            }
+            GraphBuilder::CollectBy { input, collect } => {
+                child!(input).hash(&mut hasher);
+                collect.hash(&mut hasher);
+            }
+            GraphBuilder::Aggregate {
+                input,
+                group_cols,
+                aggregates,
+            } => {
+                child!(input).hash(&mut hasher);
+                group_cols.hash(&mut hasher);
+                aggregates.hash(&mut hasher);
+            }
+        }
+        hashes.insert(node_ptr, hasher.finish());
+    }
+    *hashes
+        .get(&std::ptr::from_ref(graph))
+        .expect("postorder includes the graph root")
+}
+
+/// Exact, nonrecursive equality check paired with the bounded family hash.
+fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
+    let mut pending = vec![(left, right)];
+    while let Some((left, right)) = pending.pop() {
+        match (left, right) {
+            (
+                GraphBuilder::Table {
+                    table: a,
+                    scan: b,
+                    variant_projection: c,
+                },
+                GraphBuilder::Table {
+                    table: x,
+                    scan: y,
+                    variant_projection: z,
+                },
+            ) if a == x && b == y && c == z => {}
+            (
+                GraphBuilder::InlineRecords {
+                    output: a,
+                    records: b,
+                },
+                GraphBuilder::InlineRecords {
+                    output: x,
+                    records: y,
+                },
+            ) if a == x && b == y => {}
+            (
+                GraphBuilder::Index {
+                    table: a,
+                    index: b,
+                    scan: c,
+                    intersections: d,
+                    row_projection: e,
+                },
+                GraphBuilder::Index {
+                    table: x,
+                    index: y,
+                    scan: z,
+                    intersections: w,
+                    row_projection: v,
+                },
+            ) if a == x && b == y && c == z && d == w && e == v => {}
+            (
+                GraphBuilder::FrontierSource {
+                    binding: a,
+                    output: b,
+                },
+                GraphBuilder::FrontierSource {
+                    binding: x,
+                    output: y,
+                },
+            ) if a == x && b == y => {}
+            (
+                GraphBuilder::BindingSource {
+                    shape: a,
+                    output: b,
+                },
+                GraphBuilder::BindingSource {
+                    shape: x,
+                    output: y,
+                },
+            ) if a == x && b == y => {}
+            (
+                GraphBuilder::Recursive {
+                    seed: a,
+                    step: b,
+                    frontier: c,
+                    max_iters: d,
+                },
+                GraphBuilder::Recursive {
+                    seed: x,
+                    step: y,
+                    frontier: z,
+                    max_iters: w,
+                },
+            ) if c == z && d == w => {
+                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
+            }
+            (
+                GraphBuilder::Filter {
+                    input: a,
+                    predicate: b,
+                    comparison: c,
+                },
+                GraphBuilder::Filter {
+                    input: x,
+                    predicate: y,
+                    comparison: z,
+                },
+            ) if b == y && c == z => pending.push((a, x)),
+            (
+                GraphBuilder::UnwrapNullable { input: a, field: b },
+                GraphBuilder::UnwrapNullable { input: x, field: y },
+            ) if b == y => pending.push((a, x)),
+            (
+                GraphBuilder::Unnest {
+                    input: a,
+                    array_field: b,
+                    element_field: c,
+                },
+                GraphBuilder::Unnest {
+                    input: x,
+                    array_field: y,
+                    element_field: z,
+                },
+            ) if b == y && c == z => pending.push((a, x)),
+            (
+                GraphBuilder::VariantProject {
+                    input: a,
+                    field: b,
+                    case: c,
+                },
+                GraphBuilder::VariantProject {
+                    input: x,
+                    field: y,
+                    case: z,
+                },
+            ) if b == y && c == z => pending.push((a, x)),
+            (
+                GraphBuilder::Project {
+                    input: a,
+                    fields: b,
+                },
+                GraphBuilder::Project {
+                    input: x,
+                    fields: y,
+                },
+            ) if b == y => pending.push((a, x)),
+            (
+                GraphBuilder::StreamingChecksum {
+                    input: a,
+                    field: b,
+                    output_field: c,
+                    window_bytes: d,
+                    max_bytes_per_turn: e,
+                },
+                GraphBuilder::StreamingChecksum {
+                    input: x,
+                    field: y,
+                    output_field: z,
+                    window_bytes: w,
+                    max_bytes_per_turn: v,
+                },
+            ) if b == y && c == z && d == w && e == v => pending.push((a, x)),
+            (GraphBuilder::Union { inputs: a }, GraphBuilder::Union { inputs: x })
+                if a.len() == x.len() =>
+            {
+                pending.extend(a.iter().zip(x).map(|(a, x)| (a.as_ref(), x.as_ref())))
+            }
+            (
+                GraphBuilder::Join {
+                    left: a,
+                    right: b,
+                    left_on: c,
+                    right_on: d,
+                    comparison: e,
+                },
+                GraphBuilder::Join {
+                    left: x,
+                    right: y,
+                    left_on: z,
+                    right_on: w,
+                    comparison: v,
+                },
+            ) if c == z && d == w && e == v => {
+                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
+            }
+            (
+                GraphBuilder::SemiJoin {
+                    left: a,
+                    right: b,
+                    left_on: c,
+                    right_on: d,
+                    comparison: e,
+                },
+                GraphBuilder::SemiJoin {
+                    left: x,
+                    right: y,
+                    left_on: z,
+                    right_on: w,
+                    comparison: v,
+                },
+            ) if c == z && d == w && e == v => {
+                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
+            }
+            (
+                GraphBuilder::AntiJoin {
+                    left: a,
+                    right: b,
+                    left_on: c,
+                    right_on: d,
+                    comparison: e,
+                },
+                GraphBuilder::AntiJoin {
+                    left: x,
+                    right: y,
+                    left_on: z,
+                    right_on: w,
+                    comparison: v,
+                },
+            ) if c == z && d == w && e == v => {
+                pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
+            }
+            (
+                GraphBuilder::ArgMaxBy {
+                    input: a,
+                    group_cols: b,
+                    order_cols: c,
+                },
+                GraphBuilder::ArgMaxBy {
+                    input: x,
+                    group_cols: y,
+                    order_cols: z,
+                },
+            ) if b == y && c == z => pending.push((a, x)),
+            (
+                GraphBuilder::ArgMinBy {
+                    input: a,
+                    group_cols: b,
+                    order_cols: c,
+                },
+                GraphBuilder::ArgMinBy {
+                    input: x,
+                    group_cols: y,
+                    order_cols: z,
+                },
+            ) if b == y && c == z => pending.push((a, x)),
+            (
+                GraphBuilder::TopBy {
+                    input: a,
+                    group_cols: b,
+                    order_cols: c,
+                    tie_cols: d,
+                    offset: e,
+                    limit: f,
+                },
+                GraphBuilder::TopBy {
+                    input: x,
+                    group_cols: y,
+                    order_cols: z,
+                    tie_cols: w,
+                    offset: v,
+                    limit: u,
+                },
+            ) if b == y && c == z && d == w && e == v && f == u => pending.push((a, x)),
+            (
+                GraphBuilder::CollectBy {
+                    input: a,
+                    collect: b,
+                },
+                GraphBuilder::CollectBy {
+                    input: x,
+                    collect: y,
+                },
+            ) if b == y => pending.push((a, x)),
+            (
+                GraphBuilder::Aggregate {
+                    input: a,
+                    group_cols: b,
+                    aggregates: c,
+                },
+                GraphBuilder::Aggregate {
+                    input: x,
+                    group_cols: y,
+                    aggregates: z,
+                },
+            ) if b == y && c == z => pending.push((a, x)),
+            _ => return false,
+        }
+    }
+    true
 }
 
 struct AutoDirectFamilyPlan {
@@ -872,7 +1369,7 @@ fn bound_routed_multisink_graph(
             .map(|predicate| input.as_ref().clone().filter(predicate))
             .unwrap_or_else(|| input.as_ref().clone());
         return GraphBuilder::CollectBy {
-            input: Box::new(input),
+            input: Arc::new(input),
             collect: Box::new(collect),
         };
     }
@@ -890,63 +1387,14 @@ fn route_predicate(field: &str, value: &Value) -> PredicateExpr {
 }
 
 pub(super) fn count_builder_nodes(graph: &GraphBuilder) -> usize {
-    match graph {
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => 1,
-        GraphBuilder::Recursive { seed, step, .. } => {
-            1 + count_builder_nodes(seed) + count_builder_nodes(step)
-        }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => 1 + count_builder_nodes(input),
-        GraphBuilder::Union { inputs } => 1 + inputs.iter().map(count_builder_nodes).sum::<usize>(),
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            1 + count_builder_nodes(left) + count_builder_nodes(right)
-        }
-    }
+    graph.postorder().len()
 }
 
 pub(super) fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
-    match graph {
-        GraphBuilder::BindingSource { .. } => true,
-        GraphBuilder::Recursive { seed, step, .. } => {
-            builder_contains_binding_source(seed) || builder_contains_binding_source(step)
-        }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => builder_contains_binding_source(input),
-        GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_binding_source),
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            builder_contains_binding_source(left) || builder_contains_binding_source(right)
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. } => false,
-    }
+    graph
+        .postorder()
+        .iter()
+        .any(|node| matches!(node, GraphBuilder::BindingSource { .. }))
 }
 
 #[derive(Clone)]
@@ -984,47 +1432,14 @@ fn collect_builder_field_names(
     runtime: &IvmRuntime,
     occupied: &mut HashSet<String>,
 ) -> Result<(), IvmRuntimeError> {
-    let output = runtime.infer_builder_output(graph)?;
-    occupied.extend(
-        output
-            .fields()
-            .iter()
-            .filter_map(|field| field.name.as_ref().cloned()),
-    );
-    match graph {
-        GraphBuilder::Recursive { seed, step, .. } => {
-            collect_builder_field_names(seed, runtime, occupied)?;
-            collect_builder_field_names(step, runtime, occupied)?;
-        }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => {
-            collect_builder_field_names(input, runtime, occupied)?;
-        }
-        GraphBuilder::Union { inputs } => {
-            for input in inputs {
-                collect_builder_field_names(input, runtime, occupied)?;
-            }
-        }
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            collect_builder_field_names(left, runtime, occupied)?;
-            collect_builder_field_names(right, runtime, occupied)?;
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => {}
+    for node in graph.postorder() {
+        let output = runtime.infer_builder_output(node)?;
+        occupied.extend(
+            output
+                .fields()
+                .iter()
+                .filter_map(|field| field.name.as_ref().cloned()),
+        );
     }
     Ok(())
 }
@@ -1034,6 +1449,34 @@ fn lift_literal_filter(
     graph: &GraphBuilder,
     binding_field: &str,
 ) -> Result<Option<LiftedLiteralFilter>, IvmRuntimeError> {
+    let mut lifted = HashMap::<*const GraphBuilder, Option<LiftedLiteralFilter>>::default();
+    for node in graph.postorder() {
+        let node_ptr = node as *const GraphBuilder;
+        if lifted.contains_key(&node_ptr) {
+            continue;
+        }
+        let result = lift_literal_filter_node(runtime, node, binding_field, &lifted)?;
+        lifted.insert(node_ptr, result);
+    }
+    Ok(lifted
+        .remove(&std::ptr::from_ref(graph))
+        .expect("postorder includes the graph root"))
+}
+
+fn lift_literal_filter_node(
+    runtime: &IvmRuntime,
+    graph: &GraphBuilder,
+    binding_field: &str,
+    lifted_children: &HashMap<*const GraphBuilder, Option<LiftedLiteralFilter>>,
+) -> Result<Option<LiftedLiteralFilter>, IvmRuntimeError> {
+    macro_rules! lifted_child {
+        ($child:expr) => {
+            lifted_children
+                .get(&($child.as_ref() as *const GraphBuilder))
+                .expect("postorder visits graph children before their parent")
+                .clone()
+        };
+    }
     match graph {
         GraphBuilder::Filter {
             input,
@@ -1061,10 +1504,10 @@ fn lift_literal_filter(
                     value: value.clone(),
                 }));
             }
-            if let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? {
+            if let Some(lifted) = lifted_child!(input) {
                 return Ok(Some(LiftedLiteralFilter {
                     graph: GraphBuilder::Filter {
-                        input: Box::new(lifted.graph),
+                        input: Arc::new(lifted.graph),
                         predicate: predicate.clone(),
                         comparison: *comparison,
                     },
@@ -1082,9 +1525,9 @@ fn lift_literal_filter(
                 comparison,
             } = input.as_ref()
             {
-                if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
+                if let Some(lifted) = lifted_child!(left) {
                     let joined = GraphBuilder::Join {
-                        left: Box::new(lifted.graph),
+                        left: Arc::new(lifted.graph),
                         right: right.clone(),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
@@ -1102,10 +1545,10 @@ fn lift_literal_filter(
                         value: lifted.value,
                     }));
                 }
-                if let Some(lifted) = lift_literal_filter(runtime, right, binding_field)? {
+                if let Some(lifted) = lifted_child!(right) {
                     let joined = GraphBuilder::Join {
                         left: left.clone(),
-                        right: Box::new(lifted.graph),
+                        right: Arc::new(lifted.graph),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
                         comparison: *comparison,
@@ -1225,7 +1668,7 @@ fn lift_literal_filter(
                     value: value.clone(),
                 }));
             }
-            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+            let Some(lifted) = lifted_child!(input) else {
                 return Ok(None);
             };
             let mut fields = fields.clone();
@@ -1236,7 +1679,7 @@ fn lift_literal_filter(
             );
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::Project {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     fields,
                 },
                 value: lifted.value,
@@ -1249,10 +1692,10 @@ fn lift_literal_filter(
             right_on,
             comparison,
         } => {
-            if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
+            if let Some(lifted) = lifted_child!(left) {
                 let original_output = runtime.infer_builder_output(graph)?;
                 let joined = GraphBuilder::Join {
-                    left: Box::new(lifted.graph),
+                    left: Arc::new(lifted.graph),
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
@@ -1268,11 +1711,11 @@ fn lift_literal_filter(
                     value: lifted.value,
                 }));
             }
-            if let Some(lifted) = lift_literal_filter(runtime, right, binding_field)? {
+            if let Some(lifted) = lifted_child!(right) {
                 let original_output = runtime.infer_builder_output(graph)?;
                 let joined = GraphBuilder::Join {
                     left: left.clone(),
-                    right: Box::new(lifted.graph),
+                    right: Arc::new(lifted.graph),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
                     comparison: *comparison,
@@ -1296,12 +1739,12 @@ fn lift_literal_filter(
             right_on,
             comparison,
         } => {
-            let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
+            let Some(lifted) = lifted_child!(left) else {
                 return Ok(None);
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::AntiJoin {
-                    left: Box::new(lifted.graph),
+                    left: Arc::new(lifted.graph),
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
@@ -1317,12 +1760,12 @@ fn lift_literal_filter(
             right_on,
             comparison,
         } => {
-            let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
+            let Some(lifted) = lifted_child!(left) else {
                 return Ok(None);
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::SemiJoin {
-                    left: Box::new(lifted.graph),
+                    left: Arc::new(lifted.graph),
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
@@ -1334,12 +1777,12 @@ fn lift_literal_filter(
         GraphBuilder::Recursive { .. } => Ok(None),
         GraphBuilder::Union { .. } | GraphBuilder::VariantProject { .. } => Ok(None),
         GraphBuilder::UnwrapNullable { input, field } => {
-            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+            let Some(lifted) = lifted_child!(input) else {
                 return Ok(None);
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::UnwrapNullable {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     field: field.clone(),
                 },
                 value: lifted.value,
@@ -1350,12 +1793,12 @@ fn lift_literal_filter(
             array_field,
             element_field,
         } => {
-            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+            let Some(lifted) = lifted_child!(input) else {
                 return Ok(None);
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::Unnest {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     array_field: array_field.clone(),
                     element_field: element_field.clone(),
                 },
@@ -1367,14 +1810,14 @@ fn lift_literal_filter(
             group_cols,
             order_cols,
         } => {
-            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+            let Some(lifted) = lifted_child!(input) else {
                 return Ok(None);
             };
             let mut group_cols = group_cols.clone();
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::ArgMaxBy {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     order_cols: order_cols.clone(),
                 },
@@ -1386,14 +1829,14 @@ fn lift_literal_filter(
             group_cols,
             order_cols,
         } => {
-            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+            let Some(lifted) = lifted_child!(input) else {
                 return Ok(None);
             };
             let mut group_cols = group_cols.clone();
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::ArgMinBy {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     order_cols: order_cols.clone(),
                 },
@@ -1408,14 +1851,14 @@ fn lift_literal_filter(
             offset,
             limit,
         } => {
-            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+            let Some(lifted) = lifted_child!(input) else {
                 return Ok(None);
             };
             let mut group_cols = group_cols.clone();
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::TopBy {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     order_cols: order_cols.clone(),
                     tie_cols: tie_cols.clone(),
@@ -1431,14 +1874,14 @@ fn lift_literal_filter(
             group_cols,
             aggregates,
         } => {
-            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+            let Some(lifted) = lifted_child!(input) else {
                 return Ok(None);
             };
             let mut group_cols = group_cols.clone();
             group_cols.push(FieldRef::name(binding_field));
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::Aggregate {
-                    input: Box::new(lifted.graph),
+                    input: Arc::new(lifted.graph),
                     group_cols,
                     aggregates: aggregates.clone(),
                 },
@@ -1592,7 +2035,7 @@ fn project_to_output_with_binding(
         binding_project_source(&graph, binding_field),
     );
     Ok(GraphBuilder::Project {
-        input: Box::new(graph),
+        input: Arc::new(graph),
         fields,
     })
 }
@@ -1628,49 +2071,60 @@ fn binding_project_source(input: &GraphBuilder, binding_field: &str) -> String {
 }
 
 fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
-    match graph {
-        GraphBuilder::BindingSource { output, .. }
-        | GraphBuilder::FrontierSource { output, .. }
-        | GraphBuilder::InlineRecords { output, .. } => output.field_index(binding_field).is_some(),
-        GraphBuilder::Project { fields, .. } => fields
-            .iter()
-            .any(|field| field.output_name == binding_field),
-        GraphBuilder::StreamingChecksum {
-            input,
-            field,
-            output_field,
-            ..
-        } => {
-            if output_field == binding_field {
-                true
-            } else if matches!(field, FieldRef::Name(name) if name == binding_field) {
-                false
-            } else {
-                graph_outputs_binding(input, binding_field)
-            }
-        }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => graph_outputs_binding(input, binding_field),
-        GraphBuilder::Recursive { seed, .. } => graph_outputs_binding(seed, binding_field),
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            graph_outputs_binding(left, binding_field)
-                || graph_outputs_binding(right, binding_field)
-        }
-        GraphBuilder::Union { inputs } => inputs
-            .iter()
-            .any(|input| graph_outputs_binding(input, binding_field)),
-        GraphBuilder::Table { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::VariantProject { .. } => false,
+    let mut outputs = HashMap::<*const GraphBuilder, bool>::default();
+    macro_rules! child {
+        ($child:expr) => {
+            *outputs
+                .get(&($child.as_ref() as *const GraphBuilder))
+                .expect("postorder visits graph children before their parent")
+        };
     }
+    for node in graph.postorder() {
+        let node_ptr = node as *const GraphBuilder;
+        if outputs.contains_key(&node_ptr) {
+            continue;
+        }
+        let output = match node {
+            GraphBuilder::BindingSource { output, .. }
+            | GraphBuilder::FrontierSource { output, .. }
+            | GraphBuilder::InlineRecords { output, .. } => {
+                output.field_index(binding_field).is_some()
+            }
+            GraphBuilder::Project { fields, .. } => fields
+                .iter()
+                .any(|field| field.output_name == binding_field),
+            GraphBuilder::StreamingChecksum {
+                input,
+                field,
+                output_field,
+                ..
+            } => {
+                output_field == binding_field
+                    || (!matches!(field, FieldRef::Name(name) if name == binding_field)
+                        && child!(input))
+            }
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. }
+            | GraphBuilder::CollectBy { input, .. }
+            | GraphBuilder::Aggregate { input, .. } => child!(input),
+            GraphBuilder::Recursive { seed, .. } => child!(seed),
+            GraphBuilder::Join { left, right, .. }
+            | GraphBuilder::SemiJoin { left, right, .. }
+            | GraphBuilder::AntiJoin { left, right, .. } => child!(left) || child!(right),
+            GraphBuilder::Union { inputs } => inputs.iter().any(|input| child!(input)),
+            GraphBuilder::Table { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::VariantProject { .. } => false,
+        };
+        outputs.insert(node_ptr, output);
+    }
+    *outputs
+        .get(&std::ptr::from_ref(graph))
+        .expect("postorder includes the graph root")
 }
 
 #[allow(dead_code)]
@@ -1706,7 +2160,7 @@ fn propagate_binding_through_frontier(
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::Filter {
-                input: Box::new(input),
+                input: Arc::new(input),
                 predicate: predicate.clone(),
                 comparison: *comparison,
             })
@@ -1721,7 +2175,7 @@ fn propagate_binding_through_frontier(
                 binding_project_source(&input, binding_field),
             );
             Some(GraphBuilder::Project {
-                input: Box::new(input),
+                input: Arc::new(input),
                 fields,
             })
         }
@@ -1729,7 +2183,7 @@ fn propagate_binding_through_frontier(
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::UnwrapNullable {
-                input: Box::new(input),
+                input: Arc::new(input),
                 field: field.clone(),
             })
         }
@@ -1741,7 +2195,7 @@ fn propagate_binding_through_frontier(
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::Unnest {
-                input: Box::new(input),
+                input: Arc::new(input),
                 array_field: array_field.clone(),
                 element_field: element_field.clone(),
             })
@@ -1764,8 +2218,8 @@ fn propagate_binding_through_frontier(
                 propagate_binding_through_frontier(right, frontier, binding_field, binding_type)
                     .unwrap_or_else(|| (**right).clone());
             Some(GraphBuilder::Join {
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Arc::new(left),
+                right: Arc::new(right),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
                 comparison: *comparison,
@@ -1781,7 +2235,7 @@ fn propagate_binding_through_frontier(
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::SemiJoin {
-                left: Box::new(left),
+                left: Arc::new(left),
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
@@ -1798,7 +2252,7 @@ fn propagate_binding_through_frontier(
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::AntiJoin {
-                left: Box::new(left),
+                left: Arc::new(left),
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
@@ -1822,135 +2276,166 @@ fn propagate_binding_through_frontier(
     }
 }
 
-fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
-    match graph {
-        GraphBuilder::BindingSource { output, .. } => GraphBuilder::binding_source(shape, output),
-        GraphBuilder::Recursive {
-            seed,
-            step,
-            frontier,
-            max_iters,
-        } => GraphBuilder::Recursive {
-            seed: Box::new(replace_binding_shape(*seed, shape)),
-            step: Box::new(replace_binding_shape(*step, shape)),
-            frontier,
-            max_iters,
-        },
-        GraphBuilder::Filter {
-            input,
-            predicate,
-            comparison,
-        } => GraphBuilder::Filter {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            predicate,
-            comparison,
-        },
-        GraphBuilder::Project { input, fields } => GraphBuilder::Project {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            fields,
-        },
-        GraphBuilder::UnwrapNullable { input, field } => GraphBuilder::UnwrapNullable {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            field,
-        },
-        GraphBuilder::Unnest {
-            input,
-            array_field,
-            element_field,
-        } => GraphBuilder::Unnest {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            array_field,
-            element_field,
-        },
-        GraphBuilder::ArgMaxBy {
-            input,
-            group_cols,
-            order_cols,
-        } => GraphBuilder::ArgMaxBy {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            group_cols,
-            order_cols,
-        },
-        GraphBuilder::ArgMinBy {
-            input,
-            group_cols,
-            order_cols,
-        } => GraphBuilder::ArgMinBy {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            group_cols,
-            order_cols,
-        },
-        GraphBuilder::TopBy {
-            input,
-            group_cols,
-            order_cols,
-            tie_cols,
-            offset,
-            limit,
-        } => GraphBuilder::TopBy {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            group_cols,
-            order_cols,
-            tie_cols,
-            offset,
-            limit,
-        },
-        GraphBuilder::Aggregate {
-            input,
-            group_cols,
-            aggregates,
-        } => GraphBuilder::Aggregate {
-            input: Box::new(replace_binding_shape(*input, shape)),
-            group_cols,
-            aggregates,
-        },
-        GraphBuilder::Union { inputs } => GraphBuilder::Union {
-            inputs: inputs
-                .into_iter()
-                .map(|input| replace_binding_shape(input, shape))
-                .collect(),
-        },
-        GraphBuilder::Join {
-            left,
-            right,
-            left_on,
-            right_on,
-            comparison,
-        } => GraphBuilder::Join {
-            left: Box::new(replace_binding_shape(*left, shape)),
-            right: Box::new(replace_binding_shape(*right, shape)),
-            left_on,
-            right_on,
-            comparison,
-        },
-        GraphBuilder::SemiJoin {
-            left,
-            right,
-            left_on,
-            right_on,
-            comparison,
-        } => GraphBuilder::SemiJoin {
-            left: Box::new(replace_binding_shape(*left, shape)),
-            right: Box::new(replace_binding_shape(*right, shape)),
-            left_on,
-            right_on,
-            comparison,
-        },
-        GraphBuilder::AntiJoin {
-            left,
-            right,
-            left_on,
-            right_on,
-            comparison,
-        } => GraphBuilder::AntiJoin {
-            left: Box::new(replace_binding_shape(*left, shape)),
-            right: Box::new(replace_binding_shape(*right, shape)),
-            left_on,
-            right_on,
-            comparison,
-        },
-        graph => graph,
+fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
+    // Auto-direct planning can build a long chain of otherwise ordinary
+    // operators. Rewriting the binding source must therefore be bounded just
+    // like compilation: transform the owned graph in iterative postorder
+    // rather than recursing once per operator.
+    let mut rewritten = HashMap::<*const GraphBuilder, Arc<GraphBuilder>>::default();
+    macro_rules! child {
+        ($child:expr) => {{
+            let child = $child;
+            rewritten
+                .get(&(child.as_ref() as *const GraphBuilder))
+                .expect("postorder rewrites every graph child before its parent")
+                .clone()
+        }};
     }
+
+    for node in graph.postorder() {
+        let node_ptr = node as *const GraphBuilder;
+        if rewritten.contains_key(&node_ptr) {
+            continue;
+        }
+        let replacement = match node {
+            GraphBuilder::BindingSource { output, .. } => {
+                GraphBuilder::binding_source(shape, *output)
+            }
+            GraphBuilder::Recursive {
+                seed,
+                step,
+                frontier,
+                max_iters,
+            } => GraphBuilder::Recursive {
+                seed: child!(seed),
+                step: child!(step),
+                frontier: frontier.clone(),
+                max_iters: *max_iters,
+            },
+            GraphBuilder::Filter {
+                input,
+                predicate,
+                comparison,
+            } => GraphBuilder::Filter {
+                input: child!(input),
+                predicate: predicate.clone(),
+                comparison: *comparison,
+            },
+            GraphBuilder::Project { input, fields } => GraphBuilder::Project {
+                input: child!(input),
+                fields: fields.clone(),
+            },
+            GraphBuilder::UnwrapNullable { input, field } => GraphBuilder::UnwrapNullable {
+                input: child!(input),
+                field: field.clone(),
+            },
+            GraphBuilder::Unnest {
+                input,
+                array_field,
+                element_field,
+            } => GraphBuilder::Unnest {
+                input: child!(input),
+                array_field: array_field.clone(),
+                element_field: element_field.clone(),
+            },
+            GraphBuilder::ArgMaxBy {
+                input,
+                group_cols,
+                order_cols,
+            } => GraphBuilder::ArgMaxBy {
+                input: child!(input),
+                group_cols: group_cols.clone(),
+                order_cols: order_cols.clone(),
+            },
+            GraphBuilder::ArgMinBy {
+                input,
+                group_cols,
+                order_cols,
+            } => GraphBuilder::ArgMinBy {
+                input: child!(input),
+                group_cols: group_cols.clone(),
+                order_cols: order_cols.clone(),
+            },
+            GraphBuilder::TopBy {
+                input,
+                group_cols,
+                order_cols,
+                tie_cols,
+                offset,
+                limit,
+            } => GraphBuilder::TopBy {
+                input: child!(input),
+                group_cols: group_cols.clone(),
+                order_cols: order_cols.clone(),
+                tie_cols: tie_cols.clone(),
+                offset: *offset,
+                limit: *limit,
+            },
+            GraphBuilder::Aggregate {
+                input,
+                group_cols,
+                aggregates,
+            } => GraphBuilder::Aggregate {
+                input: child!(input),
+                group_cols: group_cols.clone(),
+                aggregates: aggregates.clone(),
+            },
+            GraphBuilder::Union { inputs } => GraphBuilder::Union {
+                inputs: inputs.iter().map(|input| child!(input)).collect(),
+            },
+            GraphBuilder::Join {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            } => GraphBuilder::Join {
+                left: child!(left),
+                right: child!(right),
+                left_on: left_on.clone(),
+                right_on: right_on.clone(),
+                comparison: *comparison,
+            },
+            GraphBuilder::SemiJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            } => GraphBuilder::SemiJoin {
+                left: child!(left),
+                right: child!(right),
+                left_on: left_on.clone(),
+                right_on: right_on.clone(),
+                comparison: *comparison,
+            },
+            GraphBuilder::AntiJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            } => GraphBuilder::AntiJoin {
+                left: child!(left),
+                right: child!(right),
+                left_on: left_on.clone(),
+                right_on: right_on.clone(),
+                comparison: *comparison,
+            },
+            // Preserve the former behavior for operators auto-direct does not
+            // rewrite through: their enclosing graph stays byte-for-byte
+            // equivalent, even if a child happens to contain a binding.
+            node => node.clone(),
+        };
+        rewritten.insert(node_ptr, Arc::new(replacement));
+    }
+
+    Arc::try_unwrap(
+        rewritten
+            .remove(&std::ptr::from_ref(graph))
+            .expect("postorder includes the graph root"),
+    )
+    .expect("rewritten graph root has no parent")
 }
 
 impl IvmRuntime {
@@ -2677,14 +3162,12 @@ impl IvmRuntime {
             return Ok(None);
         };
         let shape_seed = "__auto_direct_shape".to_owned();
-        let graph = replace_binding_shape(lifted.graph, &shape_seed);
+        let graph = replace_binding_shape(&lifted.graph, &shape_seed);
         let shape_output = self.infer_builder_output(&graph)?;
         validate_public_output_fields(&shape_output, &original_output)?;
         let public_fields = descriptor_field_names(&original_output)?;
-        let mut hasher = DefaultHasher::new();
-        graph.hash(&mut hasher);
-        let shape = format!("auto_direct_{:016x}", hasher.finish());
-        let graph = replace_binding_shape(graph, &shape);
+        let shape = format!("auto_direct_{:016x}", graph_builder_fingerprint(&graph));
+        let graph = replace_binding_shape(&graph, &shape);
         if shape_output.field_index(&binding_field).is_none() {
             return Ok(None);
         }
@@ -3119,5 +3602,53 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_graph_traversal_tests {
+    use super::*;
+
+    #[test]
+    fn deep_binding_shape_rewrite_and_family_keying_fit_a_two_mib_stack() {
+        std::thread::Builder::new()
+            .name("deep-binding-shape-rewrite".to_owned())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                const DEPTH: usize = 4_096;
+                let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+                let mut graph = GraphBuilder::binding_source("old_shape", descriptor);
+                for _ in 0..DEPTH {
+                    graph = graph.project(["id"]);
+                }
+
+                assert_eq!(count_builder_nodes(&graph), DEPTH + 1);
+                assert!(builder_contains_binding_source(&graph));
+                let rewritten = replace_binding_shape(&graph, "new_shape");
+                assert_eq!(rewritten.postorder().len(), DEPTH + 1);
+                assert!(graph_builders_equal(&rewritten, &rewritten.clone()));
+                assert_eq!(
+                    graph_builder_fingerprint(&rewritten),
+                    graph_builder_fingerprint(&rewritten.clone())
+                );
+
+                let mut leaf = &rewritten;
+                for _ in 0..DEPTH {
+                    let GraphBuilder::Project { input, .. } = leaf else {
+                        panic!("rewrite must preserve the unary project chain");
+                    };
+                    leaf = input;
+                }
+                assert!(matches!(leaf, GraphBuilder::BindingSource { shape, .. } if shape == "new_shape"));
+
+                // Arc child destruction is intentionally independent of this
+                // traversal receipt; do not make its stack behavior mask a
+                // regression in bounded rewrite/keying.
+                std::mem::forget(graph);
+                std::mem::forget(rewritten);
+            })
+            .expect("spawn normal-stack traversal test")
+            .join()
+            .expect("normal-stack traversal test must not overflow");
     }
 }

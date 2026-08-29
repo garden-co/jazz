@@ -92,7 +92,7 @@ const relationalRecipientApp = s.defineApp({
 });
 const relationalRecipientPermissions = {
   ...betterAuthPermissions,
-  ...s.definePermissions(relationalRecipientApp, ({ policy, session, anyOf, allowedTo }) => {
+  ...s.definePermissions(relationalRecipientApp, ({ policy, session, allOf, anyOf, allowedTo }) => {
     policy.albums.allowRead.where({});
     policy.albums.allowInsert.where({ $createdBy: session.user });
     policy.tracks.allowRead.where({});
@@ -133,21 +133,28 @@ const relationalRecipientPermissions = {
     policy.invitations.allowInsert.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
-    policy.invitations.allowUpdate.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
-    );
     policy.invitations.allowUpdate
-      .whereOld({ subject: session.user, status: "pending" })
-      .whereNew((invite) =>
-        policy.invitations.exists.where({
-          id: invite.id,
-          playlist_id: invite.playlist_id,
-          subject: invite.subject,
-          role: invite.role,
-          status: "pending",
-        }),
+      .whereOld((invite) =>
+        anyOf([
+          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          { subject: session.user, status: "pending" },
+        ]),
       )
-      .whereNew({ subject: session.user, status: "accepted" });
+      .whereNew((invite) =>
+        anyOf([
+          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          allOf([
+            policy.invitations.exists.where({
+              id: invite.id,
+              playlist_id: invite.playlist_id,
+              subject: invite.subject,
+              role: invite.role,
+              status: "pending",
+            }),
+            { subject: session.user, status: "accepted" },
+          ]),
+        ]),
+      );
     policy.invitations.allowDelete.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
@@ -269,7 +276,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       "edge",
     );
     const acceptance = recipient.update(app.invitations, invitation.id, { status: "accepted" });
-    await expect(acceptance.batchId).resolves.toEqual(expect.any(String));
+    await expect(acceptance.txId).resolves.toEqual(expect.any(String));
     await withTimeout(
       acceptance.wait({ tier: "edge" }),
       10_000,
@@ -648,9 +655,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
               const playlistWrite = owner.insert(app.playlists, {
                 name: "Road tape",
               });
-              const playlistBatchId = await playlistWrite.batchId;
+              const playlistTxId = await playlistWrite.txId;
               console.info("[record-player-topology] playlist transaction", {
-                transactionId: playlistBatchId,
+                transactionId: playlistTxId,
               });
               await withTimeout(
                 playlistWrite.wait({ tier: "local" }),
@@ -665,11 +672,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 void edgeSettlement.then(
                   () =>
                     console.info("[record-player-topology] playlist edge settlement resolved", {
-                      transactionId: playlistBatchId,
+                      transactionId: playlistTxId,
                     }),
                   (error) =>
                     console.info("[record-player-topology] playlist edge settlement rejected", {
-                      transactionId: playlistBatchId,
+                      transactionId: playlistTxId,
                       error: String(error),
                     }),
                 );
@@ -694,7 +701,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 status: "pending",
               });
               console.info("[record-player-topology] editor invitation transaction", {
-                transactionId: await editorInviteWrite.batchId,
+                transactionId: await editorInviteWrite.txId,
               });
               editorInvite = await editorInviteWrite.wait({ tier: "edge" });
               console.info("[record-player-topology] editor invitation edge settlement");
@@ -706,7 +713,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 status: "pending",
               });
               console.info("[record-player-topology] listener invitation transaction", {
-                transactionId: await listenerInviteWrite.batchId,
+                transactionId: await listenerInviteWrite.txId,
               });
               listenerInvite = await listenerInviteWrite.wait({ tier: "edge" });
               console.info("[record-player-topology] listener invitation edge settlement");
@@ -738,17 +745,17 @@ describe("RecordPlayer authenticated playlist topology", () => {
               const editorAcceptance = editor.update(app.invitations, editorInvite.id, {
                 status: "accepted",
               });
-              const editorAcceptanceBatchId = await editorAcceptance.batchId;
+              const editorAcceptanceTxId = await editorAcceptance.txId;
               console.info("[record-player-topology] editor acceptance transaction", {
-                transactionId: editorAcceptanceBatchId,
+                transactionId: editorAcceptanceTxId,
               });
               console.info("[record-player-topology] accept listener invitation");
               const listenerAcceptance = listener.update(app.invitations, listenerInvite.id, {
                 status: "accepted",
               });
-              const listenerAcceptanceBatchId = await listenerAcceptance.batchId;
+              const listenerAcceptanceTxId = await listenerAcceptance.txId;
               console.info("[record-player-topology] listener acceptance transaction", {
-                transactionId: listenerAcceptanceBatchId,
+                transactionId: listenerAcceptanceTxId,
               });
               const stopEditorMutationErrors = editor.onMutationError((event) => {
                 console.info("[record-player-topology] editor acceptance error", {
@@ -770,22 +777,22 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 void editorAcceptanceSettlement.then(
                   () =>
                     console.info("[record-player-topology] editor acceptance settled", {
-                      transactionId: editorAcceptanceBatchId,
+                      transactionId: editorAcceptanceTxId,
                     }),
                   (error) =>
                     console.info("[record-player-topology] editor acceptance rejected", {
-                      transactionId: editorAcceptanceBatchId,
+                      transactionId: editorAcceptanceTxId,
                       error: String(error),
                     }),
                 );
                 void listenerAcceptanceSettlement.then(
                   () =>
                     console.info("[record-player-topology] listener acceptance settled", {
-                      transactionId: listenerAcceptanceBatchId,
+                      transactionId: listenerAcceptanceTxId,
                     }),
                   (error) =>
                     console.info("[record-player-topology] listener acceptance rejected", {
-                      transactionId: listenerAcceptanceBatchId,
+                      transactionId: listenerAcceptanceTxId,
                       error: String(error),
                     }),
                 );
@@ -1205,13 +1212,12 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   "edge",
                 ),
               ]);
-
               // This production schema keeps permissions separate from row
-              // declarations. A standalone policy-scoped exact-id Edge read
-              // must forward and settle as a fresh relay authority session;
-              // it must not fall back to Local or reuse ordinary Global.
-              // The revocation check below proves that its Edge membership is
-              // withdrawn even while Local can retain the materialized body.
+              // declarations. This policy-scoped exact-id Edge read must use
+              // the editor's Global authorization receipt, not re-evaluate a
+              // cached row as a trusted relay or fall back to Local. The
+              // revocation check below proves the receipt is withdrawn while
+              // Local can retain the materialized body.
               const authorizedExactChild = await waitForQuery(
                 editor,
                 app.playlist_entries.where({ id: belowWindowEntryId }),
@@ -1221,7 +1227,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 "edge",
               );
               expect(authorizedExactChild.map((row) => row.id)).toEqual([belowWindowEntryId]);
-
               await owner.delete(app.invitations, editorInvite.id).wait({ tier: "edge" });
               await Promise.all([
                 waitForQuery(

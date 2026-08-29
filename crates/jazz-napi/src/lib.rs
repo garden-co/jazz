@@ -43,14 +43,16 @@ pub type JsonValue = serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
 use futures::task::{ArcWake, waker};
@@ -86,7 +88,8 @@ use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
 use jazz::schema::JazzSchema;
-use jazz::tools::OpenTransactionId as CoreOpenBatchId;
+use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
+use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
 use jazz::tools::identity;
 use jazz::tools::{AppId, TransactionId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
@@ -96,10 +99,12 @@ use jazz::wire::{
 };
 use jazz_server::AuthConfig;
 use jazz_server::{
-    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
-    TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
+    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend, TEST_JWT_AUDIENCE,
+    TEST_JWT_ISSUER, TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
-use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
+use jazz_storage_rocksdb::{
+    Durability as CoreRocksDbDurability, RocksDbStorage as CoreRocksDbStorage,
+};
 
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
@@ -107,6 +112,14 @@ pub fn native_artifact_fingerprint() -> String {
     option_env!("JAZZ_NATIVE_ARTIFACT_FINGERPRINT")
         .unwrap_or("missing-build-fingerprint")
         .to_owned()
+}
+
+/// Test-only bridge for executing the Rust-owned v1 binding corpus through the
+/// generated NAPI artifact. It intentionally returns the frozen corpus rather
+/// than a TypeScript reimplementation of its byte layouts.
+#[napi(js_name = "__testBindingCodecGoldenFixture", skip_typescript)]
+pub fn test_binding_codec_golden_fixture() -> String {
+    jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -294,7 +307,7 @@ pub struct QueryAttachment {
 pub struct Write {
     payload: Vec<u8>,
     row_id: CoreRowUuid,
-    batch_id: TransactionId,
+    tx_id: TransactionId,
     inner: Option<NapiWrite>,
 }
 
@@ -732,11 +745,15 @@ enum NapiSubscription {
 
 #[napi(js_name = "Tx")]
 pub struct Tx {
-    db: NapiDbInnerStorage,
+    // Attached transaction views retain a core `Rc` independently of their
+    // owner `NapiDb`. They must be explicitly releasable: waiting for the JS
+    // GC finalizer after the owner closes keeps persistent storage alive past
+    // the host-visible close boundary.
+    db: Option<NapiDbInnerStorage>,
     kind: NapiTxKind,
-    open_tx: Option<CoreOpenBatchId>,
+    open_tx: Option<CoreOpenTransactionId>,
     owns_lifetime: bool,
-    /// A backend-attributed batch is deliberately root-only until branch
+    /// A backend-attributed transaction is deliberately root-only until branch
     /// attribution has a separately designed representation.
     attributed: bool,
 }
@@ -750,7 +767,11 @@ enum NapiTxKind {
 macro_rules! with_napi_mergeable_tx {
     ($transaction:expr, |$tx:ident| $operation:expr) => {{
         let open_tx = $transaction.open_tx()?;
-        match &$transaction.db {
+        let db = $transaction
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        match db {
             NapiDbInnerStorage::Memory(db) => {
                 let $tx = db.mergeable_tx_ref(open_tx);
                 core_block_on($operation)
@@ -767,7 +788,11 @@ macro_rules! with_napi_mergeable_tx {
 macro_rules! with_napi_exclusive_tx {
     ($transaction:expr, |$tx:ident| $operation:expr) => {{
         let open_tx = $transaction.open_tx()?;
-        match &$transaction.db {
+        let db = $transaction
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        match db {
             NapiDbInnerStorage::Memory(db) => {
                 let $tx = db.exclusive_tx_ref(open_tx);
                 core_block_on($operation)
@@ -816,9 +841,9 @@ impl Write {
 
 #[napi]
 impl Write {
-    #[napi(getter, js_name = "batchId")]
-    pub fn batch_id(&self) -> String {
-        self.batch_id.to_string()
+    #[napi(getter, js_name = "txId")]
+    pub fn tx_id(&self) -> String {
+        self.tx_id.to_string()
     }
 
     #[napi(getter)]
@@ -1234,11 +1259,15 @@ impl Tx {
     pub fn commit(&mut self) -> napi::Result<Write> {
         if !self.owns_lifetime {
             return Err(napi::Error::from_reason(
-                "attached transaction views cannot commit the owner-wide batch",
+                "attached transaction views cannot commit the owner-wide transaction",
             ));
         }
         let open_tx = self.open_tx()?;
-        let write = match &self.db {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        let write = match db {
             NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, open_tx),
             NapiDbInnerStorage::Persistent(db) => core_commit_tx_persistent(db, open_tx),
         }?;
@@ -1250,13 +1279,31 @@ impl Tx {
     pub fn rollback(&mut self) -> napi::Result<()> {
         if !self.owns_lifetime {
             return Err(napi::Error::from_reason(
-                "attached transaction views cannot roll back the owner-wide batch",
+                "attached transaction views cannot roll back the owner-wide transaction",
             ));
         }
         let open_tx = self.open_tx()?;
         self.abandon(open_tx)?;
         self.open_tx.take();
         Ok(())
+    }
+
+    /// Release this transaction view's core reference. Attached views do not
+    /// own the batch lifetime, while owning views abandon an uncommitted batch
+    /// just as their Drop implementation does.
+    #[napi]
+    pub fn close(&mut self) -> bool {
+        let Some(db) = self.db.take() else {
+            return false;
+        };
+        if self.owns_lifetime {
+            if let Some(open_tx) = self.open_tx.take() {
+                let _ = abandon_transaction_handle(&db, open_tx);
+            }
+        } else {
+            self.open_tx.take();
+        }
+        true
     }
 }
 
@@ -1270,17 +1317,17 @@ impl Tx {
         Ok(())
     }
 
-    fn open_tx(&self) -> napi::Result<CoreOpenBatchId> {
+    fn open_tx(&self) -> napi::Result<CoreOpenTransactionId> {
         self.open_tx
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
     }
 
-    fn abandon(&self, open_tx: CoreOpenBatchId) -> napi::Result<()> {
-        match &self.db {
-            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
-            NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+    fn abandon(&self, open_tx: CoreOpenTransactionId) -> napi::Result<()> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        abandon_transaction_handle(db, open_tx)
     }
 }
 
@@ -1296,6 +1343,17 @@ impl Drop for Tx {
     }
 }
 
+fn abandon_transaction_handle(
+    db: &NapiDbInnerStorage,
+    open_tx: CoreOpenTransactionId,
+) -> napi::Result<()> {
+    match db {
+        NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
+        NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
+    }
+    .map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
 #[napi(js_name = "NapiDb")]
 pub struct NapiDb {
     inner: NapiDbInner,
@@ -1305,7 +1363,7 @@ pub struct NapiDb {
     trusted_backend: bool,
     /// Owner-wide marker carried into short-lived attached Tx handles so they
     /// can reject branch operations before staging any mutation.
-    attributed_mergeable_batches: Rc<RefCell<HashSet<CoreOpenBatchId>>>,
+    attributed_mergeable_batches: Rc<RefCell<HashSet<CoreOpenTransactionId>>>,
 }
 
 /// Native bounded-memory sink used by the TypeScript async streaming-mutation
@@ -1989,10 +2047,7 @@ impl NapiDb {
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = CoreRocksDbStorage::open(data_path, &refs)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
@@ -2014,10 +2069,7 @@ impl NapiDb {
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_backend_identity(&config)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = CoreRocksDbStorage::open(data_path, &refs)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, true)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
@@ -2045,10 +2097,7 @@ impl NapiDb {
             claimed_author,
         };
         let identity = core_open_identity(&config, Some(&proof))?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = CoreRocksDbStorage::open(data_path, &refs)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let storage = open_persistent_core_storage(data_path, &schema)?;
         let db = open_core_db(schema, storage, config, identity, false)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
@@ -2086,49 +2135,49 @@ impl NapiDb {
         })
     }
 
-    /// Attach a schema view to an owner-wide mergeable batch without opening,
-    /// committing, or abandoning that batch.
+    /// Attach a schema view to an owner-wide mergeable transaction without opening,
+    /// committing, or abandoning that transaction.
     #[napi(js_name = "attachMergeableTx")]
-    pub fn attach_mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn attach_mergeable_tx(&self, open_transaction_id: String) -> napi::Result<Tx> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(Tx {
-            db: match db {
+            db: Some(match db {
                 NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
-            },
+            }),
             kind: NapiTxKind::Mergeable,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: false,
             attributed: self
                 .attributed_mergeable_batches
                 .borrow()
-                .contains(&open_batch_id),
+                .contains(&open_transaction_id),
         })
     }
 
-    /// Attach a schema view to an existing owner-wide exclusive batch.
+    /// Attach a schema view to an existing owner-wide exclusive transaction.
     #[napi(js_name = "attachExclusiveTx")]
-    pub fn attach_exclusive_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn attach_exclusive_tx(&self, open_transaction_id: String) -> napi::Result<Tx> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         Ok(Tx {
-            db: match db {
+            db: Some(match db {
                 NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
                 NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
-            },
+            }),
             kind: NapiTxKind::Exclusive,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: false,
             attributed: false,
         })
@@ -2138,22 +2187,22 @@ impl NapiDb {
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: String,
         author: Option<Uint8Array>,
     ) -> napi::Result<()> {
-        self.begin_transaction_inner(open_batch_id, kind, author, None)
+        self.begin_transaction_inner(open_transaction_id, kind, author, None)
     }
 
     fn begin_transaction_inner(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: String,
         author: Option<Uint8Array>,
         attribution: Option<Uint8Array>,
     ) -> napi::Result<()> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let author = author
             .as_deref()
@@ -2191,24 +2240,24 @@ impl NapiDb {
                     if kind == "mergeable" {
                         match attribution {
                             Some(attribution) => {
-                                $db.begin_mergeable_attributed(open_batch_id, attribution)
+                                $db.begin_mergeable_attributed(open_transaction_id, attribution)
                                     .await
                             }
                             None => match author {
                                 Some(author) => {
-                                    $db.begin_mergeable_for_identity(open_batch_id, author)
+                                    $db.begin_mergeable_for_identity(open_transaction_id, author)
                                         .await
                                 }
-                                None => $db.begin_mergeable(open_batch_id).await,
+                                None => $db.begin_mergeable(open_transaction_id).await,
                             },
                         }
                     } else {
                         match author {
                             Some(author) => {
-                                $db.begin_exclusive_for_identity(open_batch_id, author)
+                                $db.begin_exclusive_for_identity(open_transaction_id, author)
                                     .await
                             }
-                            None => $db.begin_exclusive(open_batch_id).await,
+                            None => $db.begin_exclusive(open_transaction_id).await,
                         }
                     }
                 })
@@ -2222,7 +2271,7 @@ impl NapiDb {
         if attribution.is_some() {
             self.attributed_mergeable_batches
                 .borrow_mut()
-                .insert(open_batch_id);
+                .insert(open_transaction_id);
         }
         Ok(())
     }
@@ -2233,11 +2282,11 @@ impl NapiDb {
     #[napi(js_name = "beginTransactionAttributed")]
     pub fn begin_transaction_attributed(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         attribution: Uint8Array,
     ) -> napi::Result<()> {
         self.begin_transaction_inner(
-            open_batch_id,
+            open_transaction_id,
             "mergeable".to_owned(),
             None,
             Some(attribution),
@@ -2248,11 +2297,11 @@ impl NapiDb {
     #[napi(js_name = "commitTransaction")]
     pub fn commit_transaction(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: Option<String>,
     ) -> napi::Result<Write> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
@@ -2260,16 +2309,16 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let result = match (db, kind.as_deref().unwrap_or("mergeable")) {
             (NapiDbInnerStorage::Memory(db), "mergeable") => {
-                core_commit_tx_memory(db, open_batch_id)
+                core_commit_tx_memory(db, open_transaction_id)
             }
             (NapiDbInnerStorage::Persistent(db), "mergeable") => {
-                core_commit_tx_persistent(db, open_batch_id)
+                core_commit_tx_persistent(db, open_transaction_id)
             }
             (NapiDbInnerStorage::Memory(db), "exclusive") => {
-                core_commit_exclusive_tx_memory(db, open_batch_id)
+                core_commit_exclusive_tx_memory(db, open_transaction_id)
             }
             (NapiDbInnerStorage::Persistent(db), "exclusive") => {
-                core_commit_exclusive_tx_persistent(db, open_batch_id)
+                core_commit_exclusive_tx_persistent(db, open_transaction_id)
             }
             (_, kind) => Err(napi::Error::from_reason(unknown_transaction_kind_message(
                 kind,
@@ -2278,30 +2327,32 @@ impl NapiDb {
         if result.is_ok() {
             self.attributed_mergeable_batches
                 .borrow_mut()
-                .remove(&open_batch_id);
+                .remove(&open_transaction_id);
         }
         result
     }
 
     /// Roll back an owner-wide open transaction by id.
     #[napi(js_name = "rollbackTransaction")]
-    pub fn rollback_transaction(&self, open_batch_id: String) -> napi::Result<()> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn rollback_transaction(&self, open_transaction_id: String) -> napi::Result<()> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let result = match db {
-            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_batch_id),
-            NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_batch_id),
+            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_transaction_id),
+            NapiDbInnerStorage::Persistent(db) => {
+                db.abandon_transaction_handle(open_transaction_id)
+            }
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()));
         if result.is_ok() {
             self.attributed_mergeable_batches
                 .borrow_mut()
-                .remove(&open_batch_id);
+                .remove(&open_transaction_id);
         }
         result
     }
@@ -2328,13 +2379,13 @@ impl NapiDb {
     )]
     pub fn on_mutation_error(
         &self,
-        callback: ThreadsafeFunction<JsonValue, ()>,
+        callback: ThreadsafeFunction<JsonValue, (), JsonValue, napi::Status, false>,
     ) -> napi::Result<()> {
         let callback: CoreMutationErrorCallback = Rc::new(move |event| {
             let Ok(event) = serde_json::to_value(event) else {
                 return;
             };
-            let _ = callback.call(Ok(event), ThreadsafeFunctionCallMode::NonBlocking);
+            let _ = callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
         });
         let db = self.inner.borrow();
         let db = db
@@ -2422,7 +2473,11 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        if !db.shares_runtime_with(&tx.db) {
+        let tx_db = tx
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        if !db.shares_runtime_with(tx_db) {
             return Err(napi::Error::from_reason(
                 "transaction belongs to a different database runtime",
             ));
@@ -3432,9 +3487,9 @@ impl NapiDb {
     }
 
     #[napi(js_name = "mergeableTx")]
-    pub fn mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+    pub fn mergeable_tx(&self, open_transaction_id: String) -> napi::Result<Tx> {
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
@@ -3442,23 +3497,23 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable(open_batch_id))
+                    core_block_on(db.begin_mergeable(open_transaction_id))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable(open_batch_id))
+                    core_block_on(db.begin_mergeable(open_transaction_id))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
@@ -3469,11 +3524,11 @@ impl NapiDb {
     #[napi(js_name = "mergeableTxForIdentity")]
     pub fn mergeable_tx_for_identity(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         author: Uint8Array,
     ) -> napi::Result<Tx> {
-        let open_batch_id = open_batch_id
-            .parse::<CoreOpenBatchId>()
+        let open_transaction_id = open_transaction_id
+            .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
         let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
@@ -3482,23 +3537,23 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
+                    core_block_on(db.begin_mergeable_for_identity(open_transaction_id, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
-                db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
+                    core_block_on(db.begin_mergeable_for_identity(open_transaction_id, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_batch_id
+                    open_transaction_id
                 }),
                 owns_lifetime: true,
                 attributed: false,
@@ -3561,6 +3616,29 @@ fn decode_core_open_args(
 fn decode_public_schema(schema: &[u8]) -> napi::Result<JazzSchema> {
     jazz::tools::public_schema_convert::decode_public_schema_json(schema)
         .map_err(napi::Error::from_reason)
+}
+
+/// Open the one durable store owned by a public NAPI runtime.
+///
+/// This is deliberately the Jazz profile rather than the adapter's generic
+/// Groove-only convenience open: the runtime can persist every Jazz codec
+/// family in `epoch_1_storage_codec_profile`, so its root must declare all of
+/// them before any bytes are admitted.
+fn open_persistent_core_storage(
+    data_path: String,
+    schema: &JazzSchema,
+) -> napi::Result<CoreRocksDbStorage> {
+    let refs = schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let codec_profile = epoch_1_storage_codec_profile()
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    CoreRocksDbStorage::open_with_durability_and_codec_profile(
+        data_path,
+        &refs,
+        CoreRocksDbDurability::WalNoSync,
+        &codec_profile,
+    )
+    .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 fn open_core_db<S>(
@@ -3727,7 +3805,7 @@ fn core_write_memory(
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
 }
@@ -3745,7 +3823,7 @@ fn core_write_persistent(
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
@@ -3844,7 +3922,7 @@ fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })
 }
@@ -3944,7 +4022,7 @@ fn finish_immediate_promise(
     let _ = unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
 }
 
-fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<TxId>
+fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenTransactionId) -> napi::Result<TxId>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -3954,7 +4032,7 @@ where
 
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
@@ -3968,7 +4046,7 @@ fn core_commit_tx_memory(
 
 fn core_commit_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
@@ -3982,7 +4060,7 @@ fn core_commit_tx_persistent(
 
 fn core_commit_exclusive_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -3997,7 +4075,7 @@ fn core_commit_exclusive_tx_memory(
 
 fn core_commit_exclusive_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
-    open_tx: CoreOpenBatchId,
+    open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -4433,6 +4511,8 @@ struct JazzServerStartOptions {
     data_dir: Option<String>,
     in_memory: Option<bool>,
     jwks_url: Option<String>,
+    jwt_issuer: Option<String>,
+    jwt_audience: Option<String>,
     backend_secret: String,
     admin_secret: String,
     upstream_url: Option<String>,
@@ -4487,6 +4567,16 @@ impl TestJwtIssuer {
         self.jwks_url.clone()
     }
 
+    #[napi(getter)]
+    pub fn issuer(&self) -> String {
+        TEST_JWT_ISSUER.to_owned()
+    }
+
+    #[napi(getter)]
+    pub fn audience(&self) -> String {
+        TEST_JWT_AUDIENCE.to_owned()
+    }
+
     #[napi(js_name = "jwtForUser")]
     pub fn jwt_for_user(
         &self,
@@ -4514,7 +4604,7 @@ impl TestJwtIssuer {
                 // Keep the server test helper's ordinary external-session
                 // default. `None` is reserved for tests that explicitly
                 // exercise an issuer-less bearer, not the NAPI omission case.
-                issuer: options.issuer.or_else(|| Some("urn:jazz:test".to_owned())),
+                issuer: options.issuer.or_else(|| Some(TEST_JWT_ISSUER.to_owned())),
             },
         ))
     }
@@ -4535,7 +4625,18 @@ impl TestJwtIssuer {
 
 #[napi]
 pub struct JazzServer {
-    inner: Mutex<Option<JazzServerInner>>,
+    lifecycle: Arc<JazzServerLifecycle>,
+}
+
+struct JazzServerLifecycle {
+    state: Mutex<JazzServerState>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+enum JazzServerState {
+    Running(JazzServerInner),
+    Stopping,
+    Stopped(std::result::Result<(), String>),
 }
 
 enum JazzServerInner {
@@ -4547,7 +4648,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
+            ts_arg_type = "{ appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -4565,6 +4666,8 @@ impl JazzServer {
 
         let auth_config = AuthConfig {
             jwks_url: opts.jwks_url,
+            jwt_issuer: opts.jwt_issuer,
+            jwt_audience: opts.jwt_audience,
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: Some(opts.backend_secret.clone()),
             admin_secret: Some(opts.admin_secret.clone()),
@@ -4629,9 +4732,7 @@ impl JazzServer {
         )
         .await;
 
-        Ok(Self {
-            inner: Mutex::new(Some(JazzServerInner::Core(server))),
-        })
+        Ok(Self::from_inner(JazzServerInner::Core(server)))
     }
 
     #[napi(getter, js_name = "appId")]
@@ -4678,30 +4779,103 @@ impl JazzServer {
 
     #[napi]
     pub async fn stop(&self) -> napi::Result<()> {
-        let server = self
-            .inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .take();
-
-        if let Some(server) = server {
-            match server {
-                JazzServerInner::Core(server) => server.shutdown().await,
+        let mut changes = self.lifecycle.changed.subscribe();
+        let shutdown_owner = {
+            let mut state = self
+                .lifecycle
+                .state
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            match &*state {
+                JazzServerState::Running(_) => {
+                    let JazzServerState::Running(server) =
+                        std::mem::replace(&mut *state, JazzServerState::Stopping)
+                    else {
+                        unreachable!("running state changed while locked")
+                    };
+                    Some(server)
+                }
+                JazzServerState::Stopping | JazzServerState::Stopped(_) => None,
             }
+        };
+
+        if let Some(server) = shutdown_owner {
+            let lifecycle = Arc::clone(&self.lifecycle);
+            tokio::spawn(async move {
+                let result = AssertUnwindSafe(shutdown_jazz_server(server))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err("JazzServer shutdown task panicked".to_owned()));
+                let mut state = lifecycle
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *state = JazzServerState::Stopped(result);
+                drop(state);
+                lifecycle.changed.send_replace(());
+            });
         }
 
-        Ok(())
+        loop {
+            let result = {
+                let state = self
+                    .lifecycle
+                    .state
+                    .lock()
+                    .map_err(|_| napi::Error::from_reason("lock"))?;
+                match &*state {
+                    JazzServerState::Running(_) => {
+                        return Err(napi::Error::from_reason(
+                            "JazzServer shutdown state returned to running",
+                        ));
+                    }
+                    JazzServerState::Stopping => None,
+                    JazzServerState::Stopped(result) => Some(result.clone()),
+                }
+            };
+            if let Some(result) = result {
+                return result.map_err(napi::Error::from_reason);
+            }
+            changes.changed().await.map_err(|_| {
+                napi::Error::from_reason("JazzServer shutdown state closed unexpectedly")
+            })?;
+        }
+    }
+
+    fn from_inner(inner: JazzServerInner) -> Self {
+        let (changed, _) = tokio::sync::watch::channel(());
+        Self {
+            lifecycle: Arc::new(JazzServerLifecycle {
+                state: Mutex::new(JazzServerState::Running(inner)),
+                changed,
+            }),
+        }
     }
 
     fn with_server<T>(&self, f: impl FnOnce(&JazzServerInner) -> T) -> napi::Result<T> {
-        let server = self
-            .inner
+        let state = self
+            .lifecycle
+            .state
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let server = server
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("JazzServer has been stopped"))?;
-        Ok(f(server))
+        match &*state {
+            JazzServerState::Running(server) => Ok(f(server)),
+            JazzServerState::Stopping => Err(napi::Error::from_reason("JazzServer is stopping")),
+            JazzServerState::Stopped(_) => {
+                Err(napi::Error::from_reason("JazzServer has been stopped"))
+            }
+        }
+    }
+}
+
+async fn shutdown_jazz_server(server: JazzServerInner) -> std::result::Result<(), String> {
+    let phase = match server {
+        JazzServerInner::Core(server) => server.shutdown().await,
+    };
+    if phase == jazz_server::ShutdownPhase::StorageClosed {
+        Ok(())
+    } else {
+        Err(format!("JazzServer shutdown failed during phase {phase:?}"))
     }
 }
 
@@ -4780,12 +4954,14 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
 
     use futures::channel::oneshot;
 
     use crate::{
-        CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, NapiDb, NapiDbInnerStorage,
-        NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
+        CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, JazzServer, JazzServerInner,
+        NapiDb, NapiDbInnerStorage, NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
         PendingSubscriptionBatchOutcome, PendingSubscriptionBatchPoll, PreparedQuery,
         RestoreOptions, Tx, UpdateOptions, UpsertOptions, authority_epoch_from_bigint,
         core_author_id_from_bytes, core_block_on, core_claim_value_from_json, core_insert_options,
@@ -4794,6 +4970,113 @@ mod tests {
         core_update_options, core_upsert_options, encode_core_subscription_delta,
         requeue_retryable_subscription_batch, unknown_transaction_kind_message,
     };
+
+    fn encode_persistent_open_config(author: CoreAuthorSubject) -> Vec<u8> {
+        #[derive(serde::Serialize)]
+        struct EncodedIdentity {
+            node: CoreNodeUuid,
+            author: CoreAuthorSubject,
+        }
+        #[derive(serde::Serialize)]
+        struct EncodedConfig {
+            identity: EncodedIdentity,
+            row_id_seed: Option<u64>,
+            history_complete: bool,
+            initial_sync_flush_every: Option<u32>,
+            backend_credential: Option<String>,
+        }
+        postcard::to_allocvec(&EncodedConfig {
+            identity: EncodedIdentity {
+                node: CoreNodeUuid::from_bytes([0x71; 16]),
+                author,
+            },
+            row_id_seed: None,
+            history_complete: false,
+            initial_sync_flush_every: None,
+            backend_credential: None,
+        })
+        .expect("valid NAPI open fixture")
+    }
+
+    /// Plant the adapter's generic profile first. Each public persistent NAPI
+    /// opener must reject it rather than silently treating a Jazz root as a
+    /// Groove-only one. This is intentionally an internal manifest-admission
+    /// receipt: a user-visible API cannot create the invalid physical root.
+    fn plant_groove_only_persistent_root(path: &std::path::Path, schema_bytes: &[u8]) {
+        let schema = crate::decode_public_schema(schema_bytes).expect("valid public schema");
+        let column_families = schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        drop(
+            jazz_storage_rocksdb::RocksDbStorage::open(path, &refs)
+                .expect("plant generic Groove manifest"),
+        );
+    }
+
+    #[test]
+    fn every_public_persistent_open_rejects_a_planted_groove_only_manifest() {
+        let schema = br#"{"tables":{}}"#;
+        let external_author =
+            CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let config = encode_persistent_open_config(external_author);
+
+        let ordinary_dir = tempfile::tempdir().unwrap();
+        let ordinary_path = ordinary_dir.path().join("ordinary.rocksdb");
+        plant_groove_only_persistent_root(&ordinary_path, schema);
+        assert!(
+            NapiDb::open_persistent(
+                ordinary_path.to_string_lossy().into_owned(),
+                Uint8Array::from(schema.to_vec()),
+                Uint8Array::from(config.clone()),
+            )
+            .is_err(),
+            "openPersistent must reject a manifest that omits Jazz codecs"
+        );
+
+        let backend_dir = tempfile::tempdir().unwrap();
+        let backend_path = backend_dir.path().join("backend.rocksdb");
+        plant_groove_only_persistent_root(&backend_path, schema);
+        assert!(
+            NapiDb::open_persistent_as_backend(
+                backend_path.to_string_lossy().into_owned(),
+                Uint8Array::from(schema.to_vec()),
+                Uint8Array::from(config.clone()),
+            )
+            .is_err(),
+            "openPersistentAsBackend must reject a manifest that omits Jazz codecs"
+        );
+
+        let proof_dir = tempfile::tempdir().unwrap();
+        let proof_path = proof_dir.path().join("proof.rocksdb");
+        plant_groove_only_persistent_root(&proof_path, schema);
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[0x72; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "codec-profile-test",
+            60,
+        )
+        .unwrap();
+        let verified =
+            jazz::tools::identity::verify_jazz_self_signed_proof(&token, "codec-profile-test")
+                .unwrap();
+        let claimed_author =
+            serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, verified.user_id))
+                .unwrap();
+        assert!(
+            NapiDb::open_persistent_with_self_signed_proof(
+                proof_path.to_string_lossy().into_owned(),
+                Uint8Array::from(schema.to_vec()),
+                Uint8Array::from(config),
+                token,
+                "codec-profile-test".to_owned(),
+                claimed_author,
+            )
+            .is_err(),
+            "openPersistentWithSelfSignedProof must reject a manifest that omits Jazz codecs"
+        );
+    }
 
     #[test]
     fn pending_native_read_retains_a_suspended_future_until_the_next_js_turn() {
@@ -4896,6 +5179,118 @@ mod tests {
             "unknown transaction kind invalid"
         );
     }
+
+    async fn jazz_server_binding(
+        built: jazz_server::BuiltServer,
+        app_id: jazz::tools::AppId,
+    ) -> JazzServer {
+        let server = jazz_server::JazzServer::from_built(
+            built,
+            None,
+            app_id,
+            jazz_server::ServerDataDir::in_memory(),
+            "napi-stop-test-admin".to_owned(),
+            "napi-stop-test-backend".to_owned(),
+        )
+        .await;
+        JazzServer::from_inner(JazzServerInner::Core(server))
+    }
+
+    #[tokio::test]
+    async fn jazz_server_stop_shares_success_with_concurrent_and_later_callers() {
+        let app_id = jazz::tools::AppId::from_name("napi-stop-success");
+        let built = jazz_server::ServerBuilder::new(app_id)
+            .with_storage(jazz_server::StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build NAPI test server");
+        let server = jazz_server_binding(built, app_id).await;
+
+        let (first, second) = tokio::join!(server.stop(), server.stop());
+        assert!(first.is_ok(), "shutdown owner succeeds: {first:?}");
+        assert!(
+            second.is_ok(),
+            "concurrent waiter shares success: {second:?}"
+        );
+        assert!(
+            server.stop().await.is_ok(),
+            "later caller replays terminal success"
+        );
+    }
+
+    #[tokio::test]
+    async fn jazz_server_stop_finalization_outlives_the_initiating_future() {
+        let app_id = jazz::tools::AppId::from_name("napi-stop-cancelled-initiator");
+        let built = jazz_server::ServerBuilder::new(app_id)
+            .with_storage(jazz_server::StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build NAPI test server");
+        let server = jazz_server_binding(built, app_id).await;
+
+        // The first poll synchronously transfers Running -> Stopping and
+        // launches the independently owned finalizer. Dropping this future
+        // models cancellation of the Promise which initiated `stop`.
+        let mut initiator = Box::pin(server.stop());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            initiator.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(initiator);
+
+        assert!(
+            server.stop().await.is_ok(),
+            "waiter completes the finalization detached from its initiator"
+        );
+        assert!(
+            server.stop().await.is_ok(),
+            "later caller replays the same completed outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn jazz_server_stop_shares_failure_with_concurrent_and_later_callers() {
+        let app_id = jazz::tools::AppId::from_name("napi-stop-failure");
+        let built = jazz_server::ServerBuilder::new(app_id)
+            .with_storage(jazz_server::StorageBackend::InMemory)
+            .with_shutdown_timeout(Duration::from_millis(1))
+            .build()
+            .await
+            .expect("build NAPI test server");
+        let active_request = built
+            .state
+            .shutdown
+            .try_enter_app_request()
+            .expect("hold request through shutdown timeout");
+        let server = jazz_server_binding(built, app_id).await;
+
+        let (first, second) = tokio::join!(server.stop(), server.stop());
+        let first = first
+            .expect_err("shutdown owner reports failure")
+            .reason
+            .clone();
+        let second = second
+            .expect_err("concurrent waiter reports failure")
+            .reason
+            .clone();
+        assert_eq!(second, first);
+        assert_eq!(
+            first, "JazzServer shutdown failed during phase Failed",
+            "binding preserves the embedded host's terminal failure"
+        );
+        assert_eq!(
+            server
+                .stop()
+                .await
+                .expect_err("later caller replays failure")
+                .reason
+                .clone(),
+            first
+        );
+        drop(active_request);
+    }
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
@@ -4908,7 +5303,7 @@ mod tests {
         AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
     };
     use jazz::protocol::{ReadViewSpec as CoreReadViewSpec, SubscribeRejectReason};
-    use jazz::tools::OpenTransactionId as CoreOpenBatchId;
+    use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
     use jazz::tools::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
     };
@@ -5371,7 +5766,7 @@ mod tests {
         };
         assert!(err.reason.contains("explicit backend runtime"));
 
-        let attributed_batch = CoreOpenBatchId::new().to_string();
+        let attributed_batch = CoreOpenTransactionId::new().to_string();
         backend
             .begin_transaction_attributed(
                 attributed_batch.clone(),
@@ -5401,7 +5796,7 @@ mod tests {
 
         let err = ordinary
             .begin_transaction_attributed(
-                CoreOpenBatchId::new().to_string(),
+                CoreOpenTransactionId::new().to_string(),
                 Uint8Array::from(alice_bytes.clone()),
             )
             .expect_err("ordinary transactions cannot claim backend attribution");
@@ -5930,10 +6325,37 @@ mod tests {
             .unwrap(),
         );
         let view = Rc::new(core_block_on(owner.register_schema_view(schema.clone())).unwrap());
-        let batch = CoreOpenBatchId::new();
+        let batch = CoreOpenTransactionId::new();
         core_block_on(owner.begin_mergeable(batch)).unwrap();
+        let view_refs_before_attachment = Rc::strong_count(&view);
+        let mut releasable_view = Tx {
+            db: Some(NapiDbInnerStorage::Memory(Rc::clone(&view))),
+            kind: NapiTxKind::Mergeable,
+            open_tx: Some(batch),
+            owns_lifetime: false,
+            attributed: false,
+        };
+        assert_eq!(
+            Rc::strong_count(&view),
+            view_refs_before_attachment + 1,
+            "an attached NAPI transaction view retains the core while it is open"
+        );
+        assert!(
+            releasable_view.close(),
+            "explicit close releases an attached view"
+        );
+        assert_eq!(
+            Rc::strong_count(&view),
+            view_refs_before_attachment,
+            "explicit close must release the retained core before JS GC"
+        );
+        assert!(
+            !releasable_view.close(),
+            "explicit attached-view close is idempotent"
+        );
+        drop(releasable_view);
         drop(Tx {
-            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            db: Some(NapiDbInnerStorage::Memory(Rc::clone(&view))),
             kind: NapiTxKind::Mergeable,
             open_tx: Some(batch),
             owns_lifetime: false,
@@ -5950,10 +6372,10 @@ mod tests {
         .unwrap();
         core_block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
-        let exclusive = CoreOpenBatchId::new();
+        let exclusive = CoreOpenTransactionId::new();
         core_block_on(owner.begin_exclusive(exclusive)).unwrap();
         drop(Tx {
-            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            db: Some(NapiDbInnerStorage::Memory(Rc::clone(&view))),
             kind: NapiTxKind::Exclusive,
             open_tx: Some(exclusive),
             owns_lifetime: false,
@@ -5973,7 +6395,7 @@ mod tests {
         .unwrap();
         core_block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
 
-        // The public NAPI batch surface binds Alice at begin. A later request
+        // The public NAPI transaction surface binds Alice at begin. A later request
         // cannot switch the transaction-local authorization subject to Bob.
         let binding = NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
@@ -5984,7 +6406,7 @@ mod tests {
             attributed_mergeable_batches: Rc::default(),
         };
         let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
-        let bound = CoreOpenBatchId::new();
+        let bound = CoreOpenTransactionId::new();
         binding
             .begin_transaction(
                 bound.to_string(),

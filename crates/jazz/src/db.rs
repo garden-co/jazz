@@ -1628,6 +1628,23 @@ fn register_local_fate_route(
     tx_id: TxId,
     queue: &PendingDownstreamFates,
 ) {
+    register_local_fate_route_with_acknowledgement(routes, tx_id, queue, false);
+}
+
+fn register_local_fate_observer(
+    routes: &LocalFateRoutes,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+) {
+    register_local_fate_route_with_acknowledgement(routes, tx_id, queue, true);
+}
+
+fn register_local_fate_route_with_acknowledgement(
+    routes: &LocalFateRoutes,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+    local_acknowledged: bool,
+) {
     let mut routes = routes.borrow_mut();
     routes.retain(|_, pending| {
         pending.retain(|candidate| candidate.queue.upgrade().is_some());
@@ -1645,7 +1662,7 @@ fn register_local_fate_route(
     }
     routes.entry(tx_id).or_default().push(LocalFateRoute {
         queue: Rc::downgrade(queue),
-        local_acknowledged: false,
+        local_acknowledged,
     });
 }
 
@@ -1935,7 +1952,7 @@ fn direct_schema_view_lens(
         .map(|table| table.name.clone())
         .collect::<Vec<_>>();
     Ok((
-        MigrationLens::new(source_id, target_id, table_lenses),
+        MigrationLens::new(source_id, target_id, table_lenses).expect("valid migration lens"),
         new_tables,
         dropped_tables,
     ))

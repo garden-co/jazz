@@ -8,6 +8,9 @@ pub(super) fn groove_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(super) struct SchemaPhysicalMapping {
+    /// Globally meaningful immutable identities authored by the catalogue
+    /// authority. The remaining u64 ids in this mapping are local aliases.
+    pub(super) identities: PhysicalIdentityManifest,
     pub(super) tables: BTreeMap<String, TablePhysicalMapping>,
 }
 
@@ -201,10 +204,27 @@ fn bootstrap_copy_enum_remaps(
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(super) struct GlobalScalarEnumCaseId {
+    /// Permanent authority-issued semantic identity. Authored ordinals and
+    /// schema versions select this UUID through a publication manifest but
+    /// never participate in equality or storage identity.
+    pub(super) id: crate::ids::GlobalPhysicalEnumVariantId,
+    /// Ordering provenance only. Equality and ordering of semantic identities
+    /// deliberately ignore these authored lookup coordinates.
     pub(super) introducing_schema: SchemaVersionId,
     pub(super) introducing_ordinal: u8,
+}
+
+impl PartialEq for GlobalScalarEnumCaseId {
+    fn eq(&self, other: &Self) -> bool { self.id == other.id }
+}
+impl Eq for GlobalScalarEnumCaseId {}
+impl PartialOrd for GlobalScalarEnumCaseId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for GlobalScalarEnumCaseId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.id.cmp(&other.id) }
 }
 
 /// Explicit authored-to-physical tags for every enum occurrence beneath one
@@ -219,11 +239,7 @@ type EnumOccurrenceRemaps = groove::ivm::RecursiveEnumRemaps;
 /// names used in the physical descriptor are intentionally opaque: tags are
 /// only decoded through this durable catalogue mapping.
 fn physical_scalar_enum_case_name(case: &GlobalScalarEnumCaseId) -> String {
-    format!(
-        "case-{}-{}",
-        case.introducing_schema.0.simple(),
-        case.introducing_ordinal
-    )
+    format!("case-{}", case.id.0.simple())
 }
 
 fn compare_scalar_enum_cases(
@@ -242,7 +258,7 @@ fn compare_scalar_enum_cases(
         .get(&left.introducing_schema)
         .cmp(&aliases.get(&right.introducing_schema))
         .then_with(|| left.introducing_ordinal.cmp(&right.introducing_ordinal))
-        .then_with(|| left.introducing_schema.cmp(&right.introducing_schema))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn physical_scalar_enum_schema(
@@ -530,7 +546,7 @@ pub(super) fn physical_rejected_versions_table_name(table_id: PhysicalTableId) -
 }
 
 pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String {
-    format!("by_physical_user_{}", column_id.0)
+    format!("by_physical_user_v1_{}", column_id.0)
 }
 
 pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {

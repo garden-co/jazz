@@ -16,6 +16,7 @@ import {
   encodeWebSocketPrelude,
   encodeWebSocketFrameBatch,
   isWireHello,
+  isWireError,
   isWireMessage,
   peerIdentityForWebSocketAuth,
 } from "./websocket.js";
@@ -43,6 +44,12 @@ describe("websocket frame carrier", () => {
       [1, 2, 3],
       [4, 5],
     ]);
+
+    const suffixed = Uint8Array.from([...encodeWebSocketFrameBatch(frames), 0]);
+    expect(new PostcardReader(suffixed).readVec((reader) => reader.bytes())).toHaveLength(2);
+    expect(() => decodeWebSocketFrameBatch(suffixed)).toThrow(
+      "websocket frame batch has trailing postcard bytes",
+    );
   });
 
   // This is intentionally transport-level: the public Db API cannot expose
@@ -270,29 +277,123 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES);
     expect(reader.u64()).toBe(0);
     expect(reader.option((authority) => authority.bytes(false))).toBeUndefined();
+
+    const suffixed = Uint8Array.from([...hello, 0]);
+    expect(new PostcardReader(suffixed).u64()).toBe(0);
+    expect(() => isWireHello(suffixed)).toThrow("WireFrame::Hello has trailing postcard bytes");
   });
 
-  it("rejects a v12 server without compatibility negotiation", async () => {
-    let socket: MessageWebSocket | undefined;
-    const carrier = new WebSocketCarrier({
-      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
-      peerIdentity: new Uint8Array(16),
-      onFrame: () => {},
-      WebSocket: class extends MessageWebSocket {
-        constructor(url: string) {
-          super(url, (created) => {
-            socket = created;
-          });
-        }
+  it("decodes exact Rust-produced Hello frames and rejects only true suffixes", async () => {
+    const manifest = rustWireHelloFixtureManifest();
+
+    for (const fixture of manifest.fixtures) {
+      const frame = hexToBytes(fixture.frame_hex);
+      expect(isWireHello(frame), fixture.name).toBe(true);
+      expect(() => isWireHello(Uint8Array.from([...frame, 0])), fixture.name).toThrow(
+        "WireFrame::Hello has trailing postcard bytes",
+      );
+
+      if (fixture.role !== 1) continue;
+      let socket: MessageWebSocket | undefined;
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: () => {},
+        WebSocket: class extends MessageWebSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created;
+            });
+          }
+        },
+      });
+      socket!.emitMessage(encodeWebSocketFrameBatch([frame]));
+      const negotiated = await carrier.ready();
+      expect(negotiated.features, fixture.name).toBe(fixture.features);
+      expect(negotiated.authority?.node, fixture.name).toEqual(
+        fixture.authority_node_hex ? hexToBytes(fixture.authority_node_hex) : undefined,
+      );
+      expect(negotiated.authority?.epoch, fixture.name).toBe(
+        fixture.authority_epoch === null ? undefined : BigInt(fixture.authority_epoch),
+      );
+      carrier.close();
+    }
+  });
+
+  it("rejects malformed authority UUID lengths and unsupported u64 feature bits", async () => {
+    const cases: Array<{ name: string; frame: Uint8Array; error: string }> = [
+      {
+        name: "15-byte authority UUID",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          authorityNode: new Uint8Array(15),
+        }),
+        error: "WireHello.authority.node must be exactly 16 bytes, got 15",
       },
-    });
+      {
+        name: "17-byte authority UUID",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+          authorityNode: new Uint8Array(17),
+        }),
+        error: "WireHello.authority.node must be exactly 16 bytes, got 17",
+      },
+      {
+        name: "unsupported low feature bit",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 1n }),
+        error: "server accepted unsupported wire features 0x2",
+      },
+      {
+        name: "unsupported bit 32",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 32n }),
+        error: "server accepted unsupported wire features 0x100000000",
+      },
+      {
+        name: "unsupported high feature bit",
+        frame: encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: 1n << 63n }),
+        error: "server accepted unsupported wire features 0x8000000000000000",
+      },
+    ];
 
-    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 12)]));
+    for (const testCase of cases) {
+      const { carrier, socket } = carrierForTest();
+      socket.emitMessage(encodeWebSocketFrameBatch([testCase.frame]));
+      await expect(carrier.ready(), testCase.name).rejects.toThrow(testCase.error);
+      expect(socket.closed, testCase.name).toBe(true);
+    }
+  });
 
-    await expect(carrier.ready()).rejects.toThrow(
-      `does not support wire protocol ${WIRE_PROTOCOL_VERSION}`,
-    );
-    expect(socket!.closed).toBe(true);
+  it("accepts supported feature masks without losing u64 validation", async () => {
+    for (const features of [0n, BigInt(CLIENT_WIRE_FEATURES)]) {
+      const { carrier, socket } = carrierForTest();
+      socket.emitMessage(
+        encodeWebSocketFrameBatch([encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features })]),
+      );
+      await expect(carrier.ready()).resolves.toMatchObject({ features: Number(features) });
+      carrier.close();
+    }
+  });
+
+  it("rejects non-exact server wire-version advertisements before payload decode", async () => {
+    for (const [minProtocolVersion, maxProtocolVersion] of [
+      [0, 1],
+      [1, 2],
+      [1, 15],
+      [12, 12],
+    ]) {
+      const { carrier, socket } = carrierForTest();
+      socket.emitMessage(
+        encodeWebSocketFrameBatch([
+          encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+            minProtocolVersion,
+            maxProtocolVersion,
+          }),
+        ]),
+      );
+
+      await expect(carrier.ready()).rejects.toThrow(
+        `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${minProtocolVersion}..=${maxProtocolVersion}`,
+      );
+      expect(socket.closed).toBe(true);
+    }
   });
 
   it("sends an authority-unbound hello first on every reconnect", async () => {
@@ -377,7 +478,9 @@ describe("websocket frame carrier", () => {
     writer.u64(staleEpoch);
     const encodedEpoch = writer.finish();
     expect(new PostcardReader(encodedEpoch).u64BigInt()).toBe(staleEpoch);
-    expect(BigInt(new PostcardReader(encodedEpoch).u64())).not.toBe(staleEpoch);
+    expect(() => new PostcardReader(encodedEpoch).u64()).toThrow(
+      "postcard u64 exceeds Number.MAX_SAFE_INTEGER",
+    );
   });
 
   it("does not send or deliver semantic frames before the server hello", async () => {
@@ -462,11 +565,23 @@ describe("websocket frame carrier", () => {
   });
 
   it("decodes structured wire error frames", () => {
-    expect(decodeWireError(encodeWireError(3, 1, "bad credentials"))).toEqual({
+    const encoded = encodeWireError(3, 1, "bad credentials");
+    expect(isWireError(encoded)).toBe(true);
+    expect(decodeWireError(encoded)).toEqual({
       code: "auth_failed",
       retry: "after_auth",
       message: "bad credentials",
     });
+
+    const suffixed = Uint8Array.from([...encoded, 0]);
+    expect(new PostcardReader(suffixed).u64()).toBe(2);
+    expect(() => isWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
+    expect(() => decodeWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
+
+    expect(encoded[0]).toBe(2);
+    const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
+    expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+    expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
@@ -503,6 +618,21 @@ describe("websocket frame carrier", () => {
     );
 
     expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
+    for (const candidate of manifest.fixtures) {
+      const candidateFrame = hexToBytes(candidate.frame_hex);
+      expect(isWireMessage(candidateFrame), candidate.name).toBe(true);
+      expect(
+        bytesEqual(
+          decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([candidateFrame]))[0]!,
+          candidateFrame,
+        ),
+        candidate.name,
+      ).toBe(true);
+      const suffixed = Uint8Array.from([...candidateFrame, 0]);
+      expect(() => isWireMessage(suffixed), candidate.name).toThrow(
+        "WireFrame::Message has trailing postcard bytes",
+      );
+    }
     expect(fixture?.name).toBe("view_update_mixed_version_carrier_runs");
     expect(fixture?.message_family).toBe("ViewUpdate");
 
@@ -533,6 +663,17 @@ type RustWireFixtureManifest = {
   }>;
 };
 
+type RustWireHelloFixtureManifest = {
+  fixtures: Array<{
+    name: string;
+    features: number;
+    role: number;
+    authority_node_hex: string | null;
+    authority_epoch: number | string | null;
+    frame_hex: string;
+  }>;
+};
+
 function rustWireFixtureManifest(): RustWireFixtureManifest {
   return JSON.parse(
     readFileSync(
@@ -540,6 +681,15 @@ function rustWireFixtureManifest(): RustWireFixtureManifest {
       "utf8",
     ),
   ) as RustWireFixtureManifest;
+}
+
+function rustWireHelloFixtureManifest(): RustWireHelloFixtureManifest {
+  return JSON.parse(
+    readFileSync(
+      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames.json", import.meta.url),
+      "utf8",
+    ),
+  ) as RustWireHelloFixtureManifest;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -569,21 +719,52 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
-function encodeServerHello(epoch: bigint, protocolVersion = WIRE_PROTOCOL_VERSION): Uint8Array {
+function encodeServerHello(
+  epoch: bigint,
+  protocolVersion = WIRE_PROTOCOL_VERSION,
+  options: {
+    features?: number | bigint;
+    authorityNode?: Uint8Array | null;
+    minProtocolVersion?: number;
+    maxProtocolVersion?: number;
+  } = {},
+): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
-  writer.u64(protocolVersion);
-  writer.u64(protocolVersion);
-  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(options.minProtocolVersion ?? protocolVersion);
+  writer.u64(options.maxProtocolVersion ?? protocolVersion);
+  writer.u64(options.features ?? CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
-  writer.some((authority) => {
-    authority.bytes(
-      Uint8Array.from({ length: 16 }, () => 0x5e),
-      false,
-    );
-    authority.u64(epoch);
-  });
+  const authorityNode =
+    options.authorityNode === undefined
+      ? Uint8Array.from({ length: 16 }, () => 0x5e)
+      : options.authorityNode;
+  if (authorityNode === null) {
+    writer.none();
+  } else {
+    writer.some((authority) => {
+      authority.bytes(authorityNode);
+      authority.u64(epoch);
+    });
+  }
   return writer.finish();
+}
+
+function carrierForTest(): { carrier: WebSocketCarrier; socket: MessageWebSocket } {
+  let socket: MessageWebSocket | undefined;
+  const carrier = new WebSocketCarrier({
+    endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+    peerIdentity: new Uint8Array(16),
+    onFrame: () => {},
+    WebSocket: class extends MessageWebSocket {
+      constructor(url: string) {
+        super(url, (created) => {
+          socket = created;
+        });
+      }
+    },
+  });
+  return { carrier, socket: socket! };
 }
 
 class MessageWebSocket {

@@ -1,14 +1,219 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::executor::block_on;
+use groove::db::Database;
+use groove::records::Value;
+use groove::schema::{
+    ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
+};
 use groove::storage::{
-    Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest, collect_scan,
+    Error, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
+    StorageLayout, collect_scan,
 };
 use jazz_storage_sqlite::SqliteStorage;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 
+const EPOCH_1_SQLITE_FIXTURE_BASE64: &str =
+    include_str!("../fixtures/epoch-1-historical.sqlite.base64");
+const EPOCH_1_SQLITE_FIXTURE_SHA256: &str =
+    "6a195b6db62f9fdea2509e29cb4fb5bdff7f98ae2f1badae84639137ebe33321";
+const EPOCH_1_ORDERED_KV_PACK: &str = include_str!("../../groove/fixtures/epoch-1-ordered-kv.pack");
+const EPOCH_1_ORDERED_KV_PACK_SHA256: &str =
+    "5892ba4cb484da21f28316b90c260c6e07656ba7cfcc21e4c96944fc52baa2e7";
+
+fn decode_historical_epoch_1_sqlite_fixture(base64: &str) -> Result<Vec<u8>, String> {
+    let bytes = STANDARD
+        .decode(base64.lines().collect::<String>())
+        .map_err(|error| format!("committed SQLite fixture is not base64: {error}"))?;
+    if !historical_epoch_1_sqlite_checksum_matches(&bytes) {
+        return Err("committed SQLite fixture checksum does not match".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn historical_epoch_1_sqlite_checksum_matches(bytes: &[u8]) -> bool {
+    format!("{:x}", Sha256::digest(bytes)) == EPOCH_1_SQLITE_FIXTURE_SHA256
+}
+
+fn write_historical_epoch_1_sqlite(path: &Path, base64: &str) -> Result<(), String> {
+    // Check the immutable corpus before creating the target, so a corrupt
+    // checked-in payload cannot be mistaken for a corrupt SQLite database.
+    let bytes = decode_historical_epoch_1_sqlite_fixture(base64)?;
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn decode_hex(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0, "fixture hex is byte aligned");
+    (0..value.len())
+        .step_by(2)
+        .map(|offset| u8::from_str_radix(&value[offset..offset + 2], 16).unwrap())
+        .collect()
+}
+
+fn parse_epoch_1_ordered_kv_pack(
+    pack: &str,
+    expected_sha256: &str,
+) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> {
+    if format!("{:x}", Sha256::digest(pack)) != expected_sha256 {
+        return Err("authoritative logical pack checksum does not match".to_owned());
+    }
+    let mut lines = pack.lines();
+    if lines.next() != Some("JAZZ-ORDERED-KV-PACK-1") {
+        return Err("authoritative logical pack has an unsupported header".to_owned());
+    }
+    Ok(lines
+        .map(|line| {
+            let mut fields = line.split('\t');
+            let family = fields.next().unwrap().to_owned();
+            let key = decode_hex(fields.next().unwrap());
+            let value = decode_hex(fields.next().unwrap());
+            assert!(
+                fields.next().is_none(),
+                "fixture pack has exactly three fields"
+            );
+            (family, key, value)
+        })
+        .collect())
+}
+
+fn epoch_1_ordered_kv_pack() -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    parse_epoch_1_ordered_kv_pack(EPOCH_1_ORDERED_KV_PACK, EPOCH_1_ORDERED_KV_PACK_SHA256)
+        .expect("the authoritative logical pack must be canonical")
+}
+
 fn open(dir: &tempfile::TempDir) -> SqliteStorage {
     SqliteStorage::open(dir.path().join("jazz.sqlite"), &["records"]).unwrap()
+}
+
+fn epoch_1_codec_fixture_schema() -> DatabaseSchema {
+    // Declaration order is deliberately variable-before-fixed. The frozen
+    // stored bytes below prove that every durable backend shares Groove's
+    // physical fixed-first record layout without changing public row order.
+    DatabaseSchema::new([TableSchema::new(
+        "records",
+        [
+            ColumnSchema::new("label", ColumnType::String),
+            ColumnSchema::new("id", ColumnType::U16),
+            ColumnSchema::new("enabled", ColumnType::Bool),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U16))])
+}
+
+#[test]
+fn class_layout_v1_writes_exact_sqlite_marker_and_mapped_key_receipt() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("class-layout.sqlite");
+        let logical_cf = "jazz_albums_history";
+        let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([logical_cf]);
+        let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let layout = LayoutStorage::new(
+            SqliteStorage::open(&path, &refs).unwrap(),
+            StorageLayout::jazz_class_v1(),
+        )
+        .await
+        .unwrap();
+        layout
+            .set(logical_cf.into(), b"row\0key".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+        drop(layout);
+
+        // This is deliberately a raw SQLite inspection, rather than another
+        // LayoutStorage read: it freezes the adapter-visible marker and key.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let marker: Vec<u8> = connection
+            .query_row(
+                "SELECT kv.v FROM kv JOIN column_families ON kv.cf = column_families.id \
+                 WHERE column_families.name = ?1 AND kv.k = ?2",
+                rusqlite::params!["__groove_class_meta", b"groove-storage-layout"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, b"class-cf-v1");
+
+        let mut expected_key = (logical_cf.len() as u32).to_be_bytes().to_vec();
+        expected_key.extend_from_slice(logical_cf.as_bytes());
+        expected_key.extend_from_slice(b"row\0key");
+        let value: Vec<u8> = connection
+            .query_row(
+                "SELECT kv.v FROM kv JOIN column_families ON kv.cf = column_families.id \
+                 WHERE column_families.name = ?1 AND kv.k = ?2",
+                rusqlite::params!["__groove_class_history", expected_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, b"value");
+        drop(connection);
+
+        let reopened = LayoutStorage::new(
+            SqliteStorage::open(&path, &refs).unwrap(),
+            StorageLayout::jazz_class_v1(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened
+                .get(logical_cf.into(), b"row\0key".to_vec())
+                .await
+                .unwrap(),
+            Some(b"value".to_vec())
+        );
+    });
+}
+
+#[test]
+fn class_layout_v1_reopen_rejects_a_future_marker_without_normalizing_it() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("class-layout-future.sqlite");
+        let logical_cf = "jazz_albums_history";
+        let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([logical_cf]);
+        let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let layout = LayoutStorage::new(
+            SqliteStorage::open(&path, &refs).unwrap(),
+            StorageLayout::jazz_class_v1(),
+        )
+        .await
+        .unwrap();
+        layout
+            .set(logical_cf.into(), b"row".to_vec(), b"old-value".to_vec())
+            .await
+            .unwrap();
+        drop(layout);
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE kv SET v = ?1 WHERE cf = (SELECT id FROM column_families WHERE name = ?2) AND k = ?3",
+                rusqlite::params![b"class-cf-v2", "__groove_class_meta", b"groove-storage-layout"],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            LayoutStorage::new(
+                SqliteStorage::open(&path, &refs).unwrap(),
+                StorageLayout::jazz_class_v1(),
+            )
+            .await,
+            Err(Error::InvalidStorageLayout(_))
+        ));
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let marker: Vec<u8> = connection
+            .query_row(
+                "SELECT kv.v FROM kv JOIN column_families ON kv.cf = column_families.id \
+                 WHERE column_families.name = ?1 AND kv.k = ?2",
+                rusqlite::params!["__groove_class_meta", b"groove-storage-layout"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, b"class-cf-v2");
+    });
 }
 
 #[test]
@@ -20,6 +225,118 @@ fn open_rejects_nul_column_family_before_creating_database() {
         assert!(SqliteStorage::open(&path, &[invalid]).is_err());
     }
     assert!(!path.exists());
+}
+
+#[test]
+fn historical_epoch_1_sqlite_fixture_is_checksum_guarded_before_materialization() {
+    let corrupted = EPOCH_1_SQLITE_FIXTURE_BASE64.replacen('U', "V", 1);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("must-not-exist.sqlite");
+    assert!(
+        write_historical_epoch_1_sqlite(&path, &corrupted).is_err(),
+        "planted source-payload corruption must fail in the materializer"
+    );
+    assert!(
+        !path.exists(),
+        "checksum rejection must precede target creation"
+    );
+}
+
+#[test]
+fn historical_epoch_1_ordered_kv_pack_requires_its_exact_header() {
+    let corrupt_header =
+        EPOCH_1_ORDERED_KV_PACK.replacen("JAZZ-ORDERED-KV-PACK-1", "JAZZ-ORDERED-KV-PACK-0", 1);
+    let corrupt_header_sha256 = format!("{:x}", Sha256::digest(&corrupt_header));
+    assert!(parse_epoch_1_ordered_kv_pack(&corrupt_header, &corrupt_header_sha256).is_err());
+}
+
+#[test]
+fn historical_epoch_1_sqlite_fixture_read_only_snapshot_mixed_write_and_reopen() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let historical_path = directory.path().join("epoch-1.sqlite");
+        write_historical_epoch_1_sqlite(&historical_path, EPOCH_1_SQLITE_FIXTURE_BASE64).unwrap();
+
+        // The first open is deliberately raw and read-only: it proves the
+        // committed physical file itself has the documented logical snapshot
+        // before the current adapter can alter journal or metadata state.
+        let read_only = rusqlite::Connection::open_with_flags(
+            &historical_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let snapshot = read_only
+            .prepare(
+                "SELECT column_families.name, kv.k, kv.v \
+                 FROM kv JOIN column_families ON kv.cf = column_families.id \
+                 ORDER BY column_families.name, kv.k",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(snapshot, epoch_1_ordered_kv_pack());
+        drop(read_only);
+
+        let current = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        assert_eq!(
+            current
+                .get("records".into(), b"user:2".to_vec())
+                .await
+                .unwrap(),
+            Some(b"Grace".to_vec())
+        );
+        current
+            .write_many(vec![
+                OwnedWriteOperation::Set {
+                    cf: "records".into(),
+                    key: b"user:3".to_vec(),
+                    value: b"Lin".to_vec(),
+                },
+                OwnedWriteOperation::Delete {
+                    cf: "indices".into(),
+                    key: b"name:Ada".to_vec(),
+                },
+                OwnedWriteOperation::Set {
+                    cf: "indices".into(),
+                    key: b"name:Lin".to_vec(),
+                    value: b"3".to_vec(),
+                },
+            ])
+            .await
+            .unwrap();
+        drop(current);
+
+        let reopened = SqliteStorage::open(&historical_path, &["records", "indices"]).unwrap();
+        assert_eq!(
+            reopened
+                .get("records".into(), b"user:3".to_vec())
+                .await
+                .unwrap(),
+            Some(b"Lin".to_vec())
+        );
+        assert_eq!(
+            reopened
+                .get("indices".into(), b"name:Ada".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            reopened
+                .get("indices".into(), b"name:Lin".to_vec())
+                .await
+                .unwrap(),
+            Some(b"3".to_vec())
+        );
+    });
 }
 
 #[test]
@@ -112,67 +429,94 @@ fn ordered_prefix_range_atomic_batch_and_reopen_contract() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
         let storage = open(&dir);
-        storage
-            .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
-            .await
-            .unwrap();
-        storage
-            .set("records".into(), b"user:10".to_vec(), b"ten".to_vec())
-            .await
-            .unwrap();
-        storage
-            .set("records".into(), b"user:1".to_vec(), b"one".to_vec())
-            .await
-            .unwrap();
+        groove::storage::conformance::persistence_order_and_batch_atomicity(&storage).await;
+        groove::storage::conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(&storage).await;
+        groove::storage::conformance::invalid_batch_is_proven_uncommitted(&storage).await;
+        groove::storage::conformance::reopen_preserves_data_and_adds_families(storage).await;
+    });
+}
+
+#[test]
+fn epoch_1_table_row_bytes_and_order_survive_a_fresh_sqlite_open() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jazz.sqlite");
+        let schema = epoch_1_codec_fixture_schema();
+        let mut database = Database::new(
+            schema.clone(),
+            SqliteStorage::open(&path, &["records"]).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut batch = database.open_batch();
+        batch.insert(
+            "records",
+            vec![
+                Value::String("a".to_owned()),
+                Value::U16(2),
+                Value::Bool(false),
+            ],
+        );
+        batch.insert(
+            "records",
+            vec![
+                Value::String("hi".to_owned()),
+                Value::U16(0x1234),
+                Value::Bool(true),
+            ],
+        );
+        let applied = database.apply_batch(batch).await.unwrap();
+        let persisted = applied.persist().await;
+        database.finish_persistence(persisted).unwrap();
+        drop(applied);
+
+        let storage = database.into_storage();
         assert_eq!(
             storage
-                .prefix("records".into(), b"user:".to_vec())
+                .prefix("records".to_owned(), Vec::new())
                 .await
                 .unwrap(),
             vec![
-                (b"user:1".to_vec(), b"one".to_vec()),
-                (b"user:10".to_vec(), b"ten".to_vec()),
-                (b"user:2".to_vec(), b"two".to_vec()),
-            ]
+                (
+                    vec![0x01, 0x00, 0x02],
+                    vec![0x00, 0x02, 0x00, 0x00, 0x02, b'a'],
+                ),
+                (
+                    vec![0x01, 0x12, 0x34],
+                    vec![0x00, 0x34, 0x12, 0x01, 0x02, b'h', b'i'],
+                ),
+            ],
+            "SQLite must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes",
         );
-        let error = storage
-            .write_many(vec![
-                OwnedWriteOperation::Set {
-                    cf: "records".into(),
-                    key: b"user:3".to_vec(),
-                    value: b"three".to_vec(),
-                },
-                OwnedWriteOperation::Set {
-                    cf: "missing".into(),
-                    key: b"user:4".to_vec(),
-                    value: b"four".to_vec(),
-                },
-            ])
-            .await
-            .unwrap_err();
-        assert!(matches!(error, Error::ColumnFamilyNotFound(name) if name == "missing"));
-        assert_eq!(
-            storage
-                .get("records".into(), b"user:3".to_vec())
-                .await
-                .unwrap(),
-            None
-        );
-        let storage = storage
-            .reopen(vec!["records".into(), "indices".into()])
-            .await
-            .unwrap();
-        storage
-            .set("indices".into(), b"name:one".to_vec(), b"1".to_vec())
+        storage.close().await.unwrap();
+        drop(storage);
+
+        let reopened = Database::new(schema, SqliteStorage::open(&path, &["records"]).unwrap())
             .await
             .unwrap();
         assert_eq!(
-            storage
-                .get("records".into(), b"user:1".to_vec())
+            reopened
+                .primary_key_scan("records", &[])
                 .await
-                .unwrap(),
-            Some(b"one".to_vec())
+                .unwrap()
+                .into_iter()
+                .map(|record| record.to_values().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![
+                    Value::String("a".to_owned()),
+                    Value::U16(2),
+                    Value::Bool(false),
+                ],
+                vec![
+                    Value::String("hi".to_owned()),
+                    Value::U16(0x1234),
+                    Value::Bool(true),
+                ],
+            ],
+            "a fresh SQLite handle must decode the exact canonical bytes in declaration order",
         );
+        reopened.close().await.unwrap();
     });
 }
 

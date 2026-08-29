@@ -5,7 +5,7 @@ import { app } from "./schema";
 
 const recordPlayerPermissions = s.definePermissions(
   app,
-  ({ policy, anyOf, allowedTo, session }) => {
+  ({ policy, allOf, anyOf, allowedTo, session }) => {
     // RecordPlayer deliberately models a shared public catalogue: every
     // authenticated listener can publish album metadata and audio tracks, and
     // everyone can browse them. A production catalog would ordinarily replace
@@ -54,23 +54,34 @@ const recordPlayerPermissions = s.definePermissions(
     policy.invitations.allowInsert.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
-    policy.invitations.allowUpdate.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
-    );
     // Recipients may perform the one-way pending → accepted transition; every
     // other invitation change (including revoke) remains owner-controlled.
+    // Before, those alternatives were separate update rules; that silently
+    // formed an old/new cross product. Keep them in one explicit rule.
+    // The recipient's persisted pending row and accepted new row are both
+    // required: chained whereNew calls replace, rather than combine, checks.
     policy.invitations.allowUpdate
-      .whereOld({ subject: session.user, status: "pending" })
-      .whereNew((invite) =>
-        policy.invitations.exists.where({
-          id: invite.id,
-          playlist_id: invite.playlist_id,
-          subject: invite.subject,
-          role: invite.role,
-          status: "pending",
-        }),
+      .whereOld((invite) =>
+        anyOf([
+          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          { subject: session.user, status: "pending" },
+        ]),
       )
-      .whereNew({ subject: session.user, status: "accepted" });
+      .whereNew((invite) =>
+        anyOf([
+          policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
+          allOf([
+            policy.invitations.exists.where({
+              id: invite.id,
+              playlist_id: invite.playlist_id,
+              subject: invite.subject,
+              role: invite.role,
+              status: "pending",
+            }),
+            { subject: session.user, status: "accepted" },
+          ]),
+        ]),
+      );
     policy.invitations.allowDelete.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );

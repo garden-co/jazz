@@ -26,7 +26,7 @@ declare module "jazz-wasm" {
   }
 
   export class WasmWrite {
-    readonly batchId: string;
+    readonly txId: string;
     readonly payload: Uint8Array;
     readonly rowId: Uint8Array;
     writeState(): unknown;
@@ -210,12 +210,12 @@ declare module "jazz-wasm" {
       cells: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
-    beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | null): void;
-    beginTransactionAttributed(openBatchId: string, attribution: Uint8Array): void;
-    commitTransaction(openBatchId: string, kind?: string | null): WasmWrite;
-    rollbackTransaction(openBatchId: string): void;
-    attachMergeableTx(openBatchId: string): WasmTx;
-    attachExclusiveTx(openBatchId: string): WasmTx;
+    beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | null): void;
+    beginTransactionAttributed(openTransactionId: string, attribution: Uint8Array): void;
+    commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
+    rollbackTransaction(openTransactionId: string): void;
+    attachMergeableTx(openTransactionId: string): WasmTx;
+    attachExclusiveTx(openTransactionId: string): WasmTx;
 
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
@@ -306,8 +306,8 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmTransport;
-    mergeableTx(openBatchId: string): WasmTx;
-    mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
-    exclusiveTx(openBatchId: string): WasmTx;
+    mergeableTx(openTransactionId: string): WasmTx;
+    mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): WasmTx;
+    exclusiveTx(openTransactionId: string): WasmTx;
   }
 }

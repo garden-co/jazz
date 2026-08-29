@@ -430,7 +430,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
                     },
                 ],
             }],
-        ),
+        ).expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )

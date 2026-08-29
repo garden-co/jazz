@@ -124,9 +124,24 @@ enum Commands {
         #[arg(long, env = "JAZZ_JWT_PUBLIC_KEY", conflicts_with = "jwks_url")]
         jwt_public_key: Option<String>,
 
+        /// Required issuer for externally verified JWTs.
+        #[arg(long, env = "JAZZ_JWT_ISSUER")]
+        jwt_issuer: Option<String>,
+
+        /// Required audience for externally verified JWTs.
+        #[arg(long, env = "JAZZ_JWT_AUDIENCE")]
+        jwt_audience: Option<String>,
+
         /// Cookie name used for browser auth on the `/ws` upgrade.
         #[arg(long, env = "JAZZ_AUTH_COOKIE_NAME")]
         auth_cookie_name: Option<String>,
+
+        /// Trust X-Forwarded-Host for cookie WebSocket origin checks.
+        ///
+        /// Enable only when Jazz is reachable exclusively through a trusted
+        /// proxy that removes client-supplied forwarded headers.
+        #[arg(long = "trust-proxy", env = "JAZZ_TRUST_PROXY")]
+        trust_forwarded_host: bool,
 
         /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
         ///
@@ -200,7 +215,10 @@ async fn main() {
             in_memory,
             jwks_url,
             jwt_public_key,
+            jwt_issuer,
+            jwt_audience,
             auth_cookie_name,
+            trust_forwarded_host,
             allow_local_first_auth,
             backend_secret,
             admin_secret,
@@ -237,7 +255,10 @@ async fn main() {
             let auth_config = AuthConfig {
                 jwks_url,
                 jwt_public_key,
+                jwt_issuer,
+                jwt_audience,
                 auth_cookie_name,
+                trust_forwarded_host,
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
@@ -270,6 +291,10 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     let Commands::Server {
         upstream_url,
         admin_secret,
+        jwks_url,
+        jwt_public_key,
+        jwt_issuer,
+        jwt_audience,
         ..
     } = command
     else {
@@ -278,6 +303,33 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
 
     if upstream_url.is_some() && admin_secret.is_none() {
         return Err("--admin-secret / JAZZ_ADMIN_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
+    }
+
+    let external_jwt_key_configured = jwks_url.is_some() || jwt_public_key.is_some();
+    if external_jwt_key_configured {
+        if jwt_issuer
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(
+                "--jwt-issuer / JAZZ_JWT_ISSUER is required with --jwks-url or --jwt-public-key"
+                    .to_owned(),
+            );
+        }
+        if jwt_audience
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(
+                "--jwt-audience / JAZZ_JWT_AUDIENCE is required with --jwks-url or --jwt-public-key"
+                    .to_owned(),
+            );
+        }
+    } else if jwt_issuer.is_some() || jwt_audience.is_some() {
+        return Err(
+            "--jwt-issuer and --jwt-audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
+                .to_owned(),
+        );
     }
 
     Ok(())
@@ -431,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn server_command_parses_jwt_public_key_flag() {
+    fn server_command_accepts_fully_bound_external_jwt_config() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         let cli = Cli::try_parse_from([
             "jazz-tools",
@@ -439,13 +491,62 @@ mod tests {
             "test-app",
             "--jwt-public-key",
             r#"{"kty":"oct","kid":"test-kid","alg":"HS256","k":"c2VjcmV0"}"#,
+            "--jwt-issuer",
+            "https://issuer.example",
+            "--jwt-audience",
+            "test-app",
+            "--trust-proxy",
         ])
         .expect("server command should parse");
 
+        validate_server_cli_options(&cli.command)
+            .expect("bound external JWT configuration should be valid");
         match cli.command {
-            Commands::Server { .. } => {}
+            Commands::Server {
+                jwt_issuer,
+                jwt_audience,
+                trust_forwarded_host,
+                ..
+            } => {
+                assert_eq!(jwt_issuer.as_deref(), Some("https://issuer.example"));
+                assert_eq!(jwt_audience.as_deref(), Some("test-app"));
+                assert!(trust_forwarded_host);
+            }
             _ => panic!("expected server command"),
         }
+    }
+
+    #[test]
+    fn server_cli_validation_requires_external_jwt_issuer_and_audience() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _issuer = EnvVarGuard::remove("JAZZ_JWT_ISSUER");
+        let _audience = EnvVarGuard::remove("JAZZ_JWT_AUDIENCE");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "test-app",
+            "--jwks-url",
+            "https://issuer.example/.well-known/jwks.json",
+        ])
+        .expect("server command should parse");
+
+        let error = validate_server_cli_options(&cli.command)
+            .expect_err("external JWT verifier without issuer must fail");
+        assert!(error.contains("--jwt-issuer"), "{error}");
+
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "test-app",
+            "--jwks-url",
+            "https://issuer.example/.well-known/jwks.json",
+            "--jwt-issuer",
+            "https://issuer.example",
+        ])
+        .expect("server command should parse");
+        let error = validate_server_cli_options(&cli.command)
+            .expect_err("external JWT verifier without audience must fail");
+        assert!(error.contains("--jwt-audience"), "{error}");
     }
 
     #[test]

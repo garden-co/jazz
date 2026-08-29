@@ -536,16 +536,14 @@ fn large_value_metadata_records_are_canonical_groove_records() {
     );
     assert_eq!(
         to_hex(Database::descriptor_upload_id(&value_ref).unwrap().0),
-        "56b8e4a2c8d0c22a9ca73b21d372744f"
+        "aec69de205adc49847c9d755eee7c9c3"
     );
 }
 
-// This internal reopen receipt protects the metadata envelope boundary. The
-// descriptor bytes are intentionally a future selector followed by a payload
-// that cannot possibly bind as V1; reads must return the selector failure and
-// leave both persisted journals untouched for a future implementation.
+// This internal reopen receipt proves the discarded pre-freeze V2 selector is
+// rejected, with no compatibility decoding or lifecycle mutation.
 #[futures_test::test]
-async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
+async fn historical_v2_descriptor_metadata_is_rejected_without_mutation() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",
         [ColumnSchema::new("id", ColumnType::U64)],
@@ -630,13 +628,133 @@ async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 2")
         ),
-        "staged journal must dispatch before V1 binding"
+        "staged journal must reject discarded V2"
     );
     assert!(
         matches!(
             reopened.pending_large_value_uploads().await,
             Err(Error::InvalidLargeValueMetadata(message))
                 if message.contains("unsupported large-value format version 2")
+        ),
+        "pending journal must reject discarded V2"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key)
+            .await
+            .unwrap(),
+        Some(staged),
+        "a rejected staged receipt must not mutate lifecycle metadata"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), pending_key)
+            .await
+            .unwrap(),
+        Some(pending),
+        "a rejected pending journal must not mutate lifecycle metadata"
+    );
+}
+
+// This internal reopen receipt protects the metadata envelope boundary. The
+// descriptor bytes are intentionally a future selector followed by a payload
+// that cannot possibly bind as V1; reads must return the selector failure and
+// leave both persisted journals untouched for a future implementation.
+#[futures_test::test]
+async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    // V2 is the discarded pre-freeze encoding. This receipt must instead use
+    // an actual future selector, so it proves the future-version boundary.
+    let future_descriptor = vec![0, crate::large_values::FORMAT_VERSION + 2, 0xff];
+    let staged_id = crate::large_values::StagedLargeValueId([0x91; 16]);
+    let pending_id = crate::large_values::StagedLargeValueId([0x92; 16]);
+    let staged = encode_large_value_metadata_record(
+        staged_large_value_schema(),
+        [
+            (
+                STAGED_VALUE_ID_FIELD,
+                staged_large_value_id_value(staged_id),
+            ),
+            (
+                STAGED_VALUE_REF_FIELD,
+                records::Value::Bytes(future_descriptor.clone()),
+            ),
+            (STAGED_VALUE_ENCODED_BYTES_FIELD, records::Value::U64(0)),
+            (STAGED_VALUE_NODE_COUNT_FIELD, records::Value::U64(0)),
+            (STAGED_VALUE_CREATED_AT_MS_FIELD, records::Value::U64(0)),
+        ],
+        "staged large value",
+    )
+    .unwrap();
+    let pending = encode_large_value_metadata_record(
+        pending_large_value_upload_schema(),
+        [
+            (
+                PENDING_UPLOAD_ID_FIELD,
+                staged_large_value_id_value(pending_id),
+            ),
+            (
+                PENDING_UPLOAD_DESCRIPTOR_FIELD,
+                records::Value::Nullable(Some(Box::new(records::Value::Bytes(future_descriptor)))),
+            ),
+            (
+                PENDING_UPLOAD_RECEIPT_ID_FIELD,
+                records::Value::Nullable(None),
+            ),
+            (PENDING_UPLOAD_ENCODED_BYTES_FIELD, records::Value::U64(0)),
+            (PENDING_UPLOAD_NODE_COUNT_FIELD, records::Value::U64(0)),
+            (PENDING_UPLOAD_CREATED_AT_MS_FIELD, records::Value::U64(0)),
+            (
+                PENDING_UPLOAD_CHUNKS_FIELD,
+                records::Value::Array(Vec::new()),
+            ),
+        ],
+        "pending large-value upload",
+    )
+    .unwrap();
+    let staged_key = staged_large_value_key(staged_id);
+    let pending_key = pending_large_value_upload_key(pending_id);
+    database
+        .storage
+        .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: staged_key.clone(),
+                value: staged.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: pending_key.clone(),
+                value: pending.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+    drop(database);
+
+    let reopened = Database::new(schema, storage.clone()).await.unwrap();
+    let staged_result = reopened.staged_large_values().await;
+    assert!(
+        matches!(
+            staged_result,
+            Err(Error::InvalidLargeValueMetadata(message))
+                if message.contains("unsupported large-value format version 3")
+        ),
+        "staged journal must dispatch before V1 binding"
+    );
+    assert!(
+        matches!(
+            reopened.pending_large_value_uploads().await,
+            Err(Error::InvalidLargeValueMetadata(message))
+                if message.contains("unsupported large-value format version 3")
         ),
         "pending journal must dispatch before V1 binding"
     );
@@ -655,5 +773,275 @@ async fn future_descriptor_metadata_fails_before_v1_binding_without_mutation() {
             .unwrap(),
         Some(pending),
         "a rejected pending journal must not mutate lifecycle metadata"
+    );
+}
+
+// This is intentionally a facade-level corruption receipt: journal keys and
+// their duplicate value IDs are engine-owned durable authority, not fields a
+// public row can forge. It proves scans, expiry eviction, and recovery reject
+// a copied canonical record before touching either lifecycle entry.
+#[futures_test::test]
+async fn receipt_and_upload_key_identity_corruption_survives_reopen_without_mutation() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    let descriptor = crate::large_values::prepare(crate::large_values::LargeValueKind::Bytes, b"x")
+        .unwrap()
+        .value_ref;
+    let staged_key_id = crate::large_values::StagedLargeValueId([0x81; 16]);
+    let staged_value_id = crate::large_values::StagedLargeValueId([0x82; 16]);
+    let pending_key_id = crate::large_values::StagedLargeValueId([0x83; 16]);
+    let pending_value_id = crate::large_values::StagedLargeValueId([0x84; 16]);
+    let staged_key = staged_large_value_key(staged_key_id);
+    let pending_key = pending_large_value_upload_key(pending_key_id);
+    let staged = encode_staged_large_value(&crate::large_values::StagedLargeValue {
+        id: staged_value_id,
+        value_ref: descriptor.clone(),
+        accounting: crate::large_values::StagedLargeValueAccounting {
+            encoded_bytes: 1,
+            node_count: 1,
+        },
+        created_at_ms: 0,
+    })
+    .unwrap();
+    let pending =
+        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
+            id: pending_value_id,
+            descriptor: Some(descriptor),
+            receipt_id: None,
+            accounting: crate::large_values::StagedLargeValueAccounting::default(),
+            created_at_ms: u64::MAX,
+            chunks: Vec::new(),
+        })
+        .unwrap();
+    database
+        .storage
+        .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: staged_key.clone(),
+                value: staged.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: pending_key.clone(),
+                value: pending.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+    drop(database);
+
+    let mut reopened = Database::new(schema, storage.clone()).await.unwrap();
+    assert!(matches!(
+        reopened.staged_large_values().await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("key and receipt id differ")
+    ));
+    assert!(matches!(
+        reopened.pending_large_value_uploads().await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("key and journal id differ")
+    ));
+    let mut batch = reopened.open_batch();
+    batch.insert("objects", vec![records::Value::U64(1)]);
+    batch.accept_large_value(staged_key_id);
+    assert!(matches!(
+        reopened.commit_batch(batch).await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("key and receipt id differ")
+    ));
+    assert!(matches!(
+        reopened.evict_staged_large_value(staged_key_id).await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("key and receipt id differ")
+    ));
+    assert!(matches!(
+        reopened.evict_pending_large_value_upload(pending_key_id).await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("key and journal id differ")
+    ));
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key)
+            .await
+            .unwrap(),
+        Some(staged),
+        "rejected receipt corruption must remain intact for inspection"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), pending_key)
+            .await
+            .unwrap(),
+        Some(pending),
+        "rejected pending corruption must remain intact for inspection"
+    );
+}
+
+// The completed journals are an authority boundary too: neither direction may
+// be copied to another fixed-width lifecycle key. Exercise the forward
+// staging preflight and the reverse cleanup primitive that acceptance and TTL
+// eviction share, and prove both reject before a write.
+#[futures_test::test]
+async fn completed_journal_key_copies_fail_closed_before_staging_or_cleanup() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let database = Database::new(schema, storage.clone()).await.unwrap();
+    let descriptor = crate::large_values::prepare(crate::large_values::LargeValueKind::Bytes, b"x")
+        .unwrap()
+        .value_ref;
+    let source_upload = crate::large_values::StagedLargeValueId([0x85; 16]);
+    let copied_upload_key_id = crate::large_values::StagedLargeValueId([0x86; 16]);
+    let source_receipt = crate::large_values::StagedLargeValueId([0x87; 16]);
+    let copied_receipt_key_id = crate::large_values::StagedLargeValueId([0x88; 16]);
+    let completed =
+        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
+            id: source_upload,
+            descriptor: Some(descriptor),
+            receipt_id: Some(source_receipt),
+            accounting: crate::large_values::StagedLargeValueAccounting::default(),
+            created_at_ms: 0,
+            chunks: Vec::new(),
+        })
+        .unwrap();
+    let copied_upload_key = completed_large_value_upload_key(copied_upload_key_id);
+    let copied_receipt_key = completed_large_value_receipt_key(copied_receipt_key_id);
+    database
+        .storage
+        .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: copied_upload_key.clone(),
+                value: completed.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: copied_receipt_key.clone(),
+                value: completed.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        database
+            .stage_large_value_chunk_batch(
+                copied_upload_key_id,
+                crate::large_values::LargeValueKind::Bytes,
+                Vec::new(),
+            )
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("completed upload key and journal id differ")
+    ));
+    assert!(matches!(
+        super::facade::completed_large_value_cleanup_operations(&storage, copied_receipt_key_id)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("completed receipt key and receipt id differ")
+    ));
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), copied_upload_key)
+            .await
+            .unwrap(),
+        Some(completed.clone()),
+        "rejected forward copy must remain untouched"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), copied_receipt_key)
+            .await
+            .unwrap(),
+        Some(completed),
+        "rejected reverse copy must remain untouched"
+    );
+}
+
+// A bidirectional completion journal is not itself a completed upload: its
+// durable staged receipt is the third member of that atomic promotion. This is
+// necessarily an internal corruption receipt because public APIs never expose
+// lifecycle keys, and it proves raw staging cannot silently treat an incomplete
+// promotion as a successful idempotent retry.
+#[futures_test::test]
+async fn completed_journal_without_staged_receipt_fails_before_raw_staging_mutates() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [ColumnSchema::new("id", ColumnType::U64)],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let database = Database::new(schema, storage.clone()).await.unwrap();
+    let descriptor = crate::large_values::prepare(crate::large_values::LargeValueKind::Bytes, b"x")
+        .unwrap()
+        .value_ref;
+    let upload_id = crate::large_values::StagedLargeValueId([0x89; 16]);
+    let receipt_id = crate::large_values::StagedLargeValueId([0x8a; 16]);
+    let completed =
+        encode_pending_large_value_upload(&crate::large_values::PendingLargeValueUpload {
+            id: upload_id,
+            descriptor: Some(descriptor),
+            receipt_id: Some(receipt_id),
+            accounting: crate::large_values::StagedLargeValueAccounting::default(),
+            created_at_ms: 0,
+            chunks: Vec::new(),
+        })
+        .unwrap();
+    let upload_key = completed_large_value_upload_key(upload_id);
+    let receipt_key = completed_large_value_receipt_key(receipt_id);
+    database
+        .storage
+        .write_many(vec![
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: upload_key.clone(),
+                value: completed.clone(),
+            },
+            crate::storage::OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: receipt_key.clone(),
+                value: completed.clone(),
+            },
+        ])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        database
+            .stage_large_value_chunk_batch(
+                upload_id,
+                crate::large_values::LargeValueKind::Bytes,
+                Vec::new(),
+            )
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("completed upload points to a missing staged receipt")
+    ));
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), upload_key)
+            .await
+            .unwrap(),
+        Some(completed.clone()),
+        "failed staging must not alter the forward completion journal"
+    );
+    assert_eq!(
+        storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), receipt_key)
+            .await
+            .unwrap(),
+        Some(completed),
+        "failed staging must not alter the reverse completion journal"
     );
 }

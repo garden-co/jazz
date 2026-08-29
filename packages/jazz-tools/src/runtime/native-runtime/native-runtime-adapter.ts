@@ -12,11 +12,11 @@ import type {
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import type {
-  BatchId,
+  TxId,
   InsertResult,
   MutationErrorEvent,
   MutationResult,
-  OpenBatchId,
+  OpenTransactionId,
   PermissionAdvice,
   Runtime,
   StreamingInsertResult,
@@ -57,6 +57,7 @@ import {
   type QueryPredicateOp,
   type ValueType,
 } from "./native-codec.js";
+import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import {
@@ -158,12 +159,12 @@ type NativeDb = {
   // owns idempotence, so callers never observe that implementation detail.
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
-  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
-  beginTransactionAttributed?(openBatchId: string, attribution: Uint8Array): void;
-  commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
-  rollbackTransaction(openBatchId: string): void;
-  attachMergeableTx(openBatchId: string): Tx;
-  attachExclusiveTx?(openBatchId: string): Tx;
+  beginTransaction(openTransactionId: string, kind: TransactionKind, author?: Uint8Array): void;
+  beginTransactionAttributed?(openTransactionId: string, attribution: Uint8Array): void;
+  commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
+  rollbackTransaction(openTransactionId: string): void;
+  attachMergeableTx(openTransactionId: string): Tx;
+  attachExclusiveTx?(openTransactionId: string): Tx;
   all(query: PreparedQuery, opts: unknown): NativeReadResult;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
   allAsync?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
@@ -283,9 +284,9 @@ type NativeDb = {
     patch: Uint8Array,
   ): NativePermissionAdviceRequest;
   requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
-  mergeableTx(openBatchId: OpenBatchId): Tx;
-  mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
-  exclusiveTx?(openBatchId: OpenBatchId): Tx;
+  mergeableTx(openTransactionId: OpenTransactionId): Tx;
+  mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
+  exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
   allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadResult;
   setTickScheduler(
     callback:
@@ -382,7 +383,7 @@ type Subscription = {
 };
 
 type Write = {
-  readonly batchId: string;
+  readonly txId: string;
   readonly payload: Uint8Array;
   readonly rowId: Uint8Array;
   wait(tier: string): Promise<void>;
@@ -393,6 +394,8 @@ type Write = {
 type Tx = {
   commit(): Write;
   rollback(): void;
+  /** Release the native transaction view after its owner batch has completed. */
+  close?(): boolean;
   insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
   updateEncoded(
     table: string,
@@ -434,7 +437,7 @@ export type Transport = {
 };
 
 type PendingTx = {
-  id: OpenBatchId;
+  id: OpenTransactionId;
   kind: TransactionKind;
   txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
@@ -1095,8 +1098,23 @@ export class NativeRuntimeAdapter implements Runtime {
         closeSubscriptionSource(source.source);
       }
     }
+    // Prepared plans and coverage receipts are valid only while this runtime
+    // is live. Release them before closing the native owner so long-lived JS
+    // Db wrappers cannot retain stale native graph/storage state through a
+    // cache after their context has shut down.
+    this.preparedQueries.clear();
+    this.peerCoveredQueries.clear();
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
+      // A schema view can own an attached transaction handle while its parent
+      // owns the batch. Closing this view must release only that handle; the
+      // parent still needs its batch and sibling views to complete it.
+      for (const pending of this.pendingTxs.values()) {
+        const tx = pending.txByView.get(this);
+        if (!tx) continue;
+        tx.close?.();
+        pending.txByView.delete(this);
+      }
       // Query and subscription futures may still be unwinding through this
       // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
       // use-after-free; let GC release the Rc-backed view after those promises
@@ -1107,6 +1125,9 @@ export class NativeRuntimeAdapter implements Runtime {
       write.close?.();
     }
     this.subscriptions.clear();
+    for (const pending of this.pendingTxs.values()) {
+      this.releaseTransactionViews(pending);
+    }
     this.pendingTxs.clear();
     this.completedTxs.clear();
     this.writes.clear();
@@ -1167,7 +1188,7 @@ export class NativeRuntimeAdapter implements Runtime {
         id: row.id,
         values: row.values,
         kind: "staged",
-        openBatchId: txIdFromContext(_writeContext)!,
+        openTransactionId: txIdFromContext(_writeContext)!,
       };
     }
     const write = writeOrNormalizeRejection("Insert", () => {
@@ -1344,7 +1365,7 @@ export class NativeRuntimeAdapter implements Runtime {
         id: row.id,
         values: row.values,
         kind: "staged",
-        openBatchId: txIdFromContext(writeContext)!,
+        openTransactionId: txIdFromContext(writeContext)!,
       };
     }
     const write = writeOrNormalizeRejection("Restore", () => {
@@ -1393,7 +1414,7 @@ export class NativeRuntimeAdapter implements Runtime {
         rowId,
         row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
       });
-      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () => {
       if (attribution) {
@@ -1493,7 +1514,7 @@ export class NativeRuntimeAdapter implements Runtime {
           ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
           : this.rowStateFromValues(table, rowId, values),
       });
-      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () => {
       if (attribution) {
@@ -1532,7 +1553,7 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       tx.writes.push({ table, rowId, deleted: true });
-      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () => {
       if (attribution) {
@@ -1633,9 +1654,9 @@ export class NativeRuntimeAdapter implements Runtime {
 
   beginTransaction(
     kind: TransactionKind,
-    id: OpenBatchId,
+    id: OpenTransactionId,
     sessionJson?: string | null,
-  ): OpenBatchId {
+  ): OpenTransactionId {
     if (this !== this.ownerRuntime) {
       return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
     }
@@ -1672,37 +1693,37 @@ export class NativeRuntimeAdapter implements Runtime {
     return id;
   }
 
-  commitTransaction(openBatchId: OpenBatchId): BatchId {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openBatchId);
-    const pending = this.pendingTxs.get(openBatchId);
+  commitTransaction(openTransactionId: OpenTransactionId): TxId {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openTransactionId);
+    const pending = this.pendingTxs.get(openTransactionId);
     if (!pending) {
-      throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
+      throw new Error(commitTransactionMessage(openTransactionId, this.completedTxs));
     }
     if (pending.writes.length === 0 && pending.kind === "mergeable") {
       throw new Error(
         "Commit transaction failed: empty mergeable transaction has no committed unit; roll it back instead",
       );
     }
-    let write: Write;
-    write = this.db.commitTransaction(openBatchId, pending.kind);
-    this.pendingTxs.delete(openBatchId);
-    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
+    const write = this.db.commitTransaction(openTransactionId, pending.kind);
+    this.releaseTransactionViews(pending);
+    this.pendingTxs.delete(openTransactionId);
+    this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
-    const batchId = recordWrite(write, this.writes);
-    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
-    return batchId;
+    const txId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(txId);
+    return txId;
   }
 
-  async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
+  async waitForTransaction(txId: TxId | Promise<TxId>, tier: string): Promise<void> {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.waitForTransaction(batchId, tier);
+      return this.ownerRuntime.waitForTransaction(txId, tier);
     }
-    batchId = await batchId;
-    const write = this.writes.get(batchId);
+    txId = await txId;
+    const write = this.writes.get(txId);
     if (!write) {
-      throw new Error(`Wait for transaction failed: unknown transaction ${batchId}`);
+      throw new Error(`Wait for transaction failed: unknown transaction ${txId}`);
     }
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
@@ -1723,7 +1744,7 @@ export class NativeRuntimeAdapter implements Runtime {
           return;
         }
       } catch (error) {
-        const rejected = rejectedWaitError(batchId, error);
+        const rejected = rejectedWaitError(txId, error);
         if (rejected) {
           throw rejected;
         }
@@ -1735,15 +1756,19 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.rollbackTransaction(openBatchId);
-    const pending = this.pendingTxs.get(openBatchId);
+  rollbackTransaction(openTransactionId: OpenTransactionId): Promise<boolean> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.rollbackTransaction(openTransactionId);
+    const pending = this.pendingTxs.get(openTransactionId);
     if (!pending) {
-      throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
+      throw new Error(rollbackTransactionMessage(openTransactionId, this.completedTxs));
     }
-    this.db.rollbackTransaction(openBatchId);
-    this.pendingTxs.delete(openBatchId);
-    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "rolled_back" });
+    try {
+      this.db.rollbackTransaction(openTransactionId);
+    } finally {
+      this.releaseTransactionViews(pending);
+      this.pendingTxs.delete(openTransactionId);
+    }
+    this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "rolled_back" });
     return Promise.resolve(true);
   }
 
@@ -2168,13 +2193,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.mutationErrorCallback?.(event);
   }
 
-  private trackLocalSettlement(batchId: BatchId): void {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.trackLocalSettlement(batchId);
+  private trackLocalSettlement(txId: TxId): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.trackLocalSettlement(txId);
     let settlement!: Promise<void>;
     // The follower itself is non-durable. Its `local` receipt is the durable
     // worker's acknowledgement, emitted after inbound persistence but before
     // separately scheduled cold downstream view assembly.
-    settlement = this.waitForTransaction(batchId, "local")
+    settlement = this.waitForTransaction(txId, "local")
       .catch(() => undefined)
       .finally(() => this.pendingLocalSettlements.delete(settlement));
     this.pendingLocalSettlements.add(settlement);
@@ -2186,28 +2211,30 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     write: Write,
   ): InsertResult {
-    const batchId = recordWrite(write, this.writes);
-    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
+    const txId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(txId);
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     const row = this.rowStateFromValues(table, rowId, values);
-    return { id: row.id, values: row.values, kind: "committed", batchId };
+    return { id: row.id, values: row.values, kind: "committed", txId };
   }
 
   private finishMutation(write: Write): MutationResult {
-    const batchId = recordWrite(write, this.writes);
-    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
+    const txId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(txId);
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
-    return { kind: "committed", batchId };
+    return { kind: "committed", txId };
   }
 
   private resultForRow(
     table: string,
     rowId: Uint8Array,
-    receipt: { kind: "committed"; batchId: BatchId } | { kind: "staged"; openBatchId: OpenBatchId },
+    receipt:
+      | { kind: "committed"; txId: TxId }
+      | { kind: "staged"; openTransactionId: OpenTransactionId },
     identity?: Uint8Array,
   ): InsertResult {
     const row = this.readRow(table, rowId, identity);
@@ -2688,7 +2715,14 @@ export class NativeRuntimeAdapter implements Runtime {
     return tx;
   }
 
-  private exclusiveTx(id: OpenBatchId): Tx {
+  private releaseTransactionViews(pending: PendingTx): void {
+    for (const tx of pending.txByView.values()) {
+      tx.close?.();
+    }
+    pending.txByView.clear();
+  }
+
+  private exclusiveTx(id: OpenTransactionId): Tx {
     if (!this.db.exclusiveTx) {
       throw new Error(
         "Native runtime cannot perform exclusive transaction writes: " +
@@ -2698,7 +2732,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.exclusiveTx(id);
   }
 
-  private mergeableTxForIdentity(id: OpenBatchId, identity: Uint8Array): Tx {
+  private mergeableTxForIdentity(id: OpenTransactionId, identity: Uint8Array): Tx {
     if (!this.db.mergeableTxForIdentity) {
       throw new Error(
         "Native runtime cannot perform session-scoped transaction writes: " +
@@ -3272,7 +3306,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.serverTransportError && message === "websocket closed") return;
     const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
-    this.failActiveSubscriptions(this.serverTransportError);
+    this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
@@ -3305,9 +3339,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private failActiveSubscriptions(error: Error): void {
+  private failRemoteSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
+      const tier = (subscription.opts as { tier?: unknown }).tier ?? "local";
+      if (tier !== "edge" && tier !== "global") continue;
       this.failSubscription(subscription, error);
     }
   }
@@ -3446,17 +3482,19 @@ function normalizeTransportFrame(frame: unknown): Uint8Array {
   return normalized;
 }
 
-function recordWrite(write: Write, writes: Map<string, Write>): BatchId {
-  const id = write.batchId as BatchId;
+function recordWrite(write: Write, writes: Map<string, Write>): TxId {
+  const id = write.txId as TxId;
   writes.set(id, write);
-  return id as BatchId;
+  return id as TxId;
 }
 
-function txIdFromContext(writeContext?: string | null): OpenBatchId | undefined {
+function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
   if (!writeContext) return undefined;
   try {
-    const parsed = JSON.parse(writeContext) as { batch_id?: unknown };
-    return typeof parsed.batch_id === "string" ? (parsed.batch_id as OpenBatchId) : undefined;
+    const parsed = JSON.parse(writeContext) as { transaction_id?: unknown };
+    return typeof parsed.transaction_id === "string"
+      ? (parsed.transaction_id as OpenTransactionId)
+      : undefined;
   } catch {
     return undefined;
   }
@@ -3639,30 +3677,33 @@ function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
-function txStateMessage(openBatchId: string, completedBatches: Map<string, CompletedTx>): string {
-  const completed = completedBatches.get(openBatchId);
+function txStateMessage(
+  openTransactionId: string,
+  completedBatches: Map<string, CompletedTx>,
+): string {
+  const completed = completedBatches.get(openTransactionId);
   if (completed?.state === "committed") {
-    return `open transaction ${openBatchId} is already committed`;
+    return `open transaction ${openTransactionId} is already committed`;
   }
-  return `open transaction ${openBatchId} has already been completed or was never opened`;
+  return `open transaction ${openTransactionId} has already been completed or was never opened`;
 }
 
 function commitTransactionMessage(
-  openBatchId: string,
+  openTransactionId: string,
   completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(openBatchId, completedBatches);
-  return completedBatches.get(openBatchId)?.state === "committed"
+  const message = txStateMessage(openTransactionId, completedBatches);
+  return completedBatches.get(openTransactionId)?.state === "committed"
     ? `Write error: ${message}`
     : `Commit transaction failed: Write error: ${message}`;
 }
 
 function rollbackTransactionMessage(
-  openBatchId: string,
+  openTransactionId: string,
   completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(openBatchId, completedBatches);
-  return completedBatches.get(openBatchId)?.state === "committed"
+  const message = txStateMessage(openTransactionId, completedBatches);
+  return completedBatches.get(openTransactionId)?.state === "committed"
     ? `Write error: ${message}`
     : `Rollback transaction failed: Write error: ${message}`;
 }
@@ -3672,25 +3713,27 @@ function assertTransactionReadOpen(
   pendingTxs: Map<string, PendingTx>,
   completedTxs: Map<string, CompletedTx>,
 ): void {
-  const openBatchId = openBatchIdFromOptions(optionsJson);
-  if (!openBatchId || pendingTxs.has(openBatchId)) return;
-  throw new Error(`Query setup failed: Write error: ${txStateMessage(openBatchId, completedTxs)}`);
+  const openTransactionId = openTransactionIdFromOptions(optionsJson);
+  if (!openTransactionId || pendingTxs.has(openTransactionId)) return;
+  throw new Error(
+    `Query setup failed: Write error: ${txStateMessage(openTransactionId, completedTxs)}`,
+  );
 }
 
 function pendingTxFromOptions(
   optionsJson: string | null | undefined,
   pendingTxs: Map<string, PendingTx>,
 ): PendingTx | undefined {
-  const openBatchId = openBatchIdFromOptions(optionsJson);
-  return openBatchId ? pendingTxs.get(openBatchId) : undefined;
+  const openTransactionId = openTransactionIdFromOptions(optionsJson);
+  return openTransactionId ? pendingTxs.get(openTransactionId) : undefined;
 }
 
-function openBatchIdFromOptions(optionsJson?: string | null): OpenBatchId | undefined {
+function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransactionId | undefined {
   if (!optionsJson) return undefined;
   try {
-    const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
-    return typeof parsed.transaction_batch_id === "string"
-      ? (parsed.transaction_batch_id as OpenBatchId)
+    const parsed = JSON.parse(optionsJson) as { transaction_id?: unknown };
+    return typeof parsed.transaction_id === "string"
+      ? (parsed.transaction_id as OpenTransactionId)
       : undefined;
   } catch {
     return undefined;
@@ -4173,11 +4216,11 @@ function isPendingCoverageError(error: unknown): boolean {
 }
 
 function rejectedWaitError(
-  transactionId: BatchId,
+  transactionId: TxId,
   error: unknown,
 ): {
   kind: "rejected";
-  transactionId: BatchId;
+  transactionId: TxId;
   code: string;
   reason: string;
   /** An Error-compatible diagnostic for direct native callers. */
@@ -4187,7 +4230,7 @@ function rejectedWaitError(
   if (!message.includes("WriteRejected")) return null;
   const rejection: {
     kind: "rejected";
-    transactionId: BatchId;
+    transactionId: TxId;
     code: string;
     reason: string;
     message: string;
@@ -4852,7 +4895,7 @@ function coerceLiteralForColumnType(
     return { type: "Double", value: value.value };
   }
   if (columnType?.type === "BigInt" && value.type === "Integer") {
-    return { type: "BigInt", value: BigInt(value.value) };
+    return { type: "BigInt", value: exactSignedI64(value.value, "BigInt value") };
   }
   if (columnType?.type === "Timestamp" && value.type === "Integer") {
     return { type: "Timestamp", value: value.value };

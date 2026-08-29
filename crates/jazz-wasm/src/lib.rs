@@ -69,6 +69,14 @@ pub fn native_artifact_fingerprint() -> String {
         .to_owned()
 }
 
+/// Test-only bridge for executing the Rust-owned v1 binding corpus through the
+/// generated WASM artifact. The JavaScript test still uses the production
+/// decoder for every returned postcard payload.
+#[wasm_bindgen(js_name = __testBindingCodecGoldenFixture)]
+pub fn test_binding_codec_golden_fixture() -> String {
+    jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
+}
+
 /// Generate a new UUID v7 (time-ordered).
 ///
 /// Useful when a caller wants the default generated row-id shape.
@@ -223,7 +231,7 @@ pub struct WasmQueryAttachment {
 pub struct WasmWrite {
     payload: Vec<u8>,
     row_id: RowUuid,
-    batch_id: TransactionId,
+    tx_id: TransactionId,
     inner: Option<WasmWriteInner>,
 }
 
@@ -357,9 +365,9 @@ enum WasmWriteInner {
 
 #[wasm_bindgen]
 impl WasmWrite {
-    #[wasm_bindgen(getter, js_name = batchId)]
-    pub fn batch_id(&self) -> String {
-        self.batch_id.to_string()
+    #[wasm_bindgen(getter, js_name = txId)]
+    pub fn tx_id(&self) -> String {
+        self.tx_id.to_string()
     }
 
     #[wasm_bindgen(getter, js_name = payload)]
@@ -1513,54 +1521,54 @@ impl WasmDb {
         })
     }
 
-    /// Attach this typed view to an existing owner-wide mergeable batch.
+    /// Attach this typed view to an existing owner-wide mergeable transaction.
     #[wasm_bindgen(js_name = attachMergeableTx)]
-    pub fn attach_mergeable_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id
+    pub fn attach_mergeable_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: false,
         })
     }
 
-    /// Attach this typed view to an existing owner-wide exclusive batch.
+    /// Attach this typed view to an existing owner-wide exclusive transaction.
     #[wasm_bindgen(js_name = attachExclusiveTx)]
-    pub fn attach_exclusive_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id
+    pub fn attach_exclusive_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Exclusive,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: false,
         })
     }
 
-    /// Begin one owner-wide batch without creating an owning per-schema Tx.
+    /// Begin one owner-wide transaction without creating an owning per-schema Tx.
     #[wasm_bindgen(js_name = beginTransaction)]
     pub fn begin_transaction(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: String,
         author: Option<Vec<u8>>,
     ) -> Result<(), JsValue> {
-        let open_batch_id = open_batch_id
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let author = author.as_deref().map(author_id_from_bytes).transpose()?;
         match kind.as_str() {
             "mergeable" => self
                 .inner
-                .begin_mergeable(open_batch_id, author)
+                .begin_mergeable(open_transaction_id, author)
                 .map_err(to_js_error),
             "exclusive" => self
                 .inner
-                .begin_exclusive(open_batch_id, author)
+                .begin_exclusive(open_transaction_id, author)
                 .map_err(to_js_error),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
@@ -1572,21 +1580,21 @@ impl WasmDb {
     #[wasm_bindgen(js_name = beginTransactionAttributed)]
     pub fn begin_transaction_attributed(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         attribution: Vec<u8>,
     ) -> Result<(), JsValue> {
         self.require_trusted_backend()?;
-        let open_batch_id = open_batch_id
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let attribution = author_id_from_bytes(&attribution)?;
         match &self.inner {
             WasmDbInner::Memory(db) => {
-                block_on(db.begin_mergeable_attributed(open_batch_id, attribution))
+                block_on(db.begin_mergeable_attributed(open_transaction_id, attribution))
             }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => {
-                block_on(db.begin_mergeable_attributed(open_batch_id, attribution))
+                block_on(db.begin_mergeable_attributed(open_transaction_id, attribution))
             }
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1597,15 +1605,15 @@ impl WasmDb {
     #[wasm_bindgen(js_name = commitTransaction)]
     pub fn commit_transaction(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         kind: Option<String>,
     ) -> Result<WasmWrite, JsValue> {
-        let open_batch_id = open_batch_id
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let tx_id = match kind.as_deref().unwrap_or("mergeable") {
-            "mergeable" => self.inner.commit_mergeable(open_batch_id),
-            "exclusive" => self.inner.commit_exclusive(open_batch_id),
+            "mergeable" => self.inner.commit_mergeable(open_transaction_id),
+            "exclusive" => self.inner.commit_exclusive(open_transaction_id),
             kind => return Err(JsValue::from_str(&unknown_transaction_kind_message(kind))),
         }
         .map_err(to_js_error)?;
@@ -1631,12 +1639,12 @@ impl WasmDb {
 
     /// Roll back an owner-wide open transaction by id.
     #[wasm_bindgen(js_name = rollbackTransaction)]
-    pub fn rollback_transaction(&self, open_batch_id: String) -> Result<(), JsValue> {
-        let open_batch_id = open_batch_id
+    pub fn rollback_transaction(&self, open_transaction_id: String) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         self.inner
-            .abandon_transaction(open_batch_id)
+            .abandon_transaction(open_transaction_id)
             .map_err(to_js_error)
     }
 
@@ -2654,17 +2662,17 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = mergeableTx)]
-    pub fn mergeable_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id
+    pub fn mergeable_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         self.inner
-            .begin_mergeable(open_batch_id, None)
+            .begin_mergeable(open_transaction_id, None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: true,
         })
     }
@@ -2672,36 +2680,36 @@ impl WasmDb {
     #[wasm_bindgen(js_name = mergeableTxForIdentity)]
     pub fn mergeable_tx_for_identity(
         &self,
-        open_batch_id: String,
+        open_transaction_id: String,
         author: Vec<u8>,
     ) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         let author = author_id_from_bytes(&author)?;
         self.inner
-            .begin_mergeable(open_batch_id, Some(author))
+            .begin_mergeable(open_transaction_id, Some(author))
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Mergeable,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: true,
         })
     }
 
     #[wasm_bindgen(js_name = exclusiveTx)]
-    pub fn exclusive_tx(&self, open_batch_id: String) -> Result<WasmTx, JsValue> {
-        let open_batch_id = open_batch_id
+    pub fn exclusive_tx(&self, open_transaction_id: String) -> Result<WasmTx, JsValue> {
+        let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         self.inner
-            .begin_exclusive(open_batch_id, None)
+            .begin_exclusive(open_transaction_id, None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
             kind: WasmTxKind::Exclusive,
-            open_tx: Some(open_batch_id),
+            open_tx: Some(open_transaction_id),
             owns_lifetime: true,
         })
     }
@@ -3565,7 +3573,7 @@ fn wasm_write_memory(
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::MemoryTx { db, tx_id }),
     })
 }
@@ -3583,7 +3591,7 @@ fn wasm_write_browser(
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::BrowserTx { db, tx_id }),
     })
 }
@@ -3596,7 +3604,7 @@ fn wasm_tx_write(tx_id: TxId, inner: Option<WasmWriteInner>) -> Result<WasmWrite
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
         row_id: result.row_id,
-        batch_id: TransactionId::from_committed_tx(tx_id),
+        tx_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })
 }
@@ -4694,7 +4702,7 @@ mod dynamic_schema_view_tests {
         );
     }
     /// A short-lived WASM schema attachment must not abandon its owner's open
-    /// batch when the JavaScript wrapper is collected.
+    /// transaction when the JavaScript wrapper is collected.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn attached_tx_drop_preserves_owner_batch() {
@@ -4773,7 +4781,7 @@ mod dynamic_schema_view_tests {
         .unwrap();
         block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
 
-        // The public WASM batch surface binds Alice at begin. A later request
+        // The public WASM transaction surface binds Alice at begin. A later request
         // cannot switch the transaction-local authorization subject to Bob.
         // JsValue construction requires an actual wasm runtime.
         #[cfg(target_arch = "wasm32")]

@@ -249,28 +249,27 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         ),
     );
     let renamed = SchemaVersion::new(renamed_schema);
-    owner
-        .publish_schema_with_lens(
-            2,
-            SchemaLineagePublication::new(
-                renamed.clone(),
-                MigrationLens::new(
-                    schema.version_id(),
-                    renamed.id,
-                    vec![TableLens {
-                        source_table: "todos".to_owned(),
-                        target_table: "todos".to_owned(),
-                        ops: vec![LensOp::RenameColumn {
-                            from: "title".to_owned(),
-                            to: "summary".to_owned(),
-                        }],
+    let publication = owner
+        .author_schema_lineage_publication(
+            renamed.clone(),
+            MigrationLens::new(
+                schema.version_id(),
+                renamed.id,
+                vec![TableLens {
+                    source_table: "todos".to_owned(),
+                    target_table: "todos".to_owned(),
+                    ops: vec![LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "summary".to_owned(),
                     }],
-                ),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            ),
+                }],
+            )
+            .expect("valid migration lens"),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
         )
         .unwrap();
+    owner.publish_schema_with_lens(2, publication).unwrap();
     owner
         .set_current_write_schema(CurrentWriteSchema {
             revision: 2,

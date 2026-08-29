@@ -30,7 +30,7 @@ import { encodeSchema } from "./schema-codec.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
-import { type BatchId, type WriteReceipt } from "../client.js";
+import { type TxId, type WriteReceipt } from "../client.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
@@ -46,9 +46,9 @@ type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
 >;
 
-async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+async function committedTxId(receipt: WriteReceipt): Promise<TxId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
-  return await receipt.batchId;
+  return await receipt.txId;
 }
 
 const previousWebSocket = globalThis.WebSocket;
@@ -674,7 +674,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         "00000000-0000-0000-0000-000000000001",
         {},
         descriptors,
-        JSON.stringify({ batch_id: "00000000000000000000000000000001" }),
+        JSON.stringify({ transaction_id: "00000000000000000000000000000001" }),
       ),
     ).toThrow("Update failed: WriteError");
     expect(() =>
@@ -926,7 +926,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    await runtime.waitForTransaction(await committedBatchId(inserted), "edge");
+    await runtime.waitForTransaction(await committedTxId(inserted), "edge");
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
       {
@@ -5559,7 +5559,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
     const beginTransaction = vi.fn();
     const beginTransactionAttributed = vi.fn(
-      (_openBatchId: string, _author: Uint8Array) => undefined,
+      (_openTransactionId: string, _author: Uint8Array) => undefined,
     );
     const beginStreamingMutationAttributedEncoded = vi.fn(
       (
@@ -5783,7 +5783,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         "todos",
         { title: { type: "Text", value: "must not lose provenance" } },
         JSON.stringify({
-          batch_id: id,
+          transaction_id: id,
           attribution: JSON.stringify(["https://issuer.example", "alice"]),
         }),
         "00000000-0000-0000-0000-000000000123",
@@ -6570,10 +6570,7 @@ function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {
-    authority.bytes(
-      Uint8Array.from({ length: 16 }, () => 0x5e),
-      false,
-    );
+    authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e));
     authority.u64(epoch);
   });
   return writer.finish();
@@ -7132,42 +7129,47 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   const implementation = db as T & {
     connectUpstream?(): Transport;
     tick?(): void | Promise<void>;
-    mergeableTx?(openBatchId: string): TxForTest;
-    mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
-    exclusiveTx?(openBatchId: string): TxForTest;
+    mergeableTx?(openTransactionId: string): TxForTest;
+    mergeableTxForIdentity?(openTransactionId: string, author: Uint8Array): TxForTest;
+    exclusiveTx?(openTransactionId: string): TxForTest;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
-  const attach = (openBatchId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
-    const batch = openBatches.get(openBatchId);
-    if (!batch || batch.kind !== kind) throw new Error(`unknown ${kind} batch ${openBatchId}`);
+  const attach = (openTransactionId: string, kind: FakeOpenBatch["kind"]): TxForTest => {
+    const batch = openBatches.get(openTransactionId);
+    if (!batch || batch.kind !== kind)
+      throw new Error(`unknown ${kind} batch ${openTransactionId}`);
     batch.tx ??=
       kind === "exclusive"
-        ? (implementation.exclusiveTx?.(openBatchId) ?? fakeTx())
+        ? (implementation.exclusiveTx?.(openTransactionId) ?? fakeTx())
         : batch.author && implementation.mergeableTxForIdentity
-          ? implementation.mergeableTxForIdentity(openBatchId, batch.author)
-          : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
+          ? implementation.mergeableTxForIdentity(openTransactionId, batch.author)
+          : (implementation.mergeableTx?.(openTransactionId) ?? fakeTx());
     return batch.tx;
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
-    beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
-      openBatches.set(openBatchId, { kind, author });
+    beginTransaction: (
+      openTransactionId: string,
+      kind: FakeOpenBatch["kind"],
+      author?: Uint8Array,
+    ) => {
+      openBatches.set(openTransactionId, { kind, author });
     },
-    attachMergeableTx: (openBatchId: string) => attach(openBatchId, "mergeable"),
-    attachExclusiveTx: (openBatchId: string) => attach(openBatchId, "exclusive"),
-    commitTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
-      openBatches.delete(openBatchId);
+    attachMergeableTx: (openTransactionId: string) => attach(openTransactionId, "mergeable"),
+    attachExclusiveTx: (openTransactionId: string) => attach(openTransactionId, "exclusive"),
+    commitTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
+      openBatches.delete(openTransactionId);
       return batch.tx?.commit() ?? fakeWrite();
     },
-    rollbackTransaction: (openBatchId: string) => {
-      const batch = openBatches.get(openBatchId);
-      if (!batch) throw new Error(`unknown batch ${openBatchId}`);
+    rollbackTransaction: (openTransactionId: string) => {
+      const batch = openBatches.get(openTransactionId);
+      if (!batch) throw new Error(`unknown batch ${openTransactionId}`);
       batch.tx?.rollback();
-      openBatches.delete(openBatchId);
+      openBatches.delete(openTransactionId);
     },
     ...db,
   };
@@ -7201,7 +7203,7 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
 
 function fakeWrite() {
   return {
-    batchId: "00000000000070008000000000000001",
+    txId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
     wait: async () => undefined,
     writeState: () => ({}),

@@ -23,6 +23,34 @@ function recordingStore() {
   return { secureStore, getItemAsync, setItemAsync, deleteItemAsync };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function controlledStore() {
+  let value: string | null = null;
+  const firstRead = deferred<string | null>();
+  const events: string[] = [];
+  const getItemAsync = vi
+    .fn<ExpoSecureStoreLike["getItemAsync"]>()
+    .mockImplementationOnce(() => firstRead.promise)
+    .mockImplementation(async () => value);
+  const setItemAsync = vi.fn<ExpoSecureStoreLike["setItemAsync"]>(async (_key, secret) => {
+    events.push(`save:${secret}`);
+    value = secret;
+  });
+  const deleteItemAsync = vi.fn<ExpoSecureStoreLike["deleteItemAsync"]>(async () => {
+    events.push("clear");
+    value = null;
+  });
+  const secureStore: ExpoSecureStoreLike = { getItemAsync, setItemAsync, deleteItemAsync };
+  return { secureStore, firstRead, events, value: () => value };
+}
+
 describe("ExpoAuthSecretStore scoped keys", () => {
   it("uses the same hashed, SecureStore-compatible key as browser storage", async () => {
     const { secureStore, setItemAsync } = recordingStore();
@@ -90,5 +118,54 @@ describe("ExpoAuthSecretStore scoped keys", () => {
       await expect(store.getOrCreateSecret()).rejects.toThrow();
       expect(setItemAsync).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("ExpoAuthSecretStore operation ordering", () => {
+  it("does not let an older get-or-create overwrite a completed save", async () => {
+    const { secureStore, firstRead, events, value } = controlledStore();
+    const store = new ExpoAuthSecretStore({ secureStore });
+    const creating = store.getOrCreateSecret();
+    await vi.waitFor(() => expect(secureStore.getItemAsync).toHaveBeenCalledOnce());
+
+    const importedSecret = generateAuthSecret();
+    const saving = store.saveSecret(importedSecret);
+    firstRead.resolve(null);
+    await Promise.all([creating, saving]);
+
+    expect(events.at(-1)).toBe(`save:${importedSecret}`);
+    expect(value()).toBe(importedSecret);
+    expect(await store.getOrCreateSecret()).toBe(importedSecret);
+  });
+
+  it("does not let an older get-or-create resurrect a cleared secret", async () => {
+    const { secureStore, firstRead, events, value } = controlledStore();
+    const store = new ExpoAuthSecretStore({ secureStore });
+    const creating = store.getOrCreateSecret();
+    await vi.waitFor(() => expect(secureStore.getItemAsync).toHaveBeenCalledOnce());
+
+    const clearing = store.clearSecret();
+    firstRead.resolve(null);
+    await Promise.all([creating, clearing]);
+
+    expect(events.at(-1)).toBe("clear");
+    expect(value()).toBeNull();
+  });
+
+  it("serializes direct instances sharing one physical SecureStore key", async () => {
+    const { secureStore, firstRead, events, value } = controlledStore();
+    const first = new ExpoAuthSecretStore({ secureStore });
+    const second = new ExpoAuthSecretStore({ secureStore });
+    const creating = first.getOrCreateSecret();
+    await vi.waitFor(() => expect(secureStore.getItemAsync).toHaveBeenCalledOnce());
+
+    const importedSecret = generateAuthSecret();
+    const saving = second.saveSecret(importedSecret);
+    firstRead.resolve(null);
+    await Promise.all([creating, saving]);
+
+    expect(events.at(-1)).toBe(`save:${importedSecret}`);
+    expect(value()).toBe(importedSecret);
+    expect(await first.getOrCreateSecret()).toBe(importedSecret);
   });
 });

@@ -93,7 +93,8 @@ pub use macros::{FieldKind, RecordField, assert_record_field_layout};
 pub use values::collect_by_ordered_scalar;
 pub use values::{
     EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
-    VariantRegistry, variant_registry_id_for_path,
+    VariantRegistry, decode_record_descriptor, encode_record_descriptor,
+    variant_registry_id_for_path,
 };
 
 /// Maximum bytes in the canonical table-local variant-tag prefix.

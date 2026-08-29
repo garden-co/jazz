@@ -312,7 +312,7 @@ export async function insertTodoAndWait(db: Db) {
     projectId: EXAMPLE_PROJECT_ID,
   });
 
-  console.log(await pending.transactionId);
+  console.log(await pending.txId);
 
   try {
     const row = await pending.wait({ tier: "global" });

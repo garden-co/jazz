@@ -29,6 +29,21 @@ fn schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
+fn epoch_1_codec_fixture_schema() -> DatabaseSchema {
+    // Declaration order is deliberately variable-before-fixed. The frozen
+    // stored bytes below prove that every durable backend shares Groove's
+    // physical fixed-first record layout without changing public row order.
+    DatabaseSchema::new([TableSchema::new(
+        "records",
+        [
+            ColumnSchema::new("label", ColumnType::String),
+            ColumnSchema::new("id", ColumnType::U16),
+            ColumnSchema::new("enabled", ColumnType::Bool),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U16))])
+}
+
 fn row(id: u64, revision: u64) -> VariantRecord {
     let schema = schema();
     let descriptor = schema.table("rows").unwrap().record_schema();
@@ -227,6 +242,90 @@ fn checksum_is_sensitive_to_returned_row_content() {
         checksum_record(&row(7, 0)).unwrap(),
         checksum_record(&row(7, 1)).unwrap()
     );
+}
+
+#[futures_test::test]
+async fn epoch_1_table_row_bytes_and_order_survive_a_fresh_rocksdb_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let schema = epoch_1_codec_fixture_schema();
+    let mut database = Database::new(
+        schema.clone(),
+        RocksDbStorage::open(directory.path(), &["records"]).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "records",
+        vec![
+            Value::String("a".to_owned()),
+            Value::U16(2),
+            Value::Bool(false),
+        ],
+    );
+    batch.insert(
+        "records",
+        vec![
+            Value::String("hi".to_owned()),
+            Value::U16(0x1234),
+            Value::Bool(true),
+        ],
+    );
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+    drop(applied);
+
+    let storage = database.into_storage();
+    assert_eq!(
+        storage
+            .prefix("records".to_owned(), Vec::new())
+            .await
+            .unwrap(),
+        vec![
+            (
+                vec![0x01, 0x00, 0x02],
+                vec![0x00, 0x02, 0x00, 0x00, 0x02, b'a'],
+            ),
+            (
+                vec![0x01, 0x12, 0x34],
+                vec![0x00, 0x34, 0x12, 0x01, 0x02, b'h', b'i'],
+            ),
+        ],
+        "RocksDB must retain lexicographic U16 key order and canonical variant-tagged, fixed-first record bytes",
+    );
+    storage.close().await.unwrap();
+    drop(storage);
+
+    let reopened = Database::new(
+        schema,
+        RocksDbStorage::open(directory.path(), &["records"]).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened
+            .primary_key_scan("records", &[])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.to_values().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![
+                Value::String("a".to_owned()),
+                Value::U16(2),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::String("hi".to_owned()),
+                Value::U16(0x1234),
+                Value::Bool(true),
+            ],
+        ],
+        "a fresh RocksDB handle must decode the exact canonical bytes in declaration order",
+    );
+    reopened.close().await.unwrap();
 }
 
 #[futures_test::test]

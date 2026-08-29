@@ -31,6 +31,7 @@ use crate::protocol::{
     SyncMessage, TableLens,
 };
 use crate::schema::JazzSchema;
+use crate::storage_codec_profile::epoch_1_storage_codec_profile;
 use crate::wire::{TransportError, WireTransport};
 use futures::lock::Mutex as LocalMutex;
 
@@ -332,6 +333,23 @@ impl fmt::Debug for ServerSessionState {
 }
 
 impl ShellDb {
+    fn author_schema_lineage_publication(
+        &self,
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
+    ) -> ShellResult<SchemaLineagePublication> {
+        match self {
+            Self::Memory(db) => db
+                .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)
+                .map_err(Into::into),
+        }
+    }
+
     fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         match self {
             Self::Memory(db) => db.set_tick_scheduler(scheduler),
@@ -373,7 +391,12 @@ impl ShellDb {
                 })?;
                 let mut config = DbConfig::new(
                     schema,
-                    crate::db::block_on(factory.open(path, refs)).map_err(db_storage_error)?,
+                    crate::db::block_on(factory.open(
+                        path,
+                        refs,
+                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                    ))
+                    .map_err(db_storage_error)?,
                     identity,
                 );
                 if let Some(seed) = row_id_seed {
@@ -728,8 +751,12 @@ impl InMemoryServerShell {
                 })?;
                 let mut db_config = DbConfig::new(
                     config.schema,
-                    crate::db::block_on(factory.open(path.clone(), refs))
-                        .map_err(db_storage_error)?,
+                    crate::db::block_on(factory.open(
+                        path.clone(),
+                        refs,
+                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                    ))
+                    .map_err(db_storage_error)?,
                     config.identity,
                 );
                 if let Some(row_id_seed) = config.row_id_seed {
@@ -1008,8 +1035,12 @@ impl InMemoryServerShell {
             }
             return Err(ShellError::MissingEvent("atomic schema lineage"));
         }
-        let publication =
-            SchemaLineagePublication::new(schema_version, lens, new_tables, dropped_tables);
+        let publication = self.db.author_schema_lineage_publication(
+            schema_version,
+            lens,
+            new_tables,
+            dropped_tables,
+        )?;
         let catalogue_seq = self.db.active_catalogue_seq().saturating_add(1);
         let acks = catalogue_acks_from_messages(
             self.db
@@ -1070,7 +1101,8 @@ impl InMemoryServerShell {
                         ops: Vec::new(),
                     })
                     .collect(),
-            );
+            )
+            .expect("valid migration lens");
             self.publish_runtime_schema_with_lens(schema, lens, Vec::new(), Vec::new())?;
         }
 

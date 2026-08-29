@@ -4,13 +4,14 @@ use std::mem;
 use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalEdit, TerminalOperation};
 use groove::records::{
     BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
+    encode_record_descriptor,
 };
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
     owned_record_from_storage_values_with_descriptor, register_values_from_parts,
-    tx_ids_from_value, version_tx_id_from_aliases,
+    settled_result_value_storage_bytes, tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -1057,8 +1058,8 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"jazz terminal root layout v1");
     hasher.update(
-        &postcard::to_allocvec(&rows.descriptor)
-            .expect("record descriptors are postcard serializable"),
+        &encode_record_descriptor(&rows.descriptor)
+            .expect("terminal layouts contain valid Groove record descriptors"),
     );
     hasher.update(&(root_key_slot as u64).to_le_bytes());
     hasher.update(&[match rows.carrier {
@@ -1274,15 +1275,31 @@ fn decode_typed_terminal_record(
                     ));
                 }
             };
-            let row_value = record.get_idx(field_idx(record, &schema.synthetic.row_field)?)?;
-            let row = postcard::to_allocvec(&row_value).map_err(|_| {
-                super::Error::InvalidStoredValue("aggregate result row encoding failed")
-            })?;
-            let replacement_value =
-                record.get_idx(field_idx(record, &schema.synthetic.replacement_field)?)?;
-            let replacement = postcard::to_allocvec(&replacement_value).map_err(|_| {
-                super::Error::InvalidStoredValue("aggregate replacement token encoding failed")
-            })?;
+            let row_idx = field_idx(record, &schema.synthetic.row_field)?;
+            let row_value = record.get_idx(row_idx)?;
+            let row_type = record
+                .descriptor()
+                .fields()
+                .get(row_idx)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate result row field is missing from descriptor",
+                ))?
+                .value_type
+                .clone();
+            let row = settled_result_value_storage_bytes(&row_value, &row_type)?;
+            let replacement_idx = field_idx(record, &schema.synthetic.replacement_field)?;
+            let replacement_value = record.get_idx(replacement_idx)?;
+            let replacement_type = record
+                .descriptor()
+                .fields()
+                .get(replacement_idx)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "aggregate replacement field is missing from descriptor",
+                ))?
+                .value_type
+                .clone();
+            let replacement =
+                settled_result_value_storage_bytes(&replacement_value, &replacement_type)?;
             let member = ResultMemberEntry::Synthetic {
                 table,
                 row,
@@ -2010,16 +2027,6 @@ impl NetEvent {
             }
         }
     }
-}
-
-fn encode_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, super::Error> {
-    let fields = descriptor
-        .fields()
-        .iter()
-        .map(|field| (field.name.clone(), field.value_type.clone()))
-        .collect::<Vec<_>>();
-    postcard::to_allocvec(&fields)
-        .map_err(|_| super::Error::InvalidStoredValue("aggregate descriptor encoding failed"))
 }
 
 fn remove_tx_identity(

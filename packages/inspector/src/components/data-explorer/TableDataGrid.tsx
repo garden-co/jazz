@@ -919,6 +919,7 @@ export function TableDataGrid() {
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.
   const isInitialLoading = queryResult.isLoading;
+  const queryError = queryResult.error;
   const rows = queryResult.data ?? EMPTY_ROWS;
 
   const allGridColumns = useMemo<GridColumn[]>(
@@ -1270,7 +1271,11 @@ export function TableDataGrid() {
       />
       <div className={styles.contentArea}>
         <div className={styles.gridFrame}>
-          {isInitialLoading ? (
+          {queryError ? (
+            <div className={styles.emptyState} role="alert">
+              Could not load rows: {queryError.message}
+            </div>
+          ) : isInitialLoading ? (
             <GridSkeleton />
           ) : (
             <PlainTableView
@@ -2191,6 +2196,12 @@ function PlainTableView({
           schemaColumn && isEditable
             ? (props) => <QueuedCellEditor {...props} schemaColumn={schemaColumn} />
             : undefined,
+        // Live query delivery and row-change animations can replace an otherwise
+        // unchanged row object. Queued editors own their draft until commit, so
+        // those external identity changes must not close the editor.
+        editorOptions: {
+          closeOnExternalRowChange: false,
+        },
       };
     });
 

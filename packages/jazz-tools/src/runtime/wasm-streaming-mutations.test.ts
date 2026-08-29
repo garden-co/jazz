@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import type { BatchId, WriteReceipt } from "./client.js";
+import type { TxId, WriteReceipt } from "./client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
 const app = s.defineApp({
@@ -11,9 +11,9 @@ const app = s.defineApp({
   }),
 });
 
-async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+async function committedTxId(receipt: WriteReceipt): Promise<TxId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
-  return await receipt.batchId;
+  return await receipt.txId;
 }
 
 async function withWatchdog<T>(promise: Promise<T>, label: string, timeoutMs = 3_000): Promise<T> {
@@ -42,7 +42,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       title: { type: "Text", value: "created by canonical author" },
       done: { type: "Boolean", value: false },
     });
-    await runtime.waitForTransaction(await committedBatchId(inserted), "local");
+    await runtime.waitForTransaction(await committedTxId(inserted), "local");
 
     await expect(
       runtime.query(
@@ -169,9 +169,9 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
         ]),
         "concurrent streamed WASM publication",
       );
-      const batchIds = await Promise.all(writes.map(committedBatchId));
+      const txIds = await Promise.all(writes.map(committedTxId));
       await withWatchdog(
-        Promise.all(batchIds.map((batchId) => runtime.waitForTransaction!(batchId, "local"))),
+        Promise.all(txIds.map((txId) => runtime.waitForTransaction!(txId, "local"))),
         "concurrent streamed WASM local settlement",
       );
 

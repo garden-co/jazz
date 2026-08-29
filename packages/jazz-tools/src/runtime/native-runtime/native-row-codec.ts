@@ -7,6 +7,7 @@ import type {
 } from "../../drivers/types.js";
 import { isProvenanceMagicColumn } from "../../magic-columns.js";
 import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
+import { exactSignedI64 } from "./exact-integer.js";
 
 const textDecoder = new TextDecoder();
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -53,6 +54,7 @@ type PostcardReaderLike = {
   bytes(): Uint8Array;
   bool(): boolean;
   readVec<T>(readItem: (reader: PostcardReaderLike) => T): T[];
+  done(): boolean;
 };
 
 type PostcardWriterLike = {
@@ -104,6 +106,7 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
   ) {
     throw new Error("subscription occurrence sidecar length mismatch");
   }
+  assertReaderDone(reader, "subscription delta");
   return delta;
 }
 
@@ -173,7 +176,12 @@ export function readNativeRelationSubscriptionSnapshot(
 ): NativeRelationSubscriptionSnapshot {
   const rootCount = reader.u64();
   const rows = reader.readVec(readNativeRowBatch);
+  assertReaderDone(reader, "relation snapshot");
   return { rootCount, rows };
+}
+
+function assertReaderDone(reader: PostcardReaderLike, payload: string): void {
+  if (!reader.done()) throw new Error(`${payload} has trailing postcard bytes`);
 }
 
 export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedRow {
@@ -1561,11 +1569,7 @@ function expectSignedI32(value: Value): number {
 
 function expectSignedI64(value: Value): bigint {
   if (value.type !== "BigInt") throw new Error("expected BigInt value");
-  const integer = BigInt(value.value);
-  if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
-    throw new Error("BigInt value must be a signed 64-bit integer");
-  }
-  return integer;
+  return exactSignedI64(value.value, "BigInt value");
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
@@ -1583,6 +1587,9 @@ class OffsetWriter {
   readonly #bytes: number[] = [];
 
   u32Le(value: number): void {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+      throw new Error(`offset must be an unsigned 32-bit integer, got ${value}`);
+    }
     this.#bytes.push(
       value & 0xff,
       (value >>> 8) & 0xff,
