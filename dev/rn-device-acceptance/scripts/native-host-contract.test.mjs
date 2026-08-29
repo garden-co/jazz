@@ -250,10 +250,11 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   // after re-admission only proves the host transport; it does not prove a
   // fresh application can start, select its foreground runtime, and decode a
   // persisted row through `createJazzClient`.
-  assert.match(app, /await proveHighLevelForegroundRestart\(reopened\.capability\)/);
+  assert.match(app, /await proveHighLevelForegroundRestart\(reopened\.capability, receipt\.runNonce\)/);
+  assert.match(app, /seedHighLevelForegroundRuntime\(scopeA\.capability, receipt\.runNonce\)/);
   assert.match(highLevelForeground, /createJazzClient\(clientConfig\(capability\)\)/);
   assert.match(highLevelForeground, /client\.db\.all\(app\.todos\)/);
-  assert.match(highLevelForeground, /prior process's persisted row/);
+  assert.match(highLevelForeground, /assertPersistedTitleForRun/);
   assert.match(app, /\{\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
   assert.match(app, /\{\s*contains: \["b"\],\s*excludes: \["a"\],?\s*\}/);
   assert.match(app, /\{\s*write: "a",\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);

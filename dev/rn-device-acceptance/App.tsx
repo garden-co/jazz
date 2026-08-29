@@ -33,6 +33,11 @@ import {
 } from "./src/relay-admission";
 
 async function observeTrustedAdmissionLifecycle() {
+  // The native fixture returns the same host-issued nonce from both launches.
+  // It is also bound into every accepted device receipt, so use it to make
+  // retained app data from an old install unable to satisfy this run's reopen
+  // assertion.
+  const receipt = await deviceReceiptContext();
   const phase = await nativeAcceptancePhase();
   if (phase === "verify") {
     // This is intentionally a new JS and native process. The row was committed
@@ -40,7 +45,7 @@ async function observeTrustedAdmissionLifecycle() {
     // materialize it through a newly admitted relay/SQLite owner using that
     // same public app surface, before the byte-level scope isolation receipt.
     const reopened = await admittedNativeRelay();
-    await proveHighLevelForegroundRestart(reopened.capability);
+    await proveHighLevelForegroundRestart(reopened.capability, receipt.runNonce);
     const foregroundFactory = installNativeForegroundRuntime();
     const foregroundCodec = {
       encode: encodeNativeForegroundCommand,
@@ -56,7 +61,7 @@ async function observeTrustedAdmissionLifecycle() {
       excludes: ["a"],
     });
     await logoutNativeRelay();
-    return { phase, receipt: await deviceReceiptContext() };
+    return { phase, receipt };
   }
   const admitted = await admittedNativeRelay();
   const { executor, capability } = admitted;
@@ -77,7 +82,7 @@ async function observeTrustedAdmissionLifecycle() {
     admittedNativeRelay,
   );
   const scopeA = await admittedNativeRelay();
-  await seedHighLevelForegroundRuntime(scopeA.capability);
+  await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce);
   proveForegroundScopeIsolation(foregroundFactory, scopeA.capability, foregroundCodec, {
     write: "a",
     contains: ["a"],
@@ -110,7 +115,7 @@ async function observeTrustedAdmissionLifecycle() {
     excludes: ["b"],
   });
   await logoutNativeRelay();
-  return { phase, receipt: await deviceReceiptContext() };
+  return { phase, receipt };
 }
 
 export default function App() {
