@@ -68,7 +68,7 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
   assert.match(
     android,
-    /github\.event_name == 'workflow_dispatch' \|\| \( contains\(github\.event\.pull_request\.labels\.\*\.name, 'react-native\/rn-preview-release'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
+    /github\.event_name == 'workflow_dispatch' \|\| \( contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
     "native device jobs run only when manually dispatched or for a same-repository RN-preview PR",
   );
 }
@@ -301,7 +301,7 @@ test("dispatch device workflow uses hosted KVM while source jobs remain cheap", 
     () =>
       assertRnDeviceWorkflowContract(
         workflow.replace(
-          "contains(github.event.pull_request.labels.*.name, 'react-native/rn-preview-release')",
+          "contains(github.event.pull_request.labels.*.name, 'rn-preview-release')",
           "contains(github.event.pull_request.labels.*.name, 'react-native')",
         ),
       ),

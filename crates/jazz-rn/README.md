@@ -111,7 +111,7 @@ it cannot contain the relay module.
 
 Expo Go is not supported. For a bare Android host set `newArchEnabled=true`;
 for iOS install pods with `RCT_NEW_ARCH_ENABLED=1 bundle exec pod install`.
-Use the `react-native/rn-preview-release` pull-request label when a preview
+Use the `rn-preview-release` pull-request label when a preview
 must run the expensive native artifact and device workflows. The alpha still
 does not support every Jazz operation family: remote tiers, branches, restore,
 large-value diffs, custom attribution, and relation terminal operations fail
