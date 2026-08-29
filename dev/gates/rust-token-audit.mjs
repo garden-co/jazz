@@ -259,6 +259,7 @@ function attributeText(tokens, start) {
 function boundary(tokens, target) {
   const braces = [];
   let pendingAttributes = [];
+  const plannedBlocks = new Map();
   for (let index = 0; index < target; index += 1) {
     if (tokens[index].text === "#" && tokens[index + 1]?.text === "[") {
       pendingAttributes.push(attributeText(tokens, index));
@@ -280,13 +281,21 @@ function boundary(tokens, target) {
       while (cursor < tokens.length && tokens[cursor].text !== "{" && tokens[cursor].text !== ";")
         cursor += 1;
       if (tokens[cursor]?.text === "{")
-        braces.push(attributes.some((attribute) => /cfg\(test\)/.test(attribute)));
+        plannedBlocks.set(
+          cursor,
+          attributes.some((attribute) => /cfg\(test\)/.test(attribute)),
+        );
       // A semicolon item consumed the attributes even though it introduces no
       // lexical scope. This explicit branch is deliberately boring: it keeps
       // the state machine correct for all item kinds rather than relying on
       // the next brace to reset it.
       continue;
     }
+    if (tokens[index].text === "{")
+      // Track ordinary expression/closure blocks too. Otherwise their `}`
+      // would pop a surrounding cfg(test) item scope that was the only scope
+      // we had recorded.
+      braces.push(plannedBlocks.get(index) ?? braces.at(-1) ?? false);
     if (tokens[index].text === "}") braces.pop();
   }
   return braces.some(Boolean) ? "test" : "production";
