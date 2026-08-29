@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 /**
- * Fail closed if a durable-storage owner gains a raw convenience serializer.
- *
- * Authoritative state uses the normative Groove record/scalar or ordered-key
- * codecs. A small number of source uses remain for semantic JSON parsing,
- * in-memory query helpers, and the explicitly versioned catalogue JSON
- * payload. They live in the registry with an exact source-count and boundary
- * classification so a new default serde/postcard call cannot silently become
- * durable state.
+ * Persistence serializer boundary. Rust is tokenized, rather than searched by
+ * regular expression, so comments, raw identifiers, aliases, macro arguments,
+ * type paths, and function-item references cannot evade this policy.
  */
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
+import childProcess from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  describeEndpoint,
+  rustTokens,
+  serializerExternCrates,
+  serializerImports,
+  serializerReferences,
+} from "./rust-token-audit.mjs";
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const argv = process.argv.slice(2);
@@ -32,290 +34,231 @@ let registry;
 try {
   registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
 } catch (error) {
-  fail(`cannot read registry: ${error.message}`);
+  fail("cannot read registry: " + error.message);
 }
 if (
-  registry?.schemaVersion !== 2 ||
+  registry?.schemaVersion !== 3 ||
   !Array.isArray(registry.scope?.paths) ||
   !Array.isArray(registry.scope?.serializerCrates) ||
-  !Array.isArray(registry.allowances)
+  !Array.isArray(registry.allowances) ||
+  !Array.isArray(registry.directDependencySnapshots)
 )
-  fail("registry must have schemaVersion 2, scope.paths, scope.serializerCrates, and allowances");
+  fail("registry must have schemaVersion 3, scope, allowances, and directDependencySnapshots");
 
-const serializerFamilies = new Map([
+const serializerPackages = new Map([
   ["postcard", "postcard"],
   ["serde_json", "serde_json"],
   ["ciborium", "ciborium"],
   ["bincode", "bincode"],
   ["rmp-serde", "rmp_serde"],
 ]);
-const cargoLock = fs.readFileSync(path.join(root, "Cargo.lock"), "utf8");
-const availableSerializerCrates = [...serializerFamilies]
-  .filter(([packageName]) => cargoLock.includes(`name = "${packageName}"`))
-  .map(([, crateName]) => crateName)
-  .sort();
+const metadata = cargoMetadata(root);
+const snapshots = snapshotDependencies(metadata);
+if (JSON.stringify(registry.directDependencySnapshots) !== JSON.stringify(snapshots))
+  fail(
+    "directDependencySnapshots differs from cargo metadata/Cargo.toml direct external dependencies; audit and update the registry",
+  );
+const directSerializerCrates = [
+  ...new Set(
+    snapshots
+      .flatMap((snapshot) => snapshot.dependencies)
+      .filter((dependency) => serializerPackages.has(dependency.package))
+      .map((dependency) => serializerPackages.get(dependency.package)),
+  ),
+].sort();
 if (
   JSON.stringify([...registry.scope.serializerCrates].sort()) !==
-  JSON.stringify(availableSerializerCrates)
+  JSON.stringify(directSerializerCrates)
 )
   fail(
-    `scope.serializerCrates must exactly inventory known serde serializer dependencies from Cargo.lock: ${availableSerializerCrates.join(", ")}`,
+    "scope.serializerCrates must exactly inventory known direct serializer dependencies: " +
+      directSerializerCrates.join(", "),
   );
 
-// Every spelling is named once.  This deliberately recognizes convenience
-// families, rather than a hand-picked list of calls seen in today's source:
-// adding a new `serde_json::*` helper under a persistence owner fails closed.
-const forbiddenApis = new Set([
-  "postcard::to_allocvec",
-  "postcard::to_stdvec",
-  "postcard::to_slice",
-  "postcard::to_extend",
-  "postcard::to_io",
-  "postcard::to_allocvec_cobs",
-  "postcard::to_stdvec_cobs",
-  "postcard::to_slice_cobs",
-  "postcard::from_bytes",
-  "postcard::from_bytes_cobs",
-  "postcard::take_from_bytes",
-  "postcard::take_from_bytes_cobs",
-  "postcard::experimental::serialized_size",
-  "serde_json::to_vec",
-  "serde_json::to_writer",
-  "serde_json::to_writer_pretty",
-  "serde_json::to_string",
-  "serde_json::to_string_pretty",
-  "serde_json::from_slice",
-  "serde_json::from_reader",
-  "serde_json::from_str",
-  "serde_json::Serializer::new",
-  "serde_json::Serializer::pretty",
-  "serde_json::Deserializer::from_slice",
-  "serde_json::Deserializer::from_str",
-  "serde_json::Deserializer::from_reader",
-  "bincode::serialize",
-  "bincode::serialize_into",
-  "bincode::deserialize",
-  "bincode::deserialize_from",
-  "rmp_serde::to_vec",
-  "rmp_serde::to_vec_named",
-  "rmp_serde::from_slice",
-  "rmp_serde::from_read",
-  "ciborium::ser::into_writer",
-  "ciborium::de::from_reader",
-]);
 const files = new Map();
 for (const scoped of registry.scope.paths) collectRust(path.join(root, scoped), files);
-
-const seen = new Set();
+const expected = new Map();
+const allowanceIds = new Set();
 for (const allowance of registry.allowances) {
   if (
     !allowance?.id ||
-    !allowance.path ||
-    !forbiddenApis.has(allowance.api) ||
-    !Array.isArray(allowance.anchors) ||
-    !Number.isInteger(allowance.expectedOccurrences) ||
-    !allowance.classification
+    !allowance.classification ||
+    !Array.isArray(allowance.endpoints) ||
+    allowance.endpoints.length === 0
   )
-    fail(`invalid allowance ${JSON.stringify(allowance)}`);
-  if (seen.has(allowance.id)) fail(`duplicate allowance ID ${allowance.id}`);
-  seen.add(allowance.id);
-  const source = files.get(allowance.path);
-  if (source === undefined)
-    fail(`${allowance.id}: source is outside scope or absent: ${allowance.path}`);
-  const matches = serializerCalls(source).filter((match) => match.api === allowance.api);
-  if (matches.length !== allowance.expectedOccurrences)
-    fail(
-      `${allowance.id}: expected ${allowance.expectedOccurrences} ${allowance.api} occurrence(s) in ${allowance.path}, found ${matches.length}`,
-    );
-  const anchors = matches.map((match) => sourceAnchor(source, match.index));
-  if (JSON.stringify(anchors) !== JSON.stringify(allowance.anchors))
-    fail(`${allowance.id}: registered endpoint anchor changed or call moved in ${allowance.path}`);
+    fail("invalid allowance " + JSON.stringify(allowance));
+  if (allowanceIds.has(allowance.id)) fail("duplicate allowance ID " + allowance.id);
+  allowanceIds.add(allowance.id);
+  for (const endpoint of allowance.endpoints) {
+    if (!validEndpoint(endpoint)) fail(allowance.id + ": invalid endpoint");
+    if (!files.has(endpoint.path))
+      fail(allowance.id + ": source is outside scope or absent: " + endpoint.path);
+    const key = endpointKey(endpoint);
+    if (expected.has(key)) fail(allowance.id + ": duplicate exact endpoint " + key);
+    expected.set(key, allowance.id);
+  }
 }
 
+const serializerRoots = new Set(serializerPackages.values());
 for (const [relative, source] of files) {
-  for (const imported of forbiddenExternCrates(source)) {
-    const line = source.slice(0, imported.index).split("\n").length;
+  const tokens = rustTokens(source);
+  for (const external of serializerExternCrates(tokens, serializerRoots))
     fail(
-      `${relative}:${line}: serializer extern crates are prohibited at the persistence boundary (${imported.root}); use an explicitly registered fully-qualified canonical endpoint instead`,
+      relative +
+        ":" +
+        external.line +
+        ": serializer extern crates are prohibited at the persistence boundary (" +
+        external.root +
+        "); use an explicitly registered fully-qualified canonical endpoint instead",
     );
-  }
-  for (const imported of forbiddenPersistenceImports(source)) {
-    const line = source.slice(0, imported.index).split("\n").length;
+  for (const imported of serializerImports(tokens, serializerRoots))
     fail(
-      `${relative}:${line}: serializer imports are prohibited at the persistence boundary (${imported.root}); use an explicitly registered fully-qualified canonical endpoint instead`,
+      relative +
+        ":" +
+        imported.line +
+        ": serializer imports are prohibited at the persistence boundary (" +
+        imported.root +
+        "); use an explicitly registered fully-qualified canonical endpoint instead",
     );
+  for (const reference of serializerReferences(tokens, serializerRoots)) {
+    const endpoint = describeEndpoint(tokens, reference, relative);
+    const key = endpointKey(endpoint);
+    if (!expected.delete(key))
+      fail(
+        relative +
+          ":" +
+          endpoint.location.line +
+          ":" +
+          endpoint.location.column +
+          ": unregistered default serialization reference " +
+          endpoint.canonicalPath,
+      );
   }
-  for (const match of serializerCalls(source)) {
-    const permitted = registry.allowances.some(
-      (allowance) => allowance.path === relative && allowance.api === match.api,
-    );
-    if (!permitted) {
-      const line = source.slice(0, match.index).split("\n").length;
-      fail(`${relative}:${line}: unregistered default serialization ${match.api}`);
-    }
-  }
 }
-
-function forbiddenExternCrates(source) {
-  const code = rustCodeMask(source);
-  const imports = [];
-  for (const match of code.matchAll(
-    /(?:^|\n)\s*(?:pub(?:\s*\([^)]*\))?\s+)?extern\s+crate\s+(?:r#)?(postcard|serde_json|bincode|rmp_serde|ciborium)(?:\s+as\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*)?\s*;/g,
-  )) {
-    imports.push({ root: match[1], index: match.index });
-  }
-  return imports;
-}
-
-/** Finds only explicit serializer calls; imports are rejected separately. */
-function serializerCalls(source) {
-  const code = rustCodeMask(source);
-  const calls = [];
-  for (const api of forbiddenApis) {
-    const direct = new RegExp(`(?<![A-Za-z0-9_])(?:::)?${rawRootApiPattern(api)}\\b`, "g");
-    for (const match of code.matchAll(direct)) {
-      if (isCallAt(code, match.index + match[0].length)) {
-        calls.push({ api, index: match.index });
-      }
-    }
-  }
-  return calls.sort((left, right) => left.index - right.index);
-}
-
-function forbiddenPersistenceImports(source) {
-  const code = rustCodeMask(source);
-  const imports = [];
-  for (const match of code.matchAll(/(?:^|\n)\s*(?:pub\s*(?:\([^)]*\)\s*)?)?use\s+([^;]+);/g)) {
-    const root = match[1].match(
-      /(?:^|::)(?:r#)?(postcard|serde_json|bincode|rmp_serde|ciborium)(?=::|\s|\{|$)/,
-    )?.[1];
-    if (root) imports.push({ root, index: match.index });
-  }
-  return imports;
-}
-
-function sourceAnchor(source, index) {
-  const lines = source.split("\n");
-  const line = source.slice(0, index).split("\n").length - 1;
-  const context = lines
-    .slice(Math.max(0, line - 1), line + 2)
-    .join("\n")
-    .trim();
-  return crypto.createHash("sha256").update(context).digest("hex");
-}
-
-// Keep offsets and newlines intact so diagnostics still point into the source,
-// while comments and string/byte/raw-string literals cannot manufacture a call.
-function rustCodeMask(source) {
-  const masked = source.split("");
-  const blank = (index) => {
-    if (masked[index] !== "\n") masked[index] = " ";
-  };
-  for (let index = 0; index < source.length; index += 1) {
-    if (source.startsWith("//", index)) {
-      for (; index < source.length && source[index] !== "\n"; index += 1) blank(index);
-      continue;
-    }
-    if (source.startsWith("/*", index)) {
-      let depth = 1;
-      blank(index++);
-      blank(index);
-      for (index += 1; index < source.length && depth > 0; index += 1) {
-        if (source.startsWith("/*", index)) {
-          blank(index++);
-          blank(index);
-          depth += 1;
-        } else if (source.startsWith("*/", index)) {
-          blank(index++);
-          blank(index);
-          depth -= 1;
-        } else {
-          blank(index);
-        }
-      }
-      index -= 1;
-      continue;
-    }
-    const raw = source.slice(index).match(/^(?:br|rb|r)(#{0,255})"/);
-    if (raw) {
-      const delimiter = `"${raw[1]}`;
-      const end = source.indexOf(delimiter, index + raw[0].length);
-      const stop = end === -1 ? source.length : end + delimiter.length;
-      for (; index < stop; index += 1) blank(index);
-      index -= 1;
-      continue;
-    }
-    const ordinaryString =
-      source[index] === '"' ||
-      ((source[index] === "b" || source[index] === "c") && source[index + 1] === '"');
-    const character = source.slice(index).match(/^'(?:\\.|[^'\\\n])'/);
-    if (character) {
-      for (let offset = 0; offset < character[0].length; offset += 1) blank(index + offset);
-      index += character[0].length - 1;
-      continue;
-    }
-    if (ordinaryString) {
-      const start = index;
-      blank(start);
-      if (source[index] !== '"') {
-        index += 1;
-        blank(index);
-      }
-      index += 1; // consume the opening quote before masking its contents
-      for (; index < source.length; index += 1) {
-        blank(index);
-        if (source[index] === "\\") {
-          index += 1;
-          blank(index);
-        } else if (source[index] === '"') {
-          break;
-        }
-      }
-    }
-  }
-  return masked.join("");
-}
-
-function isCallAt(source, index) {
-  let cursor = index;
-  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-  if (source.startsWith("::", cursor)) return true; // turbofish call; the following parser owns syntax.
-  return source[cursor] === "(";
-}
-
-function escapeRegex(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function rawRootApiPattern(api) {
-  const [root, ...suffix] = api.split("::");
-  return `(?:r#)?${escapeRegex(root)}::${suffix.map(escapeRegex).join("::")}`;
-}
+if (expected.size)
+  fail(
+    "registered serializer endpoint is absent, moved, or changed boundary: " +
+      expected.keys().next().value,
+  );
 
 console.log(
-  `default-serialization-persistence: checked ${files.size} persistence-owner source file(s) and ${registry.allowances.length} registered exceptions`,
+  "default-serialization-persistence: token-checked " +
+    files.size +
+    " persistence-owner source file(s), " +
+    registry.allowances.length +
+    " reviewed exception group(s), and " +
+    snapshots.length +
+    " direct-dependency snapshot(s)",
 );
 
+function validEndpoint(endpoint) {
+  return (
+    endpoint &&
+    typeof endpoint.path === "string" &&
+    typeof endpoint.canonicalPath === "string" &&
+    endpoint.location &&
+    Number.isInteger(endpoint.location.line) &&
+    Number.isInteger(endpoint.location.column) &&
+    endpoint.span &&
+    endpoint.span.start &&
+    endpoint.span.end &&
+    Number.isInteger(endpoint.span.start.line) &&
+    Number.isInteger(endpoint.span.start.column) &&
+    Number.isInteger(endpoint.span.end.line) &&
+    Number.isInteger(endpoint.span.end.column) &&
+    endpoint.enclosing &&
+    Array.isArray(endpoint.enclosing.modules) &&
+    typeof endpoint.enclosing.item === "string" &&
+    (endpoint.boundary === "production" || endpoint.boundary === "test")
+  );
+}
+function endpointKey(endpoint) {
+  return JSON.stringify({
+    path: endpoint.path,
+    canonicalPath: endpoint.canonicalPath,
+    location: endpoint.location,
+    span: endpoint.span,
+    enclosing: endpoint.enclosing,
+    boundary: endpoint.boundary,
+  });
+}
+function cargoMetadata(directory) {
+  const result = childProcess.spawnSync(
+    "cargo",
+    ["metadata", "--no-deps", "--format-version", "1"],
+    {
+      cwd: directory,
+      encoding: "utf8",
+    },
+  );
+  if (result.status !== 0)
+    fail("cargo metadata failed: " + (result.stderr || result.stdout).trim());
+  try {
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    fail("cargo metadata returned invalid JSON: " + error.message);
+  }
+}
+function packageMap(metadata) {
+  return metadata.packages.map((pkg) => ({
+    prefix:
+      path.posix.dirname(path.relative(root, pkg.manifest_path).replaceAll(path.sep, "/")) + "/",
+    name: pkg.name,
+  }));
+}
+function packageFor(relative, packages) {
+  const candidates = packages
+    .filter((entry) => relative.startsWith(entry.prefix))
+    .sort((left, right) => right.prefix.length - left.prefix.length);
+  if (!candidates.length) fail("no Cargo package owns scoped source " + relative);
+  return candidates[0].name;
+}
+function snapshotDependencies(metadata) {
+  const packages = packageMap(metadata);
+  const wanted = new Set(
+    registry.scope.paths.map((scoped) => {
+      const relative = scoped.replaceAll("\\", "/");
+      return packageFor(relative.endsWith(".rs") ? relative : relative + "/_audit.rs", packages);
+    }),
+  );
+  return metadata.packages
+    .filter((pkg) => wanted.has(pkg.name))
+    .map((pkg) => ({
+      crate: pkg.name,
+      manifest: path.relative(root, pkg.manifest_path).replaceAll(path.sep, "/"),
+      dependencies: pkg.dependencies
+        .filter((dependency) => !dependency.path)
+        .map((dependency) => ({
+          crate: dependency.rename ?? dependency.name.replaceAll("-", "_"),
+          package: dependency.name,
+        }))
+        .sort(
+          (left, right) =>
+            left.crate.localeCompare(right.crate) || left.package.localeCompare(right.package),
+        ),
+    }))
+    .sort((left, right) => left.crate.localeCompare(right.crate));
+}
 function collectRust(absolute, files) {
-  if (!fs.existsSync(absolute)) fail(`scope path is absent: ${path.relative(root, absolute)}`);
+  if (!fs.existsSync(absolute)) fail("scope path is absent: " + path.relative(root, absolute));
   const stat = fs.statSync(absolute);
   if (stat.isFile()) {
     if (absolute.endsWith(".rs"))
-      files.set(path.relative(root, absolute), fs.readFileSync(absolute, "utf8"));
+      files.set(
+        path.relative(root, absolute).replaceAll(path.sep, "/"),
+        fs.readFileSync(absolute, "utf8"),
+      );
     return;
   }
   for (const entry of fs.readdirSync(absolute, { withFileTypes: true })) {
-    // Tests deliberately manufacture malformed and historical byte sequences;
-    // they cannot add a production persistence spelling. Inline test modules
-    // remain visible through their owning source file and therefore need an
-    // explicit registry receipt.
+    // External test trees construct malformed/historical bytes. Inline tests
+    // remain governed because their owning source is scanned.
     if (entry.isDirectory() && entry.name === "tests") continue;
     collectRust(path.join(absolute, entry.name), files);
   }
 }
-
 function fail(message) {
-  console.error(`default-serialization-persistence: ERROR: ${message}`);
+  console.error("default-serialization-persistence: ERROR: " + message);
   process.exitCode = 1;
   throw new Error(message);
 }

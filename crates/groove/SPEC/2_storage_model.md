@@ -182,17 +182,28 @@ spelling by accident. `dev/gates/default-serialization-persistence.mjs` scans
 every production source tree that owns an authoritative storage ingress, egress,
 or value carried across one. Such a source cannot import, re-export, or declare
 an `extern crate` for a general-purpose serializer. A reviewed exception must
-instead use a fully qualified call whose API, occurrence count, and exact local
-source anchor are recorded in
-`dev/storage/default-serialization-registry.json`; moving the call therefore
-requires renewed review rather than silently transferring an allowance to a new
-endpoint.
+instead use a fully qualified canonical path recorded in
+`dev/storage/default-serialization-registry.json`. The registry records each
+token endpoint's canonical path, exact line/column, enclosing module/item, and
+the source-derived `cfg(test)` versus production boundary. Moving an otherwise
+verbatim call, changing its enclosing item, or removing its test boundary
+therefore requires renewed review rather than silently transferring an
+allowance to a new endpoint. Type-only serializer paths are explicit endpoint
+entries too.
 
-The gate inventories serializer dependencies from `Cargo.lock` as well as
-scanning calls. Its current inventory is `postcard`, `serde_json`, and
-`ciborium`; known default-codec families such as bincode and MessagePack are
-also denied if introduced. Adding another serializer dependency requires an
-explicit registry decision before persistence-owning code can use it. Thus
+The gate lexes Rust tokens before applying that rule: comments and literals do
+not count, while raw identifiers, comment-separated paths, macro token trees,
+function-item references, and type paths do. Imports, re-exports, and `extern
+crate` aliases remain prohibited, so a reviewed endpoint cannot be hidden
+behind a local spelling.
+
+The registry also snapshots every direct external dependency, with the Rust
+rename-to-package mapping, for each persistence-owning Cargo crate using
+`cargo metadata --no-deps`. It intentionally does not mistake transitive
+`Cargo.lock` packages for dependencies that a crate can name. Known
+general-purpose serializer families (postcard, JSON, CBOR, bincode, and
+MessagePack) are governed whenever directly introduced; adding any external
+dependency makes the snapshot fail closed until it has been audited. Thus
 adding a default serializer at the persistence boundary is a reviewable
 storage-format change, not an invisible implementation detail.
 
