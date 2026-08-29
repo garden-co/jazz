@@ -210,55 +210,99 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
   }
 });
 
-test("a pointer failure after fallback-marker publication restores the complete prior reader state", () => {
-  for (const priorMarker of ["prior marker\n", undefined]) {
-    const root = fixture();
-    const prior = "prior";
-    const markerPath = join(root, "native-artifact-fingerprint.cjs");
-    try {
-      publishNapiGeneration(stage(root, ".napi-stage-good", prior), root, prior);
-      const pointer = readFileSync(join(root, "native-binding.pointer.cjs"), "utf8");
-      const generations = readdirSync(join(root, ".native-artifacts")).sort();
-      if (priorMarker !== undefined) writeFileSync(markerPath, priorMarker);
-      process.env.JAZZ_NAPI_BUILD_FAULT = "pointer-write";
-      assert.throws(
-        () =>
-          publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next", {
-            beforePointerCommit: () => publishExpectedFingerprint("napi", "next", root),
-          }),
-        /final-pointer failure/,
-      );
-      assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
-      assert.deepEqual(readdirSync(join(root, ".native-artifacts")).sort(), generations);
-      assert.equal(existsSync(markerPath), priorMarker !== undefined);
-      if (priorMarker !== undefined) assert.equal(readFileSync(markerPath, "utf8"), priorMarker);
-    } finally {
-      delete process.env.JAZZ_NAPI_BUILD_FAULT;
-      rmSync(root, { recursive: true, force: true });
-    }
-  }
-});
-
-test("a fallback-marker failure occurs before the NAPI pointer can expose a new generation", () => {
+test("a pointer failure leaves the fallback marker and complete prior reader state unchanged", () => {
   const root = fixture();
   const prior = "prior";
   try {
     publishNapiGeneration(stage(root, ".napi-stage-good", prior), root, prior);
     const pointer = readFileSync(join(root, "native-binding.pointer.cjs"), "utf8");
     const generations = readdirSync(join(root, ".native-artifacts")).sort();
+    const markerPath = join(root, "native-artifact-fingerprint.cjs");
+    writeFileSync(markerPath, "prior marker\n");
+    process.env.JAZZ_NAPI_BUILD_FAULT = "pointer-write";
     assert.throws(
       () =>
         publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next", {
-          beforePointerCommit: () => {
+          afterPointerCommit: () => publishExpectedFingerprint("napi", "next", root),
+        }),
+      /final-pointer failure/,
+    );
+    assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
+    assert.deepEqual(readdirSync(join(root, ".native-artifacts")).sort(), generations);
+    assert.equal(readFileSync(markerPath, "utf8"), "prior marker\n");
+  } finally {
+    delete process.env.JAZZ_NAPI_BUILD_FAULT;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a fallback-marker failure after pointer publication leaves the new complete reader pointer active", () => {
+  const root = fixture();
+  try {
+    publishNapiGeneration(stage(root, ".napi-stage-good", "prior"), root, "prior");
+    const markerPath = join(root, "native-artifact-fingerprint.cjs");
+    writeFileSync(markerPath, "prior marker\n");
+    assert.throws(
+      () =>
+        publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next", {
+          afterPointerCommit: () => {
             throw new Error("planted fallback-marker failure");
           },
         }),
       /fallback-marker failure/,
     );
-    assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
-    assert.deepEqual(readdirSync(join(root, ".native-artifacts")).sort(), generations);
+    const active = receipt(
+      root,
+      "const b=require(process.argv[1]); if (b.nativeArtifactFingerprint() !== 'next') process.exit(26)",
+    );
+    assert.equal(active.status, 0, active.stderr);
+    assert.equal(readFileSync(markerPath, "utf8"), "prior marker\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a SIGKILL after pointer publication cannot persist a mismatched fallback state", () => {
+  const moduleUrl = new URL("./build.mjs", import.meta.url).href;
+  for (const { name, priorPointer, priorMarker } of [
+    { name: "first generation", priorPointer: false, priorMarker: undefined },
+    { name: "existing pointer", priorPointer: true, priorMarker: "prior marker\n" },
+  ]) {
+    const root = fixture();
+    const markerPath = join(root, "native-artifact-fingerprint.cjs");
+    try {
+      if (priorPointer) publishNapiGeneration(stage(root, ".napi-stage-prior", "prior"), root, "prior");
+      if (priorMarker !== undefined) writeFileSync(markerPath, priorMarker);
+      const staged = stage(root, ".napi-stage-killed", "next");
+      const crashed = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import { publishNapiGeneration } from ${JSON.stringify(moduleUrl)}; publishNapiGeneration(process.argv[1], process.argv[2], "next");`,
+          staged,
+          root,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            JAZZ_NAPI_BUILD_FAULT: "after-pointer-write",
+            JAZZ_TEST_ARTIFACT_LOCK_PATH: join(root, ".artifact-build.lock"),
+          },
+        },
+      );
+      assert.equal(crashed.signal, "SIGKILL", name);
+      const active = receipt(
+        root,
+        "const b=require(process.argv[1]); if (b.nativeArtifactFingerprint() !== 'next') process.exit(27)",
+      );
+      assert.equal(active.status, 0, `${name}: ${active.stderr}`);
+      assert.equal(existsSync(markerPath), priorMarker !== undefined, name);
+      if (priorMarker !== undefined) assert.equal(readFileSync(markerPath, "utf8"), priorMarker, name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

@@ -340,11 +340,10 @@ export function publishNapiGeneration(
   stagePath,
   packageDir,
   fingerprint,
-  { lease = undefined, beforePointerCommit = undefined } = {},
+  { lease = undefined, afterPointerCommit = undefined } = {},
 ) {
   const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireArtifactLease();
   let generationPath;
-  let rollbackBeforePointerCommit;
   let pointerCommitted = false;
   try {
     const bindings = readdirSync(stagePath, { withFileTypes: true })
@@ -360,12 +359,6 @@ export function publishNapiGeneration(
       `generation-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
     renameSync(stagePath, generationPath);
-    // The package-local fallback expectation and the pointer form one reader
-    // contract. Publish the fallback first: if it cannot be written, no new
-    // pointer can expose a generation that disagrees with fallback readers.
-    rollbackBeforePointerCommit = beforePointerCommit?.();
-    if (rollbackBeforePointerCommit !== undefined && typeof rollbackBeforePointerCommit !== "function")
-      throw new Error("NAPI pre-pointer publication must return a rollback function");
     // The pointer is the sole reader-facing runtime switch. All generated JS,
     // d.ts, native bytes and stage manifest are already present in this directory.
     if (process.env.JAZZ_NAPI_BUILD_FAULT === "pointer-write")
@@ -375,23 +368,17 @@ export function publishNapiGeneration(
       napiGenerationPointer(packageDir, generationPath, fingerprint),
     );
     pointerCommitted = true;
+    // A fallback marker is consulted only when no generated pointer exists.
+    // Commit the pointer first so a SIGKILL can leave either the complete prior
+    // state or a complete new pointer state, never a new fallback paired with
+    // an old/missing pointer generation.
+    if (process.env.JAZZ_NAPI_BUILD_FAULT === "after-pointer-write")
+      process.kill(process.pid, "SIGKILL");
+    afterPointerCommit?.();
     return generationPath;
   } catch (error) {
-    let rollbackError;
-    if (!pointerCommitted && rollbackBeforePointerCommit) {
-      try {
-        rollbackBeforePointerCommit();
-      } catch (caught) {
-        rollbackError = caught;
-      }
-    }
-    if (generationPath && existsSync(generationPath))
+    if (!pointerCommitted && generationPath && existsSync(generationPath))
       rmSync(generationPath, { recursive: true, force: true });
-    if (rollbackError)
-      throw new Error(
-        `NAPI pointer publication failed and could not restore its pre-pointer reader state: ${rollbackError.message}`,
-        { cause: error },
-      );
     throw error;
   } finally {
     held.release?.();
@@ -508,7 +495,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
         throw new Error("planted NAPI publication-boundary failure");
       publishNapiGeneration(napiStage, join(root, "crates", "jazz-napi"), fingerprint, {
         lease: artifactLock.lease,
-        beforePointerCommit: () => publishExpectedFingerprint(kind, fingerprint),
+        afterPointerCommit: () => publishExpectedFingerprint(kind, fingerprint),
       });
     }
   } finally {
