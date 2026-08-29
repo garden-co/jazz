@@ -4,6 +4,7 @@ import type {
   NativeForegroundRuntime,
   NativeForegroundRuntimeFactory,
 } from "jazz-rn";
+import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 
 export type ForegroundByteCodec = {
   encode(command: NativeForegroundCommand): Uint8Array;
@@ -20,11 +21,11 @@ export function proveForegroundByteAbi(
   capability: Uint8Array,
   codec: ForegroundByteCodec,
 ): NativeForegroundRuntime {
-  if (factory.abiVersion !== 4)
+  if (factory.abiVersion !== NATIVE_RELAY_ABI_VERSION)
     throw new Error(`installed foreground factory has unexpected ABI ${factory.abiVersion}`);
   const foreground = factory.openAttached(capability);
   const probe = codec.decode(foreground.execute(codec.encode("probe")));
-  if (probe.type !== "probe" || probe.abiVersion !== 4)
+  if (probe.type !== "probe" || probe.abiVersion !== NATIVE_RELAY_ABI_VERSION)
     throw new Error("installed foreground returned an unexpected Probe response");
   const tick = codec.decode(foreground.execute(codec.encode("tick")));
   if (tick.type !== "ticked") throw new Error("installed foreground did not acknowledge Tick");
@@ -82,18 +83,29 @@ export function proveForegroundWriteAbi(
     { type: "upsert" as const, cells: fixtureCells("upserted") },
     { type: "delete" as const },
   ]) {
-    const response = execute({ ...command, transaction: mergeable, table: "todos", rowId });
+    const response = execute({
+      ...command,
+      transaction: mergeable,
+      table: "todos",
+      rowId,
+    });
     if (response.type !== "mutationStaged")
       throw new Error(`foreground ${command.type} was not staged`);
   }
-  const committed = execute({ type: "commitTransaction", transaction: mergeable });
+  const committed = execute({
+    type: "commitTransaction",
+    transaction: mergeable,
+  });
   if (
     committed.type !== "transactionCommitted" ||
     committed.txId.byteLength !== 16 ||
     committed.txId.every((byte) => byte === 0)
   )
     throw new Error("foreground Commit did not return a non-zero public txId");
-  const retired = execute({ type: "rollbackTransaction", transaction: mergeable });
+  const retired = execute({
+    type: "rollbackTransaction",
+    transaction: mergeable,
+  });
   if (retired.type !== "operationError")
     throw new Error("foreground accepted a terminal transaction handle");
 
@@ -108,7 +120,10 @@ export function proveForegroundWriteAbi(
   });
   if (rollbackInsert.type !== "inserted" || !sameBytes(rollbackInsert.rowId, rollbackRowId))
     throw new Error("exclusive foreground Insert did not return its supplied row id");
-  const rolledBack = execute({ type: "rollbackTransaction", transaction: exclusive });
+  const rolledBack = execute({
+    type: "rollbackTransaction",
+    transaction: exclusive,
+  });
   if (rolledBack.type !== "transactionRolledBack" || !rolledBack.rolledBack)
     throw new Error("exclusive foreground transaction did not roll back");
 
@@ -130,14 +145,14 @@ export function proveForegroundWriteAbi(
 }
 
 /**
- * Actual two-foreground receipt for the installed JSI bridge.  A and B are
- * separate JS runtime aliases, but both are attached to the same native relay
- * admitted by the capability.  B starts a local subscription before A writes;
+ * Actual two-foreground receipt for one installed JSI runtime. A and B are
+ * separate foreground aliases in that same JSI runtime, both attached to the
+ * same native relay admitted by the capability. B starts a local subscription before A writes;
  * bounded ordinary ticks must then deliver A's committed row as B's binding
  * delta.  This deliberately stays at the byte ABI boundary: JS only checks a
  * fixed fixture title in Rust-produced binding bytes.
  */
-export function proveForegroundWriteSubscription(
+export function proveSameJsiRuntimeWriteSubscription(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
@@ -159,7 +174,10 @@ export function proveForegroundWriteSubscription(
     // initial materialization.
     drainSubscription(b, subscribed.subscription, codec);
 
-    const transaction = execute(a, { type: "beginTransaction", kind: "mergeable" });
+    const transaction = execute(a, {
+      type: "beginTransaction",
+      kind: "mergeable",
+    });
     if (transaction.type !== "transactionOpened")
       throw new Error("foreground A write transaction did not open");
     const rowId = Uint8Array.from({ length: 16 }, () => 0x74);
@@ -191,7 +209,10 @@ export function proveForegroundWriteSubscription(
             event.type === "delta" && containsUtf8(event.delta, "foreground-a-subscription-row"),
         )
       ) {
-        const closed = execute(b, { type: "unsubscribe", subscription: subscribed.subscription });
+        const closed = execute(b, {
+          type: "unsubscribe",
+          subscription: subscribed.subscription,
+        });
         if (closed.type !== "unsubscribed" || !closed.closed)
           throw new Error("foreground B subscription did not close");
         return;
@@ -247,7 +268,10 @@ export function proveForegroundScopeIsolation(
     try {
       const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
         codec.decode(writer.execute(codec.encode(command)));
-      const transaction = execute({ type: "beginTransaction", kind: "mergeable" });
+      const transaction = execute({
+        type: "beginTransaction",
+        kind: "mergeable",
+      });
       if (transaction.type !== "transactionOpened")
         throw new Error("scope fixture foreground transaction did not open");
       const rowId = Uint8Array.from({ length: 16 }, () => (receipt.write === "a" ? 0x73 : 0x75));

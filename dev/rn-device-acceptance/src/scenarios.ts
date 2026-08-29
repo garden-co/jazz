@@ -1,4 +1,5 @@
 import type { ScenarioResult } from "./protocol";
+import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 
 /**
  * The acceptance matrix requires two UI peers and one native durable relay.
@@ -7,7 +8,10 @@ import type { ScenarioResult } from "./protocol";
  * device driver as a green receipt requirement.
  */
 export const scenarioPlan: readonly ScenarioResult[] = [
-  ["linked-abi-admission", "Installed relay admits an opaque scope and reports ABI 4"],
+  [
+    "linked-abi-admission",
+    `Installed relay admits an opaque scope and reports ABI ${NATIVE_RELAY_ABI_VERSION}`,
+  ],
   [
     "foreground-byte-abi",
     "Installed JSI foreground executes ABI v1 Probe, Tick, Close, and revoke",
@@ -18,7 +22,11 @@ export const scenarioPlan: readonly ScenarioResult[] = [
   ],
   [
     "local-write-subscription",
-    "Public RN Db API inserts, queries, and publishes locally; two UI runtimes also observe a write through one relay",
+    "Public RN Db API inserts, queries, and publishes locally; two aliases in one JSI runtime observe a write through one relay",
+  ],
+  [
+    "independent-jsi-runtime-subscription",
+    "Two physical JSI runtimes observe one relay write (explicit installed-device gap; current ABI receipt covers aliases in one JSI runtime only)",
   ],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
   ["reopen", "A fresh app process reopens scope A's durable relay store"],

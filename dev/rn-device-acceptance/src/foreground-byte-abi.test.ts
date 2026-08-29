@@ -4,9 +4,10 @@ import {
   proveForegroundByteAbi,
   proveForegroundRevoked,
   proveForegroundScopeIsolation,
-  proveForegroundWriteSubscription,
+  proveSameJsiRuntimeWriteSubscription,
   type ForegroundByteCodec,
 } from "./foreground-byte-abi.ts";
+import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 
 const capability = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const codec = {
@@ -14,7 +15,8 @@ const codec = {
     return Uint8Array.of(command === "probe" ? 0 : command === "tick" ? 1 : 2);
   },
   decode(bytes: Uint8Array) {
-    if (bytes[0] === 0 && bytes[1] === 4) return { type: "probe" as const, abiVersion: 4 };
+    if (bytes[0] === 0 && bytes[1] === NATIVE_RELAY_ABI_VERSION)
+      return { type: "probe" as const, abiVersion: NATIVE_RELAY_ABI_VERSION };
     if (bytes[0] === 1) return { type: "ticked" as const };
     if (bytes[0] === 2) return { type: "closed" as const, closed: bytes[1] === 1 };
     throw new Error("malformed response");
@@ -28,7 +30,7 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
     execute(command: Uint8Array) {
       commands.push(command[0]!);
       if (closed && command[0] !== 2) throw new Error("foreground closed");
-      if (command[0] === 0) return Uint8Array.of(0, 4);
+      if (command[0] === 0) return Uint8Array.of(0, NATIVE_RELAY_ABI_VERSION);
       if (command[0] === 1) return Uint8Array.of(1);
       if (command[0] === 2) {
         const first = !closed;
@@ -42,7 +44,7 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
   };
   proveForegroundByteAbi(
     {
-      abiVersion: 4,
+      abiVersion: NATIVE_RELAY_ABI_VERSION,
       openAttached: (received) => {
         assert.deepEqual(received, capability);
         return foreground;
@@ -120,7 +122,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
       ...(containsB ? utf8("scope-b-private-row") : []),
     );
   const scopeFactory = (bLeaksA: boolean, aLeaksB: boolean) => ({
-    abiVersion: 4,
+    abiVersion: NATIVE_RELAY_ABI_VERSION,
     openAttached(capability: Uint8Array) {
       const isA = capability[0] === 1;
       return {
@@ -191,7 +193,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   );
 });
 
-test("two installed foreground aliases require B to observe A's committed subscription delta", () => {
+test("two aliases in one installed JSI runtime require B to observe A's committed subscription delta", () => {
   const command = {
     encode(value: unknown) {
       return new TextEncoder().encode(JSON.stringify(value));
@@ -210,7 +212,7 @@ test("two installed foreground aliases require B to observe A's committed subscr
   let committed = false;
   let opened = 0;
   const factory = {
-    abiVersion: 4,
+    abiVersion: NATIVE_RELAY_ABI_VERSION,
     openAttached(received: Uint8Array) {
       assert.deepEqual(received, capability);
       const peer = opened++;
@@ -228,7 +230,10 @@ test("two installed foreground aliases require B to observe A's committed subscr
                     ? { type: "mutationStaged" }
                     : request.type === "commitTransaction"
                       ? ((committed = true),
-                        { type: "transactionCommitted", txId: new Uint8Array(16).fill(1) })
+                        {
+                          type: "transactionCommitted",
+                          txId: new Uint8Array(16).fill(1),
+                        })
                       : request.type === "drainSubscription"
                         ? {
                             type: "subscriptionEvents",
@@ -257,7 +262,7 @@ test("two installed foreground aliases require B to observe A's committed subscr
       };
     },
   };
-  proveForegroundWriteSubscription(factory, capability, command);
+  proveSameJsiRuntimeWriteSubscription(factory, capability, command);
 
   committed = false;
   opened = 0;
@@ -277,7 +282,7 @@ test("two installed foreground aliases require B to observe A's committed subscr
     },
   };
   assert.throws(
-    () => proveForegroundWriteSubscription(noObservation, capability, command),
+    () => proveSameJsiRuntimeWriteSubscription(noObservation, capability, command),
     /did not observe foreground A's committed row/,
   );
 });

@@ -37,11 +37,7 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(registration, /listOf\(JazzDeviceFixtureModule\(context\)\)/);
   assert.match(host, /add\(JazzDeviceFixturePackage\(\)\)/);
   assert.match(fixture, /Build\.FINGERPRINT/);
-  assert.match(
-    fixture,
-    /JazzRelayTrustedAdmission\.admit\(scopeConfig\(/,
-    "the foundation fixture must construct its trusted admission configuration in native code",
-  );
+  assert.match(fixture, /scopeConfig\(authScope: String\)/);
   assert.match(fixture, /fixture-user-b/);
   assert.match(fixture, /JazzRelayTrustedAdmission\.replace/);
   assert.match(fixture, /jazz-device-\$authScope\.sqlite/);
@@ -101,6 +97,28 @@ test("each native JSI runtime owns an independent foreground lease", () => {
   );
 });
 
+test("foreground wake lifecycle clears native callbacks before close or runtime revocation", () => {
+  const foregroundRuntime = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/native/foreground-runtime.cpp"),
+    "utf8",
+  );
+  // A CallInvoker task may already be queued when the JS alias closes. The
+  // registration must first become inactive, clear the Rust callback, and the
+  // delayed task must re-check active state before it looks up JS values.
+  assert.match(foregroundRuntime, /active_ = false;[\s\S]*pending_ = false;/);
+  assert.match(
+    foregroundRuntime,
+    /jazz_native_relay_host_lease_set_foreground_wake_callback\([\s\S]*nullptr, nullptr\)/,
+  );
+  assert.match(foregroundRuntime, /if \(!active_ \|\| !pending_\) return;/);
+  assert.match(foregroundRuntime, /if \(kind == kWakeCancelled\) \{[\s\S]*active_ = false;/);
+  assert.match(foregroundRuntime, /catch \(\.\.\.\) \{[\s\S]*scheduled_ = false;/);
+  // Native handle close/revoke reaches the same clear-before-free operation;
+  // a late callback cannot retain a stale JSI function or escape as unhandled.
+  assert.match(foregroundRuntime, /wake_->deactivateAndClear\(lease_->nativeLease\(\)\);/);
+  assert.match(foregroundRuntime, /wake_->removeCallback\(runtime\);/);
+});
+
 test("Expo config plugin describes the real iOS receipt boundary without claiming TODO scenarios", () => {
   const plugin = read("plugins/with-jazz-device-fixture.cjs");
   assert.match(plugin, /JAZZ_DEVICE_SCHEMA_JSON.*todos/);
@@ -132,7 +150,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   }
   assert.match(androidDriver, /am", "force-stop", "dev\.jazz\.rndeviceacceptance/);
   assert.match(iosDriver, /simctl\(\["terminate", udid, "dev\.jazz\.rndeviceacceptance"\]\)/);
-  assert.match(scenarios, /phase === "verify" \? scenario\.scenario === "reopen"/);
+  assert.match(scenarios, /phase === "verify"\s*\?\s*scenario\.scenario === "reopen"/);
   assert.match(app, /\{\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
   assert.match(app, /\{\s*contains: \["b"\],\s*excludes: \["a"\],?\s*\}/);
   assert.match(app, /\{\s*write: "a",\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
@@ -175,6 +193,10 @@ test("dispatch device workflow uses hosted KVM while source jobs remain cheap", 
   assert.doesNotMatch(workflow, /adb wait-for-device/);
   assert.match(workflow, /android-device-acceptance:[\s\S]*timeout-minutes: 45/);
   assert.match(workflow, /react-native\/rn-preview-release/);
+  assert.match(
+    workflow,
+    /android-device-acceptance:[\s\S]*contains\(github\.event\.pull_request\.labels\.\*\.name, 'react-native\/rn-preview-release'\)[\s\S]*head\.repo\.full_name == github\.repository/,
+  );
   assert.doesNotMatch(workflow, /labels\.\*\.name, 'react-native'/);
   assert.match(workflow, /scripts\/create-android-avd\.sh[\s\\]+jazz-device-acceptance-api35/);
   assert.doesNotMatch(workflow, /yes no \| avdmanager/);
@@ -367,8 +389,19 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   assert.match(app, /await proveAdmittedRelay/);
   assert.match(app, /installNativeForegroundRuntime/);
   assert.match(app, /proveForegroundByteAbi/);
+  assert.match(app, /proveForegroundRevoked/);
   assert.match(app, /encodeNativeForegroundCommand/);
   assert.match(app, /decodeNativeForegroundResponse/);
+  assert.match(app, /await proveLogoutRevocation/);
+  assert.match(app, /await proveAuthScopeSwitch/);
+  assert.match(app, /switchNativeRelayAuthScope/);
+  assert.match(app, /logoutNativeRelay/);
+  assert.match(app, /oldScopeForeground = foregroundFactory\.openAttached\(scopeA\.capability\)/);
+  assert.match(app, /proveForegroundRevoked\(oldScopeForeground, foregroundCodec\.encode\)/);
+  assert.match(
+    app,
+    /proveForegroundByteAbi\(foregroundFactory, scopeB\.capability, foregroundCodec\)/,
+  );
   assert.match(app, /await recordDeviceReceipt\(results\.join\("\\n"\)\)/);
   assert.ok(
     app.indexOf("await observeTrustedAdmissionLifecycle()") <

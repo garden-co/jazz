@@ -115,7 +115,13 @@ export class NativeForegroundDb {
         "React Native native foreground runtime does not expose owner wake scheduling",
       );
     }
-    this.runtime.setTickScheduler((urgency) => callback(urgency));
+    this.runtime.setTickScheduler((urgency) => {
+      // Native invalidation clears the JSI registration first, but a
+      // CallInvoker task may already have crossed into JS when close races
+      // teardown. Do not let that stale task re-enter the adapter after its
+      // foreground facade has become unusable.
+      if (!this.closed) callback(urgency);
+    });
   }
 
   onMutationError(_callback: unknown): void {}

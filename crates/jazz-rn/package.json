@@ -55,6 +55,11 @@
       "source": "./src/relay.ts",
       "default": "./lib/module/relay.js"
     },
+    "./native-relay-abi": {
+      "types": "./lib/typescript/src/native-relay-abi.d.ts",
+      "source": "./src/native-relay-abi.ts",
+      "default": "./lib/module/native-relay-abi.js"
+    },
     "./app.plugin": "./app.plugin.js",
     "./app.plugin.js": "./app.plugin.js",
     "./package.json": "./package.json"
@@ -69,7 +74,8 @@
     "test:codegen": "bash scripts/test-codegen.sh",
     "build:relay:android": "bash scripts/build-relay-artifacts.sh android",
     "build:relay:ios": "bash scripts/build-relay-artifacts.sh ios",
-    "test": "jest",
+    "verify:abi": "node scripts/generate-native-relay-abi.mjs --check",
+    "test": "node scripts/generate-native-relay-abi.mjs --check && jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
     "prepare": "bob build"
@@ -122,17 +128,6 @@
     "tabWidth": 2,
     "trailingComma": "es5",
     "useTabs": false
-  },
-  "jest": {
-    "modulePathIgnorePatterns": [
-      "<rootDir>/example/node_modules",
-      "<rootDir>/lib/"
-    ],
-    "preset": "react-native",
-    "transformIgnorePatterns": [
-      "node_modules/(?!((jest-)?react-native|@react-native(-community)?|\\.pnpm)/)",
-      "node_modules/.pnpm/(?!(react-native|@react-native\\+.*|@react-native-community\\+.*)@)"
-    ]
   },
   "packageManager": "pnpm@10.16.1",
   "codegenConfig": {

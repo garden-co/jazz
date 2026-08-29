@@ -141,10 +141,16 @@ jobs:
         run: pnpm --filter rn-device-acceptance device:ios
 
   android-device-acceptance:
-    # Deliberately dispatch-only until the repository assigns a suitably sized
-    # Android/KVM runner to PR labels. Unlike the source jobs, this is a real
-    # artifact -> assemble -> installed-device receipt workflow.
-    if: github.event_name == 'workflow_dispatch'
+    # Keep the expensive installed-device receipt opt-in, but make its label
+    # contract identical to iOS. Forks never receive native artifacts/caches.
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'react-native/rn-preview-release')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
     name: Android device acceptance
     # GitHub-hosted Linux runners expose Android hardware acceleration; this
     # Blacksmith image did not expose a usable /dev/kvm.
