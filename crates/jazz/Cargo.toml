@@ -54,6 +54,7 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [dev-dependencies]
+divan.workspace = true
 groove = { workspace = true, default-features = false, features = ["test"] }
 jazz-benchmark-guard = { path = "../benchmark-guard" }
 jazz-testkit = { path = "../jazz-testkit", default-features = false }

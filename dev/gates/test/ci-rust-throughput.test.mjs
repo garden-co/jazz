@@ -33,6 +33,10 @@ const previewBuild = fs.readFileSync(
   "utf8",
 );
 const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
+const routeSubscriptionCurve = fs.readFileSync(
+  path.join(root, "crates/jazz/benches/route_subscription_curve.rs"),
+  "utf8",
+);
 const realisticWorkflow = fs.readFileSync(
   path.join(root, ".github/workflows/benchmarks.yml"),
   "utf8",
@@ -1154,7 +1158,11 @@ test("CodSpeed retains the route subscription binding-scale wall-time receipt", 
   const commands = job.steps.map((step) => step.run).filter(Boolean).join("\n");
   assert.match(commands, /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/);
   const run = job.steps.find((step) => step.with?.run)?.with?.run;
-  assert.match(run, /JAZZ_ROUTE_CURVE_ROUTES=100 cargo codspeed run --package jazz --features testing --bench route_subscription_curve/);
+  assert.match(run, /^cargo codspeed run --package jazz --bench route_subscription_curve$/m);
+  assert.doesNotMatch(run, /--features|JAZZ_ROUTE_CURVE_ROUTES/);
+  assert.match(routeSubscriptionCurve, /#\[divan::bench\(args = \[ROUTE_BENCH_BINDINGS\]/);
+  assert.match(routeSubscriptionCurve, /fn attach_route_bindings/);
+  assert.match(routeSubscriptionCurve, /fn matching_write_fanout/);
 });
 
 test("React Native artifact builds are explicit same-repository label opt-ins", () => {

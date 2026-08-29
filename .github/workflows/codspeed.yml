@@ -150,7 +150,11 @@ jobs:
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: walltime
-          run: JAZZ_ROUTE_CURVE_ROUTES=100 cargo codspeed run --package jazz --features testing --bench route_subscription_curve
+          # Features are selected at `cargo codspeed build` time. `run` only
+          # executes that copied target; passing Cargo feature flags here is
+          # rejected by cargo-codspeed and used to leave this job reporting no
+          # walltime benchmarks.
+          run: cargo codspeed run --package jazz --bench route_subscription_curve
 
   maintained-selective-hydration-walltime:
     # This is the direct receipt for #2077: fixed owner/result cardinality
