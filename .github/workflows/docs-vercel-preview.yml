@@ -24,6 +24,7 @@ jobs:
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
         && contains(github.event.pull_request.labels.*.name, 'docs')
         && github.event.action != 'closed'
+        && github.event.action != 'unlabeled'
       }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
@@ -60,6 +61,7 @@ jobs:
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
         && contains(github.event.pull_request.labels.*.name, 'docs')
         && github.event.action != 'closed'
+        && github.event.action != 'unlabeled'
       }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -86,9 +88,16 @@ jobs:
           test -x "$vercel_bin"
           echo "bin=$vercel_bin" >> "$GITHUB_OUTPUT"
 
-      # Check provisioning before evaluating checked-out PR code. This command
-      # intentionally reports only variable names, never their values.
-      - name: Guard Vercel preview configuration
+      # Source only: this credentialed job never installs, builds, or invokes
+      # workspace code. The remote Vercel build remains intentionally untrusted.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Deploy preview
+        id: deploy
+        # The only step that receives Vercel configuration. Check it before
+        # invoking the absolute, pinned uploader and never print its values.
         env:
           VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
@@ -101,21 +110,6 @@ jobs:
               exit 1
             fi
           done
-
-      # Source only: this credentialed job never installs, builds, or invokes
-      # workspace code. The remote Vercel build remains intentionally untrusted.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Deploy preview
-        id: deploy
-        env:
-          VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
-          VERCEL_TOKEN: ${{ secrets.VERCEL_DOCS_TOKEN }}
-        run: |
-          set -euo pipefail
           deployment_url="$(
             "${{ steps.vercel.outputs.bin }}" deploy --yes \
               --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}" \
