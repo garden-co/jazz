@@ -13,10 +13,76 @@
       "crates/jazz/src/db",
       "crates/jazz/src/db.rs",
       "crates/jazz/src/ids.rs",
-      "crates/jazz/src/node"
+      "crates/jazz/src/node",
+      "crates/jazz/src/protocol.rs",
+      "crates/jazz/src/tools/public_schema_convert.rs",
+      "crates/jazz-server/src/server/catalogue_payload_codec.rs"
     ]
   },
   "allowances": [
+    {
+      "id": "catalogue-nested-json-number-parse",
+      "path": "crates/jazz-server/src/server/catalogue_payload_codec.rs",
+      "api": "serde_json::from_str",
+      "expectedOccurrences": 1,
+      "classification": "Explicit semantic parse of a JSON number primitive inside the versioned catalogue nested-value algebra. Decode immediately re-encodes with Number::to_string and rejects a noncanonical spelling; no serde container layout is durable."
+    },
+    {
+      "id": "protocol-wire-fixture-postcard-encode",
+      "path": "crates/jazz/src/protocol.rs",
+      "api": "postcard::to_allocvec",
+      "expectedOccurrences": 12,
+      "classification": "Protocol module's hostile-wire and compatibility receipts. Production wire ingress/egress is versioned by crate::wire; these test-only constructors do not define durable storage or identity bytes."
+    },
+    {
+      "id": "protocol-wire-fixture-postcard-decode",
+      "path": "crates/jazz/src/protocol.rs",
+      "api": "postcard::from_bytes",
+      "expectedOccurrences": 8,
+      "classification": "Protocol module's hostile-wire and compatibility receipts; see protocol-wire-fixture-postcard-encode."
+    },
+    {
+      "id": "schema-version-public-json-v1",
+      "path": "crates/jazz/src/protocol.rs",
+      "api": "serde_json::to_vec",
+      "expectedOccurrences": 2,
+      "classification": "Canonical public-schema JSON, including the explicit CATS v1 schema envelope. Publication content IDs consume the CATS v1 bytes directly, never this Rust serde wrapper. The second occurrence is a test receipt."
+    },
+    {
+      "id": "protocol-public-schema-test-decode",
+      "path": "crates/jazz/src/protocol.rs",
+      "api": "serde_json::from_slice",
+      "expectedOccurrences": 1,
+      "classification": "Test-only physical-manifest round-trip receipt."
+    },
+    {
+      "id": "protocol-public-schema-test-string-decode",
+      "path": "crates/jazz/src/protocol.rs",
+      "api": "serde_json::from_str",
+      "expectedOccurrences": 2,
+      "classification": "Test-only SchemaVersion public-schema envelope receipt."
+    },
+    {
+      "id": "protocol-public-schema-test-string-encode",
+      "path": "crates/jazz/src/protocol.rs",
+      "api": "serde_json::to_string",
+      "expectedOccurrences": 1,
+      "classification": "Test-only SchemaVersion public-schema envelope receipt."
+    },
+    {
+      "id": "catalogue-public-schema-json-v1-decode",
+      "path": "crates/jazz/src/tools/public_schema_convert.rs",
+      "api": "serde_json::from_slice",
+      "expectedOccurrences": 1,
+      "classification": "The CATS v1 public-schema payload decoder. The owning codec re-encodes and rejects a noncanonical payload byte-for-byte."
+    },
+    {
+      "id": "public-schema-perf-fixture-json",
+      "path": "crates/jazz/src/tools/public_schema_convert.rs",
+      "api": "serde_json::from_str",
+      "expectedOccurrences": 1,
+      "classification": "Test-only policy graph performance fixture parser."
+    },
     {
       "id": "author-subject-canonical-json-encode",
       "path": "crates/jazz/src/ids.rs",
@@ -98,7 +164,7 @@
       "id": "catalogue-public-schema-json-v1",
       "path": "crates/jazz/src/node/codec.rs",
       "api": "serde_json::to_vec",
-      "expectedOccurrences": 2,
+      "expectedOccurrences": 1,
       "classification": "The one explicit versioned catalogue boundary: CATS v1 length-delimits public-schema JSON, validates schema identity, and rejects any decode that does not re-encode byte-identically. This is a compatibility contract, not a private serde layout."
     },
     {
