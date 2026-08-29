@@ -57,6 +57,25 @@ const BINDING_CODEC_GOLDEN_FIXTURE_PATH: &str = concat!(
     "/fixtures/binding_codec_golden.json"
 );
 
+/// This is intentionally a low-level receipt: exact frames are not a public
+/// database API. The generated NAPI/WASM matrix consumes this same frozen
+/// manifest, while this Rust leg proves its selected source frames are still
+/// complete canonical v1 values before either host artifact is involved.
+#[derive(Deserialize)]
+struct WireFrameArtifactCorpus {
+    format: String,
+    hello_cases: Vec<String>,
+    message_cases: Vec<String>,
+    error_frame_hex: String,
+    rejections: Vec<WireFrameArtifactRejection>,
+}
+
+#[derive(Deserialize)]
+struct WireFrameArtifactRejection {
+    name: String,
+    frame_hex: String,
+}
+
 #[derive(Deserialize, Serialize)]
 struct Manifest {
     fixture_set: &'static str,
@@ -887,6 +906,77 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
             "{name}: a canonical payload must reject a suffix"
         );
     }
+}
+
+#[test]
+fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
+    let corpus: WireFrameArtifactCorpus =
+        serde_json::from_str(include_str!("../fixtures/wire_frame_artifact_corpus.json"))
+            .expect("artifact corpus manifest parses");
+    assert_eq!(corpus.format, "jazz-wire-frame-artifact-corpus-v1");
+
+    let hello: HelloManifest =
+        serde_json::from_str(include_str!("../fixtures/wire_hello_frames.json"))
+            .expect("Hello fixture manifest parses");
+    for name in &corpus.hello_cases {
+        let fixture = hello
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.name == name)
+            .unwrap_or_else(|| panic!("artifact corpus names an absent Hello fixture {name}"));
+        jazz::wire::validate_frame_for_artifact_corpus(&parse_hex(&fixture.frame_hex))
+            .unwrap_or_else(|error| panic!("{name}: frozen complete Hello rejects: {error}"));
+    }
+
+    let messages: Manifest =
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+            .expect("message fixture manifest parses");
+    for name in &corpus.message_cases {
+        let fixture = messages
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.name == name)
+            .unwrap_or_else(|| panic!("artifact corpus names an absent message fixture {name}"));
+        jazz::wire::validate_frame_for_artifact_corpus(&parse_hex(&fixture.frame_hex))
+            .unwrap_or_else(|error| panic!("{name}: frozen complete message rejects: {error}"));
+    }
+
+    let error_bytes = parse_hex(&corpus.error_frame_hex);
+    jazz::wire::validate_frame_for_artifact_corpus(&error_bytes)
+        .expect("the representative WireFrame::Error is a complete canonical frame");
+    assert_eq!(
+        jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"),
+        WireFrame::Error(jazz::wire::WireError::new(
+            jazz::wire::WireErrorCode::MalformedFrame,
+            jazz::wire::WireRetry::Never,
+            "fixture error",
+        )),
+        "the corpus carries an exact structured-error frame, not only a valid tag"
+    );
+    assert_eq!(
+        encode_frame(&jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"))
+            .expect("error frame re-encodes"),
+        error_bytes,
+        "the representative error has one canonical v1 spelling"
+    );
+    for rejection in &corpus.rejections {
+        assert!(
+            jazz::wire::validate_frame_for_artifact_corpus(&parse_hex(&rejection.frame_hex))
+                .is_err(),
+            "{} must remain rejected by its owning frame boundary",
+            rejection.name
+        );
+    }
+
+    // Planted sensitivity: removing the exact frame check must make the
+    // trailing complete Hello observable as accepted by postcard's prefix
+    // parser. This keeps the corpus from becoming a documentation-only list.
+    let trailing = parse_hex(&corpus.rejections[0].frame_hex);
+    assert!(
+        postcard::from_bytes::<WireFrame>(&trailing).is_ok(),
+        "postcard's permissive prefix parser is the planted bypass"
+    );
+    assert!(jazz::wire::decode_frame(&trailing).is_err());
 }
 
 // This is intentionally a codec-level integration fixture: TypeScript creates

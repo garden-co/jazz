@@ -92,6 +92,16 @@ compatibility matrix. A change needs this corpus, both binding paths, and the
 SPEC decision reviewed together. Terminal operations remain JSON-native
 metadata rather than an alternative row byte layout.
 
+`wire_frame_artifact_corpus.json` is the companion v1 host-artifact receipt
+for complete peer frames. It selects representative exact Hello and semantic
+message frames from the complete frozen frame manifests, carries one
+structured-error frame, and freezes malformed, unsupported-version,
+trailing-byte, and corrupt-compressed inputs. The generated NAPI and WASM
+artifacts execute every selected byte sequence through the owning Rust frame,
+negotiation, compression, and semantic-payload decoders; TypeScript supplies
+the bytes and asserts acceptance or rejection. This proves host-artifact
+reachability without treating two host bridges as independent encoders.
+
 ## Non-negotiable representation rules
 
 1. **Rows are the unit of authorization and sync.** Read policy admits or
