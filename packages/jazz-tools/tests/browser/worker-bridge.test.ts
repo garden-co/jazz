@@ -374,7 +374,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     }
   });
 
-  it("keeps createDb schema-lazy and rejects the first local subscription when durable storage cannot open", async () => {
+  it("rejects createDb operation-scoped when its foreground lease cannot open durable storage", async () => {
     const ambientErrors: string[] = [];
     const unhandledRejections: string[] = [];
     const recordAmbientError = (event: ErrorEvent) => {
@@ -391,7 +391,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
     errorListeners.add(recordAmbientError);
     const dbName = uniqueDbName("corrupt-storage-open");
     const secret = generateAuthSecret();
-    let reopened: Db | null = null;
     try {
       const initial = track(
         await createDb({
@@ -416,59 +415,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
       });
       const recordsBeforeRead = await rawStorageRecords(dbName);
 
-      reopened = track(
-        await createDb({
+      // Persistent create must acquire a durable foreground-node lease before
+      // any synchronous mutation can mint a transaction identity. Storage
+      // readiness therefore belongs to createDb, while schema selection stays
+      // lazy. The original cause must reject that operation directly.
+      await expect(
+        createDb({
           appId: "test-app",
           secret,
           driver: { type: "persistent", dbName },
         }),
-      );
-      // `createDb` intentionally does not select a schema or open durable
-      // storage. The first schema-backed subscription owns the failure. This
-      // assertion is intentionally synchronous: the old path published an
-      // empty local seed here before the worker attempted to open IndexedDB.
-      const cancelledDeltas: unknown[] = [];
-      const cancelled = getDbSubscriptionSource(reopened).subscribeDelta(
-        todos,
-        (delta) => cancelledDeltas.push(delta),
-        { tier: "local" },
-      );
-      cancelled();
-      const subscriptionDeltas: unknown[] = [];
-      const subscription = getDbSubscriptionSource(reopened).subscribeDelta(
-        todos,
-        (delta) => subscriptionDeltas.push(delta),
-        { tier: "local" },
-      );
-      expect(cancelledDeltas).toEqual([]);
-      expect(subscriptionDeltas).toEqual([]);
-      await expect(cancelled.ready ?? Promise.resolve()).resolves.toBeUndefined();
-      await expect(
-        withTimeout(
-          subscription.ready ?? Promise.resolve(),
-          5_000,
-          "corrupt storage subscription did not settle",
-        ),
       ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
-      expect(subscriptionDeltas).toEqual([]);
-      subscription();
-      // The rejected operation leaves no durable peer to flush. Shutdown is
-      // still an explicit observation point for the same readiness failure, not
-      // an ambient error deferred to best-effort test cleanup.
-      await expect(reopened.shutdown()).rejects.toThrow(
-        "Missing or invalid IndexedDB storage epoch manifest",
-      );
-      untrack(reopened);
-      reopened = null;
       await sleep(0);
       expect(ambientErrors).toEqual([]);
       expect(unhandledRejections).toEqual([]);
       expect(await rawStorageRecords(dbName)).toEqual(recordsBeforeRead);
     } finally {
-      if (reopened) {
-        await reopened.shutdown().catch(() => undefined);
-        untrack(reopened);
-      }
       globalThis.removeEventListener("error", recordAmbientError);
       globalThis.removeEventListener("unhandledrejection", recordUnhandledRejection);
       errorListeners.delete(recordAmbientError);
