@@ -11,6 +11,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -36,9 +37,30 @@ try {
 if (
   registry?.schemaVersion !== 2 ||
   !Array.isArray(registry.scope?.paths) ||
+  !Array.isArray(registry.scope?.serializerCrates) ||
   !Array.isArray(registry.allowances)
 )
-  fail("registry must have schemaVersion 2, scope.paths, and allowances");
+  fail("registry must have schemaVersion 2, scope.paths, scope.serializerCrates, and allowances");
+
+const serializerFamilies = new Map([
+  ["postcard", "postcard"],
+  ["serde_json", "serde_json"],
+  ["ciborium", "ciborium"],
+  ["bincode", "bincode"],
+  ["rmp-serde", "rmp_serde"],
+]);
+const cargoLock = fs.readFileSync(path.join(root, "Cargo.lock"), "utf8");
+const availableSerializerCrates = [...serializerFamilies]
+  .filter(([packageName]) => cargoLock.includes(`name = "${packageName}"`))
+  .map(([, crateName]) => crateName)
+  .sort();
+if (
+  JSON.stringify([...registry.scope.serializerCrates].sort()) !==
+  JSON.stringify(availableSerializerCrates)
+)
+  fail(
+    `scope.serializerCrates must exactly inventory known serde serializer dependencies from Cargo.lock: ${availableSerializerCrates.join(", ")}`,
+  );
 
 // Every spelling is named once.  This deliberately recognizes convenience
 // families, rather than a hand-picked list of calls seen in today's source:
@@ -78,6 +100,8 @@ const forbiddenApis = new Set([
   "rmp_serde::to_vec_named",
   "rmp_serde::from_slice",
   "rmp_serde::from_read",
+  "ciborium::ser::into_writer",
+  "ciborium::de::from_reader",
 ]);
 const files = new Map();
 for (const scoped of registry.scope.paths) collectRust(path.join(root, scoped), files);
@@ -88,6 +112,7 @@ for (const allowance of registry.allowances) {
     !allowance?.id ||
     !allowance.path ||
     !forbiddenApis.has(allowance.api) ||
+    !Array.isArray(allowance.anchors) ||
     !Number.isInteger(allowance.expectedOccurrences) ||
     !allowance.classification
   )
@@ -102,9 +127,18 @@ for (const allowance of registry.allowances) {
     fail(
       `${allowance.id}: expected ${allowance.expectedOccurrences} ${allowance.api} occurrence(s) in ${allowance.path}, found ${matches.length}`,
     );
+  const anchors = matches.map((match) => sourceAnchor(source, match.index));
+  if (JSON.stringify(anchors) !== JSON.stringify(allowance.anchors))
+    fail(`${allowance.id}: registered endpoint anchor changed or call moved in ${allowance.path}`);
 }
 
 for (const [relative, source] of files) {
+  for (const imported of forbiddenExternCrates(source)) {
+    const line = source.slice(0, imported.index).split("\n").length;
+    fail(
+      `${relative}:${line}: serializer extern crates are prohibited at the persistence boundary (${imported.root}); use an explicitly registered fully-qualified canonical endpoint instead`,
+    );
+  }
   for (const imported of forbiddenPersistenceImports(source)) {
     const line = source.slice(0, imported.index).split("\n").length;
     fail(
@@ -120,6 +154,17 @@ for (const [relative, source] of files) {
       fail(`${relative}:${line}: unregistered default serialization ${match.api}`);
     }
   }
+}
+
+function forbiddenExternCrates(source) {
+  const code = rustCodeMask(source);
+  const imports = [];
+  for (const match of code.matchAll(
+    /(?:^|\n)\s*(?:pub(?:\s*\([^)]*\))?\s+)?extern\s+crate\s+(?:r#)?(postcard|serde_json|bincode|rmp_serde|ciborium)(?:\s+as\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*)?\s*;/g,
+  )) {
+    imports.push({ root: match[1], index: match.index });
+  }
+  return imports;
 }
 
 /** Finds only explicit serializer calls; imports are rejected separately. */
@@ -141,10 +186,22 @@ function forbiddenPersistenceImports(source) {
   const code = rustCodeMask(source);
   const imports = [];
   for (const match of code.matchAll(/(?:^|\n)\s*(?:pub\s*(?:\([^)]*\)\s*)?)?use\s+([^;]+);/g)) {
-    const root = match[1].match(/(?:^|::)(?:r#)?(postcard|serde_json)(?=::|\s|\{|$)/)?.[1];
+    const root = match[1].match(
+      /(?:^|::)(?:r#)?(postcard|serde_json|bincode|rmp_serde|ciborium)(?=::|\s|\{|$)/,
+    )?.[1];
     if (root) imports.push({ root, index: match.index });
   }
   return imports;
+}
+
+function sourceAnchor(source, index) {
+  const lines = source.split("\n");
+  const line = source.slice(0, index).split("\n").length - 1;
+  const context = lines
+    .slice(Math.max(0, line - 1), line + 2)
+    .join("\n")
+    .trim();
+  return crypto.createHash("sha256").update(context).digest("hex");
 }
 
 // Keep offsets and newlines intact so diagnostics still point into the source,
