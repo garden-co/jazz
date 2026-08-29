@@ -18,6 +18,7 @@
 
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
 #include "../native/foreground-runtime.h"
+#include <unordered_map>
 #endif
 
 @implementation JazzRelay
@@ -32,8 +33,15 @@ RCT_EXPORT_MODULE()
 static jazz_native_relay_host *relayHost = NULL;
 static NSUInteger relayRuntimeReferences = 0;
 static NSMutableSet<NSData *> *trustedCapabilities = nil;
-static facebook::jsi::Runtime *foregroundJsiRuntime = nullptr;
-static std::shared_ptr<jazz::rn::ForegroundRuntimeLease> foregroundRuntimeLease;
+// Each module instance owns one JSI runtime lease. A process may host several
+// React Native bridges against the same durable relay; invalidating A must not
+// make B's factory or foregrounds uncallable.
+struct ForegroundRuntimeInstallation {
+  facebook::jsi::Runtime *runtime;
+  std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
+};
+static std::unordered_map<JazzRelay *, ForegroundRuntimeInstallation>
+    foregroundRuntimeLeases;
 
 static jazz_native_relay_host *EnsureRelayHost(void) {
   if (relayHost == NULL) relayHost = jazz_native_relay_host_new();
@@ -99,15 +107,19 @@ static NSError *RelayLifecycleError(NSString *message) {
 - (void)installForegroundRuntime {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
-    if (foregroundJsiRuntime == nullptr || foregroundRuntimeLease == nullptr ||
-        !foregroundRuntimeLease->active()) {
+    const auto found = foregroundRuntimeLeases.find(self);
+    if (found == foregroundRuntimeLeases.end() || found->second.runtime == nullptr ||
+        !found->second.lease->active()) {
       // The JS wrapper validates that native code installed a fresh factory
       // immediately after this method returns, yielding its normal actionable
       // development-build diagnostic if React Native has not handed us a live
       // JSI runtime yet.
       return;
     }
-    jazz::rn::installForegroundRuntime(*foregroundJsiRuntime, foregroundRuntimeLease);
+    // The factory was installed by `installJSIBindingsWithRuntime:` for this
+    // exact module/runtime. A later JS call only reinserts into that same JSI
+    // runtime; it cannot select or overwrite a sibling bridge's lease.
+    jazz::rn::installForegroundRuntime(*found->second.runtime, found->second.lease);
   }
 #endif
 }
@@ -116,10 +128,15 @@ static NSError *RelayLifecycleError(NSString *message) {
                           callInvoker:(const std::shared_ptr<facebook::react::CallInvoker> &)callInvoker {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
-    foregroundJsiRuntime = &runtime;
-    foregroundRuntimeLease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
+    if (const auto previous = foregroundRuntimeLeases.find(self);
+        previous != foregroundRuntimeLeases.end()) {
+      previous->second.lease->invalidate();
+      foregroundRuntimeLeases.erase(previous);
+    }
+    auto lease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
         EnsureRelayHost(), callInvoker);
-    jazz::rn::installForegroundRuntime(runtime, foregroundRuntimeLease);
+    foregroundRuntimeLeases.emplace(self, ForegroundRuntimeInstallation{&runtime, lease});
+    jazz::rn::installForegroundRuntime(runtime, lease);
   }
 #else
   (void)runtime;
@@ -130,9 +147,11 @@ static NSError *RelayLifecycleError(NSString *message) {
 - (void)invalidate {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   @synchronized([JazzRelay class]) {
-    if (foregroundRuntimeLease != nullptr) foregroundRuntimeLease->invalidate();
-    foregroundRuntimeLease.reset();
-    foregroundJsiRuntime = nullptr;
+    if (const auto found = foregroundRuntimeLeases.find(self);
+        found != foregroundRuntimeLeases.end()) {
+      found->second.lease->invalidate();
+      foregroundRuntimeLeases.erase(found);
+    }
     if (relayRuntimeReferences > 0) relayRuntimeReferences -= 1;
     DestroyRelayHostIfUnused();
   }

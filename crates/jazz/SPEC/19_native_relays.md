@@ -95,7 +95,11 @@ client. Platform invalidation first makes every foreground-runtime lease
 uncallable, then releases its host wrapper. Each installed JSI factory retains
 an opaque host-state lease so a late finalizer cannot dereference freed state;
 that retained state is released only when the final factory/foreground object
-is gone. No platform binding retains a Rust `Db` pointer across that lifecycle.
+is gone. The lease is keyed by the actual UI runtime (Android's native runtime
+token; iOS's module/bridge instance), never by the process-global relay host:
+invalidating UI runtime A cannot invalidate a still-live UI runtime B that
+shares the same relay. No platform binding retains a Rust `Db` pointer across
+that lifecycle.
 
 `Db` and its peer connections are executor-local. A native relay therefore owns
 all core values on one dedicated native owner thread. Host calls are encoded

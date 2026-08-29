@@ -67,6 +67,34 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
   );
 });
 
+test("each native JSI runtime owns an independent foreground lease", () => {
+  const androidBridge = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/android/cpp-relay.cpp"),
+    "utf8",
+  );
+  const iosBridge = fs.readFileSync(
+    path.resolve(root, "../../crates/jazz-rn/ios/JazzRelay.mm"),
+    "utf8",
+  );
+  // Android's Kotlin wrapper already allocates a runtime token. This receipt
+  // fails if JNI silently drops it and returns to one host-global lease.
+  assert.match(androidBridge, /ForegroundRuntimeKey = std::pair<jazz_native_relay_host \*, jlong>/);
+  assert.match(androidBridge, /nativeForegroundBindingsInstaller\([\s\S]*jlong runtime_token\)/);
+  assert.match(androidBridge, /foregroundInstallation\(relay_host, runtime_token, callInvoker\)/);
+  assert.match(androidBridge, /foreground_installations\.find\(\{relay_host, runtime_token\}\)/);
+  assert.doesNotMatch(
+    androidBridge,
+    /std::unordered_map<jazz_native_relay_host \*, std::shared_ptr<ForegroundRuntimeInstallation>>/,
+  );
+  // iOS uses the module instance as the runtime ownership token. A planted
+  // process-global `foregroundRuntimeLease` would make either bridge teardown
+  // kill its sibling and fails this source/device-host receipt.
+  assert.match(iosBridge, /std::unordered_map<JazzRelay \*, ForegroundRuntimeInstallation>/);
+  assert.match(iosBridge, /foregroundRuntimeLeases\.find\(self\)/);
+  assert.match(iosBridge, /foregroundRuntimeLeases\.erase\(found\)/);
+  assert.doesNotMatch(iosBridge, /static std::shared_ptr<jazz::rn::ForegroundRuntimeLease> foregroundRuntimeLease/);
+});
+
 test("Expo config plugin describes the real iOS receipt boundary without claiming TODO scenarios", () => {
   const plugin = read("plugins/with-jazz-device-fixture.cjs");
   assert.match(plugin, /JAZZ_DEVICE_SCHEMA_JSON.*todos/);

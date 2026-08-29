@@ -4,8 +4,8 @@
 #include <fbjni/fbjni.h>
 
 #include <memory>
+#include <map>
 #include <mutex>
-#include <unordered_map>
 
 #include "../native/foreground-runtime.h"
 #include "jazz_native_relay.h"
@@ -39,20 +39,27 @@ struct ForegroundRuntimeInstallation {
 };
 
 std::mutex foreground_installations_mutex;
-std::unordered_map<jazz_native_relay_host *, std::shared_ptr<ForegroundRuntimeInstallation>>
+// Android's bridge gives every React Native JSI runtime a monotonically
+// allocated token. Keep that token in the native ownership key: a process can
+// host more than one RN runtime against one durable relay host, and destroying
+// one runtime must not invalidate any sibling's JSI lease.
+using ForegroundRuntimeKey = std::pair<jazz_native_relay_host *, jlong>;
+std::map<ForegroundRuntimeKey, std::shared_ptr<ForegroundRuntimeInstallation>>
     foreground_installations;
 
 std::shared_ptr<ForegroundRuntimeInstallation> foregroundInstallation(
     jazz_native_relay_host *host,
+    jlong runtime_token,
     const std::shared_ptr<facebook::react::CallInvoker> &callInvoker = nullptr) {
   std::lock_guard<std::mutex> lock(foreground_installations_mutex);
-  const auto found = foreground_installations.find(host);
+  const ForegroundRuntimeKey key{host, runtime_token};
+  const auto found = foreground_installations.find(key);
   if (found != foreground_installations.end()) {
     return found->second;
   }
   if (!callInvoker) return nullptr;
   auto installation = std::make_shared<ForegroundRuntimeInstallation>(host, callInvoker);
-  foreground_installations.emplace(host, installation);
+  foreground_installations.emplace(key, installation);
   return installation;
 }
 }  // namespace
@@ -116,15 +123,15 @@ Java_com_jazzrn_JazzRelayBridge_nativeRevokeTrustedScope(
 
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_jazzrn_JazzRelayBridge_nativeForegroundBindingsInstaller(
-    JNIEnv *, jclass, jlong host) {
+    JNIEnv *, jclass, jlong host, jlong runtime_token) {
   auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
   if (relay_host == nullptr) {
     return nullptr;
   }
   auto holder = facebook::react::BindingsInstallerHolder::newObjectCxxArgs(
-      [relay_host](facebook::jsi::Runtime &runtime,
+      [relay_host, runtime_token](facebook::jsi::Runtime &runtime,
                      const std::shared_ptr<facebook::react::CallInvoker> &callInvoker) {
-        auto installation = foregroundInstallation(relay_host, callInvoker);
+        auto installation = foregroundInstallation(relay_host, runtime_token, callInvoker);
         if (!installation) return;
         std::lock_guard<std::mutex> lock(installation->mutex);
         installation->runtime = &runtime;
@@ -135,9 +142,9 @@ Java_com_jazzrn_JazzRelayBridge_nativeForegroundBindingsInstaller(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_jazzrn_JazzRelayBridge_nativeInstallForegroundRuntime(
-    JNIEnv *env, jclass, jlong host) {
+    JNIEnv *env, jclass, jlong host, jlong runtime_token) {
   auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
-  const auto installation = foregroundInstallation(relay_host);
+  const auto installation = foregroundInstallation(relay_host, runtime_token);
   if (relay_host == nullptr || !installation) {
     env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
                   "Jazz native foreground runtime is unavailable for this bridge");
@@ -154,10 +161,10 @@ Java_com_jazzrn_JazzRelayBridge_nativeInstallForegroundRuntime(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_jazzrn_JazzRelayBridge_nativeInvalidateForegroundRuntime(
-    JNIEnv *, jclass, jlong host) {
+    JNIEnv *, jclass, jlong host, jlong runtime_token) {
   auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
   std::lock_guard<std::mutex> lock(foreground_installations_mutex);
-  const auto found = foreground_installations.find(relay_host);
+  const auto found = foreground_installations.find({relay_host, runtime_token});
   if (found == foreground_installations.end()) {
     return;
   }
