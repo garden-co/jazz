@@ -2502,7 +2502,6 @@ mod tests {
     use jazz::tools::public_schema::{
         PolicyExpr, RelColumnRef, RelExpr, RelPredicateCmpOp, RelPredicateExpr, RelValueRef,
     };
-    use serde_json::json;
 
     #[test]
     fn schema_roundtrip_simple() {
@@ -2634,7 +2633,7 @@ mod tests {
                     .column(
                         "payload",
                         ColumnType::Json {
-                            schema: Some(json!({
+                            schema: Some(serde_json::json!({
                                 "type": "object",
                                 "required": ["name"]
                             })),
@@ -2650,7 +2649,7 @@ mod tests {
         assert_eq!(
             docs.columns.column("payload").unwrap().column_type,
             ColumnType::Json {
-                schema: Some(json!({
+                schema: Some(serde_json::json!({
                     "type": "object",
                     "required": ["name"]
                 }))
@@ -2670,7 +2669,7 @@ mod tests {
             .table(TableSchema::builder("docs").column(
                 "payload",
                 ColumnType::Json {
-                    schema: Some(json!({"z": null, "a": [true, 1]})),
+                    schema: Some(serde_json::json!({"z": null, "a": [true, 1]})),
                 },
             ))
             .build();
