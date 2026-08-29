@@ -125,7 +125,8 @@ for (const [relative, source] of files) {
  * them, avoiding a false positive on an unrelated local function or closure.
  */
 function serializerCalls(source) {
-  const imports = parseImports(source);
+  const code = rustCodeMask(source);
+  const imports = parseImports(code);
   const calls = [];
   const seen = new Set();
   const add = (api, index) => {
@@ -138,8 +139,8 @@ function serializerCalls(source) {
 
   for (const api of forbiddenApis) {
     const direct = new RegExp(`(?<![A-Za-z0-9_])(?:::)?${escapeRegex(api)}\\b`, "g");
-    for (const match of source.matchAll(direct)) {
-      if (isCallAt(source, match.index + match[0].length)) add(api, match.index);
+    for (const match of code.matchAll(direct)) {
+      if (isCallAt(code, match.index + match[0].length)) add(api, match.index);
     }
   }
 
@@ -148,18 +149,18 @@ function serializerCalls(source) {
       if (!api.startsWith(`${namespace}::`)) continue;
       const suffix = api.slice(namespace.length + 2);
       const pattern = new RegExp(`\\b${escapeRegex(alias)}::${escapeRegex(suffix)}\\b`, "g");
-      for (const match of source.matchAll(pattern)) {
-        if (isCallAt(source, match.index + match[0].length)) add(api, match.index);
+      for (const match of code.matchAll(pattern)) {
+        if (isCallAt(code, match.index + match[0].length)) add(api, match.index);
       }
     }
   }
 
   for (const [local, api] of imports.functions) {
     const pattern = new RegExp(`\\b${escapeRegex(local)}\\b`, "g");
-    for (const match of source.matchAll(pattern)) {
+    for (const match of code.matchAll(pattern)) {
       if (
-        isCallAt(source, match.index + match[0].length) &&
-        !isLocallyShadowed(source, match.index, local)
+        isCallAt(code, match.index + match[0].length) &&
+        !isLocallyShadowed(code, match.index, local)
       ) {
         add(api, match.index);
       }
@@ -167,6 +168,78 @@ function serializerCalls(source) {
   }
 
   return calls.sort((left, right) => left.index - right.index);
+}
+
+// Keep offsets and newlines intact so diagnostics still point into the source,
+// while comments and string/byte/raw-string literals cannot manufacture a call.
+function rustCodeMask(source) {
+  const masked = source.split("");
+  const blank = (index) => {
+    if (masked[index] !== "\n") masked[index] = " ";
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    if (source.startsWith("//", index)) {
+      for (; index < source.length && source[index] !== "\n"; index += 1) blank(index);
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      let depth = 1;
+      blank(index++);
+      blank(index);
+      for (index += 1; index < source.length && depth > 0; index += 1) {
+        if (source.startsWith("/*", index)) {
+          blank(index++);
+          blank(index);
+          depth += 1;
+        } else if (source.startsWith("*/", index)) {
+          blank(index++);
+          blank(index);
+          depth -= 1;
+        } else {
+          blank(index);
+        }
+      }
+      index -= 1;
+      continue;
+    }
+    const raw = source.slice(index).match(/^(?:br|rb|r)(#{0,255})"/);
+    if (raw) {
+      const delimiter = `"${raw[1]}`;
+      const end = source.indexOf(delimiter, index + raw[0].length);
+      const stop = end === -1 ? source.length : end + delimiter.length;
+      for (; index < stop; index += 1) blank(index);
+      index -= 1;
+      continue;
+    }
+    const ordinaryString =
+      source[index] === '"' ||
+      ((source[index] === "b" || source[index] === "c") && source[index + 1] === '"');
+    const character = source.slice(index).match(/^'(?:\\.|[^'\\\n])'/);
+    if (character) {
+      for (let offset = 0; offset < character[0].length; offset += 1) blank(index + offset);
+      index += character[0].length - 1;
+      continue;
+    }
+    if (ordinaryString) {
+      const start = index;
+      blank(start);
+      if (source[index] !== '"') {
+        index += 1;
+        blank(index);
+      }
+      index += 1; // consume the opening quote before masking its contents
+      for (; index < source.length; index += 1) {
+        blank(index);
+        if (source[index] === "\\") {
+          index += 1;
+          blank(index);
+        } else if (source[index] === '"') {
+          break;
+        }
+      }
+    }
+  }
+  return masked.join("");
 }
 
 function parseImports(source) {
@@ -179,27 +252,58 @@ function parseImports(source) {
 }
 
 function registerUseTree(tree, namespaces, functions) {
-  const brace = tree.indexOf("{");
-  if (brace !== -1 && tree.endsWith("}")) {
-    const prefix = normalizePath(tree.slice(0, brace).replace(/::$/, ""));
-    for (const member of splitUseMembers(tree.slice(brace + 1, -1))) {
-      const [path, alias] = splitUseAlias(member);
-      if (path === "*") {
-        registerGlob(prefix, functions);
-      } else if (path === "self") {
-        namespaces.set(alias ?? prefix, prefix);
-      } else {
-        registerImportedPath(`${prefix}::${path}`, alias, namespaces, functions);
-      }
+  registerUseTreeAt(tree, "", namespaces, functions);
+}
+
+function registerUseTreeAt(tree, base, namespaces, functions) {
+  const [path, alias] = splitUseAlias(tree);
+  const group = topLevelUseGroup(path);
+  if (group) {
+    const prefix = joinUsePath(base, group.prefix);
+    for (const member of splitUseMembers(group.body)) {
+      registerUseTreeAt(member, prefix, namespaces, functions);
     }
     return;
   }
-  const [path, alias] = splitUseAlias(tree);
-  if (path.endsWith("::*")) {
-    registerGlob(normalizePath(path.slice(0, -3)), functions);
+  const resolved = joinUsePath(base, path);
+  if (resolved.endsWith("::*")) {
+    registerGlob(normalizePath(resolved.slice(0, -3)), functions);
+  } else if (resolved === "self") {
+    if (base) namespaces.set(alias ?? base, base);
   } else {
-    registerImportedPath(path, alias, namespaces, functions);
+    registerImportedPath(resolved, alias, namespaces, functions);
   }
+}
+
+function topLevelUseGroup(tree) {
+  let depth = 0;
+  let start = -1;
+  for (let index = 0; index < tree.length; index += 1) {
+    if (tree[index] === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (tree[index] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        if (tree.slice(index + 1).trim()) return undefined;
+        return {
+          prefix: tree.slice(0, start).replace(/::$/, "").trim(),
+          body: tree.slice(start + 1, index),
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+function joinUsePath(base, path) {
+  const normalized = normalizePath(path);
+  if (!base) return normalized;
+  if (normalized === "self") return base;
+  if (normalized === "super") return "";
+  if (normalized.startsWith("super::")) return normalized.slice("super::".length);
+  if (normalized.startsWith("self::")) return `${base}::${normalized.slice("self::".length)}`;
+  return `${base}::${normalized}`;
 }
 
 function splitUseMembers(body) {
@@ -219,7 +323,8 @@ function splitUseMembers(body) {
 }
 
 function splitUseAlias(member) {
-  const match = member.trim().match(/^(.*?)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (topLevelUseGroup(member)) return [member.trim(), undefined];
+  const match = member.trim().match(/^(.*?)\s+as\s+((?:r#)?[A-Za-z_][A-Za-z0-9_]*)$/);
   return match ? [match[1].trim(), match[2]] : [member.trim(), undefined];
 }
 
@@ -247,7 +352,11 @@ function registerGlob(namespace, functions) {
 }
 
 function normalizePath(path) {
-  return path.trim().replace(/^::/, "").replace(/\s+/g, "");
+  const segments = path.trim().replace(/^::/, "").replace(/\s+/g, "").split("::");
+  const knownRoot = segments.findLastIndex((segment) =>
+    ["postcard", "serde_json", "bincode", "rmp_serde"].includes(segment),
+  );
+  return (knownRoot === -1 ? segments : segments.slice(knownRoot)).join("::");
 }
 
 function isCallAt(source, index) {
