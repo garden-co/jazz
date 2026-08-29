@@ -46,7 +46,9 @@ if (
       index !== rootIndex + 1,
   )
 )
-  fail("usage: node dev/gates/default-serialization-persistence.mjs [--root PATH] [--print-direct-dependency-snapshots|--refresh-registry-snapshot|--refresh-registry-endpoints]");
+  fail(
+    "usage: node dev/gates/default-serialization-persistence.mjs [--root PATH] [--print-direct-dependency-snapshots|--refresh-registry-snapshot|--refresh-registry-endpoints]",
+  );
 
 const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
 let registry;
@@ -56,8 +58,11 @@ try {
   fail("cannot read registry: " + error.message);
 }
 if (snapshotOnly) {
-  if (!Array.isArray(registry?.scope?.paths)) fail("registry scope.paths is required for snapshots");
-  console.log(JSON.stringify(snapshotDependencies(cargoMetadata(root), registry.scope.paths), null, 2));
+  if (!Array.isArray(registry?.scope?.paths))
+    fail("registry scope.paths is required for snapshots");
+  console.log(
+    JSON.stringify(snapshotDependencies(cargoMetadata(root), registry.scope.paths), null, 2),
+  );
   process.exit(0);
 }
 if (refreshRegistry) {
@@ -79,12 +84,15 @@ if (refreshRegistry) {
           : {}),
       })),
     )
-    .sort((left, right) =>
-      left.crate.localeCompare(right.crate) || left.dependency.localeCompare(right.dependency),
+    .sort(
+      (left, right) =>
+        left.crate.localeCompare(right.crate) || left.dependency.localeCompare(right.dependency),
     );
   registry.scope.serializerCrates = serializerRootsFromSnapshots(snapshots);
   fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2) + "\n");
-  console.log("refreshed direct dependency snapshot and explicit classifications; review this policy change");
+  console.log(
+    "refreshed direct dependency snapshot and explicit classifications; review this policy change",
+  );
   process.exit(0);
 }
 if (
@@ -95,7 +103,9 @@ if (
   !Array.isArray(registry.directDependencySnapshots) ||
   !Array.isArray(registry.dependencyClassifications)
 )
-  fail("registry must have schemaVersion 4, scope, allowances, directDependencySnapshots, and dependencyClassifications");
+  fail(
+    "registry must have schemaVersion 4, scope, allowances, directDependencySnapshots, and dependencyClassifications",
+  );
 
 const metadata = cargoMetadata(root);
 const snapshots = snapshotDependencies(metadata);
@@ -123,22 +133,33 @@ const directDependencies = snapshots.flatMap((snapshot) =>
   snapshot.dependencies.map((dependency) => ({ crate: snapshot.crate, dependency })),
 );
 if (classifiedDependencies.size !== directDependencies.length)
-  fail("every direct external dependency available to a persistence owner needs an explicit classification");
+  fail(
+    "every direct external dependency available to a persistence owner needs an explicit classification",
+  );
 for (const { crate, dependency } of directDependencies) {
   const classification = classifiedDependencies.get(crate + "\u0000" + dependency.identity);
-  if (!classification)
-    fail("unclassified direct dependency " + crate + ": " + dependency.identity);
+  if (!classification) fail("unclassified direct dependency " + crate + ": " + dependency.identity);
   if (dependency.path) {
     if (classification.classification !== "governed-path-dependency")
-      fail("direct path/workspace dependency must be governed: " + crate + ": " + dependency.identity);
+      fail(
+        "direct path/workspace dependency must be governed: " + crate + ": " + dependency.identity,
+      );
   } else if (classification.classification === "governed-path-dependency") {
-    fail("governed path dependency is no longer a path/workspace dependency: " + crate + ": " + dependency.identity);
+    fail(
+      "governed path dependency is no longer a path/workspace dependency: " +
+        crate +
+        ": " +
+        dependency.identity,
+    );
   } else if (classification.classification === "governed-serializer") {
     if (!serializerPackages.has(dependency.package))
       fail("only known serializer packages may be governed: " + dependency.package);
     const expectedRoots = [dependency.crate].sort();
     if (JSON.stringify([...classification.roots].sort()) !== JSON.stringify(expectedRoots))
-      fail("governed serializer roots must exactly match direct crate alias for " + dependency.identity);
+      fail(
+        "governed serializer roots must exactly match direct crate alias for " +
+          dependency.identity,
+      );
   } else if (serializerPackages.has(dependency.package)) {
     fail("known serializer package must be governed: " + crate + ": " + dependency.identity);
   }
@@ -281,11 +302,7 @@ function includedSourceIsCollected(relative, literal, files, fileOwnership) {
   if (!isWithin(owner.scope, realpath)) return false;
   const target = path.relative(root, absolute).replaceAll(path.sep, "/");
   const collected = fileOwnership.get(target);
-  return (
-    files.has(target) &&
-    collected?.realpath === realpath &&
-    collected.scope === owner.scope
-  );
+  return files.has(target) && collected?.realpath === realpath && collected.scope === owner.scope;
 }
 
 function rustStringLiteral(literal) {
@@ -349,17 +366,13 @@ function endpointKey(endpoint) {
   });
 }
 export function cargoMetadata(directory) {
-  const result = childProcess.spawnSync(
-    "cargo",
-    ["metadata", "--format-version", "1"],
-    {
-      cwd: directory,
-      encoding: "utf8",
-      // The resolved workspace graph is intentionally part of the snapshot;
-      // it is larger than Node's 1MiB spawnSync default in this workspace.
-      maxBuffer: 16 * 1024 * 1024,
-    },
-  );
+  const result = childProcess.spawnSync("cargo", ["metadata", "--format-version", "1"], {
+    cwd: directory,
+    encoding: "utf8",
+    // The resolved workspace graph is intentionally part of the snapshot;
+    // it is larger than Node's 1MiB spawnSync default in this workspace.
+    maxBuffer: 16 * 1024 * 1024,
+  });
   if (result.status !== 0)
     fail("cargo metadata failed: " + (result.stderr || result.stdout).trim());
   try {
@@ -399,10 +412,7 @@ export function snapshotDependencies(metadata, scopePaths = registry.scope.paths
       manifest: path.relative(root, pkg.manifest_path).replaceAll(path.sep, "/"),
       dependencies: pkg.dependencies
         .map((dependency) => snapshotDependency(pkg, dependency, resolved, resolvedNodes))
-        .sort(
-          (left, right) =>
-            left.identity.localeCompare(right.identity),
-        ),
+        .sort((left, right) => left.identity.localeCompare(right.identity)),
     }))
     .sort((left, right) => left.crate.localeCompare(right.crate));
 }
@@ -419,11 +429,11 @@ function snapshotDependency(owner, dependency, resolved, resolvedNodes) {
   // not preserved as a first-class field, so record the observable inherited
   // form when it is present in the manifest; all other fields are exact.
   const pathDependency = dependency.path
-    ? resolvedPackage ??
+    ? (resolvedPackage ??
       [...resolved.values()].find(
         (candidate) =>
           path.resolve(path.dirname(candidate.manifest_path)) === path.resolve(dependency.path),
-      )
+      ))
     : undefined;
   if (dependency.path && !pathDependency)
     fail("cannot resolve direct path/workspace dependency source: " + dependency.path);
@@ -445,14 +455,16 @@ function snapshotDependency(owner, dependency, resolved, resolvedNodes) {
     optional: dependency.optional,
     target,
     kind,
-    workspaceInherited: manifestUsesWorkspaceDependency(owner.manifest_path, crate, dependency.name),
+    workspaceInherited: manifestUsesWorkspaceDependency(
+      owner.manifest_path,
+      crate,
+      dependency.name,
+    ),
     // This is deliberately the small public re-export surface, not a source
     // hash. Ordinary implementation edits in a workspace dependency must not
     // churn every persistence audit snapshot, but adding/removing an explicit
     // serializer spelling that a persistence owner can reach must be reviewed.
-    ...(pathDependency
-      ? { serializerReexports: publicSerializerReexports(pathDependency) }
-      : {}),
+    ...(pathDependency ? { serializerReexports: publicSerializerReexports(pathDependency) } : {}),
   };
 }
 
@@ -481,7 +493,10 @@ function publicSerializerReexports(pkg) {
       .map((dependency) => dependency.rename ?? dependency.name.replaceAll("-", "_")),
   );
   if (!serializerRoots.size) return [];
-  return explicitPublicSerializerReexports(rustTokens(fs.readFileSync(lib.src_path, "utf8")), serializerRoots);
+  return explicitPublicSerializerReexports(
+    rustTokens(fs.readFileSync(lib.src_path, "utf8")),
+    serializerRoots,
+  );
 }
 
 function explicitPublicSerializerReexports(tokens, serializerRoots) {
@@ -585,7 +600,10 @@ function collectRust(absolute, files, fileOwnership, scope) {
 
 function isWithin(scope, candidate) {
   const relative = path.relative(scope, candidate);
-  return relative === "" || (!relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (!relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative))
+  );
 }
 function fail(message) {
   console.error("default-serialization-persistence: ERROR: " + message);
