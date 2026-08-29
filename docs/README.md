@@ -56,6 +56,8 @@ lookups are skipped.
 Production is deliberately disabled: every production event, including a push
 to `main`, exits successfully from the Ignored Build Step and does not build.
 Enable production later only by changing the checked-in filter and its tests.
+The project-level fallback is also `exit 0`, so revisions without this checked-in
+configuration skip rather than deploying.
 
 The Vercel project's **Preview** environment must contain no sensitive values:
 applying `docs` is a maintainer trust decision that allows the pull request's
