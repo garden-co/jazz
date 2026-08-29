@@ -954,9 +954,20 @@ export class JazzClient {
   }
 
   updateCookieSession(cookieSession?: Session): void {
+    const previousCookieSession = this.context.cookieSession;
+    const previousResolvedSession = this.resolvedSession;
     this.context.cookieSession = cookieSession;
     this.resolvedSession = this.resolveSessionFromContext();
-    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+    try {
+      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+    } catch (error) {
+      // A native foreground capability is authenticated at admission time and
+      // cannot safely be reused under a refreshed session. Keep the public
+      // auth view truthful when that runtime fails closed.
+      this.context.cookieSession = previousCookieSession;
+      this.resolvedSession = previousResolvedSession;
+      throw error;
+    }
   }
 
   private normalizeQueryExecutionOptions(

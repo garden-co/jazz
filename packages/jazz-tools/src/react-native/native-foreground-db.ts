@@ -195,14 +195,8 @@ export class NativeForegroundDb {
   }
 
   rejectAuthUpdate(): never {
-    try {
-      this.close();
-    } catch {
-      // A platform revocation may have already closed the opaque native
-      // handle. It is still essential that this JS facade remains closed.
-    }
     throw new Error(
-      "React Native native foreground cannot rotate authentication in place; revoke the old native capability and create a new Db for the newly admitted session",
+      "React Native native foreground cannot rotate authentication in place; keep the existing admitted session or revoke the old native capability and create a new Db for the newly admitted session",
     );
   }
 
@@ -529,7 +523,8 @@ type NativeForegroundTransaction = {
 };
 
 type NativeForegroundWrite = {
-  readonly batchId: string;
+  /** Public write identity. Native binding spellings are normalized here. */
+  readonly txId: string;
   readonly payload: Uint8Array;
   readonly rowId: Uint8Array;
   wait(tier: string): Promise<void>;
@@ -585,7 +580,7 @@ function nativeWrite(
   const id = formatUuid(txId);
   let closed = false;
   return {
-    batchId: id,
+    txId: id,
     payload: new Uint8Array(),
     rowId: rowId.slice(),
     async wait(tier: string): Promise<void> {

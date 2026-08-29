@@ -80,6 +80,12 @@ terminal operations, and remote read tiers remain unavailable.
 capability-gated persistent foreground path; it does not select a browser-WASM
 or generic TurboModule runtime as a fallback.
 
+An admitted native foreground is bound to the session used for admission.
+`db.updateCookieSession(...)` therefore rejects atomically on this path: it
+leaves the previously admitted session and capability usable, and does not
+silently apply refreshed claims. Revoke the old capability and create a new
+client for a sign-in, sign-out, or scope change.
+
 ## Expo development-build install path
 
 `jazz-rn` is a direct application dependency: React Native codegen and Expo

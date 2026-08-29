@@ -1579,8 +1579,17 @@ export class Db {
     }
 
     this.config.cookieSession = cookieSession;
-
-    this.connection.updateAuth({ cookieSession });
+    try {
+      this.connection.updateAuth({ cookieSession });
+    } catch (error) {
+      // A native foreground runtime can reject an in-place auth rotation
+      // because its opaque capability remains bound to the prior admission.
+      // Restore every locally published auth view before surfacing that error.
+      this.config.cookieSession = previousSession;
+      this.authStateStore.applyCookieSession(previousSession);
+      published.rollback();
+      throw error;
+    }
 
     return true;
   }
