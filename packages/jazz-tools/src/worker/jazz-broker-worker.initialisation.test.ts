@@ -498,7 +498,12 @@ describe("broker worker context initialization", () => {
   it("shares one successful initialization between concurrent connections for the same key", async () => {
     const browserDb = deferred<ReturnType<typeof mocks.createBrowserDb>>();
     mocks.openBrowser.mockReturnValueOnce(browserDb.promise);
-    const initOptions = options("concurrent-success");
+    const exactStorageOwner =
+      '{"version":1,"appId":"worker-initialization-test","env":"dev","auth":{"kind":"principal","authMode":"external","user":"[\\"https://issuer.example\\",\\"alice\\"]"}}';
+    const initOptions = {
+      ...options("concurrent-success"),
+      storageOwner: exactStorageOwner,
+    };
 
     const first = connect(initOptions, "first-tab");
     const second = connect(initOptions, "second-tab");
@@ -511,7 +516,10 @@ describe("broker worker context initialization", () => {
     expect(mocks.installWasmTelemetry).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).toHaveBeenCalledWith("concurrent-success", {
-      owner: "worker-initialization-test-owner",
+      // This exact caller-supplied marker is the durable admission boundary.
+      // Mutating production wiring to `owner: undefined` or a lossy surrogate
+      // makes this mock receipt fail before a worker can open WASM.
+      owner: exactStorageOwner,
       onInvalidated: expect.any(Function),
     });
     expect(mocks.openBrowser).toHaveBeenCalledOnce();

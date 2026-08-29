@@ -2786,7 +2786,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it("pins an explicit IndexedDB name to one browser auth scope without mutating it on conflict", async () => {
+  it("pins an explicit IndexedDB name across a real SharedWorker restart and permits transfer only after reset", async () => {
     const ambientFailures: string[] = [];
     const recordAmbientFailure = (event: ErrorEvent | PromiseRejectionEvent) => {
       const value = "reason" in event ? event.reason : (event.error ?? event.message);
@@ -2796,52 +2796,125 @@ describe("SharedWorker bridge with IndexedDB", () => {
     globalThis.addEventListener("unhandledrejection", recordAmbientFailure);
     const appId = uniqueDbName("explicit-browser-owner-app");
     const dbName = uniqueDbName("explicit-browser-owner-root");
+    const aliceSecret = generateAuthSecret();
+    const bobSecret = generateAuthSecret();
     const alice = track(
       await createDb({
         appId,
-        secret: generateAuthSecret(),
+        secret: aliceSecret,
         driver: { type: "persistent", dbName },
       }),
     );
-    alice.insert(todos, { title: "Alice durable row", done: false });
-    await waitForCondition(
-      async () => (await alice.all(allTodos, { tier: "local" })).length === 1,
-      8_000,
-      "first owner should persist its row before the conflicting open",
-    );
-
-    // This uses a different local-first account but exactly the same physical
-    // name. A regression that restores auth-scoped worker names lets this
-    // second runtime open the root and makes this receipt fail.
-    const bob = track(
-      await createDb({
-        appId,
-        secret: generateAuthSecret(),
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const conflictingRead = bob.all(allTodos, { tier: "local" });
-    await expect(
-      withTimeout(
-        conflictingRead,
+    let firstInspector: MessagePort | null = null;
+    let sameOwner: Db | null = null;
+    let sameOwnerInspector: MessagePort | null = null;
+    let bob: Db | null = null;
+    let transferredBob: Db | null = null;
+    try {
+      alice.insert(todos, { title: "Alice durable row", done: false });
+      await waitForCondition(
+        async () => (await alice.all(allTodos, { tier: "local" })).length === 1,
         8_000,
-        "conflicting browser owner should reject during durable admission rather than hang",
-      ),
-    ).rejects.toThrow("incompatible persistent browser configuration");
+        "first owner should persist its row before the worker is torn down",
+      );
 
-    // A conflicting durable root is an operation-level error. It must not
-    // additionally escape as an ambient error / unhandled rejection.
-    await sleep(50);
-    expect(ambientFailures).toEqual([]);
+      // Closing the only context and explicitly terminating the realm proves
+      // the next claimant reads the persisted IDB owner marker, rather than a
+      // process-memory context map left by Alice's first worker.
+      firstInspector = await alice.openInspectorControlPort();
+      firstInspector.start();
+      await alice.shutdown();
+      untrack(alice);
+      await waitForWorkerContextRelease(firstInspector, dbName);
+      await terminateWorker(firstInspector);
+      firstInspector = null;
 
-    // The failed claimant did not clear, replace, or append to the owner's
-    // existing physical store.
-    expect((await alice.all(allTodos, { tier: "local" })).map((row) => row.title)).toEqual([
-      "Alice durable row",
-    ]);
-    await bob.shutdown();
-    globalThis.removeEventListener("error", recordAmbientFailure);
-    globalThis.removeEventListener("unhandledrejection", recordAmbientFailure);
+      sameOwner = track(
+        await createDb({
+          appId,
+          secret: aliceSecret,
+          driver: { type: "persistent", dbName },
+        }),
+      );
+      expect((await sameOwner.all(allTodos, { tier: "local" })).map((row) => row.title)).toEqual([
+        "Alice durable row",
+      ]);
+      sameOwnerInspector = await sameOwner.openInspectorControlPort();
+      sameOwnerInspector.start();
+      await sameOwner.shutdown();
+      untrack(sameOwner);
+      sameOwner = null;
+      await waitForWorkerContextRelease(sameOwnerInspector, dbName);
+      await terminateWorker(sameOwnerInspector);
+      sameOwnerInspector = null;
+
+      // This uses a different local-first account but exactly the same physical
+      // name. It arrives in a fresh SharedWorker realm, so a lossy owner
+      // substitution or `owner: undefined` admits it and makes this fail.
+      bob = track(
+        await createDb({
+          appId,
+          secret: bobSecret,
+          driver: { type: "persistent", dbName },
+        }),
+      );
+      const conflictingRead = bob.all(allTodos, { tier: "local" });
+      await expect(
+        withTimeout(
+          conflictingRead,
+          8_000,
+          "conflicting browser owner should reject during durable admission rather than hang",
+        ),
+      ).rejects.toThrow("already owned by a different Jazz browser session");
+      await bob.shutdown();
+      untrack(bob);
+      bob = null;
+
+      // A conflicting durable root is an operation-level error. It must not
+      // additionally escape as an ambient error / unhandled rejection.
+      await sleep(50);
+      expect(ambientFailures).toEqual([]);
+
+      // Only the rightful owner can explicitly reset this namespace. Reset
+      // removes the durable marker together with the root, after which Bob can
+      // claim and use the same selected physical name.
+      sameOwner = track(
+        await createDb({
+          appId,
+          secret: aliceSecret,
+          driver: { type: "persistent", dbName },
+        }),
+      );
+      // `createDb()` is intentionally lazy. Materialize the rightful owner's
+      // connection before asking it to perform the explicit durable reset.
+      expect((await sameOwner.all(allTodos, { tier: "local" })).map((row) => row.title)).toEqual([
+        "Alice durable row",
+      ]);
+      await sameOwner.deleteClientStorage();
+      await sameOwner.shutdown();
+      untrack(sameOwner);
+      sameOwner = null;
+
+      transferredBob = track(
+        await createDb({
+          appId,
+          secret: bobSecret,
+          driver: { type: "persistent", dbName },
+        }),
+      );
+      await expect(transferredBob.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+    } finally {
+      for (const db of [transferredBob, bob, sameOwner]) {
+        await db?.shutdown().catch(() => undefined);
+        if (db) untrack(db);
+      }
+      await alice.shutdown().catch(() => undefined);
+      untrack(alice);
+      firstInspector?.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+      sameOwnerInspector?.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+      globalThis.removeEventListener("error", recordAmbientFailure);
+      globalThis.removeEventListener("unhandledrejection", recordAmbientFailure);
+    }
   });
 
   it("fans out auth loss and accepts same-principal refresh from either tab", async () => {

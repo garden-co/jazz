@@ -21,6 +21,33 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("resolveDefaultPersistentDbName", () => {
+  it("uses the canonical public issuer/subject identity as the non-secret browser owner scope", () => {
+    const config: DbConfig = {
+      appId: "chat-app",
+      env: "production",
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice@example.com" }),
+    };
+
+    // The durable marker and worker routing identity must preserve the exact
+    // public session identity. A short hash could collide and silently let
+    // two principals share an explicitly named physical root.
+    expect(createBrowserAuthSessionKey(config)).toBe(
+      '{"version":1,"appId":"chat-app","env":"production","auth":{"kind":"principal","authMode":"external","user":"[\\"https://issuer.example\\",\\"alice@example.com\\"]"}}',
+    );
+    expect(createBrowserStorageOwner(config)).toBe(
+      '{"version":1,"appId":"chat-app","env":"production","auth":{"kind":"principal","authMode":"external","user":"[\\"https://issuer.example\\",\\"alice@example.com\\"]"}}',
+    );
+  });
+
+  it("uses intentional anonymous and system auth-scope tags without credentials", () => {
+    expect(createBrowserStorageOwner({ appId: "chat-app" })).toBe(
+      '{"version":1,"appId":"chat-app","env":"dev","auth":{"kind":"anonymous"}}',
+    );
+    expect(createBrowserStorageOwner({ appId: "chat-app", adminSecret: "private" })).toBe(
+      '{"version":1,"appId":"chat-app","env":"dev","auth":{"kind":"system"}}',
+    );
+  });
+
   it("keeps verified local-first principals distinct in browser worker auth metadata", () => {
     const configFor = (subject: string): DbConfig => {
       const config: DbConfig = {
