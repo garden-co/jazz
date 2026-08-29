@@ -1373,6 +1373,11 @@ fn flat_join_row_digest_preimage(
     fields: &[TypedOutputField],
     values: &[Value],
 ) -> Result<Vec<u8>, super::Error> {
+    if fields.len() != values.len() {
+        return Err(super::Error::InvalidStoredValue(
+            "flat joined result revision field/value arity disagrees",
+        ));
+    }
     let descriptor = RecordDescriptor::new(
         fields
             .iter()
@@ -1380,7 +1385,17 @@ fn flat_join_row_digest_preimage(
             .map(|(index, field)| (format!("flat_join_payload_{index}"), field.ty.clone())),
     );
     let descriptor_bytes = encode_record_descriptor(&descriptor)?;
-    let record_bytes = descriptor.create(values)?;
+    // The public payload descriptor is the durable contract. An inner join may
+    // nevertheless tighten a proven-present `Nullable(T)` runtime field to
+    // `T` before the terminal sees it. Restore that wrapper here so the same
+    // logical tuple gets one digest regardless of that execution detail.
+    let values = values
+        .iter()
+        .cloned()
+        .zip(fields)
+        .map(|(value, field)| canonicalize_flat_join_payload_value(value, &field.ty))
+        .collect::<Vec<_>>();
+    let record_bytes = descriptor.create(&values)?;
     let field_count = u32::try_from(fields.len()).map_err(|_| {
         super::Error::InvalidStoredValue("flat joined result revision has too many fields")
     })?;
@@ -1399,6 +1414,54 @@ fn flat_join_row_digest_preimage(
     bytes.extend_from_slice(&record_len.to_be_bytes());
     bytes.extend_from_slice(&record_bytes);
     Ok(bytes)
+}
+
+fn canonicalize_flat_join_payload_value(value: Value, target: &ValueType) -> Value {
+    match (value, target) {
+        (Value::Nullable(None), ValueType::Nullable(_)) => Value::Nullable(None),
+        (Value::Nullable(Some(value)), ValueType::Nullable(inner)) => {
+            let value = canonicalize_flat_join_payload_value(*value, inner);
+            // A relation carrier can add one nullable layer around a null
+            // authored value. A `Nullable(T)` public field has only one such
+            // layer, so collapse that extra present-null carrier.
+            if matches!(value, Value::Nullable(None))
+                && !matches!(inner.as_ref(), ValueType::Nullable(_))
+            {
+                Value::Nullable(None)
+            } else {
+                Value::Nullable(Some(Box::new(value)))
+            }
+        }
+        // Runtime lowering may unwrap a nullable join key after proving it is
+        // present. Persisted payload identity remains expressed in the public
+        // nullable descriptor, not in that temporary tightened layout.
+        (value, ValueType::Nullable(inner)) => Value::Nullable(Some(Box::new(
+            canonicalize_flat_join_payload_value(value, inner),
+        ))),
+        // Conversely, a runtime source can retain an optional carrier around
+        // a field whose public flat-join projection is proven non-null. Only a
+        // present wrapper is equivalent; `None` deliberately remains invalid
+        // for a non-null declared field and is rejected by `descriptor.create`.
+        (Value::Nullable(Some(value)), target) => {
+            canonicalize_flat_join_payload_value(*value, target)
+        }
+        (Value::Array(values), ValueType::Array(inner)) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| canonicalize_flat_join_payload_value(value, inner))
+                .collect(),
+        ),
+        (Value::Tuple(values), ValueType::Tuple(types)) if values.len() == types.len() => {
+            Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(types)
+                    .map(|(value, target)| canonicalize_flat_join_payload_value(value, target))
+                    .collect(),
+            )
+        }
+        (value, _) => value,
+    }
 }
 
 fn decode_typed_relation_edge(
@@ -2184,6 +2247,57 @@ mod tests {
                 .unwrap(),
             digest
         );
+    }
+
+    #[test]
+    fn flat_join_row_digest_restores_a_proven_present_nullable_payload() {
+        let fields = vec![TypedOutputField {
+            name: "team_id".to_owned(),
+            ty: ValueType::Nullable(Box::new(ValueType::Uuid)),
+        }];
+        let id = uuid::Uuid::from_bytes([0x71; 16]);
+
+        // Inner-join lowering is permitted to use the proven-present UUID
+        // directly, while the public result field remains nullable.
+        let tightened = flat_join_row_digest(&fields, &[Value::Uuid(id)]).unwrap();
+        let declared =
+            flat_join_row_digest(&fields, &[Value::Nullable(Some(Box::new(Value::Uuid(id))))])
+                .unwrap();
+
+        assert_eq!(tightened, declared);
+    }
+
+    #[test]
+    fn flat_join_row_digest_removes_a_present_runtime_nullable_carrier() {
+        let fields = vec![TypedOutputField {
+            name: "team_id".to_owned(),
+            ty: ValueType::Uuid,
+        }];
+        let id = uuid::Uuid::from_bytes([0x72; 16]);
+
+        let declared = flat_join_row_digest(&fields, &[Value::Uuid(id)]).unwrap();
+        let carried =
+            flat_join_row_digest(&fields, &[Value::Nullable(Some(Box::new(Value::Uuid(id))))])
+                .unwrap();
+
+        assert_eq!(declared, carried);
+    }
+
+    #[test]
+    fn flat_join_row_digest_collapses_an_extra_present_null_carrier() {
+        let fields = vec![TypedOutputField {
+            name: "parent_id".to_owned(),
+            ty: ValueType::Nullable(Box::new(ValueType::Uuid)),
+        }];
+
+        let declared = flat_join_row_digest(&fields, &[Value::Nullable(None)]).unwrap();
+        let carried = flat_join_row_digest(
+            &fields,
+            &[Value::Nullable(Some(Box::new(Value::Nullable(None))))],
+        )
+        .unwrap();
+
+        assert_eq!(declared, carried);
     }
 
     /// Production-shaped typed relation facts retain branch identity through
