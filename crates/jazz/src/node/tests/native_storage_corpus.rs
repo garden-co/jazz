@@ -253,6 +253,25 @@ fn canonical_corpus_child(path: &std::path::Path, role: &str) -> Result<std::pat
     Ok(canonical_parent.join(name))
 }
 
+/// Create an implementation-owned staging root.  Regeneration accepts a
+/// maintainer-selected *publication* path, but never a staging path: the
+/// source database must first be copied into a private, independent location
+/// before the fresh-root receipt is allowed to inspect it.
+fn private_native_corpus_staging_root(kind: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("jazz-native-corpus-{kind}-staging-"))
+        .tempdir()
+        .expect("create private native corpus staging root")
+}
+
+fn path_entry_exists(path: &std::path::Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("cannot inspect corpus path {path:?}: {error}")),
+    }
+}
+
 fn same_existing_file_identity(
     left: &std::path::Path,
     right: &std::path::Path,
@@ -286,6 +305,69 @@ fn same_existing_file_identity(
     }
 }
 
+/// Return every regular member of a live store.  SQLite contributes its one
+/// image; RocksDB contributes its manifest, logs, SSTs, and any other regular
+/// backend-owned members.  Symlinks are deliberately not followed: this is a
+/// trusted-maintainer accidental-alias guard, not an attempt to make a
+/// concurrent hostile filesystem namespace safe against TOCTOU replacement.
+fn regular_files_below(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect corpus path {path:?}: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("corpus path {path:?} is a symlink"));
+    }
+    if metadata.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if !metadata.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| format!("cannot list corpus directory {path:?}: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("cannot read corpus directory entry: {error}"))?;
+        let child = entry.path();
+        let child_metadata = std::fs::symlink_metadata(&child)
+            .map_err(|error| format!("cannot inspect corpus member {child:?}: {error}"))?;
+        if child_metadata.file_type().is_symlink() {
+            return Err(format!("corpus member {child:?} is a symlink"));
+        }
+        if child_metadata.is_file() {
+            files.push(child);
+        } else if child_metadata.is_dir() {
+            files.extend(regular_files_below(&child)?);
+        }
+    }
+    Ok(files)
+}
+
+/// A staged file must not share physical identity with *any* regular member of
+/// the live store.  Checking only the live root misses the dangerous RocksDB
+/// case where a candidate entry aliases an SST or MANIFEST directly.
+fn assert_candidate_regular_files_are_independent(
+    live: &std::path::Path,
+    candidate: &std::path::Path,
+    kind: &str,
+) -> Result<(), String> {
+    if !path_entry_exists(candidate)? {
+        return Ok(());
+    }
+    let live_files = regular_files_below(live)?;
+    let candidate_files = regular_files_below(candidate)?;
+    for candidate_file in &candidate_files {
+        for live_file in &live_files {
+            if same_existing_file_identity(live_file, candidate_file)? {
+                return Err(format!(
+                    "{kind} candidate file {candidate_file:?} is physically linked to live producer member {live_file:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Prove a staged candidate cannot be the live producer through spelling,
 /// symlink, or (on platforms that expose one) physical-file aliasing.  `live`
 /// is a SQLite file or a RocksDB root/archive source; candidates may be absent
@@ -314,7 +396,12 @@ fn assert_staged_path_is_distinct(
             "candidate {candidate:?} resolves inside live producer root {live_root:?}"
         ));
     }
-    if candidate.exists() {
+    if path_entry_exists(candidate)? {
+        let candidate_metadata = std::fs::symlink_metadata(candidate)
+            .map_err(|error| format!("cannot inspect existing {kind} candidate {candidate:?}: {error}"))?;
+        if candidate_metadata.file_type().is_symlink() {
+            return Err(format!("candidate {candidate:?} is a symlink"));
+        }
         let candidate_target = std::fs::canonicalize(candidate)
             .map_err(|error| format!("cannot resolve existing {kind} candidate {candidate:?}: {error}"))?;
         if candidate_target == live_canonical || candidate_target.starts_with(&live_root) {
@@ -323,14 +410,7 @@ fn assert_staged_path_is_distinct(
             ));
         }
     }
-    if candidate.exists()
-        && live.exists()
-        && same_existing_file_identity(live, candidate)?
-    {
-        return Err(format!(
-            "candidate {candidate:?} is the same physical file as live producer {live:?}"
-        ));
-    }
+    assert_candidate_regular_files_are_independent(live, candidate, kind)?;
     Ok(())
 }
 
@@ -347,17 +427,8 @@ fn assert_publication_paths_are_distinct(
     if candidate_canonical == requested_canonical {
         return Err("requested corpus output aliases its staged candidate".to_owned());
     }
-    if requested.exists() {
-        let candidate_target = std::fs::canonicalize(candidate)
-            .map_err(|error| format!("cannot resolve corpus candidate {candidate:?}: {error}"))?;
-        let requested_target = std::fs::canonicalize(requested)
-            .map_err(|error| format!("cannot resolve requested corpus output {requested:?}: {error}"))?;
-        if candidate_target == requested_target {
-            return Err("requested corpus output resolves to its staged candidate".to_owned());
-        }
-        if same_existing_file_identity(candidate, requested)? {
-            return Err("requested corpus output is the same physical file as its staged candidate".to_owned());
-        }
+    if path_entry_exists(requested)? {
+        return Err("requested corpus output already exists; choose a new path or delete it before regeneration".to_owned());
     }
     Ok((candidate_canonical, requested_canonical))
 }
@@ -394,14 +465,25 @@ fn publish_verified_native_corpus_candidate_with_copy(
         file_name.to_string_lossy(),
         uuid::Uuid::new_v4()
     ));
+    // Reserve the private name before copying.  It lives next to the requested
+    // output so a later hard-link publication is an atomic create-new operation
+    // on one filesystem; an existing output, including a dangling symlink, is
+    // always rejected above and never overwritten.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| format!("reserve private corpus publication path {temporary:?}: {error}"))?;
     if let Err(error) = copy(&candidate, &temporary) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
-    std::fs::rename(&temporary, requested).map_err(|error| {
+    std::fs::hard_link(&temporary, &requested).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
-        error.to_string()
-    })
+        format!("publish verified corpus without overwriting {requested:?}: {error}")
+    })?;
+    std::fs::remove_file(&temporary)
+        .map_err(|error| format!("remove private corpus staging file {temporary:?}: {error}"))
 }
 
 /// Keep failed admissions from accidentally reaching the requested path.  The
@@ -1200,7 +1282,10 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let rocks_live_path_for_verification = rocks_path.clone();
     let rocks_live_path_for_publish = rocks_path.clone();
     let rocks_wrong_schema = rocks_schema.clone();
-    let rocks_candidate_directory = tempfile::tempdir().expect("create RocksDB candidate directory");
+    // The candidate root is implementation-owned.  A maintainer may choose
+    // only a final publication path, never a location that could alias the
+    // live RocksDB tree while it is being exported.
+    let rocks_candidate_directory = private_native_corpus_staging_root("rocksdb");
     let rocks_candidate_archive = rocks_candidate_directory.path().join("epoch-1-native-jazz-rocksdb.tar.gz");
     let requested_rocks_archive = std::env::var_os("JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT")
         .map(std::path::PathBuf::from);
@@ -1297,7 +1382,7 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let sqlite_live_path_for_verification = sqlite_path.clone();
     let sqlite_live_path_for_publish = sqlite_path.clone();
     let sqlite_wrong_schema = sqlite_schema.clone();
-    let sqlite_candidate_directory = tempfile::tempdir().expect("create SQLite candidate directory");
+    let sqlite_candidate_directory = private_native_corpus_staging_root("sqlite");
     let sqlite_candidate_path = sqlite_candidate_directory.path().join("epoch-1-native-jazz.sqlite");
     let requested_sqlite_fixture_path = std::env::var_os("JAZZ_NATIVE_CORPUS_SQLITE_OUT")
         .map(std::path::PathBuf::from);
@@ -1383,12 +1468,15 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
         "the native adapters must preserve the same canonical Jazz logical pack",
     );
     if let Some(path) = std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT") {
-        // Maintainers deliberately request this output only while reviewing a
-        // new epoch producer. Write before the pinned checks so the candidate
-        // receipt remains available when either check correctly fails after
-        // an intentional producer change.
-        std::fs::write(&path, native_corpus_pack(&rocks_receipt))
-            .expect("write requested native corpus pack");
+        // The logical pack is also a candidate output: keep it private until
+        // this complete producer receipt has finished, and never overwrite a
+        // previously reviewed pack by accident.
+        let staging_root = private_native_corpus_staging_root("logical-pack");
+        let candidate = staging_root.path().join("epoch-1-native-jazz-corpus.pack");
+        std::fs::write(&candidate, native_corpus_pack(&rocks_receipt))
+            .expect("stage requested native corpus logical pack");
+        publish_verified_native_corpus_candidate(&candidate, std::path::Path::new(&path))
+            .expect("publish verified native corpus logical pack without overwrite");
     }
     assert_eq!(
         native_corpus_checksum(&rocks_receipt),
@@ -1654,6 +1742,11 @@ fn native_jazz_corpus_staging_rejects_normalized_and_physical_aliases() {
         "a dot-path spelling of the live image is rejected"
     );
 
+    let rocks_live = live_root.join("rocksdb-live");
+    std::fs::create_dir(&rocks_live).expect("create live RocksDB root");
+    let live_sst = rocks_live.join("000001.sst");
+    std::fs::write(&live_sst, b"live RocksDB SST bytes").expect("create live SST member");
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
@@ -1671,8 +1764,6 @@ fn native_jazz_corpus_staging_rejects_normalized_and_physical_aliases() {
             "a SQLite hard-link alias is rejected by file identity"
         );
 
-        let rocks_live = live_root.join("rocksdb-live");
-        std::fs::create_dir(&rocks_live).expect("create live RocksDB root");
         let rocks_alias_root = root.path().join("rocksdb-alias-root");
         symlink(&rocks_live, &rocks_alias_root).expect("create RocksDB root symlink alias");
         assert!(
@@ -1684,14 +1775,26 @@ fn native_jazz_corpus_staging_rejects_normalized_and_physical_aliases() {
             .is_err(),
             "a candidate below a symlink alias of the live RocksDB root is rejected"
         );
+
+    }
+
+    #[cfg(any(unix, windows))]
+    {
+        let hardlinked_sst_candidate = staging_root.join("candidate-000001.sst");
+        std::fs::hard_link(&live_sst, &hardlinked_sst_candidate)
+            .expect("plant a staged file linked to a live RocksDB SST");
+        assert!(
+            assert_staged_path_is_distinct(&rocks_live, &hardlinked_sst_candidate, "RocksDB").is_err(),
+            "a candidate hard-linked to any live RocksDB member is rejected, not only an alias of the root"
+        );
     }
 }
 
-/// A failed copy is allowed to leave a private temporary file briefly, but it
-/// must never truncate or replace an already-published destination, nor leave
-/// the partial private file behind after cleanup.
+/// Publication is create-new only.  A regeneration never overwrites an old
+/// reviewed artifact; a maintainer explicitly chooses a fresh path or removes
+/// the old one.  A failed copy also leaves no partial private file behind.
 #[test]
-fn native_jazz_corpus_publication_copy_failure_preserves_existing_destination() {
+fn native_jazz_corpus_publication_rejects_existing_output_and_preserves_it() {
     let root = tempfile::tempdir().expect("create publication failure root");
     let candidate = root.path().join("candidate.sqlite");
     let requested = root.path().join("published.sqlite");
@@ -1701,18 +1804,14 @@ fn native_jazz_corpus_publication_copy_failure_preserves_existing_destination() 
     let error = publish_verified_native_corpus_candidate_with_copy(
         &candidate,
         &requested,
-        |_candidate, temporary| {
-            std::fs::write(temporary, b"partial prefix")
-                .map_err(|error| error.to_string())?;
-            Err("injected partial copy failure".to_owned())
-        },
+        |_candidate, _temporary| panic!("an existing output must reject before copying"),
     )
-    .expect_err("an injected staged-copy failure must abort publication");
-    assert_eq!(error, "injected partial copy failure");
+    .expect_err("an existing output must reject before any staged copy");
+    assert!(error.contains("already exists"));
     assert_eq!(
         std::fs::read(&requested).expect("read existing destination after failed publication"),
         b"previous published corpus",
-        "a failed staged copy leaves the pre-existing destination byte-for-byte intact"
+        "a rejected regeneration leaves the pre-existing destination byte-for-byte intact"
     );
     let temporary_prefix = ".published.sqlite.native-corpus-staging-";
     assert!(
@@ -1725,7 +1824,7 @@ fn native_jazz_corpus_publication_copy_failure_preserves_existing_destination() 
                     .to_string_lossy()
                     .starts_with(temporary_prefix)
             }),
-        "failed staged publication cleans up its partial private file"
+        "rejected publication does not create a private output file"
     );
 
     assert!(
@@ -1752,6 +1851,25 @@ fn native_jazz_corpus_publication_copy_failure_preserves_existing_destination() 
             "a physical hard-link alias cannot be used as the publication destination"
         );
     }
+}
+
+#[test]
+fn native_jazz_corpus_publication_creates_a_fresh_output_without_overwrite() {
+    let root = tempfile::tempdir().expect("create publication root");
+    let candidate = root.path().join("candidate.sqlite");
+    let requested = root.path().join("fresh.sqlite");
+    std::fs::write(&candidate, b"complete verified candidate").expect("write candidate");
+
+    publish_verified_native_corpus_candidate(&candidate, &requested)
+        .expect("a fresh requested output is atomically created");
+    assert_eq!(
+        std::fs::read(&requested).expect("read fresh requested output"),
+        b"complete verified candidate"
+    );
+    assert!(
+        publish_verified_native_corpus_candidate(&candidate, &requested).is_err(),
+        "a second regeneration must not silently overwrite the first output"
+    );
 }
 
 /// The regeneration verifier must not be able to fall back to the still-live

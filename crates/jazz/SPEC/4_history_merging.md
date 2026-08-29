@@ -192,6 +192,15 @@ and put through that same full receipt before their checksums can be promoted;
 only the logical pack is deterministic. This corpus is storage-epoch evidence,
 not a compatibility decoder for pre-epoch-alpha roots.
 
+Corpus regeneration stages candidates in implementation-owned private temporary
+roots; a maintainer-supplied path is only a create-new publication destination.
+Before verification and publication, the producer rejects path/root/dot and
+symlink aliases and rejects a staged regular file that has the same stable
+physical identity as the live SQLite image or any regular RocksDB member. This
+is an accidental-alias guard for a trusted maintainer filesystem, not a hostile
+concurrent-filesystem/TOCTOU security boundary. Existing output paths are never
+overwritten: regeneration requires explicit deletion or a fresh output path.
+
 ### 4.4 Deletion as a separate layer
 
 Deletion is modeled separately from content so that hiding and restoring a row do

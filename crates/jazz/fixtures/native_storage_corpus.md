@@ -67,11 +67,21 @@ The deterministic contract is the semantic/logical pack only. Backend-owned
 SQLite pages and RocksDB files are deliberately _not_ expected to reproduce
 byte-for-byte: page layout, compaction, and filesystem metadata belong to the
 backend. `gzip -n` merely makes the checked-in SQLite wrapper stable enough to
-review; it does not make SQLite bytes a format. A regeneration produces
-reviewable candidate artifacts, then independently copies/unpacks each into a
+review; it does not make SQLite bytes a format. A regeneration creates its
+staging roots internally (the requested paths are publication destinations
+only), then produces reviewable candidate artifacts and independently
+copies/unpacks each into a
 fresh root and runs the complete historical reopen/mixed-write receipt against
 those candidates. Promotion therefore requires explicit review of all new
 physical checksums as well as the logical-pack checksum.
+
+The staging check is deliberately an accidental-alias guard for a trusted
+maintainer filesystem: it rejects dot/root/symlink aliases and any staged
+regular file physically linked to the live SQLite image or any live RocksDB
+member. It is not a hostile concurrent-filesystem or TOCTOU defense; replacing
+parents concurrently with regeneration is out of scope. Requested outputs are
+create-new only. Regeneration never overwrites an existing file (including an
+alias); delete the old candidate or choose a new path deliberately.
 
 ## Pinned producer provenance
 
@@ -94,11 +104,12 @@ JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT=/tmp/epoch-1-native-jazz-rocksdb.tar.gz \
 dev/t --exact node::tests::harness::settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes
 ```
 
-The producer intentionally writes candidate outputs before the pinned checksum
+The producer intentionally publishes candidate outputs before the pinned checksum
 assertion, so a deliberate format change leaves reviewable candidates even
 though the command exits non-zero. It first validates every candidate by
 opening a fresh materialized SQLite copy and freshly unpacked RocksDB root with
-the full historical receipt. Encode the pack and Rocks archive with base64;
+the full historical receipt. Each requested output must be a fresh path: the
+publisher refuses to overwrite an existing artifact. Encode the pack and Rocks archive with base64;
 gzip the SQLite file deterministically (`gzip -n -9`) before base64. Then
 update all three physical checksums and the logical-pack checksum together with
 the executable constants. Pre-settlement alpha stores remain intentionally unsupported.
