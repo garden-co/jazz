@@ -7,6 +7,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
+# Corpus-only helpers must stay behind Groove's test feature without hiding
+# production database methods. Compile the same non-test Jazz surface that
+# consumes the historical fixtures before running test-feature receipts.
+cargo check -p jazz --no-default-features --features testing,transport-compression-zstd
+
 dev/t --exact node::tests::harness::settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes
 dev/t --exact node::tests::harness::committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes
 dev/t --exact node::tests::harness::committed_native_jazz_physical_corpus_rejects_corruption_before_materialization

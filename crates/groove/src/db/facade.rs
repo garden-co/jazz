@@ -404,7 +404,6 @@ impl Database {
     }
 
     /// Reject any host operation after an ambiguous durable finalization.
-    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn ensure_usable(&self) -> Result<(), Error> {
         self.ensure_not_poisoned()
@@ -424,6 +423,7 @@ impl Database {
     /// key namespace and cannot be represented by one public direct-record-
     /// store descriptor. Ordinary application code must continue to use
     /// schema-aware table and direct-store APIs.
+    #[cfg(feature = "test")]
     #[doc(hidden)]
     pub async fn large_value_metadata_entries_for_compatibility(
         &self,
