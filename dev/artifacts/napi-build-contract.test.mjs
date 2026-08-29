@@ -271,7 +271,8 @@ test("a SIGKILL after pointer publication cannot persist a mismatched fallback s
     const root = fixture();
     const markerPath = join(root, "native-artifact-fingerprint.cjs");
     try {
-      if (priorPointer) publishNapiGeneration(stage(root, ".napi-stage-prior", "prior"), root, "prior");
+      if (priorPointer)
+        publishNapiGeneration(stage(root, ".napi-stage-prior", "prior"), root, "prior");
       if (priorMarker !== undefined) writeFileSync(markerPath, priorMarker);
       const staged = stage(root, ".napi-stage-killed", "next");
       const crashed = spawnSync(
@@ -299,7 +300,8 @@ test("a SIGKILL after pointer publication cannot persist a mismatched fallback s
       );
       assert.equal(active.status, 0, `${name}: ${active.stderr}`);
       assert.equal(existsSync(markerPath), priorMarker !== undefined, name);
-      if (priorMarker !== undefined) assert.equal(readFileSync(markerPath, "utf8"), priorMarker, name);
+      if (priorMarker !== undefined)
+        assert.equal(readFileSync(markerPath, "utf8"), priorMarker, name);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

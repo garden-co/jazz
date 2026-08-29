@@ -23,7 +23,9 @@ function jazzToolsDryGraph() {
     ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--dry=json"],
     { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   );
-  const task = JSON.parse(output).tasks.find((candidate) => candidate.taskId === "jazz-tools#build");
+  const task = JSON.parse(output).tasks.find(
+    (candidate) => candidate.taskId === "jazz-tools#build",
+  );
   assert.ok(task, "dry graph omitted jazz-tools#build");
   return task;
 }
@@ -75,7 +77,11 @@ try {
   // must disable both local and remote restore for the bundle that copies it.
   const jazzTools = jazzToolsDryGraph();
   assert.equal(jazzTools.cache.local, false, "jazz-tools could restore a stale sealed WASM bundle");
-  assert.equal(jazzTools.cache.remote, false, "jazz-tools could remotely restore a stale sealed WASM bundle");
+  assert.equal(
+    jazzTools.cache.remote,
+    false,
+    "jazz-tools could remotely restore a stale sealed WASM bundle",
+  );
 
   const baseline = dryGraph();
   for (const { name } of closures)
@@ -115,4 +121,6 @@ try {
   writeFileSync(unrelated, unrelatedOriginal);
 }
 
-console.log("Turbo artifact cache inputs are sensitive to closure edits only; sealed Jazz Tools bundles cannot restore.");
+console.log(
+  "Turbo artifact cache inputs are sensitive to closure edits only; sealed Jazz Tools bundles cannot restore.",
+);
