@@ -208,14 +208,12 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const session = sessionFromConfig(config);
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
     const backendMode = isBackendRuntime(config);
-    const identitySeed = persistentIdentitySeed(config, session);
-    // A persistent worker may replay a main-thread-authored transaction after
-    // the page has reopened. Keep that logical client's node identity stable
-    // for the persistence namespace so the fresh in-memory runtime still owns
-    // the transaction's eventual rejection/settlement notifications.
-    const node = isPersistentBrowserConfig(config)
-      ? deterministicBytes(`${identitySeed}:${resolveDefaultPersistentDbName(config)}:main-node`)
-      : randomBytes();
+    // The persistent worker owns durable recovery. A foreground runtime owns
+    // only its live optimistic writes, so every new runtime needs a fresh node
+    // identity. Reusing a deterministic node across independently opened tabs
+    // would let their fresh HLC registers mint the same TxId before either has
+    // observed the other's first commit.
+    const node = randomBytes();
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
