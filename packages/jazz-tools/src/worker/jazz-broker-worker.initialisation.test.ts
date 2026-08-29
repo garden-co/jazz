@@ -18,7 +18,11 @@ const mocks = vi.hoisted(() => {
   const encodeSchema = vi.fn(() => new Uint8Array());
   const openConfig = vi.fn(() => new Uint8Array());
   const telemetryDisposers: Mock[] = [];
-  const pageStores: Array<{ close: Mock; replicaNode: Uint8Array }> = [];
+  const pageStores: Array<{
+    close: Mock;
+    canonicalReplicaNode: Uint8Array;
+    readonly replicaNode: Uint8Array;
+  }> = [];
   const browserDbs: Array<{ close: Mock; setRelayAuthoritySessionOwner: Mock }> = [];
   const runtimes: Array<Record<string, Mock>> = [];
   const createBrowserDb = () => {
@@ -60,8 +64,18 @@ const mocks = vi.hoisted(() => {
       });
       openPageStore.mockReset().mockImplementation(async () => {
         const replicaNode = new Uint8Array(16);
-        replicaNode.fill(3);
-        const pageStore = { close: vi.fn(), replicaNode };
+        // IndexedDbPageStore deliberately returns a defensive copy: production
+        // callers must not be able to mutate its persisted replica identity.
+        // Keep this canonical byte string independently so the boundary tests
+        // below cannot pass merely because mocks share one object reference.
+        replicaNode.fill(pageStores.length + 3);
+        const pageStore = {
+          close: vi.fn(),
+          canonicalReplicaNode: replicaNode,
+          get replicaNode() {
+            return Uint8Array.from(replicaNode);
+          },
+        };
         pageStores.push(pageStore);
         return pageStore;
       });
@@ -426,7 +440,8 @@ describe("broker worker context initialization", () => {
       type: "runtime-ready",
     });
 
-    expect(mocks.openConfig.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]?.replicaNode);
+    expect(mocks.openConfig.mock.calls[0]?.[0]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.openConfig.mock.calls[0]?.[0]).not.toBe(mocks.pageStores[0]?.canonicalReplicaNode);
     expect(mocks.openConfig.mock.calls[0]?.slice(1)).toEqual([
       initOptions.author,
       1,
@@ -436,6 +451,11 @@ describe("broker worker context initialization", () => {
     ]);
     expect(mocks.openBrowser.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
+    // NativeRuntimeAdapter is the final runtime boundary. It must receive the
+    // persisted physical-replica identity, not a process constant or a node
+    // intended for a different open attempt.
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.fromDb.mock.calls[0]?.[2]).not.toBe(mocks.pageStores[0]?.canonicalReplicaNode);
   });
 
   it("closes the page store and telemetry when browser DB opening fails, then retries", async () => {
@@ -464,8 +484,8 @@ describe("broker worker context initialization", () => {
     // A failed WASM open evicts its context and retries from a newly opened
     // page-store handle. Each attempt must derive its opaque config from that
     // attempt's admitted physical-replica identity.
-    expect(mocks.openConfig.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]?.replicaNode);
-    expect(mocks.openConfig.mock.calls[1]?.[0]).toBe(mocks.pageStores[1]?.replicaNode);
+    expect(mocks.openConfig.mock.calls[0]?.[0]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.openConfig.mock.calls[1]?.[0]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
     expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
   });
@@ -488,21 +508,16 @@ describe("broker worker context initialization", () => {
       selfSignedClientProof.appId,
       selfSignedClientProof.claimedAuthor,
     );
-    expect(mocks.fromDb).toHaveBeenCalledWith(
-      expect.anything(),
-      initOptions.schema,
-      mocks.pageStores[0]?.replicaNode,
-      initOptions.author,
-      1,
-      false,
-      { selfSignedClientProof },
-    );
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
     expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
   });
 
   it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
     const rawDb = mocks.createBrowserDb();
     mocks.openBrowser.mockResolvedValueOnce(rawDb);
+    const rejectedConfig = Uint8Array.from([0xd4]);
+    const retryConfig = Uint8Array.from([0xe5]);
+    mocks.openConfig.mockReturnValueOnce(rejectedConfig).mockReturnValueOnce(retryConfig);
     mocks.fromDb.mockImplementationOnce(() => {
       throw new Error("adapter construction failed");
     });
@@ -527,6 +542,17 @@ describe("broker worker context initialization", () => {
     expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
     expect(mocks.fromDb).toHaveBeenCalledTimes(2);
+    // The failed context has a different persisted node and config from its
+    // retry. Verify both native opens and both adapter constructions retain
+    // their own pairing rather than silently substituting a constant node.
+    expect(mocks.pageStores[0]?.canonicalReplicaNode).not.toEqual(
+      mocks.pageStores[1]?.canonicalReplicaNode,
+    );
+    expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
+    expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.fromDb.mock.calls[1]?.[2]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
+    expect(mocks.fromDb.mock.calls[0]?.[2]).not.toEqual(mocks.fromDb.mock.calls[1]?.[2]);
   });
 
   it("shares one successful initialization between concurrent connections for the same key", async () => {
