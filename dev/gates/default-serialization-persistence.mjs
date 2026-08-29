@@ -34,14 +34,47 @@ try {
   fail(`cannot read registry: ${error.message}`);
 }
 if (
-  registry?.schemaVersion !== 1 ||
+  registry?.schemaVersion !== 2 ||
   !Array.isArray(registry.scope?.paths) ||
   !Array.isArray(registry.allowances)
 )
-  fail("registry must have schemaVersion 1, scope.paths, and allowances");
+  fail("registry must have schemaVersion 2, scope.paths, and allowances");
 
-const forbidden =
-  /\b(?:postcard::(?:to_allocvec|from_bytes|take_from_bytes|experimental::serialized_size)|serde_json::(?:to_vec|from_slice|to_string|from_str)|bincode::(?:serialize|deserialize)|rmp_serde::(?:to_vec|from_slice))\b/g;
+// Every spelling is named once.  This deliberately recognizes convenience
+// families, rather than a hand-picked list of calls seen in today's source:
+// adding a new `serde_json::*` helper under a persistence owner fails closed.
+const forbiddenApis = new Set([
+  "postcard::to_allocvec",
+  "postcard::to_stdvec",
+  "postcard::to_extend",
+  "postcard::to_io",
+  "postcard::from_bytes",
+  "postcard::take_from_bytes",
+  "postcard::experimental::serialized_size",
+  "serde_json::to_vec",
+  "serde_json::to_writer",
+  "serde_json::to_writer_pretty",
+  "serde_json::to_string",
+  "serde_json::to_string_pretty",
+  "serde_json::from_slice",
+  "serde_json::from_reader",
+  "serde_json::from_str",
+  "bincode::serialize",
+  "bincode::serialize_into",
+  "bincode::deserialize",
+  "bincode::deserialize_from",
+  "rmp_serde::to_vec",
+  "rmp_serde::to_vec_named",
+  "rmp_serde::from_slice",
+  "rmp_serde::from_read",
+]);
+const forbidden = new RegExp(
+  `\\b(?:${[...forbiddenApis]
+    .sort((left, right) => right.length - left.length)
+    .map((api) => api.replaceAll("::", "::"))
+    .join("|")})\\b`,
+  "g",
+);
 const files = new Map();
 for (const scoped of registry.scope.paths) collectRust(path.join(root, scoped), files);
 
@@ -50,7 +83,7 @@ for (const allowance of registry.allowances) {
   if (
     !allowance?.id ||
     !allowance.path ||
-    !allowance.pattern ||
+    !forbiddenApis.has(allowance.api) ||
     !Number.isInteger(allowance.expectedOccurrences) ||
     !allowance.classification
   )
@@ -60,23 +93,27 @@ for (const allowance of registry.allowances) {
   const source = files.get(allowance.path);
   if (source === undefined)
     fail(`${allowance.id}: source is outside scope or absent: ${allowance.path}`);
-  const matches = [...source.matchAll(new RegExp(allowance.pattern, "g"))];
+  const matches = [...source.matchAll(apiPattern(allowance.api))];
   if (matches.length !== allowance.expectedOccurrences)
     fail(
-      `${allowance.id}: expected ${allowance.expectedOccurrences} ${allowance.pattern} occurrence(s) in ${allowance.path}, found ${matches.length}`,
+      `${allowance.id}: expected ${allowance.expectedOccurrences} ${allowance.api} occurrence(s) in ${allowance.path}, found ${matches.length}`,
     );
 }
 
 for (const [relative, source] of files) {
   for (const match of source.matchAll(forbidden)) {
     const permitted = registry.allowances.some(
-      (allowance) => allowance.path === relative && new RegExp(allowance.pattern).test(match[0]),
+      (allowance) => allowance.path === relative && allowance.api === match[0],
     );
     if (!permitted) {
       const line = source.slice(0, match.index).split("\n").length;
       fail(`${relative}:${line}: unregistered default serialization ${match[0]}`);
     }
   }
+}
+
+function apiPattern(api) {
+  return new RegExp(`\\b${api.replaceAll("::", "::")}\\b`, "g");
 }
 
 console.log(

@@ -490,6 +490,25 @@ consolidation. It MUST NOT be derived from result position, payload bytes, a
 content transaction id, or an unordered set of source ids. It is consequently
 stable across ticks, resets, source-content replacements, and result reordering.
 
+**Flat payload revision digest.** A non-empty flat output also carries the
+opaque `row_digest` used by durable `ResultMemberEntry`, result-payload, and
+program-fact state to distinguish a source tuple whose projected payload has
+changed. This is not its occurrence identity. Its permanent `JFRD` V1
+preimage is `magic "JFRD" | version 1 | field_count:u32be |
+descriptor_len:u32be | Groove-record-descriptor | record_len:u32be |
+Groove-record`. The descriptor has the source-order payload types and the
+engine-owned names `flat_join_payload_0`, `flat_join_payload_1`, …, so user
+projection aliases do not affect it. `row_digest` is BLAKE3's derived-key hash
+of that preimage with context `jazz.flat-join-row-digest.v1`.
+
+For example, declared payload `(u64, string)` and values `(7, "blue")` have
+the frozen preimage
+`4a4652440100000002000000a8050000002a00000053000000690000009200000000000000000000000002000000120000000000000000010000000000000000010000002500000001666c61745f6a6f696e5f7061796c6f61645f300000000005000000000000000000000000120000000000000000010000000000000000010000002500000001666c61745f6a6f696e5f7061796c6f61645f31000000000a0000000000000000000000001200000000000000000000000d070000000000000002626c7565`
+and digest
+`d4bacd5d453e647a4da1c55842ddbf8e39a263ceb1ddb07f3f8fac090ff9480b`.
+Changing `"blue"` changes the digest; renaming either projection does not.
+No generic Rust serializer is part of this durable identity.
+
 This is one type with variable arity, not two identity schemes. A collect-mode
 parent has a one-element `OutputOccurrenceId`, its parent source-row id. An
 expand-mode tuple has the ordered vector above. The terminal configuration
