@@ -489,7 +489,10 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.match(aggregate, /if: always\(\)/);
-  assert.match(aggregate, /needs: \[test-rust-workspace, test-rust-differential, test-storage-compat\]/);
+  assert.match(
+    aggregate,
+    /needs: \[test-rust-workspace, test-rust-differential, test-storage-compat\]/,
+  );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{DIFFERENTIAL_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
