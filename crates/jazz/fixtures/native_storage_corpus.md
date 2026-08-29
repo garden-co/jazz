@@ -63,6 +63,16 @@ and reopens it. The paired corruption test proves a changed archive is rejected
 before any target file or extraction directory is created. SQLite pages and
 RocksDB files remain backend-owned bytes, not interchange encodings.
 
+The deterministic contract is the semantic/logical pack only. Backend-owned
+SQLite pages and RocksDB files are deliberately _not_ expected to reproduce
+byte-for-byte: page layout, compaction, and filesystem metadata belong to the
+backend. `gzip -n` merely makes the checked-in SQLite wrapper stable enough to
+review; it does not make SQLite bytes a format. A regeneration produces
+reviewable candidate artifacts, then independently copies/unpacks each into a
+fresh root and runs the complete historical reopen/mixed-write receipt against
+those candidates. Promotion therefore requires explicit review of all new
+physical checksums as well as the logical-pack checksum.
+
 ## Pinned producer provenance
 
 The checked-in epoch-1 fixtures were produced from commit
@@ -86,7 +96,9 @@ dev/t --exact node::tests::harness::settlement_baseline_native_jazz_corpus_reope
 
 The producer intentionally writes candidate outputs before the pinned checksum
 assertion, so a deliberate format change leaves reviewable candidates even
-though the command exits non-zero. Encode the pack and Rocks archive with
-base64; gzip the SQLite file deterministically (`gzip -n -9`) before base64.
-Then update all three checksums above together with the executable constants.
-Pre-settlement alpha stores remain intentionally unsupported.
+though the command exits non-zero. It first validates every candidate by
+opening a fresh materialized SQLite copy and freshly unpacked RocksDB root with
+the full historical receipt. Encode the pack and Rocks archive with base64;
+gzip the SQLite file deterministically (`gzip -n -9`) before base64. Then
+update all three physical checksums and the logical-pack checksum together with
+the executable constants. Pre-settlement alpha stores remain intentionally unsupported.
