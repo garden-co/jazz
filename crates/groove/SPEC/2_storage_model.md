@@ -184,7 +184,8 @@ or value carried across one. Such a source cannot import, re-export, or declare
 an `extern crate` for a general-purpose serializer. A reviewed exception must
 instead use a fully qualified canonical path recorded in
 `dev/storage/default-serialization-registry.json`. The registry records each
-token endpoint's canonical path, exact line/column, enclosing module/item, and
+token endpoint's canonical path, exact line/column, full enclosing structural
+stack (modules, implementation target/trait, and nested lexical items), and
 the source-derived `cfg(test)` versus production boundary. Moving an otherwise
 verbatim call, changing its enclosing item, or removing its test boundary
 therefore requires renewed review rather than silently transferring an
@@ -197,15 +198,22 @@ function-item references, and type paths do. Imports, re-exports, and `extern
 crate` aliases remain prohibited, so a reviewed endpoint cannot be hidden
 behind a local spelling.
 
-The registry also snapshots every direct external dependency, with the Rust
-rename-to-package mapping, for each persistence-owning Cargo crate using
-`cargo metadata --no-deps`. It intentionally does not mistake transitive
-`Cargo.lock` packages for dependencies that a crate can name. Known
-general-purpose serializer families (postcard, JSON, CBOR, bincode, and
-MessagePack) are governed whenever directly introduced; adding any external
-dependency makes the snapshot fail closed until it has been audited. Thus
-adding a default serializer at the persistence boundary is a reviewable
-storage-format change, not an invisible implementation detail.
+The registry snapshots every direct external dependency for each
+persistence-owning Cargo crate, including Rust rename-to-package mapping,
+requirement, resolved version/source, registry/path, features/default-features,
+optional/target/kind flags, and observable workspace inheritance. It reads the
+resolved `cargo metadata` graph, but intentionally does not mistake transitive
+`Cargo.lock` packages for dependencies that the owner can name. Every exact
+direct dependency entry is centrally classified as either a governed serializer
+(with its exact crate-root aliases) or a reviewed non-serializer. Known
+general-purpose serializer families (postcard, JSON, CBOR, bincode, MessagePack,
+RON, YAML, and TOML) must be governed whenever directly introduced; a new or
+unclassified entry fails closed. Registry edits are therefore sensitive policy
+changes requiring review. The gate detects accidental drift and endpoint
+transfer; it is not presented as a defense against a reviewer deliberately
+misclassifying a serializer. Thus adding a default serializer at the persistence
+boundary is a reviewable storage-format change, not an invisible implementation
+detail.
 
 The registry does not bless a serializer as an engine-owned durable codec. Its
 current exceptions are semantic JSON parsing for already-authenticated large

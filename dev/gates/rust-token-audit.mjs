@@ -119,15 +119,19 @@ export function serializerReferences(tokens, roots) {
   }
   // The branch above continues after every root candidate. This second pass
   // intentionally tracks macro-token nesting independently, including roots
-  // in macro arguments that are not syntactically paths until expansion.
+  // in macro arguments that are not syntactically paths until expansion. Rust
+  // macro token trees nest every delimiter kind; tracking only the delimiter
+  // immediately after `!` used to let `outer!({ inner!(postcard) })` escape.
   const bareMacroReferences = [];
   const stack = [];
   for (let index = 0; index < tokens.length; index += 1) {
-    if (["(", "[", "{"].includes(tokens[index].text) && tokens[index - 1]?.text === "!") {
-      stack.push({ close: { "(": ")", "[": "]", "{": "}" }[tokens[index].text] });
+    const text = tokens[index].text;
+    if (["(", "[", "{"].includes(text)) {
+      if (stack.length || tokens[index - 1]?.text === "!")
+        stack.push({ close: { "(": ")", "[": "]", "{": "}" }[text] });
       continue;
     }
-    if (stack.length && tokens[index].text === stack.at(-1).close) {
+    if (stack.length && text === stack.at(-1).close) {
       stack.pop();
       continue;
     }
@@ -169,7 +173,11 @@ export function serializerExternCrates(tokens, roots) {
       tokens[index + 1].text === "crate" &&
       roots.has(tokens[index + 2].text)
     ) {
-      crates.push({ root: tokens[index + 2].text, line: tokens[index + 2].line });
+      const alias =
+        tokens[index + 3]?.text === "as" && tokens[index + 4]?.kind === "ident"
+          ? tokens[index + 4].text
+          : tokens[index + 2].text;
+      crates.push({ root: tokens[index + 2].text, alias, line: tokens[index + 2].line });
     }
   }
   return crates;
@@ -195,32 +203,46 @@ function enclosing(tokens, target) {
   const modules = [];
   const braces = [];
   let pending = null;
-  let item = "<module>";
+  let closurePipes = 0;
+  const itemKeywords = new Set([
+    "mod", "fn", "impl", "trait", "struct", "enum", "union", "const", "static", "type", "use",
+    "extern", "macro", "macro_rules",
+  ]);
   for (let index = 0; index < target; index += 1) {
-    if (
-      ["mod", "fn", "impl", "trait", "struct", "enum", "const", "static", "type"].includes(
-        tokens[index].text,
-      )
-    ) {
-      pending = {
-        kind: tokens[index].text,
-        name: tokens[index + 1]?.kind === "ident" ? tokens[index + 1].text : "<anonymous>",
-      };
+    const token = tokens[index];
+    if (itemKeywords.has(token.text)) {
+      let name = tokens[index + 1]?.kind === "ident" ? tokens[index + 1].text : "<anonymous>";
+      if (token.text === "impl") {
+        // The implementation target (and optional trait) is part of the
+        // endpoint identity: moving a serializer call between impls must not
+        // preserve its allowance.
+        const parts = [];
+        for (let cursor = index + 1; cursor < target; cursor += 1) {
+          if (["{", ";"].includes(tokens[cursor].text)) break;
+          parts.push(tokens[cursor].text);
+        }
+        name = parts.join(" ") || "<anonymous>";
+      }
+      pending = { kind: token.text, name };
     }
-    if (tokens[index].text === "{") {
+    if (token.text === "|") closurePipes += 1;
+    if (token.text === "{") {
+      if (!pending && closurePipes % 2 === 0 && index > 0 && tokens[index - 1]?.text === "|")
+        pending = { kind: "closure", name: "<closure>" };
       braces.push(pending);
       if (pending?.kind === "mod") modules.push(pending.name);
       pending = null;
     }
-    if (tokens[index].text === "}") {
+    if (token.text === "}") {
       const closed = braces.pop();
       if (closed?.kind === "mod") modules.pop();
     }
-    if (pending && tokens[index].text === ";") pending = null;
-    const current = braces.at(-1);
-    if (current && current.kind !== "mod") item = current.kind + " " + current.name;
+    if (pending && token.text === ";") pending = null;
   }
-  return { modules, item };
+  const items = braces
+    .filter((entry) => entry && entry.kind !== "mod")
+    .map((entry) => entry.kind + " " + entry.name);
+  return { modules, items, item: items.at(-1) ?? "<module>" };
 }
 
 function attributeText(tokens, start) {
@@ -242,7 +264,16 @@ function boundary(tokens, target) {
       pendingAttributes.push(attributeText(tokens, index));
       continue;
     }
-    if (["mod", "fn", "impl", "trait", "struct", "enum"].includes(tokens[index].text)) {
+    // An attribute belongs to the next Rust item, including semicolon items
+    // (`use`, `const`, `static`, `type`, macro declarations). Do not leave it
+    // pending until a later block: that accidentally classified production
+    // code after `#[cfg(test)] use ...;` as test-only.
+    if (
+      [
+        "mod", "fn", "impl", "trait", "struct", "enum", "union", "const", "static", "type", "use",
+        "extern", "macro", "macro_rules",
+      ].includes(tokens[index].text)
+    ) {
       const attributes = pendingAttributes;
       pendingAttributes = [];
       let cursor = index + 1;
@@ -250,6 +281,10 @@ function boundary(tokens, target) {
         cursor += 1;
       if (tokens[cursor]?.text === "{")
         braces.push(attributes.some((attribute) => /cfg\(test\)/.test(attribute)));
+      // A semicolon item consumed the attributes even though it introduces no
+      // lexical scope. This explicit branch is deliberately boring: it keeps
+      // the state machine correct for all item kinds rather than relying on
+      // the next brace to reset it.
       continue;
     }
     if (tokens[index].text === "}") braces.pop();

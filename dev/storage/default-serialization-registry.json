@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "scope": {
-    "description": "Every production source location that owns an authoritative persistence ingress, egress, or value carried across one. Test and benchmark directories are deliberately out of scope: they may construct historical or malformed bytes, but cannot define a production storage spelling.",
+    "description": "Every production source location that owns an authoritative persistence ingress, egress, or value carried across one. Test and benchmark directories are deliberately out of scope: they may construct historical or malformed bytes, but cannot define a production storage spelling. Endpoint allowances and direct-dependency classifications are sensitive reviewed policy, not an automatic serializer safety proof: this gate detects accidental dependency/endpoint drift rather than malicious misclassification.",
     "serializerCrates": ["postcard", "serde_json"],
     "paths": [
       "crates/groove/src/db",
@@ -44,6 +44,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl Database"],
             "item": "impl Database"
           },
           "boundary": "production"
@@ -73,6 +74,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl Database", "fn read_large_json_pointer"],
             "item": "fn read_large_json_pointer"
           },
           "boundary": "production"
@@ -102,6 +104,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl Database", "fn read_large_json_pointer"],
             "item": "fn read_large_json_pointer"
           },
           "boundary": "production"
@@ -131,6 +134,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["enum JsonPointerPrefix"],
             "item": "enum JsonPointerPrefix"
           },
           "boundary": "production"
@@ -160,6 +164,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn json_pointer_prefix"],
             "item": "fn json_pointer_prefix"
           },
           "boundary": "production"
@@ -189,6 +194,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn json_pointer_prefix"],
             "item": "fn json_pointer_prefix"
           },
           "boundary": "production"
@@ -218,6 +224,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn json_pointer_prefix"],
             "item": "fn json_pointer_prefix"
           },
           "boundary": "production"
@@ -247,6 +254,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn json_pointer_prefix"],
             "item": "fn json_pointer_prefix"
           },
           "boundary": "production"
@@ -276,6 +284,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn validate_logical"],
             "item": "fn validate_logical"
           },
           "boundary": "production"
@@ -305,6 +314,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn validate_logical"],
             "item": "fn validate_logical"
           },
           "boundary": "production"
@@ -334,6 +344,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+            ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
           "boundary": "production"
@@ -363,6 +376,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+            ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
           "boundary": "production"
@@ -392,6 +408,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+            ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
           "boundary": "production"
@@ -421,6 +440,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+            ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
           "boundary": "production"
@@ -450,6 +472,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+            ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
           "boundary": "production"
@@ -479,6 +504,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
+            ],
             "item": "fn v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical"
           },
           "boundary": "production"
@@ -508,6 +536,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn candidate_future_format_two_nodes_fail_closed"],
             "item": "fn candidate_future_format_two_nodes_fail_closed"
           },
           "boundary": "production"
@@ -537,7 +566,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "struct SizeRemovedRow"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -566,6 +596,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_relation_snapshot_for_size"],
             "item": "fn encode_relation_snapshot_for_size"
           },
           "boundary": "production"
@@ -595,7 +626,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn encode_relation_snapshot_for_size"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -624,6 +656,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_subscription_reset_frame_for_size"],
             "item": "fn encode_subscription_reset_frame_for_size"
           },
           "boundary": "production"
@@ -653,6 +686,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn validation_tuple_estimate_bytes"],
             "item": "fn validation_tuple_estimate_bytes"
           },
           "boundary": "production"
@@ -682,6 +716,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["struct JsonSetEdit"],
             "item": "struct JsonSetEdit"
           },
           "boundary": "production"
@@ -711,7 +746,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn checked_range"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -740,7 +776,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn checked_range"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -769,6 +806,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn apply_json_set"],
             "item": "fn apply_json_set"
           },
           "boundary": "production"
@@ -798,6 +836,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn apply_json_set"],
             "item": "fn apply_json_set"
           },
           "boundary": "production"
@@ -827,6 +866,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn apply_json_set"],
             "item": "fn apply_json_set"
           },
           "boundary": "production"
@@ -856,6 +896,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn apply_json_set"],
             "item": "fn apply_json_set"
           },
           "boundary": "production"
@@ -885,6 +926,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["static <anonymous>"],
             "item": "static <anonymous>"
           },
           "boundary": "production"
@@ -914,6 +956,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["static <anonymous>", "fn read_json_pointer"],
             "item": "fn read_json_pointer"
           },
           "boundary": "production"
@@ -943,6 +986,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["static <anonymous>", "fn read_json_pointer"],
             "item": "fn read_json_pointer"
           },
           "boundary": "production"
@@ -972,6 +1016,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["static <anonymous>", "fn apply_large_value_json_set"],
             "item": "fn apply_large_value_json_set"
           },
           "boundary": "production"
@@ -1001,6 +1046,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["static <anonymous>", "fn apply_large_value_json_set"],
             "item": "fn apply_large_value_json_set"
           },
           "boundary": "production"
@@ -1030,6 +1076,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["static <anonymous>", "fn apply_large_value_json_set"],
             "item": "fn apply_large_value_json_set"
           },
           "boundary": "production"
@@ -1059,6 +1106,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn relay_upstream_subscription_key"],
             "item": "fn relay_upstream_subscription_key"
           },
           "boundary": "production"
@@ -1088,6 +1136,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["static <anonymous>"],
             "item": "static <anonymous>"
           },
           "boundary": "production"
@@ -1117,6 +1166,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl SchemaViewId", "fn for_schema"],
             "item": "fn for_schema"
           },
           "boundary": "production"
@@ -1146,6 +1196,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl AuthorSubject", "fn intern"],
             "item": "fn intern"
           },
           "boundary": "production"
@@ -1175,6 +1226,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl AuthorSubject", "fn test_uuid"],
             "item": "fn test_uuid"
           },
           "boundary": "production"
@@ -1204,6 +1256,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl AuthorSubject", "fn from_canonical"],
             "item": "fn from_canonical"
           },
           "boundary": "production"
@@ -1233,6 +1286,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl AuthorSubject", "fn from_untrusted_canonical"],
             "item": "fn from_untrusted_canonical"
           },
           "boundary": "production"
@@ -1262,6 +1316,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn untrusted_canonical_author_rejects_every_reserved_issuer"],
             "item": "fn untrusted_canonical_author_rejects_every_reserved_issuer"
           },
           "boundary": "production"
@@ -1291,6 +1346,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_catalogue_schema"],
             "item": "fn decode_catalogue_schema"
           },
           "boundary": "production"
@@ -1320,6 +1376,9 @@
           },
           "enclosing": {
             "modules": ["result_member_storage_codec_tests"],
+            "items": [
+              "fn program_fact_storage_codec_rejects_legacy_unknown_trailing_and_noncanonical_bytes"
+            ],
             "item": "fn program_fact_storage_codec_rejects_legacy_unknown_trailing_and_noncanonical_bytes"
           },
           "boundary": "production"
@@ -1349,6 +1408,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["impl CurrentRow", "fn canonical_subscription_cells"],
             "item": "fn canonical_subscription_cells"
           },
           "boundary": "production"
@@ -1378,6 +1438,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["enum Error"],
             "item": "enum Error"
           },
           "boundary": "production"
@@ -1407,7 +1468,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn footprint"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
+            "item": "closure <closure>"
           },
           "boundary": "production"
         }
@@ -1436,7 +1498,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn footprint"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
+            "item": "closure <closure>"
           },
           "boundary": "production"
         }
@@ -1465,7 +1528,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn footprint"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
+            "item": "closure <closure>"
           },
           "boundary": "production"
         }
@@ -1494,7 +1558,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn footprint"
+            "items": ["impl LocalMaintainedViewSubscription", "fn footprint", "closure <closure>"],
+            "item": "closure <closure>"
           },
           "boundary": "production"
         }
@@ -1523,6 +1588,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn normalize_enum_payload_operand"],
             "item": "fn normalize_enum_payload_operand"
           },
           "boundary": "production"
@@ -1552,6 +1618,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn normalize_operand_with_target_type_and_declared_id_and_flat_join_alias"],
             "item": "fn normalize_operand_with_target_type_and_declared_id_and_flat_join_alias"
           },
           "boundary": "production"
@@ -1581,6 +1648,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn literal_value_ref"],
             "item": "fn literal_value_ref"
           },
           "boundary": "production"
@@ -1610,6 +1678,11 @@
           },
           "enclosing": {
             "modules": [],
+            "items": [
+              "impl < S > JazzSourceGraphPreparer < ' _ , S > where S : OrderedKvStorage ,",
+              "fn projected_deletion_register_current_source_graph",
+              "fn normalized_bound_value"
+            ],
             "item": "fn normalized_bound_value"
           },
           "boundary": "production"
@@ -1639,7 +1712,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "impl <anonymous>"
+            "items": ["impl < S > NodeState < S > where S : OrderedKvStorage ,"],
+            "item": "impl < S > NodeState < S > where S : OrderedKvStorage ,"
           },
           "boundary": "test"
         }
@@ -1668,6 +1742,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn durable_public_schema_json"],
             "item": "fn durable_public_schema_json"
           },
           "boundary": "production"
@@ -1697,6 +1772,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"],
             "item": "fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"
           },
           "boundary": "production"
@@ -1726,6 +1802,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"],
             "item": "fn postcard_migration_lens_wire_cannot_bypass_validated_constructor"
           },
           "boundary": "production"
@@ -1755,6 +1832,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+            ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
           "boundary": "production"
@@ -1784,6 +1864,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+            ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
           "boundary": "production"
@@ -1813,6 +1896,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+            ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
           "boundary": "production"
@@ -1842,6 +1928,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
+            ],
             "item": "fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking"
           },
           "boundary": "production"
@@ -1871,6 +1960,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn postcard_migration_lens_rejects_oversized_blob_without_panicking"],
             "item": "fn postcard_migration_lens_rejects_oversized_blob_without_panicking"
           },
           "boundary": "production"
@@ -1900,6 +1990,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn postcard_migration_lens_rejects_oversized_blob_without_panicking"],
             "item": "fn postcard_migration_lens_rejects_oversized_blob_without_panicking"
           },
           "boundary": "production"
@@ -1929,6 +2020,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
           "boundary": "production"
@@ -1958,6 +2050,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
           "boundary": "production"
@@ -1987,6 +2080,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
           "boundary": "production"
@@ -2016,6 +2110,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"],
             "item": "fn version_parent_sets_have_one_sorted_and_deduplicated_receipt_spelling"
           },
           "boundary": "production"
@@ -2045,6 +2140,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
           "boundary": "production"
@@ -2074,6 +2170,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
           "boundary": "production"
@@ -2103,6 +2200,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
           "boundary": "production"
@@ -2132,6 +2230,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
           "boundary": "production"
@@ -2161,6 +2260,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
           "boundary": "production"
@@ -2190,6 +2290,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_version_persists_policy_source_and_recompiles_on_decode"],
             "item": "fn schema_version_persists_policy_source_and_recompiles_on_decode"
           },
           "boundary": "production"
@@ -2219,6 +2320,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
+            ],
             "item": "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
           },
           "boundary": "production"
@@ -2248,6 +2352,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
+            ],
             "item": "fn schema_version_serialization_trusts_the_retained_source_without_recompiling"
           },
           "boundary": "production"
@@ -2277,6 +2384,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
+            ],
             "item": "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
           },
           "boundary": "production"
@@ -2306,6 +2416,9 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": [
+              "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
+            ],
             "item": "fn authority_physical_identity_manifest_is_explicit_and_rejects_uuid_collisions"
           },
           "boundary": "production"
@@ -2335,6 +2448,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn result_member_transport_preserves_typed_union_occurrence"],
             "item": "fn result_member_transport_preserves_typed_union_occurrence"
           },
           "boundary": "production"
@@ -2364,6 +2478,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn result_member_transport_preserves_typed_union_occurrence"],
             "item": "fn result_member_transport_preserves_typed_union_occurrence"
           },
           "boundary": "production"
@@ -2393,6 +2508,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn legacy_row_member_postcard_golden_decodes"],
             "item": "fn legacy_row_member_postcard_golden_decodes"
           },
           "boundary": "production"
@@ -2422,6 +2538,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn legacy_row_member_postcard_golden_decodes"],
             "item": "fn legacy_row_member_postcard_golden_decodes"
           },
           "boundary": "production"
@@ -2451,6 +2568,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_public_schema_json"],
             "item": "fn decode_public_schema_json"
           },
           "boundary": "production"
@@ -2480,6 +2598,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
           "boundary": "production"
@@ -2509,6 +2628,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
           "boundary": "production"
@@ -2538,6 +2658,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn policy_graph_perf_fixture_schema"],
             "item": "fn policy_graph_perf_fixture_schema"
           },
           "boundary": "production"
@@ -2567,6 +2688,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn rejects_schema_invalid_json_inside_payload_enum_default"],
             "item": "fn rejects_schema_invalid_json_inside_payload_enum_default"
           },
           "boundary": "production"
@@ -2596,6 +2718,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn converts_public_json_as_core_string_storage"],
             "item": "fn converts_public_json_as_core_string_storage"
           },
           "boundary": "production"
@@ -2625,7 +2748,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn schema_version_for_lens_payload"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -2654,7 +2778,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn encode_canonical_json_value"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -2683,6 +2808,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_canonical_json_value_body"],
             "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2712,6 +2838,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_canonical_json_value_body"],
             "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2741,6 +2868,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_canonical_json_value_body"],
             "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2770,6 +2898,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_canonical_json_value_body"],
             "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2799,6 +2928,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_canonical_json_value_body"],
             "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2828,6 +2958,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_canonical_json_value_body"],
             "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2857,6 +2988,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn encode_canonical_json_value_body"],
             "item": "fn encode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2886,7 +3018,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn encode_canonical_json_value_body"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -2915,7 +3048,8 @@
           },
           "enclosing": {
             "modules": [],
-            "item": "fn decode_canonical_json_value"
+            "items": [],
+            "item": "<module>"
           },
           "boundary": "production"
         }
@@ -2944,6 +3078,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -2973,6 +3108,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3002,6 +3138,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3031,6 +3168,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3060,6 +3198,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3089,6 +3228,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3118,6 +3258,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3147,6 +3288,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3176,6 +3318,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3205,6 +3348,7 @@
           },
           "enclosing": {
             "modules": [],
+            "items": ["fn decode_canonical_json_value_body"],
             "item": "fn decode_canonical_json_value_body"
           },
           "boundary": "production"
@@ -3234,6 +3378,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_roundtrip_with_json"],
             "item": "fn schema_roundtrip_with_json"
           },
           "boundary": "production"
@@ -3263,6 +3408,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn schema_roundtrip_with_json"],
             "item": "fn schema_roundtrip_with_json"
           },
           "boundary": "production"
@@ -3292,6 +3438,7 @@
           },
           "enclosing": {
             "modules": ["tests"],
+            "items": ["fn nested_catalogue_payload_v1_goldens_are_exact"],
             "item": "fn nested_catalogue_payload_v1_goldens_are_exact"
           },
           "boundary": "production"
@@ -3305,76 +3452,310 @@
       "manifest": "crates/groove/Cargo.toml",
       "dependencies": [
         {
+          "identity": "blake3|blake3|normal|all",
           "crate": "blake3",
-          "package": "blake3"
+          "package": "blake3",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.8.4",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "bytes|bytes|normal|all",
           "crate": "bytes",
-          "package": "bytes"
+          "package": "bytes",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.11.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
-          "crate": "futures",
-          "package": "futures"
-        },
-        {
+          "identity": "futures_test|futures-test|dev|all",
           "crate": "futures_test",
-          "package": "futures-test"
+          "package": "futures-test",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "futures|futures|normal|all",
+          "crate": "futures",
+          "package": "futures",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "getrandom|getrandom|normal|all",
           "crate": "getrandom",
-          "package": "getrandom"
+          "package": "getrandom",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.4",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "hdrhistogram|hdrhistogram|dev|all",
           "crate": "hdrhistogram",
-          "package": "hdrhistogram"
+          "package": "hdrhistogram",
+          "rename": null,
+          "requirement": "^7.5.4",
+          "resolvedVersion": "7.5.4",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "internment|internment|normal|all",
           "crate": "internment",
-          "package": "internment"
+          "package": "internment",
+          "rename": null,
+          "requirement": "^0.8.6",
+          "resolvedVersion": "0.8.6",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["serde"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "paste|paste|normal|all",
           "crate": "paste",
-          "package": "paste"
+          "package": "paste",
+          "rename": null,
+          "requirement": "^1.0.15",
+          "resolvedVersion": "1.0.15",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "postcard|postcard|normal|all",
           "crate": "postcard",
-          "package": "postcard"
+          "package": "postcard",
+          "rename": null,
+          "requirement": "^1.1.3",
+          "resolvedVersion": "1.1.3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["alloc"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "rusqlite|rusqlite|dev|all",
           "crate": "rusqlite",
-          "package": "rusqlite"
+          "package": "rusqlite",
+          "rename": null,
+          "requirement": "^0.34",
+          "resolvedVersion": "0.34.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["bundled"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "rustc_hash|rustc-hash|normal|all",
           "crate": "rustc_hash",
-          "package": "rustc-hash"
+          "package": "rustc-hash",
+          "rename": null,
+          "requirement": "^2.1.1",
+          "resolvedVersion": "2.1.2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true
         },
         {
-          "crate": "serde",
-          "package": "serde"
-        },
-        {
+          "identity": "serde_json|serde_json|normal|all",
           "crate": "serde_json",
-          "package": "serde_json"
+          "package": "serde_json",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.0.149",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "serde|serde|normal|all",
+          "crate": "serde",
+          "package": "serde",
+          "rename": null,
+          "requirement": "^1.0.228",
+          "resolvedVersion": "1.0.228",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["derive"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "smallvec|smallvec|normal|all",
           "crate": "smallvec",
-          "package": "smallvec"
+          "package": "smallvec",
+          "rename": null,
+          "requirement": "^1.15",
+          "resolvedVersion": "1.15.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "tempfile|tempfile|dev|all",
           "crate": "tempfile",
-          "package": "tempfile"
+          "package": "tempfile",
+          "rename": null,
+          "requirement": "^3.27.0",
+          "resolvedVersion": "3.27.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "thiserror|thiserror|normal|all",
           "crate": "thiserror",
-          "package": "thiserror"
+          "package": "thiserror",
+          "rename": null,
+          "requirement": "^2.0.17",
+          "resolvedVersion": "2.0.18",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "uuid|uuid|normal|all",
           "crate": "uuid",
-          "package": "uuid"
+          "package": "uuid",
+          "rename": null,
+          "requirement": "^1.18.1",
+          "resolvedVersion": "1.23.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["serde", "v4", "v5"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "web_time|web-time|normal|all",
           "crate": "web_time",
-          "package": "web-time"
+          "package": "web-time",
+          "rename": null,
+          "requirement": "^1.1.0",
+          "resolvedVersion": "1.1.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         }
       ]
     },
@@ -3383,28 +3764,106 @@
       "manifest": "crates/idb-tree/Cargo.toml",
       "dependencies": [
         {
+          "identity": "futures|futures|dev|all",
           "crate": "futures",
-          "package": "futures"
+          "package": "futures",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "js_sys|js-sys|normal|cfg(target_arch = \"wasm32\")",
           "crate": "js_sys",
-          "package": "js-sys"
+          "package": "js-sys",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.94",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": "cfg(target_arch = \"wasm32\")",
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "thiserror|thiserror|normal|all",
           "crate": "thiserror",
-          "package": "thiserror"
+          "package": "thiserror",
+          "rename": null,
+          "requirement": "^2",
+          "resolvedVersion": "2.0.18",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
-          "crate": "wasm_bindgen",
-          "package": "wasm-bindgen"
-        },
-        {
+          "identity": "wasm_bindgen_futures|wasm-bindgen-futures|normal|cfg(target_arch = \"wasm32\")",
           "crate": "wasm_bindgen_futures",
-          "package": "wasm-bindgen-futures"
+          "package": "wasm-bindgen-futures",
+          "rename": null,
+          "requirement": "^0.4",
+          "resolvedVersion": "0.4.67",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": "cfg(target_arch = \"wasm32\")",
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "wasm_bindgen|wasm-bindgen|normal|cfg(target_arch = \"wasm32\")",
+          "crate": "wasm_bindgen",
+          "package": "wasm-bindgen",
+          "rename": null,
+          "requirement": "^0.2",
+          "resolvedVersion": "0.2.117",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": "cfg(target_arch = \"wasm32\")",
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "xxhash_rust|xxhash-rust|normal|all",
           "crate": "xxhash_rust",
-          "package": "xxhash-rust"
+          "package": "xxhash-rust",
+          "rename": null,
+          "requirement": "^0.8",
+          "resolvedVersion": "0.8.15",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["xxh3"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         }
       ]
     },
@@ -3413,148 +3872,616 @@
       "manifest": "crates/jazz/Cargo.toml",
       "dependencies": [
         {
+          "identity": "base64|base64|normal|all",
           "crate": "base64",
-          "package": "base64"
+          "package": "base64",
+          "rename": null,
+          "requirement": "^0.22",
+          "resolvedVersion": "0.22.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "blake3|blake3|normal|all",
           "crate": "blake3",
-          "package": "blake3"
+          "package": "blake3",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.8.4",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "bytes|bytes|normal|all",
           "crate": "bytes",
-          "package": "bytes"
+          "package": "bytes",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.11.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "criterion|criterion|dev|all",
           "crate": "criterion",
-          "package": "criterion"
+          "package": "criterion",
+          "rename": null,
+          "requirement": "^0.5",
+          "resolvedVersion": "0.5.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "ed25519_dalek|ed25519-dalek|normal|all",
           "crate": "ed25519_dalek",
-          "package": "ed25519-dalek"
+          "package": "ed25519-dalek",
+          "rename": null,
+          "requirement": "^2",
+          "resolvedVersion": "2.2.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["rand_core"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
-          "crate": "futures",
-          "package": "futures"
-        },
-        {
-          "crate": "futures",
-          "package": "futures"
-        },
-        {
+          "identity": "futures_channel|futures-channel|normal|all",
           "crate": "futures_channel",
-          "package": "futures-channel"
+          "package": "futures-channel",
+          "rename": null,
+          "requirement": "^0.3.31",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "futures_core|futures-core|normal|all",
           "crate": "futures_core",
-          "package": "futures-core"
+          "package": "futures-core",
+          "rename": null,
+          "requirement": "^0.3.31",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "futures_util|futures-util|normal|all",
           "crate": "futures_util",
-          "package": "futures-util"
+          "package": "futures-util",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "futures|futures|dev|all",
+          "crate": "futures",
+          "package": "futures",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
+        },
+        {
+          "identity": "futures|futures|normal|all",
+          "crate": "futures",
+          "package": "futures",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "hdrhistogram|hdrhistogram|dev|all",
           "crate": "hdrhistogram",
-          "package": "hdrhistogram"
+          "package": "hdrhistogram",
+          "rename": null,
+          "requirement": "^7.5.4",
+          "resolvedVersion": "7.5.4",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "hex|hex|normal|all",
           "crate": "hex",
-          "package": "hex"
+          "package": "hex",
+          "rename": null,
+          "requirement": "^0.4",
+          "resolvedVersion": "0.4.3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "insta|insta|dev|all",
           "crate": "insta",
-          "package": "insta"
+          "package": "insta",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.47.2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "internment|internment|normal|all",
           "crate": "internment",
-          "package": "internment"
+          "package": "internment",
+          "rename": null,
+          "requirement": "^0.8",
+          "resolvedVersion": "0.8.6",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "jsonschema|jsonschema|normal|all",
           "crate": "jsonschema",
-          "package": "jsonschema"
+          "package": "jsonschema",
+          "rename": null,
+          "requirement": "^0.42",
+          "resolvedVersion": "0.42.2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "jsonwebtoken|jsonwebtoken|dev|all",
           "crate": "jsonwebtoken",
-          "package": "jsonwebtoken"
+          "package": "jsonwebtoken",
+          "rename": null,
+          "requirement": "^10.4",
+          "resolvedVersion": "10.4.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["rust_crypto", "use_pem"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "jsonwebtoken|jsonwebtoken|normal|all",
           "crate": "jsonwebtoken",
-          "package": "jsonwebtoken"
+          "package": "jsonwebtoken",
+          "rename": null,
+          "requirement": "^10.4",
+          "resolvedVersion": "10.4.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["rust_crypto", "use_pem"],
+          "defaultFeatures": false,
+          "optional": true,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "libc|libc|dev|all",
           "crate": "libc",
-          "package": "libc"
+          "package": "libc",
+          "rename": null,
+          "requirement": "^0.2",
+          "resolvedVersion": "0.2.189",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "postcard|postcard|normal|all",
           "crate": "postcard",
-          "package": "postcard"
+          "package": "postcard",
+          "rename": null,
+          "requirement": "^1.1.3",
+          "resolvedVersion": "1.1.3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["alloc"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "rand|rand|normal|all",
           "crate": "rand",
-          "package": "rand"
+          "package": "rand",
+          "rename": null,
+          "requirement": "^0.8",
+          "resolvedVersion": "0.8.5",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "rcgen|rcgen|dev|all",
           "crate": "rcgen",
-          "package": "rcgen"
+          "package": "rcgen",
+          "rename": null,
+          "requirement": "^0.13",
+          "resolvedVersion": "0.13.2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["ring"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "reqwest|reqwest|dev|all",
           "crate": "reqwest",
-          "package": "reqwest"
+          "package": "reqwest",
+          "rename": null,
+          "requirement": "^0.12",
+          "resolvedVersion": "0.12.28",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["json", "rustls-tls"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "rustc_hash|rustc-hash|normal|all",
           "crate": "rustc_hash",
-          "package": "rustc-hash"
+          "package": "rustc-hash",
+          "rename": null,
+          "requirement": "^2.1.1",
+          "resolvedVersion": "2.1.2",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": true
         },
         {
-          "crate": "serde",
-          "package": "serde"
-        },
-        {
+          "identity": "serde_bytes|serde_bytes|normal|all",
           "crate": "serde_bytes",
-          "package": "serde_bytes"
+          "package": "serde_bytes",
+          "rename": null,
+          "requirement": "^0.11",
+          "resolvedVersion": "0.11.19",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "serde_json|serde_json|normal|all",
           "crate": "serde_json",
-          "package": "serde_json"
+          "package": "serde_json",
+          "rename": null,
+          "requirement": "^1.0.145",
+          "resolvedVersion": "1.0.149",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "serde|serde|normal|all",
+          "crate": "serde",
+          "package": "serde",
+          "rename": null,
+          "requirement": "^1.0.228",
+          "resolvedVersion": "1.0.228",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["derive"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "sha2|sha2|normal|all",
           "crate": "sha2",
-          "package": "sha2"
+          "package": "sha2",
+          "rename": null,
+          "requirement": "^0.10",
+          "resolvedVersion": "0.10.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "smallvec|smallvec|normal|all",
           "crate": "smallvec",
-          "package": "smallvec"
+          "package": "smallvec",
+          "rename": null,
+          "requirement": "^1.11",
+          "resolvedVersion": "1.15.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["serde"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "tempfile|tempfile|dev|all",
           "crate": "tempfile",
-          "package": "tempfile"
+          "package": "tempfile",
+          "rename": null,
+          "requirement": "^3.27.0",
+          "resolvedVersion": "3.27.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "thiserror|thiserror|normal|all",
           "crate": "thiserror",
-          "package": "thiserror"
+          "package": "thiserror",
+          "rename": null,
+          "requirement": "^2.0.17",
+          "resolvedVersion": "2.0.18",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "tokio|tokio|dev|all",
           "crate": "tokio",
-          "package": "tokio"
+          "package": "tokio",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.51.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "tokio|tokio|normal|all",
           "crate": "tokio",
-          "package": "tokio"
+          "package": "tokio",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.51.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["macros", "net", "rt", "sync", "time"],
+          "defaultFeatures": true,
+          "optional": true,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "tower|tower|dev|all",
           "crate": "tower",
-          "package": "tower"
+          "package": "tower",
+          "rename": null,
+          "requirement": "^0.5",
+          "resolvedVersion": "0.5.3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["util"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "tracing|tracing|normal|all",
           "crate": "tracing",
-          "package": "tracing"
+          "package": "tracing",
+          "rename": null,
+          "requirement": "^0.1",
+          "resolvedVersion": "0.1.44",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "uuid|uuid|normal|all",
           "crate": "uuid",
-          "package": "uuid"
+          "package": "uuid",
+          "rename": null,
+          "requirement": "^1.18.1",
+          "resolvedVersion": "1.23.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["serde", "v4", "v5", "v7"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "web_time|web-time|normal|all",
           "crate": "web_time",
-          "package": "web-time"
+          "package": "web-time",
+          "rename": null,
+          "requirement": "^1.1",
+          "resolvedVersion": "1.1.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         }
       ]
     },
@@ -3563,92 +4490,387 @@
       "manifest": "crates/jazz-server/Cargo.toml",
       "dependencies": [
         {
+          "identity": "axum|axum|normal|all",
           "crate": "axum",
-          "package": "axum"
+          "package": "axum",
+          "rename": null,
+          "requirement": "^0.8.9",
+          "resolvedVersion": "0.8.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [
+            "http1",
+            "json",
+            "matched-path",
+            "original-uri",
+            "query",
+            "tokio",
+            "tracing",
+            "ws"
+          ],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "base64|base64|normal|all",
           "crate": "base64",
-          "package": "base64"
+          "package": "base64",
+          "rename": null,
+          "requirement": "^0.22",
+          "resolvedVersion": "0.22.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
-          "crate": "futures",
-          "package": "futures"
-        },
-        {
+          "identity": "futures_util|futures-util|normal|all",
           "crate": "futures_util",
-          "package": "futures-util"
+          "package": "futures-util",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "futures|futures|normal|all",
+          "crate": "futures",
+          "package": "futures",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "hex|hex|normal|all",
           "crate": "hex",
-          "package": "hex"
+          "package": "hex",
+          "rename": null,
+          "requirement": "^0.4",
+          "resolvedVersion": "0.4.3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "http|http|normal|all",
           "crate": "http",
-          "package": "http"
+          "package": "http",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.4.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "jsonwebtoken|jsonwebtoken|normal|all",
           "crate": "jsonwebtoken",
-          "package": "jsonwebtoken"
+          "package": "jsonwebtoken",
+          "rename": null,
+          "requirement": "^10.4",
+          "resolvedVersion": "10.4.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["rust_crypto", "use_pem"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "opentelemetry|opentelemetry|normal|all",
           "crate": "opentelemetry",
-          "package": "opentelemetry"
+          "package": "opentelemetry",
+          "rename": null,
+          "requirement": "^0.31",
+          "resolvedVersion": null,
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": true,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "postcard|postcard|normal|all",
           "crate": "postcard",
-          "package": "postcard"
+          "package": "postcard",
+          "rename": null,
+          "requirement": "^1.1.3",
+          "resolvedVersion": "1.1.3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["alloc"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "reqwest|reqwest|normal|all",
           "crate": "reqwest",
-          "package": "reqwest"
+          "package": "reqwest",
+          "rename": null,
+          "requirement": "^0.12",
+          "resolvedVersion": "0.12.28",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["json", "rustls-tls"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
-          "crate": "serde",
-          "package": "serde"
-        },
-        {
+          "identity": "serde_json|serde_json|normal|all",
           "crate": "serde_json",
-          "package": "serde_json"
+          "package": "serde_json",
+          "rename": null,
+          "requirement": "^1.0.145",
+          "resolvedVersion": "1.0.149",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "serde|serde|normal|all",
+          "crate": "serde",
+          "package": "serde",
+          "rename": null,
+          "requirement": "^1.0.228",
+          "resolvedVersion": "1.0.228",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["derive"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "sha2|sha2|normal|all",
           "crate": "sha2",
-          "package": "sha2"
+          "package": "sha2",
+          "rename": null,
+          "requirement": "^0.10",
+          "resolvedVersion": "0.10.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "tempfile|tempfile|dev|all",
           "crate": "tempfile",
-          "package": "tempfile"
+          "package": "tempfile",
+          "rename": null,
+          "requirement": "^3.27.0",
+          "resolvedVersion": "3.27.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "tokio_tungstenite|tokio-tungstenite|dev|all",
+          "crate": "tokio_tungstenite",
+          "package": "tokio-tungstenite",
+          "rename": null,
+          "requirement": "^0.29",
+          "resolvedVersion": "0.29.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["connect", "rustls-tls-native-roots", "rustls-tls-webpki-roots"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
+        },
+        {
+          "identity": "tokio_tungstenite|tokio-tungstenite|normal|all",
+          "crate": "tokio_tungstenite",
+          "package": "tokio-tungstenite",
+          "rename": null,
+          "requirement": "^0.29",
+          "resolvedVersion": "0.29.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["handshake"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "tokio|tokio|normal|all",
           "crate": "tokio",
-          "package": "tokio"
+          "package": "tokio",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.51.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
-          "crate": "tokio_tungstenite",
-          "package": "tokio-tungstenite"
-        },
-        {
-          "crate": "tokio_tungstenite",
-          "package": "tokio-tungstenite"
-        },
-        {
-          "crate": "tower",
-          "package": "tower"
-        },
-        {
+          "identity": "tower_http|tower-http|normal|all",
           "crate": "tower_http",
-          "package": "tower-http"
+          "package": "tower-http",
+          "rename": null,
+          "requirement": "^0.6.8",
+          "resolvedVersion": "0.6.8",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["cors", "trace"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "tower|tower|dev|all",
+          "crate": "tower",
+          "package": "tower",
+          "rename": null,
+          "requirement": "^0.5",
+          "resolvedVersion": "0.5.3",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["util"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
+        },
+        {
+          "identity": "tracing|tracing|normal|all",
           "crate": "tracing",
-          "package": "tracing"
+          "package": "tracing",
+          "rename": null,
+          "requirement": "^0.1",
+          "resolvedVersion": "0.1.44",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "tungstenite|tungstenite|normal|all",
           "crate": "tungstenite",
-          "package": "tungstenite"
+          "package": "tungstenite",
+          "rename": null,
+          "requirement": "^0.29",
+          "resolvedVersion": "0.29.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["handshake"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "uuid|uuid|normal|all",
           "crate": "uuid",
-          "package": "uuid"
+          "package": "uuid",
+          "rename": null,
+          "requirement": "^1.18.1",
+          "resolvedVersion": "1.23.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["serde", "v4", "v5", "v7"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         }
       ]
     },
@@ -3657,40 +4879,157 @@
       "manifest": "crates/jazz-storage-rocksdb/Cargo.toml",
       "dependencies": [
         {
+          "identity": "base64|base64|dev|all",
           "crate": "base64",
-          "package": "base64"
+          "package": "base64",
+          "rename": null,
+          "requirement": "^0.22",
+          "resolvedVersion": "0.22.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "flate2|flate2|dev|all",
           "crate": "flate2",
-          "package": "flate2"
+          "package": "flate2",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.1.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "futures_test|futures-test|dev|all",
           "crate": "futures_test",
-          "package": "futures-test"
+          "package": "futures-test",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "rocksdb|rust-rocksdb|normal|all",
           "crate": "rocksdb",
-          "package": "rust-rocksdb"
+          "package": "rust-rocksdb",
+          "rename": "rocksdb",
+          "requirement": "^0.48.0",
+          "resolvedVersion": "0.48.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["lz4", "zstd"],
+          "defaultFeatures": false,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
-          "crate": "serde",
-          "package": "serde"
-        },
-        {
+          "identity": "serde_json|serde_json|dev|all",
           "crate": "serde_json",
-          "package": "serde_json"
+          "package": "serde_json",
+          "rename": null,
+          "requirement": "^1",
+          "resolvedVersion": "1.0.149",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "serde|serde|normal|all",
+          "crate": "serde",
+          "package": "serde",
+          "rename": null,
+          "requirement": "^1.0.228",
+          "resolvedVersion": "1.0.228",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["derive"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
+        },
+        {
+          "identity": "sha2|sha2|dev|all",
           "crate": "sha2",
-          "package": "sha2"
+          "package": "sha2",
+          "rename": null,
+          "requirement": "^0.10",
+          "resolvedVersion": "0.10.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "tar|tar|dev|all",
           "crate": "tar",
-          "package": "tar"
+          "package": "tar",
+          "rename": null,
+          "requirement": "^0.4",
+          "resolvedVersion": "0.4.46",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "tempfile|tempfile|dev|all",
           "crate": "tempfile",
-          "package": "tempfile"
+          "package": "tempfile",
+          "rename": null,
+          "requirement": "^3.27.0",
+          "resolvedVersion": "3.27.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         }
       ]
     },
@@ -3699,26 +5038,580 @@
       "manifest": "crates/jazz-storage-sqlite/Cargo.toml",
       "dependencies": [
         {
+          "identity": "base64|base64|dev|all",
           "crate": "base64",
-          "package": "base64"
+          "package": "base64",
+          "rename": null,
+          "requirement": "^0.22",
+          "resolvedVersion": "0.22.1",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "futures|futures|dev|all",
           "crate": "futures",
-          "package": "futures"
+          "package": "futures",
+          "rename": null,
+          "requirement": "^0.3",
+          "resolvedVersion": "0.3.32",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "rusqlite|rusqlite|normal|all",
           "crate": "rusqlite",
-          "package": "rusqlite"
+          "package": "rusqlite",
+          "rename": null,
+          "requirement": "^0.34",
+          "resolvedVersion": "0.34.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": ["bundled"],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": null,
+          "workspaceInherited": false
         },
         {
+          "identity": "sha2|sha2|dev|all",
           "crate": "sha2",
-          "package": "sha2"
+          "package": "sha2",
+          "rename": null,
+          "requirement": "^0.10",
+          "resolvedVersion": "0.10.9",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         },
         {
+          "identity": "tempfile|tempfile|dev|all",
           "crate": "tempfile",
-          "package": "tempfile"
+          "package": "tempfile",
+          "rename": null,
+          "requirement": "^3.27.0",
+          "resolvedVersion": "3.27.0",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "registry": null,
+          "path": null,
+          "features": [],
+          "defaultFeatures": true,
+          "optional": false,
+          "target": null,
+          "kind": "dev",
+          "workspaceInherited": false
         }
       ]
+    }
+  ],
+  "dependencyClassifications": [
+    {
+      "crate": "groove",
+      "dependency": "blake3|blake3|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "bytes|bytes|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "futures_test|futures-test|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "futures|futures|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "getrandom|getrandom|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "hdrhistogram|hdrhistogram|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "internment|internment|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "paste|paste|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "postcard|postcard|normal|all",
+      "classification": "governed-serializer",
+      "roots": ["postcard"]
+    },
+    {
+      "crate": "groove",
+      "dependency": "rusqlite|rusqlite|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "rustc_hash|rustc-hash|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "serde_json|serde_json|normal|all",
+      "classification": "governed-serializer",
+      "roots": ["serde_json"]
+    },
+    {
+      "crate": "groove",
+      "dependency": "serde|serde|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "smallvec|smallvec|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "tempfile|tempfile|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "thiserror|thiserror|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "uuid|uuid|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "groove",
+      "dependency": "web_time|web-time|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "idb-tree",
+      "dependency": "futures|futures|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "idb-tree",
+      "dependency": "js_sys|js-sys|normal|cfg(target_arch = \"wasm32\")",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "idb-tree",
+      "dependency": "thiserror|thiserror|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "idb-tree",
+      "dependency": "wasm_bindgen_futures|wasm-bindgen-futures|normal|cfg(target_arch = \"wasm32\")",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "idb-tree",
+      "dependency": "wasm_bindgen|wasm-bindgen|normal|cfg(target_arch = \"wasm32\")",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "idb-tree",
+      "dependency": "xxhash_rust|xxhash-rust|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "base64|base64|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "blake3|blake3|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "bytes|bytes|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "criterion|criterion|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "ed25519_dalek|ed25519-dalek|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "futures_channel|futures-channel|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "futures_core|futures-core|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "futures_util|futures-util|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "futures|futures|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "futures|futures|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "hdrhistogram|hdrhistogram|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "hex|hex|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "insta|insta|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "internment|internment|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "jsonschema|jsonschema|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "jsonwebtoken|jsonwebtoken|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "jsonwebtoken|jsonwebtoken|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "libc|libc|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "postcard|postcard|normal|all",
+      "classification": "governed-serializer",
+      "roots": ["postcard"]
+    },
+    {
+      "crate": "jazz",
+      "dependency": "rand|rand|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "rcgen|rcgen|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "reqwest|reqwest|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "rustc_hash|rustc-hash|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "serde_bytes|serde_bytes|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "serde_json|serde_json|normal|all",
+      "classification": "governed-serializer",
+      "roots": ["serde_json"]
+    },
+    {
+      "crate": "jazz",
+      "dependency": "serde|serde|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "sha2|sha2|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "smallvec|smallvec|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "tempfile|tempfile|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "thiserror|thiserror|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "tokio|tokio|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "tokio|tokio|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "tower|tower|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "tracing|tracing|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "uuid|uuid|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz",
+      "dependency": "web_time|web-time|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "axum|axum|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "base64|base64|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "futures_util|futures-util|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "futures|futures|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "hex|hex|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "http|http|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "jsonwebtoken|jsonwebtoken|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "opentelemetry|opentelemetry|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "postcard|postcard|normal|all",
+      "classification": "governed-serializer",
+      "roots": ["postcard"]
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "reqwest|reqwest|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "serde_json|serde_json|normal|all",
+      "classification": "governed-serializer",
+      "roots": ["serde_json"]
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "serde|serde|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "sha2|sha2|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tempfile|tempfile|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tokio_tungstenite|tokio-tungstenite|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tokio_tungstenite|tokio-tungstenite|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tokio|tokio|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tower_http|tower-http|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tower|tower|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tracing|tracing|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "tungstenite|tungstenite|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-server",
+      "dependency": "uuid|uuid|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "base64|base64|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "flate2|flate2|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "futures_test|futures-test|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "rocksdb|rust-rocksdb|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "serde_json|serde_json|dev|all",
+      "classification": "governed-serializer",
+      "roots": ["serde_json"]
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "serde|serde|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "sha2|sha2|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "tar|tar|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-rocksdb",
+      "dependency": "tempfile|tempfile|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "dependency": "base64|base64|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "dependency": "futures|futures|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "dependency": "rusqlite|rusqlite|normal|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "dependency": "sha2|sha2|dev|all",
+      "classification": "reviewed-non-serializer"
+    },
+    {
+      "crate": "jazz-storage-sqlite",
+      "dependency": "tempfile|tempfile|dev|all",
+      "classification": "reviewed-non-serializer"
     }
   ]
 }

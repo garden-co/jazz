@@ -21,13 +21,31 @@ const argv = process.argv.slice(2);
 const rootIndex = argv.indexOf("--root");
 const root = rootIndex === -1 ? defaultRoot : path.resolve(argv[rootIndex + 1] ?? "");
 if (rootIndex !== -1 && !argv[rootIndex + 1]) fail("--root requires a path");
+const snapshotOnly = argv.includes("--print-direct-dependency-snapshots");
+const refreshRegistry = argv.includes("--refresh-registry-snapshot");
+const refreshEndpoints = argv.includes("--refresh-registry-endpoints");
+const serializerPackages = new Map([
+  ["postcard", "postcard"],
+  ["serde_json", "serde_json"],
+  ["ciborium", "ciborium"],
+  ["bincode", "bincode"],
+  ["rmp-serde", "rmp_serde"],
+  ["ron", "ron"],
+  ["serde_yaml", "serde_yaml"],
+  ["toml", "toml"],
+]);
 if (
   argv.some(
     (argument, index) =>
-      argument.startsWith("-") && argument !== "--root" && index !== rootIndex + 1,
+      argument.startsWith("-") &&
+      argument !== "--root" &&
+      argument !== "--print-direct-dependency-snapshots" &&
+      argument !== "--refresh-registry-snapshot" &&
+      argument !== "--refresh-registry-endpoints" &&
+      index !== rootIndex + 1,
   )
 )
-  fail("usage: node dev/gates/default-serialization-persistence.mjs [--root PATH]");
+  fail("usage: node dev/gates/default-serialization-persistence.mjs [--root PATH] [--print-direct-dependency-snapshots|--refresh-registry-snapshot|--refresh-registry-endpoints]");
 
 const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
 let registry;
@@ -36,47 +54,130 @@ try {
 } catch (error) {
   fail("cannot read registry: " + error.message);
 }
+if (snapshotOnly) {
+  if (!Array.isArray(registry?.scope?.paths)) fail("registry scope.paths is required for snapshots");
+  console.log(JSON.stringify(snapshotDependencies(cargoMetadata(root), registry.scope.paths), null, 2));
+  process.exit(0);
+}
+if (refreshRegistry) {
+  const snapshots = snapshotDependencies(cargoMetadata(root), registry.scope.paths);
+  registry.schemaVersion = 4;
+  registry.directDependencySnapshots = snapshots;
+  registry.dependencyClassifications = snapshots
+    .flatMap((snapshot) =>
+      snapshot.dependencies.map((dependency) => ({
+        crate: snapshot.crate,
+        dependency: dependency.identity,
+        classification: serializerPackages.has(dependency.package)
+          ? "governed-serializer"
+          : "reviewed-non-serializer",
+        ...(serializerPackages.has(dependency.package) ? { roots: [dependency.crate] } : {}),
+      })),
+    )
+    .sort((left, right) =>
+      left.crate.localeCompare(right.crate) || left.dependency.localeCompare(right.dependency),
+    );
+  registry.scope.serializerCrates = [
+    ...new Set(
+      registry.dependencyClassifications
+        .filter((entry) => entry.classification === "governed-serializer")
+        .flatMap((entry) => entry.roots),
+    ),
+  ].sort();
+  fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2) + "\n");
+  console.log("refreshed direct dependency snapshot and explicit classifications; review this policy change");
+  process.exit(0);
+}
 if (
-  registry?.schemaVersion !== 3 ||
+  registry?.schemaVersion !== 4 ||
   !Array.isArray(registry.scope?.paths) ||
   !Array.isArray(registry.scope?.serializerCrates) ||
   !Array.isArray(registry.allowances) ||
-  !Array.isArray(registry.directDependencySnapshots)
+  !Array.isArray(registry.directDependencySnapshots) ||
+  !Array.isArray(registry.dependencyClassifications)
 )
-  fail("registry must have schemaVersion 3, scope, allowances, and directDependencySnapshots");
+  fail("registry must have schemaVersion 4, scope, allowances, directDependencySnapshots, and dependencyClassifications");
 
-const serializerPackages = new Map([
-  ["postcard", "postcard"],
-  ["serde_json", "serde_json"],
-  ["ciborium", "ciborium"],
-  ["bincode", "bincode"],
-  ["rmp-serde", "rmp_serde"],
-]);
 const metadata = cargoMetadata(root);
 const snapshots = snapshotDependencies(metadata);
 if (JSON.stringify(registry.directDependencySnapshots) !== JSON.stringify(snapshots))
   fail(
     "directDependencySnapshots differs from cargo metadata/Cargo.toml direct external dependencies; audit and update the registry",
   );
-const directSerializerCrates = [
-  ...new Set(
-    snapshots
-      .flatMap((snapshot) => snapshot.dependencies)
-      .filter((dependency) => serializerPackages.has(dependency.package))
-      .map((dependency) => serializerPackages.get(dependency.package)),
-  ),
-].sort();
+const classifiedDependencies = new Map();
+for (const entry of registry.dependencyClassifications) {
+  if (
+    !entry ||
+    typeof entry.crate !== "string" ||
+    typeof entry.dependency !== "string" ||
+    !["governed-serializer", "reviewed-non-serializer"].includes(entry.classification) ||
+    (entry.classification === "governed-serializer" && !Array.isArray(entry.roots))
+  )
+    fail("invalid dependency classification " + JSON.stringify(entry));
+  const key = entry.crate + "\u0000" + entry.dependency;
+  if (classifiedDependencies.has(key)) fail("duplicate dependency classification " + key);
+  classifiedDependencies.set(key, entry);
+}
+const directDependencies = snapshots.flatMap((snapshot) =>
+  snapshot.dependencies.map((dependency) => ({ crate: snapshot.crate, dependency })),
+);
+if (classifiedDependencies.size !== directDependencies.length)
+  fail("every direct external dependency available to a persistence owner needs an explicit classification");
+const directSerializerCrates = [];
+for (const { crate, dependency } of directDependencies) {
+  const classification = classifiedDependencies.get(crate + "\u0000" + dependency.identity);
+  if (!classification)
+    fail("unclassified direct dependency " + crate + ": " + dependency.identity);
+  if (classification.classification === "governed-serializer") {
+    if (!serializerPackages.has(dependency.package))
+      fail("only known serializer packages may be governed: " + dependency.package);
+    const expectedRoots = [dependency.crate].sort();
+    if (JSON.stringify([...classification.roots].sort()) !== JSON.stringify(expectedRoots))
+      fail("governed serializer roots must exactly match direct crate alias for " + dependency.identity);
+    directSerializerCrates.push(...classification.roots);
+  } else if (serializerPackages.has(dependency.package)) {
+    fail("known serializer package must be governed: " + crate + ": " + dependency.identity);
+  }
+}
+const uniqueSerializerRoots = [...new Set(directSerializerCrates)].sort();
+const serializerRoots = new Set(uniqueSerializerRoots);
 if (
-  JSON.stringify([...registry.scope.serializerCrates].sort()) !==
-  JSON.stringify(directSerializerCrates)
+  JSON.stringify([...new Set(registry.scope.serializerCrates)].sort()) !==
+  JSON.stringify(uniqueSerializerRoots)
 )
   fail(
     "scope.serializerCrates must exactly inventory known direct serializer dependencies: " +
-      directSerializerCrates.join(", "),
+      uniqueSerializerRoots.join(", "),
   );
 
 const files = new Map();
 for (const scoped of registry.scope.paths) collectRust(path.join(root, scoped), files);
+if (refreshEndpoints) {
+  const stale = new Map();
+  for (const allowance of registry.allowances) {
+    for (const endpoint of allowance.endpoints) {
+      const key = endpoint.path + "\u0000" + endpoint.canonicalPath;
+      const entries = stale.get(key) ?? [];
+      entries.push(endpoint);
+      stale.set(key, entries);
+    }
+  }
+  for (const [relative, source] of files) {
+    const tokens = rustTokens(source);
+    for (const reference of serializerReferences(tokens, serializerRoots)) {
+      const endpoint = describeEndpoint(tokens, reference, relative);
+      const entries = stale.get(relative + "\u0000" + endpoint.canonicalPath);
+      if (!entries?.length)
+        fail("cannot refresh unregistered endpoint " + relative + ": " + endpoint.canonicalPath);
+      Object.assign(entries.shift(), endpoint);
+    }
+  }
+  const missing = [...stale.entries()].find(([, entries]) => entries.length);
+  if (missing) fail("cannot refresh absent endpoint " + missing[0]);
+  fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2) + "\n");
+  console.log("refreshed exact endpoint identities; review this registry policy change");
+  process.exit(0);
+}
 const expected = new Map();
 const allowanceIds = new Set();
 for (const allowance of registry.allowances) {
@@ -99,7 +200,6 @@ for (const allowance of registry.allowances) {
   }
 }
 
-const serializerRoots = new Set(serializerPackages.values());
 for (const [relative, source] of files) {
   const tokens = rustTokens(source);
   for (const external of serializerExternCrates(tokens, serializerRoots))
@@ -168,6 +268,7 @@ function validEndpoint(endpoint) {
     Number.isInteger(endpoint.span.end.column) &&
     endpoint.enclosing &&
     Array.isArray(endpoint.enclosing.modules) &&
+    Array.isArray(endpoint.enclosing.items) &&
     typeof endpoint.enclosing.item === "string" &&
     (endpoint.boundary === "production" || endpoint.boundary === "test")
   );
@@ -182,13 +283,16 @@ function endpointKey(endpoint) {
     boundary: endpoint.boundary,
   });
 }
-function cargoMetadata(directory) {
+export function cargoMetadata(directory) {
   const result = childProcess.spawnSync(
     "cargo",
-    ["metadata", "--no-deps", "--format-version", "1"],
+    ["metadata", "--format-version", "1"],
     {
       cwd: directory,
       encoding: "utf8",
+      // The resolved workspace graph is intentionally part of the snapshot;
+      // it is larger than Node's 1MiB spawnSync default in this workspace.
+      maxBuffer: 16 * 1024 * 1024,
     },
   );
   if (result.status !== 0)
@@ -213,14 +317,16 @@ function packageFor(relative, packages) {
   if (!candidates.length) fail("no Cargo package owns scoped source " + relative);
   return candidates[0].name;
 }
-function snapshotDependencies(metadata) {
+export function snapshotDependencies(metadata, scopePaths = registry.scope.paths) {
   const packages = packageMap(metadata);
   const wanted = new Set(
-    registry.scope.paths.map((scoped) => {
+    scopePaths.map((scoped) => {
       const relative = scoped.replaceAll("\\", "/");
       return packageFor(relative.endsWith(".rs") ? relative : relative + "/_audit.rs", packages);
     }),
   );
+  const resolved = new Map(metadata.packages.map((pkg) => [pkg.id, pkg]));
+  const resolvedNodes = new Map((metadata.resolve?.nodes ?? []).map((node) => [node.id, node]));
   return metadata.packages
     .filter((pkg) => wanted.has(pkg.name))
     .map((pkg) => ({
@@ -228,16 +334,55 @@ function snapshotDependencies(metadata) {
       manifest: path.relative(root, pkg.manifest_path).replaceAll(path.sep, "/"),
       dependencies: pkg.dependencies
         .filter((dependency) => !dependency.path)
-        .map((dependency) => ({
-          crate: dependency.rename ?? dependency.name.replaceAll("-", "_"),
-          package: dependency.name,
-        }))
+        .map((dependency) => snapshotDependency(pkg, dependency, resolved, resolvedNodes))
         .sort(
           (left, right) =>
-            left.crate.localeCompare(right.crate) || left.package.localeCompare(right.package),
+            left.identity.localeCompare(right.identity),
         ),
     }))
     .sort((left, right) => left.crate.localeCompare(right.crate));
+}
+function snapshotDependency(owner, dependency, resolved, resolvedNodes) {
+  const crate = dependency.rename ?? dependency.name.replaceAll("-", "_");
+  const node = resolvedNodes.get(owner.id);
+  const resolvedEdge = node?.deps.find(
+    (edge) => edge.name === crate || edge.name === dependency.name.replaceAll("-", "_"),
+  );
+  const resolvedPackage = resolvedEdge ? resolved.get(resolvedEdge.pkg) : undefined;
+  const target = dependency.target ?? null;
+  const kind = dependency.kind ?? null;
+  // cargo metadata exposes the effective manifest semantics. `workspace` is
+  // not preserved as a first-class field, so record the observable inherited
+  // form when it is present in the manifest; all other fields are exact.
+  return {
+    identity: [crate, dependency.name, kind ?? "normal", target ?? "all"].join("|"),
+    crate,
+    package: dependency.name,
+    rename: dependency.rename ?? null,
+    requirement: dependency.req,
+    resolvedVersion: resolvedPackage?.version ?? null,
+    source: dependency.source ?? null,
+    registry: dependency.registry ?? null,
+    path: dependency.path ?? null,
+    features: [...dependency.features].sort(),
+    defaultFeatures: dependency.uses_default_features,
+    optional: dependency.optional,
+    target,
+    kind,
+    workspaceInherited: manifestUsesWorkspaceDependency(owner.manifest_path, crate, dependency.name),
+  };
+}
+function manifestUsesWorkspaceDependency(manifestPath, crate, packageName) {
+  const source = fs.readFileSync(manifestPath, "utf8");
+  // This is intentionally a narrow, conservative snapshot field. Cargo has
+  // already supplied effective semantics above; this records the two standard
+  // syntactic forms without pretending to parse TOML fully.
+  const escaped = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const names = [crate, packageName].map(escaped).join("|");
+  return new RegExp(
+    `^(?:(?:${names})\\.workspace\\s*=\\s*true|(?:${names})\\s*=\\s*\\{[^\\n}]*\\bworkspace\\s*=\\s*true[^\\n}]*\\})`,
+    "m",
+  ).test(source);
 }
 function collectRust(absolute, files) {
   if (!fs.existsSync(absolute)) fail("scope path is absent: " + path.relative(root, absolute));
