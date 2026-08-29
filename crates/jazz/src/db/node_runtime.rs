@@ -1562,10 +1562,32 @@ where
         let subscriber_state_changed =
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
-            for connection in &connections {
-                connection.lock().await.mark_subscriber_dirty();
+            // A binding with a host scheduler can service this newly dirty
+            // subscriber on the next owner turn.  A bare `Db` intentionally
+            // permits manual driving without installing such a scheduler,
+            // though: dropping the wake in that mode would leave the
+            // subscriber dirty until unrelated inbound traffic happened to
+            // arrive. Preserve the former bounded second serve pass there.
+            if self.scheduler.borrow().is_some() {
+                for connection in &connections {
+                    connection.lock().await.mark_subscriber_dirty();
+                }
+                self.schedule_tick(TickUrgency::AfterCurrentTurn);
+            } else {
+                for connection in &connections {
+                    let should_tick = {
+                        let mut connection = connection.lock().await;
+                        connection.mark_subscriber_dirty() || subscriber_state_changed
+                    };
+                    if should_tick {
+                        let mut connection = connection.lock().await;
+                        let next = connection.tick().await?;
+                        released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
+                        stats.subscription_events += next.subscription_events;
+                        stats.remote_sync_applied += next.remote_sync_applied;
+                    }
+                }
             }
-            self.schedule_tick(TickUrgency::AfterCurrentTurn);
         }
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
