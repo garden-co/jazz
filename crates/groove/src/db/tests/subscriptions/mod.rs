@@ -266,9 +266,10 @@ async fn cold_hydration_yields_before_later_subscription_work() {
     );
 }
 
-/// A large entirely resident graph is CPU work, not a storage wait. Hydration
-/// must therefore schedule bounded owner turns and still produce the same
-/// snapshot as the equivalent shallow subscription.
+/// A large entirely resident graph is CPU work, not a storage wait. The direct
+/// async API owns and drains that resident continuation chain before returning;
+/// the owner-loop API instead yields bounded turns and wakes its owner. Both
+/// paths must produce the same stable snapshot.
 #[futures_test::test]
 async fn deep_resident_hydration_yields_without_changing_its_snapshot() {
     use std::sync::Arc;
@@ -295,30 +296,27 @@ async fn deep_resident_hydration_yields_without_changing_its_snapshot() {
     }
     database.commit_batch(batch).await.unwrap();
 
-    let mut deep_graph = GraphBuilder::table("albums");
+    let mut owner_deep_graph = GraphBuilder::table("albums");
     // Deliberately far larger than one cooperative session slice.
     for _ in 0..128 {
-        deep_graph = deep_graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+        owner_deep_graph = owner_deep_graph.filter(PredicateExpr::gt("id", Value::U64(0)));
     }
-    let deep = database.subscribe_one_sink(deep_graph).await.unwrap();
-    let shallow = database
-        .subscribe_one_sink(GraphBuilder::table("albums"))
-        .await
-        .unwrap();
 
     let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
     let owner_waker = waker(Arc::clone(&wakes));
-    database
-        .drive_ready_progress_with_waker(Some(&owner_waker))
-        .await
+    let owner_deep = database
+        .subscribe_with_waker([("deep", owner_deep_graph)], Some(&owner_waker))
         .unwrap();
     assert!(database.has_pending_progress());
-    assert!(
-        wakes.0.load(Ordering::Acquire) > 0,
-        "resident graph work schedules a cooperative owner turn"
-    );
 
+    let mut previous_wakes = 0;
     for _ in 0..32 {
+        let wakes_now = wakes.0.load(Ordering::Acquire);
+        assert!(
+            wakes_now > previous_wakes,
+            "each bounded resident owner turn schedules its continuation rather than relying on polling"
+        );
+        previous_wakes = wakes_now;
         database
             .drive_ready_progress_with_waker(Some(&owner_waker))
             .await
@@ -328,10 +326,41 @@ async fn deep_resident_hydration_yields_without_changing_its_snapshot() {
         }
     }
     assert!(!database.has_pending_progress());
+    let owner_snapshot = owner_deep
+        .try_recv()
+        .expect("owner-loop hydration publishes its completed initial snapshot")
+        .get("deep")
+        .expect("the deep sink is present")
+        .to_values()
+        .unwrap();
+    let mut owner_snapshot = owner_snapshot;
+    owner_snapshot.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+
+    let mut direct_deep_graph = GraphBuilder::table("albums");
+    for _ in 0..128 {
+        direct_deep_graph = direct_deep_graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    let direct_deep = database
+        .subscribe_one_sink(direct_deep_graph)
+        .await
+        .unwrap();
+    let shallow = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    assert!(
+        !database.has_pending_progress(),
+        "the direct async API drains all self-scheduled resident slices before returning"
+    );
+    let direct_snapshot = expect_try_recv_vals(&direct_deep);
     assert_eq!(
-        expect_try_recv_vals(&deep),
+        direct_snapshot,
         expect_try_recv_vals(&shallow),
-        "bounded deep hydration preserves the shallow graph's snapshot"
+        "direct resident hydration returns a complete stable deep snapshot"
+    );
+    assert_eq!(
+        owner_snapshot, direct_snapshot,
+        "bounded owner-loop hydration preserves the deep snapshot"
     );
 }
 
