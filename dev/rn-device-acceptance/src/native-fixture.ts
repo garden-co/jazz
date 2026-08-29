@@ -1,6 +1,7 @@
 import { NativeModules } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
 import type { Platform } from "./protocol";
+import type { AdmittedRelay } from "./relay-admission";
 
 export type DeviceReceiptContext = {
   platform: Platform;
@@ -12,8 +13,10 @@ export type DeviceReceiptContext = {
 type FixtureModule = {
   admittedCapability(): Promise<string>;
   logout(): Promise<void>;
+  switchAuthScope(): Promise<string>;
   receiptContext(): Promise<DeviceReceiptContext>;
   recordReceipt(receipt: string): Promise<void>;
+  acceptancePhase(): Promise<"seed" | "verify">;
 };
 
 /**
@@ -21,11 +24,6 @@ type FixtureModule = {
  * jazz-tools' internal relay-frame API. Keep its boundary structural so it
  * cannot make those low-level implementation types public by accident.
  */
-type AdmittedNativeRelay = {
-  executor: { execute: typeof executeNativeRelayCommand };
-  capability: Uint8Array;
-};
-
 function fixtureModule(): FixtureModule {
   const fixture = NativeModules.JazzDeviceFixture as FixtureModule | undefined;
   if (!fixture)
@@ -35,13 +33,27 @@ function fixtureModule(): FixtureModule {
   return fixture;
 }
 
+/**
+ * The host selects only the bounded acceptance phase. It is not relay scope
+ * input: the compiled fixture still chooses every app/storage/auth identity
+ * and the SQLite location. Splitting the process-restart receipt this way
+ * lets the host kill the whole app between a durable write and the later
+ * observation without creating a JS reset/path-selection escape hatch.
+ */
+export async function nativeAcceptancePhase(): Promise<"seed" | "verify"> {
+  const phase = await fixtureModule().acceptancePhase();
+  if (phase !== "seed" && phase !== "verify")
+    throw new Error("JazzDeviceFixture returned an invalid acceptance phase");
+  return phase;
+}
+
 function decodeCapability(value: string): Uint8Array {
   const bytes = globalThis.atob(value);
   return Uint8Array.from(bytes, (byte) => byte.charCodeAt(0));
 }
 
 /** The only fixture material that crosses to JS is the opaque 32-byte lease. */
-export async function admittedNativeRelay(): Promise<AdmittedNativeRelay> {
+export async function admittedNativeRelay(): Promise<AdmittedRelay> {
   const fixture = fixtureModule();
   const capability = decodeCapability(await fixture.admittedCapability());
   if (capability.byteLength !== 32)
@@ -50,6 +62,19 @@ export async function admittedNativeRelay(): Promise<AdmittedNativeRelay> {
     executor: { execute: executeNativeRelayCommand },
     capability,
   };
+}
+
+/** Trusted application logout revokes the currently admitted relay scope. */
+export async function logoutNativeRelay(): Promise<void> {
+  await fixtureModule().logout();
+}
+
+/** The fixture's scope B is derived in native code and replaces scope A there. */
+export async function switchNativeRelayAuthScope(): Promise<AdmittedRelay> {
+  const capability = decodeCapability(await fixtureModule().switchAuthScope());
+  if (capability.byteLength !== 32)
+    throw new Error("JazzDeviceFixture returned a non-opaque switched admission capability");
+  return { executor: { execute: executeNativeRelayCommand }, capability };
 }
 
 /** Trusted package/launch identity used solely to bind observed device receipts. */

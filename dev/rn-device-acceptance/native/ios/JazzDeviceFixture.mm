@@ -95,6 +95,16 @@ RCT_REMAP_METHOD(receiptContext, receiptContextWithResolver:(RCTPromiseResolveBl
   resolve(@{ @"platform": @"ios", @"runNonce": nonce, @"buildFingerprint": fingerprint, @"deviceIdentifier": device });
 }
 
+RCT_REMAP_METHOD(acceptancePhase, acceptancePhaseWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
+  NSUInteger index = [arguments indexOfObject:@"-JazzDeviceAcceptancePhase"];
+  NSString *phase = index != NSNotFound && index + 1 < arguments.count ? arguments[index + 1] : @"seed";
+  if (![phase isEqualToString:@"seed"] && ![phase isEqualToString:@"verify"]) {
+    reject(@"E_JAZZ_DEVICE_FIXTURE", @"Invalid acceptance phase", nil); return;
+  }
+  resolve(phase);
+}
+
 // This is intentionally a sink, not a native receipt generator: JavaScript
 // supplies the complete protocol transcript after its relay proof, and the
 // host validates every line after reading the app-sandbox file.

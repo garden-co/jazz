@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { assertDeviceReceipt } from "./device-driver.mjs";
 import { verifyAndroidRelayStage } from "./android-relay-stage.mjs";
-import { scenarioPlan } from "../src/scenarios.ts";
+import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
 
 const serial = process.env.ANDROID_SERIAL;
 const apk = process.env.JAZZ_DEVICE_APK;
@@ -30,33 +30,30 @@ if (!packagePath.startsWith("/"))
 const buildFingerprint = adb(["shell", "sha256sum", packagePath]).trim().split(/\s+/)[0];
 if (!/^[0-9a-f]{64}$/i.test(buildFingerprint ?? ""))
   throw new Error("could not hash the installed Android package artifact");
-adb(["logcat", "-c"]);
-adb([
-  "shell",
-  "am",
-  "start",
-  "-n",
-  "dev.jazz.rndeviceacceptance/.MainActivity",
-  "--es",
-  "jazzDeviceRunNonce",
-  runNonce,
-]);
-const expected = {
-  platform: "android",
-  deviceIdentifier,
-  buildFingerprint,
-  runNonce,
-  startedAt,
-  scenarios: scenarioPlan.filter((item) => item.state === "passed").map((item) => item.scenario),
-};
-const deadline = Date.now() + 2 * 60 * 1000;
-for (;;) {
-  const output = adb(["logcat", "-d"]);
-  if (output.includes("JAZZ_DEVICE_RESULT ")) {
-    assertDeviceReceipt(output, expected);
-    break;
+async function launchAndAssert(phase) {
+  const phaseStartedAt = Date.now();
+  adb(["logcat", "-c"]);
+  adb([
+    "shell", "am", "start", "-n", "dev.jazz.rndeviceacceptance/.MainActivity",
+    "--es", "jazzDeviceRunNonce", runNonce,
+    "--es", "jazzDeviceAcceptancePhase", phase,
+  ]);
+  const expected = {
+    platform: "android", deviceIdentifier, buildFingerprint, runNonce, startedAt: phaseStartedAt,
+    scenarios: scenariosForAcceptancePhase(phase)
+      .filter((item) => item.state === "passed").map((item) => item.scenario),
+  };
+  const deadline = Date.now() + 2 * 60 * 1000;
+  for (;;) {
+    const output = adb(["logcat", "-d"]);
+    if (output.includes("JAZZ_DEVICE_RESULT ")) return assertDeviceReceipt(output, expected);
+    if (Date.now() >= deadline)
+      throw new Error(`Timed out waiting for phase ${phase} from the launched Android app`);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
-  if (Date.now() >= deadline)
-    throw new Error("Timed out waiting for a JAZZ_DEVICE_RESULT from the launched Android app");
-  await new Promise((resolve) => setTimeout(resolve, 1_000));
 }
+
+await launchAndAssert("seed");
+// This must be a process boundary: no JSI alias or relay process can survive.
+adb(["shell", "am", "force-stop", "dev.jazz.rndeviceacceptance"]);
+await launchAndAssert("verify");

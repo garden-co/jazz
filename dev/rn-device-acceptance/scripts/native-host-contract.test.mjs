@@ -111,6 +111,29 @@ test("device fixture does not import internal jazz-tools relay-frame types", () 
   assert.match(fixture, /executor: \{ execute: executeNativeRelayCommand \}/);
 });
 
+test("process-restart acceptance has two disjoint, host-terminated phases", () => {
+  const androidDriver = read("scripts/run-android.mjs");
+  const iosDriver = read("scripts/run-ios.mjs");
+  const app = read("App.tsx");
+  const scenarios = read("src/scenarios.ts");
+  const androidFixture = read("native/android/JazzDeviceFixtureModule.kt");
+  const iosFixture = read("native/ios/JazzDeviceFixture.mm");
+
+  for (const driver of [androidDriver, iosDriver]) {
+    assert.match(driver, /launchAndAssert\("seed"\)/);
+    assert.match(driver, /launchAndAssert\("verify"\)/);
+    assert.match(driver, /scenariosForAcceptancePhase\(phase\)/);
+  }
+  assert.match(androidDriver, /am", "force-stop", "dev\.jazz\.rndeviceacceptance/);
+  assert.match(iosDriver, /simctl\(\["terminate", udid, "dev\.jazz\.rndeviceacceptance"\]\)/);
+  assert.match(scenarios, /phase === "verify" \? scenario\.scenario === "reopen"/);
+  assert.match(app, /"contains-a-row-without-write"/);
+  assert.match(androidFixture, /@ReactMethod fun acceptancePhase/);
+  assert.match(androidFixture, /jazzDeviceAcceptancePhase/);
+  assert.match(iosFixture, /RCT_REMAP_METHOD\(acceptancePhase/);
+  assert.match(iosFixture, /-JazzDeviceAcceptancePhase/);
+});
+
 test("Android bootstrap rejects corrupt pinned archives before extraction", () => {
   const bootstrap = read("scripts/bootstrap-android.sh");
   assert.match(bootstrap, /verify-pinned-archive\.sh/);

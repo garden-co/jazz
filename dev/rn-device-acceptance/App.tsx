@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-native";
 import { encodeResult } from "./src/protocol";
-import { scenarioPlan } from "./src/scenarios";
+import { scenarioPlan, scenariosForAcceptancePhase } from "./src/scenarios";
 import {
   proveForegroundByteAbi,
   proveForegroundRevoked,
@@ -13,6 +13,7 @@ import {
   admittedNativeRelay,
   deviceReceiptContext,
   logoutNativeRelay,
+  nativeAcceptancePhase,
   recordDeviceReceipt,
   switchNativeRelayAuthScope,
 } from "./src/native-fixture";
@@ -28,6 +29,26 @@ import {
 } from "./src/relay-admission";
 
 async function observeTrustedAdmissionLifecycle() {
+  const phase = await nativeAcceptancePhase();
+  if (phase === "verify") {
+    // This is intentionally a new JS and native process.  The fixed A row was
+    // committed by the previous seed launch; this launch must only materialize
+    // it through a newly admitted relay/SQLite owner.
+    const reopened = await admittedNativeRelay();
+    const foregroundFactory = installNativeForegroundRuntime();
+    const foregroundCodec = {
+      encode: encodeNativeForegroundCommand,
+      decode: decodeNativeForegroundResponse,
+    };
+    proveForegroundScopeIsolation(
+      foregroundFactory,
+      reopened.capability,
+      foregroundCodec,
+      "contains-a-row-without-write",
+    );
+    await logoutNativeRelay();
+    return { phase, receipt: await deviceReceiptContext() };
+  }
   const admitted = await admittedNativeRelay();
   const { executor, capability } = admitted;
   await proveAdmittedRelay(executor, capability);
@@ -81,7 +102,7 @@ async function observeTrustedAdmissionLifecycle() {
     "contains-a-row",
   );
   await logoutNativeRelay();
-  return await deviceReceiptContext();
+  return { phase, receipt: await deviceReceiptContext() };
 }
 
 export default function App() {
@@ -89,13 +110,17 @@ export default function App() {
   const [error, setError] = useState<string>();
   useEffect(() => {
     void (async () => {
-      const receipt = await observeTrustedAdmissionLifecycle();
-      const results = scenarioPlan
+      const observed = await observeTrustedAdmissionLifecycle();
+      const results = scenariosForAcceptancePhase(observed.phase)
         .filter((scenario) => scenario.state === "passed")
         .map((scenario, index) =>
           encodeResult({
             ...scenario,
-            receipt: { ...receipt, sequence: index + 1, observedAt: new Date().toISOString() },
+            receipt: {
+              ...observed.receipt,
+              sequence: index + 1,
+              observedAt: new Date().toISOString(),
+            },
           }),
         );
       // The host validates this independently. Persisting it is necessary on
@@ -103,7 +128,7 @@ export default function App() {
       // transport; it must happen after the JS-side relay proof.
       await recordDeviceReceipt(results.join("\n"));
       for (const result of results) console.log(result);
-      return receipt;
+      return observed;
     })()
       .then(() => {
         setShown(true);

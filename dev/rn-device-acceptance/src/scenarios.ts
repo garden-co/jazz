@@ -18,7 +18,7 @@ export const scenarioPlan: readonly ScenarioResult[] = [
   ],
   ["local-write-subscription", "Two UI runtimes observe a write through one relay"],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
-  ["reopen", "Process/app relaunch reopens the durable relay store"],
+  ["reopen", "A fresh app process reopens scope A's durable relay store"],
   ["scope-isolation", "Distinct app/storage/auth scopes cannot observe each other"],
   ["logout-revocation", "Trusted native code revokes old admission aliases before any replacement"],
   [
@@ -37,8 +37,18 @@ export const scenarioPlan: readonly ScenarioResult[] = [
     scenario === "local-write-subscription" ||
     scenario === "scope-isolation" ||
     scenario === "logout-revocation" ||
-    scenario === "logout-auth-switch"
+    scenario === "logout-auth-switch" ||
+    scenario === "reopen"
       ? "passed"
       : "todo",
   detail,
 })) as readonly ScenarioResult[];
+
+/** The seed launch proves the normal matrix; the fresh process only emits the
+ * single durable-reopen claim. Keeping the receipts disjoint means neither
+ * run can accidentally satisfy the other's evidence requirement. */
+export function scenariosForAcceptancePhase(phase: "seed" | "verify") {
+  return scenarioPlan.filter((scenario) =>
+    phase === "verify" ? scenario.scenario === "reopen" : scenario.scenario !== "reopen",
+  );
+}

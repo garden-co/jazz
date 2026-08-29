@@ -223,7 +223,7 @@ export function proveForegroundScopeIsolation(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
-  expectation: "contains-a-row" | "does-not-contain-a-row",
+  expectation: "contains-a-row" | "contains-a-row-without-write" | "does-not-contain-a-row",
 ): void {
   const foreground = factory.openAttached(capability);
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
@@ -253,7 +253,10 @@ export function proveForegroundScopeIsolation(
 
   const rows = readTodos(foreground, codec);
   const observedA = containsUtf8(rows, "scope-a-private-row");
-  if (expectation === "contains-a-row" && !observedA)
+  if (
+    (expectation === "contains-a-row" || expectation === "contains-a-row-without-write") &&
+    !observedA
+  )
     throw new Error("scope A did not materialize its persisted fixture row");
   if (expectation === "does-not-contain-a-row" && observedA)
     throw new Error("scope B observed scope A's persisted fixture row");

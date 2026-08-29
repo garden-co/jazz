@@ -9,7 +9,7 @@ import {
   relevantAppLogs,
   sanitizedCommandFailure,
 } from "./ios-diagnostics.mjs";
-import { scenarioPlan } from "../src/scenarios.ts";
+import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
 
 const udid = process.env.IOS_SIMULATOR_UDID;
 const app = process.env.JAZZ_DEVICE_APP;
@@ -27,7 +27,6 @@ const trySimctl = (args) => {
     return sanitizedCommandFailure(error);
   }
 };
-const startedAt = Date.now();
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
 simctl(["bootstatus", udid, "-b"]);
 simctl(["install", udid, app]);
@@ -37,32 +36,11 @@ const receiptFilePath = () =>
   join(appDataContainer(), "Library", "Caches", "jazz-device-receipt.ndjson");
 // Reinstalling preserves the simulator data container. A former launch's valid
 // receipt must not become a confusing stale candidate for this fresh nonce.
-rmSync(receiptFilePath(), { force: true });
-const launchResult = simctl([
-  "launch",
-  udid,
-  "dev.jazz.rndeviceacceptance",
-  "-JazzDeviceRunNonce",
-  runNonce,
-  "-JazzDeviceBuildFingerprint",
-  buildFingerprint,
-  "-JazzDeviceDeviceIdentifier",
-  udid,
-]);
-const launchPid = parseLaunchProcessId(launchResult);
 const receiptFile = () => {
   const file = receiptFilePath();
   return existsSync(file) ? readFileSync(file, "utf8") : "";
 };
-const expected = {
-  platform: "ios",
-  deviceIdentifier: udid,
-  buildFingerprint,
-  runNonce,
-  startedAt,
-  scenarios: scenarioPlan.filter((item) => item.state === "passed").map((item) => item.scenario),
-};
-const diagnostics = () =>
+const diagnostics = (launchPid) =>
   [
     `simctl launch PID: ${launchPid}`,
     `app data container:\n${trySimctl(["get_app_container", udid, "dev.jazz.rndeviceacceptance", "data"])}`,
@@ -84,15 +62,37 @@ const diagnostics = () =>
       "JazzRNdeviceacceptance",
     )}`,
   ].join("\n\n");
-for (let attempt = 0; attempt < 30; attempt += 1) {
-  try {
-    assertDeviceReceipt(receiptFile(), expected);
-    break;
-  } catch (error) {
-    if (attempt === 29) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`${detail}\n\n${diagnostics()}`);
+async function launchAndAssert(phase) {
+  rmSync(receiptFilePath(), { force: true });
+  const phaseStartedAt = Date.now();
+  const launchPid = parseLaunchProcessId(
+    simctl([
+      "launch", udid, "dev.jazz.rndeviceacceptance",
+      "-JazzDeviceRunNonce", runNonce,
+      "-JazzDeviceDeviceIdentifier", udid,
+      "-JazzDeviceAcceptancePhase", phase,
+    ]),
+  );
+  const expected = {
+    platform: "ios", deviceIdentifier: udid, buildFingerprint, runNonce, startedAt: phaseStartedAt,
+    scenarios: scenariosForAcceptancePhase(phase)
+      .filter((item) => item.state === "passed").map((item) => item.scenario),
+  };
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      return assertDeviceReceipt(receiptFile(), expected);
+    } catch (error) {
+      if (attempt === 29) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${detail}\n\n${diagnostics(launchPid)}`);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
   }
 }
+
+await launchAndAssert("seed");
+// A full process termination is required: backgrounding could retain the old
+// JSI bridge and relay owner and would not establish restart durability.
+simctl(["terminate", udid, "dev.jazz.rndeviceacceptance"]);
+await launchAndAssert("verify");

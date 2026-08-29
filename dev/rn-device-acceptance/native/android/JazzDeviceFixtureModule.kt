@@ -22,17 +22,26 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
   private var capability: ByteArray? = null
   override fun getName() = "JazzDeviceFixture"
 
+  private fun scopeConfig(authScope: String): TrustedRelayScopeConfig {
+    val userB = authScope == "fixture-user-b"
+    val node = if (userB) "22222222-2222-4222-8222-222222222222" else "11111111-1111-4111-8111-111111111111"
+    return TrustedRelayScopeConfig(
+      appNamespace = BuildConfig.JAZZ_DEVICE_APP_NAMESPACE,
+      storageNamespace = BuildConfig.JAZZ_DEVICE_STORAGE_NAMESPACE,
+      authScope = authScope,
+      // Scope-specific files make a switch physically as well as logically
+      // distinct. JavaScript cannot select either path.
+      sqlitePath = reactApplicationContext.filesDir.resolve("jazz-device-$authScope.sqlite").absolutePath,
+      schemaJson = BuildConfig.JAZZ_DEVICE_SCHEMA_JSON,
+      identityJson = "{\"node\":\"$node\",\"author\":\"[\\\"https://jazz.device.test\\\",\\\"$authScope\\\"]\"}",
+      claimsJson = BuildConfig.JAZZ_DEVICE_VERIFIED_CLAIMS_JSON,
+    )
+  }
+
   @ReactMethod fun admittedCapability(promise: Promise) {
     try {
-      capability ?: JazzRelayTrustedAdmission.admit(TrustedRelayScopeConfig(
-        appNamespace = BuildConfig.JAZZ_DEVICE_APP_NAMESPACE,
-        storageNamespace = BuildConfig.JAZZ_DEVICE_STORAGE_NAMESPACE,
-        authScope = BuildConfig.JAZZ_DEVICE_AUTH_SCOPE,
-        sqlitePath = reactApplicationContext.filesDir.resolve("jazz-device.sqlite").absolutePath,
-        schemaJson = BuildConfig.JAZZ_DEVICE_SCHEMA_JSON,
-        identityJson = BuildConfig.JAZZ_DEVICE_VERIFIED_IDENTITY_JSON,
-        claimsJson = BuildConfig.JAZZ_DEVICE_VERIFIED_CLAIMS_JSON,
-      )).also { capability = it }
+      capability ?: JazzRelayTrustedAdmission.admit(scopeConfig(BuildConfig.JAZZ_DEVICE_AUTH_SCOPE))
+        .also { capability = it }
       promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
   }
@@ -41,6 +50,16 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     capability?.let(JazzRelayTrustedAdmission::revoke)
     capability = null
     promise.resolve(null)
+  }
+
+  /** Scope B is selected solely by trusted fixture code. Replacing it revokes
+   * A before B can be admitted, so stale JS capability bytes cannot cross it. */
+  @ReactMethod fun switchAuthScope(promise: Promise) {
+    try {
+      JazzRelayTrustedAdmission.replace(capability, scopeConfig("fixture-user-b"))
+        .also { capability = it }
+      promise.resolve(Base64.encodeToString(capability, Base64.NO_WRAP))
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
   }
 
   @ReactMethod fun receiptContext(promise: Promise) {
@@ -60,6 +79,17 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
         putString("runNonce", nonce)
       })
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_RECEIPT_CONTEXT", error) }
+  }
+
+  /** Only the host's bounded acceptance phase crosses this boundary.  It
+   * cannot select a relay scope, identity, or filesystem path. */
+  @ReactMethod fun acceptancePhase(promise: Promise) {
+    try {
+      val phase = reactApplicationContext.currentActivity
+        ?.intent?.getStringExtra("jazzDeviceAcceptancePhase") ?: "seed"
+      require(phase == "seed" || phase == "verify") { "invalid acceptance phase" }
+      promise.resolve(phase)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_FIXTURE", error) }
   }
 
   private fun sha256File(path: String): String {
