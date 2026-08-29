@@ -455,7 +455,7 @@ test("only direct cfg predicates proven to imply test receive a test boundary", 
   }
 });
 
-test("rejects path modules and includes that escape the collected persistence owner", () => {
+test("rejects symlinked audit entries and accepts only physically in-scope literal includes", () => {
   const root = fixture();
   try {
     const outside = path.join(root, "crates/jazz/src/outside.rs");
@@ -472,13 +472,34 @@ test("rejects path modules and includes that escape the collected persistence ow
     assert.match(result.stderr, /#\[path\] mod is prohibited/);
     assert.equal(compile(root).status, 0, compile(root).stderr);
 
+    // This is a real, compiling Rust module, but its audited logical spelling
+    // resolves to a sibling outside the node owner.  A lexical source walk
+    // would scan it as `node/codec.rs`; the audit must refuse that indirection.
+    const codec = path.join(root, "crates/jazz/src/node/codec.rs");
+    fs.rmSync(codec);
+    fs.symlinkSync("../outside.rs", codec);
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /audited persistence entry is a symbolic link/);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
     // Existing node source deliberately splits one parent namespace with
-    // literal includes. A target already collected by the audit is not an
-    // escape and remains token-checked itself.
+    // literal includes. A normal, collected target with the same real owner
+    // scope is not an escape and remains token-checked itself.
+    fs.rmSync(codec);
     fs.writeFileSync(path.join(root, "crates/jazz/src/node/in_scope.rs"), "pub fn in_scope() {}\n");
     writeSource(root, 'include!("in_scope.rs");\npub fn f() { in_scope(); }\n');
     result = run(root);
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
+    // A literal include cannot smuggle an outside source through an otherwise
+    // in-scope-looking source entry either.
+    fs.rmSync(path.join(root, "crates/jazz/src/node/in_scope.rs"));
+    fs.symlinkSync("../outside.rs", path.join(root, "crates/jazz/src/node/in_scope.rs"));
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /audited persistence entry is a symbolic link/);
     assert.equal(compile(root).status, 0, compile(root).stderr);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -509,6 +530,58 @@ test("governs explicit serializer reexports from direct path dependencies", () =
     // Re-export surface is part of the snapshot, while unrelated implementation
     // source is deliberately not hashed or snapshotted.
     fs.writeFileSync(bridgeSource, "pub use serde_json as encoded_json;\n");
+    result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /directDependencySnapshots differs/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("governs grouped public serializer-root reexports from reviewer bridges", () => {
+  const root = fixture();
+  try {
+    fs.writeFileSync(
+      path.join(root, "Cargo.toml"),
+      '[workspace]\nmembers = ["crates/jazz", "crates/reviewer_bridge"]\nresolver = "2"\n',
+    );
+    fs.mkdirSync(path.join(root, "crates/reviewer_bridge/src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "crates/reviewer_bridge/Cargo.toml"),
+      '[package]\nname = "reviewer_bridge"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\nserde_json = "1"\n',
+    );
+    const bridgeSource = path.join(root, "crates/reviewer_bridge/src/lib.rs");
+    // These are all valid public Rust spellings for the dependency root. The
+    // value member demonstrates that group parsing does not mistake every
+    // member for a root alias.
+    fs.writeFileSync(
+      bridgeSource,
+      'pub use ::serde_json::{self, self as json, self as wire_json, Value};\n',
+    );
+    fs.appendFileSync(
+      path.join(root, "crates/jazz/Cargo.toml"),
+      'reviewer_bridge = { path = "../reviewer_bridge" }\n',
+    );
+    writeRegistry(root, []);
+
+    const source =
+      'pub fn f() {\n' +
+      '  let _ = reviewer_bridge::serde_json::to_string(&42);\n' +
+      '  let _ = reviewer_bridge::json::to_string(&42);\n' +
+      '  let _ = reviewer_bridge::wire_json::to_string(&42);\n' +
+      '}\n';
+    writeSource(root, source);
+    let result = run(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /reviewer_bridge::serde_json::to_string/);
+    assert.equal(compile(root).status, 0, compile(root).stderr);
+
+    // The aliases are snapshot policy, rather than an implementation detail:
+    // replacing just one grouped root spelling must demand registry review.
+    fs.writeFileSync(
+      bridgeSource,
+      'pub use ::serde_json::{self, self as json, self as replacement_json, Value};\n',
+    );
     result = run(root);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /directDependencySnapshots differs/);
