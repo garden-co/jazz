@@ -113,6 +113,31 @@ const app: s.App<AppSchema> = s.defineApp(schema);
 const { projects, todos } = app;
 type Todo = s.RowOf<typeof todos>;
 
+const transactionIdentitySchema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  documents: s
+    .table({
+      branch: s.string(),
+      title: s.string(),
+      projectId: s.ref("projects"),
+      body: s.string(),
+    })
+    .branchBy("branch"),
+};
+const transactionIdentityApp = s.defineApp(transactionIdentitySchema);
+const transactionIdentityPermissions = s.definePermissions(transactionIdentityApp, ({ policy }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+  policy.projects.allowUpdate.always(),
+  policy.projects.allowDelete.always(),
+  policy.documents.allowRead.always(),
+  policy.documents.allowInsert.always(),
+  policy.documents.allowUpdate.always(),
+  policy.documents.allowDelete.always(),
+]);
+
 const readOnlyPermissions = s.definePermissions(app, ({ policy }) => [
   policy.projects.allowRead.always(),
   policy.projects.allowInsert.never(),
@@ -1218,6 +1243,64 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
+
+  /**
+   * Two fresh foreground runtimes can share a persistent worker. Each runtime
+   * starts with an empty HLC register, so their first writes must not alias
+   * one transaction identity when the browser gives both writes the same
+   * millisecond.
+   *
+   * alice tab A ──insert project────────────► shared worker ──► server
+   * alice tab B ──insert large branch doc───► shared worker ──► server
+   */
+  it("prevents foreground transaction identity aliasing in one millisecond", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "distinct-client-tx-ids",
+      transactionIdentityPermissions,
+      transactionIdentityApp.wasmSchema,
+    );
+    const secret = generateAuthSecret();
+    const dbName = uniqueDbName("distinct-client-tx-ids");
+    const config = {
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      secret,
+      driver: { type: "persistent" as const, dbName },
+      schema: transactionIdentityApp,
+    };
+    const first = track(await createDb(config));
+    const second = track(await createDb(config));
+    const fixedNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    const { project, document } = (() => {
+      try {
+        const project = first.insert(transactionIdentityApp.projects, {
+          name: "shared-worker project",
+        });
+        const document = second.insert(
+          transactionIdentityApp.documents,
+          {
+            branch: "main",
+            title: "first title",
+            projectId: project.value.id,
+            body: "large browser value ".repeat(20_000),
+          },
+          { branch: "main" },
+        );
+        return { project, document };
+      } finally {
+        now.mockRestore();
+      }
+    })();
+    const projectTxId = await project.txId;
+    const documentTxId = await document.txId;
+    expect(documentTxId).not.toBe(projectTxId);
+    await withTimeout(
+      Promise.all([project.wait({ tier: "global" }), document.wait({ tier: "global" })]),
+      20_000,
+      "aliased foreground transactions did not both settle globally",
+    );
+  }, 60_000);
 
   it("resolves insert wait at edge tier through the worker bridge", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("sync-wait-edge");
