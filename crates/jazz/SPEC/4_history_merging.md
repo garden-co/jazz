@@ -178,6 +178,17 @@ a distinct durable root composes this base with its own root-local codec family
 before opening. Adding a new Jazz-owned durable byte family requires a new
 storage epoch, golden fixtures, and an explicit decoder/migration decision.
 
+The native whole-root compatibility receipt is
+`fixtures/native_storage_corpus.md` and its executable tests in
+`node/tests/native_storage_corpus.rs`. It complements the per-family goldens:
+the receipt pins one authority-issued catalogue snapshot, immutable and
+current physical rows, transaction/merge metadata, and an indirect content
+tree together through both SQLite and RocksDB. Current Jazz must first inspect
+the committed backend store read-only, then open that same logical snapshot
+without writes, materialize its content tree, and preserve it across a mixed
+current-format write and a third-process reopen. This corpus is storage-epoch
+evidence, not a compatibility decoder for pre-epoch-alpha roots.
+
 ### 4.4 Deletion as a separate layer
 
 Deletion is modeled separately from content so that hiding and restoring a row do

@@ -2039,6 +2039,8 @@ dependencies = [
  "rand 0.8.5",
  "rcgen",
  "reqwest",
+ "rusqlite",
+ "rust-rocksdb",
  "rustc-hash",
  "serde",
  "serde_bytes",
