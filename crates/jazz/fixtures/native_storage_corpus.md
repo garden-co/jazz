@@ -1,4 +1,4 @@
-# Native Jazz epoch-1 corpus producer (WIP #2307)
+# Native Jazz epoch-1 compatibility corpus
 
 The executable producer is
 `node::tests::harness::settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes`.
@@ -6,7 +6,7 @@ It deliberately uses fixed node, row, branch, transaction-time, text, and
 byte-scalar inputs, then opens the resulting Jazz root through both production
 native adapters under the closed `epoch_1_storage_codec_profile`.
 
-Its settlement-baseline logical-pack SHA-256 is:
+Its settlement-baseline logical-receipt SHA-256 is:
 
 ```text
 0a81edc17508c40d1a04c52bfc00e92f34da4bf9070d394dc038370701a2779b
@@ -38,10 +38,33 @@ capabilities. The registry additionally names provenance, catalogue pointers,
 deletion history, known state, settled result members, and program facts so an
 intentionally narrow producer cannot quietly become the final corpus.
 
-This is an executable producer slice, **not yet the final committed physical
-fixture**. The remaining #2307 promotion work is to archive SQLite/RocksDB
-settlement-baseline stores with producer revision/checksums, inspect SQLite
-read-only and RocksDB physical files, and extend the scenario to populate
-provenance, result/program-fact, a true large-value chunk tree, and the typed
-catalogue lineage envelopes from #2306. Pre-settlement alpha stores remain
-intentionally unsupported.
+The producer's exact logical pack is committed as
+`epoch-1-native-jazz-corpus.pack.base64`; it is base64 only to keep its
+canonical binary values safe in a text repository. Its SHA-256 is
+`e3f4e1cffd6f3c2aec48cddd57bfad38f00b0b285470d13fed0cbf6282af1477`.
+It explicitly lists empty authoritative families as well as entries, so an
+omitted opened family cannot look the same as an empty one.
+
+The same pinned producer has two backend-specific physical receipts:
+
+- `epoch-1-native-jazz.sqlite.gz.base64` — gzip payload SHA-256
+  `50a977b27eda5ff07b416958001f9e91f45ee3a1dec4732af9b9a3aeb54dc0f5`,
+  decompressed SQLite SHA-256
+  `4f06a04f731b7b8a449d600829c2dd6a7b2fff982f30ec5d37cd93afab89d2f3`.
+- `epoch-1-native-jazz-rocksdb.tar.gz.base64` — archive SHA-256
+  `edfd22271a49e252b7b909d9693f0d5b0db9cba849aff843bb033879c1a9e8da`.
+
+`committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`
+checks each payload before materializing it, inspects SQLite and RocksDB using
+their read-only physical APIs, opens the exact logical snapshot through current
+Jazz, materializes the full indirect value, writes one new current-format row,
+and reopens it. The paired corruption test proves a changed archive is rejected
+before any target file or extraction directory is created. SQLite pages and
+RocksDB files remain backend-owned bytes, not interchange encodings.
+
+The fixture was produced by the deterministic source in this file's executable
+test on the storage-settlement branch. Reproducing it is intentionally an
+explicit review action: set `JAZZ_NATIVE_CORPUS_PACK_OUT`,
+`JAZZ_NATIVE_CORPUS_SQLITE_OUT`, and `JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT`
+while running `settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes`.
+Pre-settlement alpha stores remain intentionally unsupported.

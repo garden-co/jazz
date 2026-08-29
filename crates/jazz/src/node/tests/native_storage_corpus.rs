@@ -37,6 +37,16 @@ const EPOCH_1_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz-corpus.pack.base64");
 const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
     "e3f4e1cffd6f3c2aec48cddd57bfad38f00b0b285470d13fed0cbf6282af1477";
+const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
+    include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
+const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
+    "50a977b27eda5ff07b416958001f9e91f45ee3a1dec4732af9b9a3aeb54dc0f5";
+const EPOCH_1_NATIVE_SQLITE_SHA256: &str =
+    "4f06a04f731b7b8a449d600829c2dd6a7b2fff982f30ec5d37cd93afab89d2f3";
+const EPOCH_1_NATIVE_ROCKSDB_BASE64: &str =
+    include_str!("../../../fixtures/epoch-1-native-jazz-rocksdb.tar.gz.base64");
+const EPOCH_1_NATIVE_ROCKSDB_SHA256: &str =
+    "edfd22271a49e252b7b909d9693f0d5b0db9cba849aff843bb033879c1a9e8da";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCorpusReceipt {
@@ -95,6 +105,57 @@ fn epoch_1_native_corpus_pack() -> String {
         "native corpus pack must retain its exact epoch header"
     );
     pack
+}
+
+fn decode_native_physical_fixture(
+    base64: &str,
+    expected_sha256: &str,
+    family: &str,
+) -> Result<Vec<u8>, String> {
+    let bytes = STANDARD
+        .decode(base64.lines().collect::<String>())
+        .map_err(|error| format!("{family} corpus fixture is not base64: {error}"))?;
+    if format!("{:x}", Sha256::digest(&bytes)) != expected_sha256 {
+        return Err(format!("{family} corpus fixture checksum does not match"));
+    }
+    Ok(bytes)
+}
+
+fn materialize_native_sqlite_fixture(path: &std::path::Path, base64: &str) -> Result<(), String> {
+    // Verify the immutable payload before creating a target. This is both a
+    // corruption receipt and a guard against a bad checked-in fixture being
+    // reported later as an adapter-open failure.
+    let bytes = decode_native_physical_fixture(
+        base64,
+        EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256,
+        "SQLite",
+    )?;
+    let mut sqlite = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(std::io::Cursor::new(bytes)),
+        &mut sqlite,
+    )
+    .map_err(|error| format!("SQLite corpus fixture is not gzip: {error}"))?;
+    if format!("{:x}", Sha256::digest(&sqlite)) != EPOCH_1_NATIVE_SQLITE_SHA256 {
+        return Err("SQLite corpus decompressed checksum does not match".to_owned());
+    }
+    std::fs::write(path, sqlite).map_err(|error| error.to_string())
+}
+
+fn unpack_native_rocksdb_fixture(
+    root: &std::path::Path,
+    base64: &str,
+) -> Result<std::path::PathBuf, String> {
+    let bytes = decode_native_physical_fixture(
+        base64,
+        EPOCH_1_NATIVE_ROCKSDB_SHA256,
+        "RocksDB",
+    )?;
+    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+    tar::Archive::new(decoder)
+        .unpack(root)
+        .map_err(|error| format!("native RocksDB corpus archive is not safe: {error}"))?;
+    Ok(root.join("rocksdb-epoch-1"))
 }
 
 fn assert_same_native_corpus(
@@ -393,12 +454,13 @@ where
     (row_uuid, second)
 }
 
-fn assert_native_corpus_semantics<S>(node: &mut NodeState<S>, row_uuid: RowUuid, latest: TxId)
+fn assert_native_corpus_semantics<S>(node: &mut NodeState<S>, row_uuid: RowUuid)
 where
     S: OrderedKvStorage,
 {
     let versions = node.query_table_versions("todos").expect("history reads");
     assert_eq!(versions.len(), 2, "both immutable history versions survive");
+    let latest = node.version_tx_id(&versions[1]).expect("latest history tx id");
     assert_eq!(node.version_tx_id(&versions[1]).unwrap(), latest);
     assert_eq!(
         node.transaction_record(latest)
@@ -456,7 +518,7 @@ where
     producer
         .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .expect("install the one authority snapshot before corpus writes");
-    let (row_uuid, latest) = seed_native_corpus(
+    let (row_uuid, _latest) = seed_native_corpus(
         &mut producer,
         "settlement baseline",
         "independent table",
@@ -490,7 +552,7 @@ where
     let mut reopened = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
         .expect("open historical native corpus without mutation");
     assert_eq!(native_corpus_receipt(&reopened, &schema), before_close);
-    assert_native_corpus_semantics(&mut reopened, row_uuid, latest);
+    assert_native_corpus_semantics(&mut reopened, row_uuid);
 
     reopened
         .commit_mergeable_settled(
@@ -503,7 +565,7 @@ where
     let mut after_mixed_write =
         crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
             .expect("reopen mixed store");
-    assert_native_corpus_semantics(&mut after_mixed_write, row_uuid, latest);
+    assert_native_corpus_semantics(&mut after_mixed_write, row_uuid);
     assert!(
         after_mixed_write
             .query_table_versions("notes")
@@ -518,6 +580,45 @@ where
         "a real application-row write must change the corpus digest"
     );
     before_close
+}
+
+/// Open a committed historical physical fixture with current Jazz, without
+/// giving the verifier any producer-only state. The fixture itself carries the
+/// catalogue snapshot, physical IDs, row histories, current registers, and
+/// large-value descriptor; current code must recover all of those before it
+/// is allowed to add a new row.
+fn verify_historical_native_corpus<S>(schema: JazzSchema, open: impl Fn() -> S)
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let mut reader = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
+        .expect("current Jazz opens committed native corpus");
+    let before_write = native_corpus_receipt(&reader, &schema);
+    assert_eq!(
+        native_corpus_pack(&before_write),
+        epoch_1_native_corpus_pack(),
+        "current Jazz reads the full committed historical logical pack"
+    );
+    assert_native_corpus_semantics(&mut reader, row(0xc1));
+    reader
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row(0xc4), 103)
+                .cells(BTreeMap::from([("body".to_owned(), v("current writer"))])),
+        )
+        .expect("current Jazz writes alongside committed history");
+    drop(reader);
+
+    let mut reopened = crate::db::block_on(NodeState::new(node(0xc0), schema, open()))
+        .expect("current Jazz reopens mixed native corpus");
+    assert_native_corpus_semantics(&mut reopened, row(0xc1));
+    assert!(
+        reopened
+            .query_table_versions("notes")
+            .expect("mixed-write notes history")
+            .iter()
+            .any(|version| version.row_uuid() == row(0xc4)),
+        "current write survives a third-process reopen"
+    );
 }
 
 fn in_memory_native_corpus_receipt(first_title: &str, note_body: &str) -> NativeCorpusReceipt {
@@ -658,6 +759,122 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
         native_corpus_pack(&rocks_receipt),
         epoch_1_native_corpus_pack(),
         "the pinned producer must reproduce the committed backend-neutral logical pack"
+    );
+}
+
+/// The committed SQLite and RocksDB byte fixtures are deliberately verified
+/// independently from the live producer above. This is the compatibility
+/// direction that matters at a later epoch: current code must open a store
+/// created by the pinned producer, not merely agree with a store it just made.
+#[test]
+fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
+    let schema = native_corpus_schema();
+    let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
+
+    let sqlite_directory = tempfile::tempdir().expect("create SQLite fixture directory");
+    let sqlite_path = sqlite_directory.path().join("epoch-1-native-jazz.sqlite");
+    materialize_native_sqlite_fixture(&sqlite_path, EPOCH_1_NATIVE_SQLITE_BASE64)
+        .expect("materialize checksum-guarded SQLite corpus");
+    {
+        // This first physical inspection is read-only and intentionally below
+        // the Jazz/Groove adapter. It proves the committed file is a SQLite
+        // store with data before current code gets an opportunity to create a
+        // journal or a metadata marker.
+        let connection = rusqlite::Connection::open_with_flags(
+            &sqlite_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open committed SQLite corpus read-only");
+        let rows: u64 = connection
+            .query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0))
+            .expect("read committed SQLite key/value rows");
+        assert!(rows > 0, "committed SQLite corpus contains durable rows");
+    }
+    let sqlite_schema = schema.clone();
+    let sqlite_profile = profile.clone();
+    let sqlite_open_path = sqlite_path.clone();
+    verify_historical_native_corpus(sqlite_schema.clone(), move || {
+        let families = sqlite_schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        YieldingStorage::wrap(
+            ImmediateSqliteStorage::open_with_durability_and_codec_profile(
+                &sqlite_open_path,
+                &refs,
+                SqliteDurability::FullSync,
+                &sqlite_profile,
+            )
+            .expect("current SQLite adapter opens committed native corpus"),
+        )
+    });
+
+    let rocks_directory = tempfile::tempdir().expect("create RocksDB fixture directory");
+    let rocks_path = unpack_native_rocksdb_fixture(
+        rocks_directory.path(),
+        EPOCH_1_NATIVE_ROCKSDB_BASE64,
+    )
+    .expect("extract checksum-guarded RocksDB corpus");
+    {
+        let options = rocksdb::Options::default();
+        let families = rocksdb::DB::list_cf(&options, &rocks_path)
+            .expect("list committed RocksDB column families");
+        let read_only = rocksdb::DB::open_cf_for_read_only(&options, &rocks_path, &families, false)
+            .expect("open committed RocksDB corpus read-only");
+        assert!(
+            families.iter().any(|family| family == "__groove_storage_internal_v3"),
+            "committed RocksDB corpus retains Groove's immutable internal family"
+        );
+        let rows = families
+            .iter()
+            .filter_map(|family| read_only.cf_handle(family))
+            .map(|family| {
+                read_only
+                    .iterator_cf(family, rocksdb::IteratorMode::Start)
+                    .count()
+            })
+            .sum::<usize>();
+        assert!(rows > 0, "committed RocksDB corpus contains durable rows");
+    }
+    let rocks_schema = schema;
+    let rocks_open_path = rocks_path.clone();
+    verify_historical_native_corpus(rocks_schema.clone(), move || {
+        let families = rocks_schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        YieldingStorage::wrap(
+            ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+                &rocks_open_path,
+                &refs,
+                RocksDurability::FullSync,
+                &profile,
+            )
+            .expect("current RocksDB adapter opens committed native corpus"),
+        )
+    });
+}
+
+#[test]
+fn committed_native_jazz_physical_corpus_rejects_corruption_before_materialization() {
+    let sqlite_root = tempfile::tempdir().expect("create SQLite corruption root");
+    let sqlite_target = sqlite_root.path().join("must-not-exist.sqlite");
+    let corrupt_sqlite = EPOCH_1_NATIVE_SQLITE_BASE64.replacen('A', "B", 1);
+    assert!(
+        materialize_native_sqlite_fixture(&sqlite_target, &corrupt_sqlite).is_err(),
+        "a corrupt authoritative SQLite payload is rejected"
+    );
+    assert!(
+        !sqlite_target.exists(),
+        "SQLite checksum rejection precedes fixture materialization"
+    );
+
+    let rocks_root = tempfile::tempdir().expect("create RocksDB corruption root");
+    let rocks_target = rocks_root.path().join("must-not-exist");
+    let corrupt_rocks = EPOCH_1_NATIVE_ROCKSDB_BASE64.replacen('A', "B", 1);
+    assert!(
+        unpack_native_rocksdb_fixture(&rocks_target, &corrupt_rocks).is_err(),
+        "a corrupt authoritative RocksDB payload is rejected"
+    );
+    assert!(
+        !rocks_target.exists(),
+        "RocksDB checksum rejection precedes archive extraction"
     );
 }
 
