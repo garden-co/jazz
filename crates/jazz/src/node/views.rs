@@ -252,6 +252,14 @@ struct ViewBundlePreflight {
     persisted_tx_ids: BTreeSet<TxId>,
 }
 
+/// Provenance of version rows selected for a maintained-view wire bundle.
+/// Only exact immutable-store reads may skip witness canonicalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaintainedBundleVersionSource {
+    IvmWitness,
+    ExactStorage,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -966,12 +974,29 @@ where
                 if filtered_tx_versions.is_empty() {
                     continue;
                 }
-                let bundle = self
-                    .version_bundle_for_maintained_view_versions_with_tx(
+                // Storage-backed result membership loaded these exact
+                // immutable history records by `(table, row, tx)` above. Do
+                // not immediately reload them merely to canonicalize an IVM
+                // witness: unlike a graph-projected witness, these are
+                // already authored history rows. Keeping that distinction
+                // here preserves the cold current-row O(1) read receipt.
+                let bundle = if maintained_facts.uses_storage_backed_result_materialization()
+                    && needs_storage_fallback
+                    && self
+                        .exact_storage_maintained_versions_are_unambiguous(&filtered_tx_versions)?
+                {
+                    self.version_bundle_for_exact_storage_maintained_view_versions_with_tx(
                         &stored_tx,
                         &filtered_tx_versions,
                     )
-                    .await?;
+                    .await?
+                } else {
+                    self.version_bundle_for_maintained_view_versions_with_tx(
+                        &stored_tx,
+                        &filtered_tx_versions,
+                    )
+                    .await?
+                };
                 version_bundles.push(bundle);
                 record_maintained_view_stream_b_add_bundle();
                 continue;
@@ -1966,6 +1991,64 @@ where
         stored_tx: &StoredTransaction,
         tx_versions: &[VersionRow],
     ) -> Result<VersionBundle, Error> {
+        self.version_bundle_for_maintained_view_versions_with_tx_and_source(
+            stored_tx,
+            tx_versions,
+            MaintainedBundleVersionSource::IvmWitness,
+        )
+        .await
+    }
+
+    /// Build a maintained-view bundle from rows that were loaded directly
+    /// from the immutable history store by their exact storage identities.
+    ///
+    /// This is intentionally narrower than the ordinary maintained-witness
+    /// path: graph-projected versions still need canonicalization before
+    /// serialization. Callers may use this only for the result of an exact
+    /// `query_versions_for_tx_rows_by_alias` lookup, never for an IVM
+    /// witness.
+    async fn version_bundle_for_exact_storage_maintained_view_versions_with_tx(
+        &mut self,
+        stored_tx: &StoredTransaction,
+        tx_versions: &[VersionRow],
+    ) -> Result<VersionBundle, Error> {
+        self.version_bundle_for_maintained_view_versions_with_tx_and_source(
+            stored_tx,
+            tx_versions,
+            MaintainedBundleVersionSource::ExactStorage,
+        )
+        .await
+    }
+
+    /// Whether these direct immutable-store reads can be serialized without
+    /// the normal maintained-witness canonicalization. Logical names can be
+    /// reused by different physical tables across schema history, so an exact
+    /// `(table, row, tx)` lookup alone is not enough: every row must resolve
+    /// to the sole physical table ever named by that logical label. Otherwise
+    /// use the ordinary fail-closed canonicalization path.
+    fn exact_storage_maintained_versions_are_unambiguous(
+        &self,
+        versions: &[VersionRow],
+    ) -> Result<bool, Error> {
+        versions.iter().try_fold(true, |all_unambiguous, version| {
+            let version_table_id = self.physical_table_id_for_version(version)?;
+            let table_ids = self
+                .catalogue
+                .physical_mappings
+                .values()
+                .filter_map(|mapping| mapping.tables.get(version.table()))
+                .map(|mapping| mapping.table_id)
+                .collect::<BTreeSet<_>>();
+            Ok(all_unambiguous && table_ids.len() == 1 && table_ids.contains(&version_table_id))
+        })
+    }
+
+    async fn version_bundle_for_maintained_view_versions_with_tx_and_source(
+        &mut self,
+        stored_tx: &StoredTransaction,
+        tx_versions: &[VersionRow],
+        source: MaintainedBundleVersionSource,
+    ) -> Result<VersionBundle, Error> {
         let Transaction {
             tx_id,
             kind,
@@ -2008,9 +2091,12 @@ where
             // query output. Resolve its identity back to the stored authored
             // row before crossing the wire boundary (INV-DATA-16/18,
             // INV-SYNC-16, and C.3's byte-fidelity rule).
-            let canonical = self
-                .canonical_history_version_for_maintained_witness(version)
-                .await?;
+            let canonical = if source == MaintainedBundleVersionSource::ExactStorage {
+                version.clone()
+            } else {
+                self.canonical_history_version_for_maintained_witness(version)
+                    .await?
+            };
             versions.push(self.version_record_from_row(&canonical)?);
         }
         Ok(VersionBundle {
