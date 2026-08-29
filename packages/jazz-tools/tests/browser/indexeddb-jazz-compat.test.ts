@@ -14,7 +14,14 @@ import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { createDb, type Db } from "../../src/runtime/db.js";
-import { IndexedDbPageStore } from "../../src/runtime/indexeddb-page-store.js";
+import {
+  INDEXEDDB_BTREE_METADATA_STORE,
+  INDEXEDDB_BTREE_PAGES_STORE,
+  INDEXEDDB_STORAGE_MANIFEST,
+  INDEXEDDB_STORAGE_MANIFEST_KEY,
+  INDEXEDDB_STORAGE_MANIFEST_STORE,
+  IndexedDbPageStore,
+} from "../../src/runtime/indexeddb-page-store.js";
 import { getJazzServerInfo } from "./testing-server.js";
 import { uniqueDbName, waitForQuery, withTimeout } from "./support.js";
 
@@ -117,6 +124,7 @@ describe("browser Jazz storage compatibility corpus", () => {
 
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
+    const rawBeforeReadOnlyInspection = await rawRecords(dbName);
 
     db = await openPersistentDb(dbName, secret, server);
     const reopenedMain = await db.one(app.documents.where({ id: document.id }), { branch: "main" });
@@ -137,6 +145,39 @@ describe("browser Jazz storage compatibility corpus", () => {
       projectId: project.id,
       body: "large value ".repeat(20_000),
     });
+    await db.shutdown();
+    openDbs.splice(openDbs.indexOf(db), 1);
+    expect(await rawRecords(dbName)).toEqual(rawBeforeReadOnlyInspection);
+  }, 90_000);
+
+  it("rejects a corrupt durable epoch before handing a public Jazz handle to the app", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("storage-compat-corruption-server"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app.wasmSchema,
+      permissions,
+    });
+
+    const dbName = databaseName();
+    const secret = generateAuthSecret();
+    const db = await openPersistentDb(dbName, secret, server);
+    await withTimeout(
+      db.insert(app.projects, { name: "corruption sentinel" }).wait({ tier: "global" }),
+      20_000,
+      "corruption fixture did not settle",
+    );
+    await db.shutdown();
+    openDbs.splice(openDbs.indexOf(db), 1);
+
+    await replaceManifest(dbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
+    const rawBeforeRejectedOpen = await rawRecords(dbName);
+    await expect(openPersistentDb(dbName, secret, server)).rejects.toThrow(
+      "Missing or invalid IndexedDB storage epoch manifest",
+    );
+    expect(openDbs).toHaveLength(0);
+    expect(await rawRecords(dbName)).toEqual(rawBeforeRejectedOpen);
   }, 90_000);
 
   function databaseName(): string {
@@ -160,3 +201,72 @@ describe("browser Jazz storage compatibility corpus", () => {
     return db;
   }
 });
+
+/**
+ * Snapshot the production adapter's complete physical surface after it has
+ * closed.  This is a deliberately raw inspection: if a future read-only open
+ * rewrites a page, metadata, or manifest, the receipt exposes it rather than
+ * hiding it behind a decoded logical value.
+ */
+async function rawRecords(name: string): Promise<Record<string, string>> {
+  const database = await requestResult(indexedDB.open(name));
+  const storeNames = [
+    INDEXEDDB_BTREE_PAGES_STORE,
+    INDEXEDDB_BTREE_METADATA_STORE,
+    INDEXEDDB_STORAGE_MANIFEST_STORE,
+  ];
+  const transaction = database.transaction(storeNames, "readonly");
+  const records = Object.fromEntries(
+    await Promise.all(
+      storeNames.map(async (storeName) => {
+        const store = transaction.objectStore(storeName);
+        const [keys, values] = await Promise.all([
+          requestResult(store.getAllKeys()),
+          requestResult(store.getAll()),
+        ]);
+        return [
+          storeName,
+          JSON.stringify(keys.map((key, index) => [key, serializeRawRecord(values[index])])),
+        ] as const;
+      }),
+    ),
+  );
+  await transactionDone(transaction);
+  database.close();
+  return records;
+}
+
+async function replaceManifest(name: string, manifest: unknown): Promise<void> {
+  const database = await requestResult(indexedDB.open(name));
+  const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+  transaction
+    .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
+    .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
+  await transactionDone(transaction);
+  database.close();
+}
+
+function serializeRawRecord(value: unknown): unknown {
+  if (value instanceof ArrayBuffer) return Array.from(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) {
+    return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  }
+  return value;
+}
+
+function requestResult<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+  });
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+  });
+}
