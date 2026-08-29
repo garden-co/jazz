@@ -2042,9 +2042,38 @@ fn settled_result_member_key(
     binding_view_key: BindingViewKey,
     member: &ResultMemberEntry,
 ) -> Result<Vec<Value>, Error> {
+    let member_bytes = codec::result_member_storage_bytes(member)?;
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(codec::result_member_storage_bytes(member)?));
+    key.push(Value::Bytes(
+        settled_result_member_digest(&member_bytes).to_vec(),
+    ));
     Ok(key)
+}
+
+/// Domain-separated identity for one settled result member.  A member may
+/// contain an application-controlled synthetic payload, so its canonical bytes
+/// belong in the direct-store value rather than an ordered storage key.  The
+/// fixed-size digest retains idempotent add/remove semantics without allowing
+/// a large member to make an IDB/B-tree key exceed its page bound.
+const SETTLED_RESULT_MEMBER_DIGEST_DOMAIN: &str = "jazz.settled-result-member-key.v1";
+
+fn settled_result_member_digest(member_bytes: &[u8]) -> [u8; 32] {
+    blake3::derive_key(SETTLED_RESULT_MEMBER_DIGEST_DOMAIN, member_bytes)
+}
+
+fn settled_result_member_storage_write(
+    binding_view_key: BindingViewKey,
+    member: &ResultMemberEntry,
+) -> Result<groove::db::DirectRecordStoreWrite, Error> {
+    let member_bytes = codec::result_member_storage_bytes(member)?;
+    let mut key = binding_view_store_prefix(binding_view_key);
+    key.push(Value::Bytes(
+        settled_result_member_digest(&member_bytes).to_vec(),
+    ));
+    Ok(groove::db::DirectRecordStoreWrite::Set {
+        key,
+        value: vec![Value::Bytes(member_bytes)],
+    })
 }
 
 fn settled_program_fact_key(

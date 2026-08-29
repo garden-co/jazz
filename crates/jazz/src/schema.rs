@@ -603,9 +603,13 @@ impl RuntimeSchema {
                     ("shape_id", ValueType::Uuid),
                     ("binding_id", ValueType::Uuid),
                     ("read_view_id", ValueType::Uuid),
-                    ("member", ValueType::Bytes),
+                    ("member_digest", ValueType::Bytes),
                 ]),
-                RecordDescriptor::new([("present", ValueType::U64)]),
+                // Result members may contain synthetic application values or
+                // rich path identities. Their fixed digest is the ordered
+                // key; the complete canonical member belongs in this value
+                // cell where backends can use value-overflow storage.
+                RecordDescriptor::new([("member", ValueType::Bytes)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SETTLED_PROGRAM_FACTS_STORE,
