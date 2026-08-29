@@ -1113,6 +1113,47 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsub();
   });
 
+  it("maintains an IndexedDB-backed equality window across a tombstone", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("maintained-equality-window-tombstone"),
+        },
+      }),
+    );
+    const openWindow = app.todos.where({ done: false }).orderBy("title", "asc").limit(2);
+    const snapshots: Todo[][] = [];
+    const unsubscribe = trackSubscription(
+      db.subscribe(openWindow, (rows) => snapshots.push(rows), { tier: "local" }),
+    );
+
+    const alpha = await db.insert(todos, { title: "alpha", done: false }).wait({ tier: "local" });
+    await db.insert(todos, { title: "bravo", done: false }).wait({ tier: "local" });
+    await db.insert(todos, { title: "charlie", done: false }).wait({ tier: "local" });
+
+    await waitForCondition(
+      async () =>
+        snapshots.some((rows) => rows.map((row) => row.title).join(",") === "alpha,bravo"),
+      8_000,
+      "maintained equality query should retain its ordered local window",
+    );
+
+    await db.delete(todos, alpha.id).wait({ tier: "local" });
+    await waitForCondition(
+      async () =>
+        snapshots.some((rows) => rows.map((row) => row.title).join(",") === "bravo,charlie"),
+      8_000,
+      "tombstoning the first window member should promote the next equality match",
+    );
+    expect((await db.all(openWindow, { tier: "local" })).map((row) => row.title)).toEqual([
+      "bravo",
+      "charlie",
+    ]);
+    unsubscribe();
+  });
+
   it("tiered subscriptions gate the first callback until the worker's settled snapshot content is local", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-global-gated");
     const sharedLocalAuthToken = generateAuthSecret();
