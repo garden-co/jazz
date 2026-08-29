@@ -92,6 +92,9 @@ export const ciPartitions = Object.freeze({
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
+    command("default serialization persistence registry", "node", [
+      "dev/gates/default-serialization-persistence.mjs",
+    ]),
     command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
   ]),
   "rust-workspace": Object.freeze([
@@ -148,6 +151,9 @@ export const ciPartitions = Object.freeze({
 export const focusedCommands = Object.freeze([
   command("format check", "pnpm", ["format:check"]),
   command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
+  command("default serialization persistence registry", "node", [
+    "dev/gates/default-serialization-persistence.mjs",
+  ]),
   command("ignored-test validator self-test", "node", [
     "dev/gates/ignored-tests.mjs",
     "--self-test",
