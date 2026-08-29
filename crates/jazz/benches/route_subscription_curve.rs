@@ -139,9 +139,10 @@ pub(crate) fn correctness_smoke() {
 
 const ROUTE_BENCH_BINDINGS: usize = 100;
 
-/// Time subscription attachment only. Fixture seeding is generated outside
-/// Divan's timed closure, so this stays comparable even when the corpus grows.
-#[divan::bench(args = [ROUTE_BENCH_BINDINGS], sample_count = 3)]
+/// Time subscription attachment only. Fixture seeding and `Drop` are setup,
+/// not attachment work; `skip_ext_time` is essential because the CodSpeed
+/// Divan compatibility layer otherwise includes both in wall time.
+#[divan::bench(args = [ROUTE_BENCH_BINDINGS], sample_count = 3, skip_ext_time)]
 fn attach_route_bindings(bencher: divan::Bencher<'_, '_>, routes: usize) {
     bencher
         .with_inputs(|| RouteFixture::seeded(routes))
@@ -150,8 +151,9 @@ fn attach_route_bindings(bencher: divan::Bencher<'_, '_>, routes: usize) {
 
 /// Time the fanout work for one matching write after the same fixed 100-route
 /// binding set has already hydrated. The fixture and streams are consumed so
-/// every sample starts from an identical pre-write state.
-#[divan::bench(args = [ROUTE_BENCH_BINDINGS], sample_count = 3)]
+/// every sample starts from an identical pre-write state. Setup and teardown
+/// are explicitly outside CodSpeed's wall-time measurement.
+#[divan::bench(args = [ROUTE_BENCH_BINDINGS], sample_count = 3, skip_ext_time)]
 fn matching_write_fanout(bencher: divan::Bencher<'_, '_>, routes: usize) {
     bencher
         .with_inputs(|| RouteFixture::seeded(routes).attach_all())
