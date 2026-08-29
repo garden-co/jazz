@@ -543,6 +543,10 @@ where
                 } => outer_access_paths
                     .get(protected_source)
                     .cloned()
+                    // A cached policy graph may preserve a primary-key point
+                    // proof, but must never retain a secondary index prefix
+                    // resolved from the outer identity's claims.
+                    .filter(|path| matches!(path, CurrentAccessPath::PrimaryKey(_)))
                     .map(|path| BTreeMap::from([(protected_source.clone(), path)])),
                 _ => None,
             };

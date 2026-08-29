@@ -3276,6 +3276,7 @@ where
     pub(super) fn query_program_access_paths(
         &self,
         request: &QueryProgramRequest,
+        allow_secondary_indexes: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
         // A policy proof may contain both an owner arm and a correlated
         // membership arm for the same protected source. Walking its nested
@@ -3299,6 +3300,7 @@ where
             &request.reads.primary,
             &request.policy,
             false,
+            allow_secondary_indexes,
         )
     }
 
@@ -3308,6 +3310,7 @@ where
         read_view: &ReadView<RequestedSourceStage>,
         policy: &PolicyContext,
         allow_local: bool,
+        allow_secondary_indexes: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
         let mut equalities_by_source = BTreeMap::new();
         // This deliberately small access-path selector only recognizes a
@@ -3338,6 +3341,15 @@ where
             let Some(mut path) = select_current_access_path(&table, &equalities) else {
                 continue;
             };
+            // Authorization dependencies are cached by policy shape and claim
+            // schema, not by a resolved claim value. A secondary-index prefix
+            // derived from this request could therefore make a later identity
+            // reuse another identity's candidate set. Keep those reusable
+            // graphs identity-neutral; maintained root views are compiled for
+            // this concrete request and may safely select their own index.
+            if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
+                continue;
+            }
             if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
                 *maintained = true;
             }
@@ -3387,6 +3399,7 @@ where
             &input,
             &reads.primary,
             &PolicyContext::System,
+            true,
             true,
         )?;
 

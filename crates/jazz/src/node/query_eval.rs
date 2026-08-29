@@ -403,6 +403,7 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<QueryProgram, Error> {
+        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
             binding,
@@ -421,7 +422,7 @@ where
         // subsequent table deltas pass through the very same predicate graph.
         // In particular, this is not a separate snapshot/RPC path, so its
         // initial frontier and live continuation share one membership proof.
-        let access_paths = self.query_program_access_paths(&request)?;
+        let access_paths = self.query_program_access_paths(&request, allow_secondary_indexes)?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }

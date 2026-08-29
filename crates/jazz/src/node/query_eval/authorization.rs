@@ -310,7 +310,10 @@ where
         let result = async {
             let access_paths = match forced_access_paths {
                 Some(access_paths) => access_paths,
-                None => self.query_program_access_paths(&request)?,
+                // Cached authorization dependencies deliberately do not carry
+                // secondary index prefixes resolved from this identity's
+                // claims. Their cache key describes claim shape, not values.
+                None => self.query_program_access_paths(&request, false)?,
             };
             let program =
                 if cache {

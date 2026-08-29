@@ -106,6 +106,43 @@ fn query_rows_by_uuid_for_identity(
     (rows, node.query_engine_read_metrics().clone())
 }
 
+fn maintained_rows_by_uuid_for_identity(
+    node: &mut NodeState<RocksDbStorage>,
+    query: Query,
+    tier: DurabilityTier,
+    identity: AuthorSubject,
+) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
+    // Keep the maintained subscription path on the same authenticated claim
+    // binding as the public one-shot helper above.
+    if identity != AuthorSubject::SYSTEM {
+        let mut claims = node.session_claims.get(&identity).cloned().unwrap_or_default();
+        claims
+            .entry("sub".to_owned())
+            .or_insert_with(|| Value::Uuid(identity.test_uuid()));
+        node.set_test_provider_claims(identity, claims);
+    }
+    let shape = query.validate(&node.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    node.reset_query_engine_read_metrics();
+    let (receiver, maintained, _schemas, _transitions, _tables, _incomplete) = node
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            identity,
+            tier,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    let rows = maintained
+        .active_result_members()
+        .iter()
+        .filter_map(crate::protocol::ResultMemberEntry::as_row)
+        .filter_map(|(table, row_uuid, _)| (table.as_str() == "docs").then_some(row_uuid))
+        .collect();
+    node.unsubscribe_groove_subscription(receiver.id());
+    (rows, node.query_engine_read_metrics().clone())
+}
+
 #[test]
 fn history_complete_query_ignores_stale_settled_result_membership() {
     let schema = access_path_schema();
@@ -180,15 +217,86 @@ fn indexed_read_policy_matches_local_scan_for_allowed_and_denied_identities() {
     assert_eq!(global_allowed, vec![first]);
     assert_eq!(global_denied, local_denied);
     assert!(global_denied.is_empty());
-    assert!(
-        global_allowed_metrics.source_index_probes >= 1,
-        "the eligible global policy must use its declared owner index"
-    );
-    assert_eq!(global_allowed_metrics.source_full_scans, 0);
+    // Prepared AppRows/policy dependencies are reused across identities. Their
+    // claim-shaped cache key must not retain this owner's concrete secondary
+    // index prefix; only the per-identity maintained root may specialize it.
+    assert_eq!(global_allowed_metrics.source_index_probes, 0);
+    assert!(global_allowed_metrics.source_full_scans >= 1);
     assert!(local_allowed_metrics.source_full_scans >= 1);
     assert_eq!(edge_allowed_metrics.source_index_probes, 0);
     assert!(edge_allowed_metrics.source_full_scans >= 1);
-    assert!(global_denied_metrics.source_index_probes >= 1);
+    assert_eq!(global_denied_metrics.source_index_probes, 0);
+
+    // Exercise the reverse cache population order too: a denied identity must
+    // not leave a reusable empty authorization graph that hides a later owner.
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "sub"));
+    let (_reverse_writer_dir, mut reverse_writer) = open_node_with_schema(node(10), schema.clone());
+    let (_reverse_core_dir, mut reverse_core) = open_node_with_schema(node(11), schema);
+    let (reverse_first, _reverse_second, reverse_owner) =
+        seed_access_path_docs(&mut reverse_writer, &mut reverse_core);
+    let reverse_denied = user(0xd4);
+    let (denied_first, _) = query_rows_by_uuid_for_identity(
+        &mut reverse_core,
+        Query::from("docs"),
+        DurabilityTier::Global,
+        reverse_denied,
+    );
+    let (allowed_after_denied, _) = query_rows_by_uuid_for_identity(
+        &mut reverse_core,
+        Query::from("docs"),
+        DurabilityTier::Global,
+        reverse_owner,
+    );
+    assert!(denied_first.is_empty());
+    assert_eq!(allowed_after_denied, vec![reverse_first]);
+}
+
+#[test]
+fn maintained_policy_index_reads_are_isolated_between_identities() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "sub"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(12), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(13), schema);
+    let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let denied = user(0xe5);
+
+    // The maintained root may specialize its own source with the authenticated
+    // identity, but its cached policy dependencies must not leak that prefix
+    // into a later subscriber.
+    let (allowed_first, _) = maintained_rows_by_uuid_for_identity(
+        &mut core,
+        Query::from("docs"),
+        DurabilityTier::Global,
+        owner,
+    );
+    let (denied_after_allowed, _) = maintained_rows_by_uuid_for_identity(
+        &mut core,
+        Query::from("docs"),
+        DurabilityTier::Global,
+        denied,
+    );
+    assert_eq!(allowed_first, vec![first]);
+    assert!(denied_after_allowed.is_empty());
+
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "sub"));
+    let (_reverse_writer_dir, mut reverse_writer) = open_node_with_schema(node(14), schema.clone());
+    let (_reverse_core_dir, mut reverse_core) = open_node_with_schema(node(15), schema);
+    let (reverse_first, _reverse_second, reverse_owner) =
+        seed_access_path_docs(&mut reverse_writer, &mut reverse_core);
+    let reverse_denied = user(0xf6);
+    let (denied_first, _) = maintained_rows_by_uuid_for_identity(
+        &mut reverse_core,
+        Query::from("docs"),
+        DurabilityTier::Global,
+        reverse_denied,
+    );
+    let (allowed_after_denied, _) = maintained_rows_by_uuid_for_identity(
+        &mut reverse_core,
+        Query::from("docs"),
+        DurabilityTier::Global,
+        reverse_owner,
+    );
+    assert!(denied_first.is_empty());
+    assert_eq!(allowed_after_denied, vec![reverse_first]);
 }
 
 #[test]
