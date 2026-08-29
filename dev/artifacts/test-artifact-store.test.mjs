@@ -3,10 +3,15 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  chmodSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -85,12 +90,35 @@ function fixture(label, wasmFingerprint, napiFingerprint) {
   return root;
 }
 
+function removeFixture(root) {
+  const makeWritable = (path) => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      for (const entry of readdirSync(path)) makeWritable(join(path, entry));
+      chmodSync(path, 0o755);
+    } else chmodSync(path, 0o644);
+  };
+  if (existsSync(root)) makeWritable(root);
+  rmSync(root, { recursive: true, force: true });
+}
+
 test("two worktrees retain independently runnable fingerprint-addressed correctness pairs", async () => {
   const first = fixture("first", "a".repeat(64), "b".repeat(64));
   const second = fixture("second", "c".repeat(64), "d".repeat(64));
   try {
     const firstSnapshot = snapshotCorrectnessArtifacts(first);
     const secondSnapshot = snapshotCorrectnessArtifacts(second);
+    for (const path of [
+      join(firstSnapshot.wasmPackage, "jazz_wasm.js"),
+      join(firstSnapshot.napiGeneration, "index.js"),
+      firstSnapshot.cliArtifact,
+      join(firstSnapshot.wasmPackage, "..", "receipt.json"),
+    ]) {
+      const stat = statSync(path);
+      assert.equal(stat.nlink, 1, `${path} is not a single-link snapshot file`);
+      assert.equal(stat.mode & 0o222, 0, `${path} remains writable after publication`);
+    }
     assert.notEqual(firstSnapshot.wasmPackage, secondSnapshot.wasmPackage);
     assert.equal(
       (await import(pathToFileURL(join(firstSnapshot.wasmPackage, "jazz_wasm.js")).href)).label,
@@ -124,8 +152,8 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
     assert.equal(firstNapi.nativeBinding.label, "first");
     assert.equal(firstNapi.expectedNativeArtifactFingerprint, "b".repeat(64));
   } finally {
-    rmSync(first, { recursive: true, force: true });
-    rmSync(second, { recursive: true, force: true });
+    removeFixture(first);
+    removeFixture(second);
   }
 });
 
@@ -163,13 +191,17 @@ test("producer manifest binds immutable artifacts to every relevant source input
     rmSync(join(root, "untracked-source"));
 
     // The selected immutable CLI itself is checked on every preflight.
+    // A same-UID process can deliberately restore write permission, so every
+    // admission rechecks both mode and content.  Normal producer writes are
+    // stopped by the sealed mode in the first place.
+    chmodSync(snapshot.cliArtifact, 0o755);
     writeFileSync(snapshot.cliArtifact, "corrupt snapshot CLI");
     assert.throws(
       () => verifyCorrectnessArtifactProducer(root),
-      /stored CLI artifact hash differs/,
+      /writable after publication|stored CLI artifact hash differs/,
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeFixture(root);
   }
 });
 
@@ -254,7 +286,74 @@ test("a consumer pins its manifest-selected triple across pointer swaps and part
     writeFileSync(`${manifest}.interrupted.tmp`, "{");
     assert.equal(verifyCorrectnessArtifactProducer(root).snapshot.fingerprint, first.fingerprint);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeFixture(root);
+  }
+});
+
+test("admission is mutation-sensitive while a same-UID process races the stored snapshot", async () => {
+  const root = fixture("snapshot-race", "d".repeat(64), "e".repeat(64));
+  try {
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync(
+      "git",
+      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
+      { cwd: root },
+    );
+    const snapshot = snapshotCorrectnessArtifacts(root);
+    writeCorrectnessArtifactProducerManifest(root, snapshot);
+    const wasmJs = join(snapshot.wasmPackage, "jazz_wasm.js");
+    const original = readFileSync(wasmJs, "utf8");
+    const mutator = spawn(
+      process.execPath,
+      [
+        "-e",
+        [
+          "const fs=require('node:fs')",
+          "const [file,directory,original]=process.argv.slice(1)",
+          "for(let i=0;i<300;i++) {",
+          "fs.chmodSync(directory,0o755); fs.chmodSync(file,0o644)",
+          "fs.writeFileSync(file, 'export const label = \\\"mutated\\\";')",
+          "fs.chmodSync(file,0o444); fs.chmodSync(directory,0o555)",
+          "fs.chmodSync(directory,0o755); fs.chmodSync(file,0o644)",
+          "fs.writeFileSync(file, original)",
+          "fs.chmodSync(file,0o444); fs.chmodSync(directory,0o555)",
+          "}",
+        ].join(";"),
+        wasmJs,
+        snapshot.wasmPackage,
+        original,
+      ],
+      { stdio: "ignore" },
+    );
+    let finished = false;
+    let accepted = 0;
+    let rejected = 0;
+    mutator.once("exit", (code) => {
+      assert.equal(code, 0);
+      finished = true;
+    });
+    do {
+      try {
+        const environment = correctnessArtifactConsumerEnvironment(root);
+        assert.equal(environment.JAZZ_CORRECTNESS_WASM_PACKAGE, snapshot.wasmPackage);
+        // A second independent read makes this a mutation-sensitive receipt:
+        // a race either retains the sealed content or rejects admission.
+        assert.equal(readCorrectnessArtifactSnapshot(root).fingerprint, snapshot.fingerprint);
+        accepted++;
+      } catch (error) {
+        assert.match(
+          String(error),
+          /writable after publication|artifact hash mismatch|stored snapshot file inventory/,
+        );
+        rejected++;
+      }
+      await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    } while (!finished);
+    assert.ok(accepted + rejected > 1, "mutation race did not overlap admission");
+    assert.ok(rejected > 0, "mutated snapshot was never detected");
+    assert.doesNotThrow(() => verifyCorrectnessArtifactProducer(root));
+  } finally {
+    removeFixture(root);
   }
 });
 
@@ -272,31 +371,57 @@ test("snapshot pointers reject malformed fingerprints and path traversal", () =>
     );
     assert.throws(() => readCorrectnessArtifactSnapshot(root), /invalid snapshot receipt/);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeFixture(root);
   }
 });
 
-test("tampered or incomplete stored generations fail on read and reuse", () => {
+test("tampered, hard-linked, or incomplete stored generations fail on read and reuse", () => {
   const root = fixture("tamper", "1".repeat(64), "2".repeat(64));
   try {
     const snapshot = snapshotCorrectnessArtifacts(root);
-    writeFileSync(join(snapshot.wasmPackage, "jazz_wasm.js"), "tampered");
+    const wasmJs = join(snapshot.wasmPackage, "jazz_wasm.js");
+    assert.equal((readFileSync(wasmJs).length > 0), true);
+    assert.throws(() => writeFileSync(wasmJs, "tampered"), /EACCES|EPERM/);
+    chmodSync(wasmJs, 0o644);
+    writeFileSync(wasmJs, "tampered");
     assert.throws(
       () => readCorrectnessArtifactSnapshot(root),
-      /artifact hash mismatch|inventory or hash differs/,
+      /writable after publication|artifact hash mismatch|inventory or hash differs/,
     );
     assert.throws(
       () => snapshotCorrectnessArtifacts(root),
-      /artifact hash mismatch|inventory or hash differs/,
+      /writable after publication|artifact hash mismatch|inventory or hash differs/,
     );
-    writeFileSync(join(snapshot.wasmPackage, "jazz_wasm.js"), 'export const label = "tamper";');
+    chmodSync(wasmJs, 0o644);
+    writeFileSync(wasmJs, 'export const label = "tamper";');
+    chmodSync(snapshot.wasmPackage, 0o755);
     rmSync(join(snapshot.wasmPackage, "jazz_wasm_bg.wasm"));
     assert.throws(
       () => readCorrectnessArtifactSnapshot(root),
-      /missing wasm artifact|inventory or hash differs/,
+      /writable after publication|missing wasm artifact|inventory or hash differs/,
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeFixture(root);
+  }
+});
+
+test("stored snapshot rejects a same-UID hardlink replacement before admission", () => {
+  const root = fixture("hardlink", "b".repeat(64), "c".repeat(64));
+  try {
+    const snapshot = snapshotCorrectnessArtifacts(root);
+    const storedCli = snapshot.cliArtifact;
+    const replacement = join(root, "replacement-cli");
+    writeFileSync(replacement, readFileSync(storedCli));
+    chmodSync(join(snapshot.cliArtifact, ".."), 0o755);
+    rmSync(storedCli);
+    linkSync(replacement, storedCli);
+    chmodSync(join(snapshot.cliArtifact, ".."), 0o555);
+    assert.throws(
+      () => readCorrectnessArtifactSnapshot(root),
+      /hardlink/,
+    );
+  } finally {
+    removeFixture(root);
   }
 });
 
@@ -314,12 +439,16 @@ test("source and stored symbolic links are rejected recursively", () => {
 
     const snapshot = snapshotCorrectnessArtifacts(storedRoot);
     const storedFile = join(snapshot.napiGeneration, "index.js");
+    chmodSync(snapshot.napiGeneration, 0o755);
     rmSync(storedFile);
     symlinkSync(
       join(storedRoot, "crates", "jazz-napi", ".native-artifacts", "generation-test", "index.js"),
       storedFile,
     );
-    assert.throws(() => readCorrectnessArtifactSnapshot(storedRoot), /contains a symbolic link/);
+    assert.throws(
+      () => readCorrectnessArtifactSnapshot(storedRoot),
+      /writable after publication|contains a symbolic link/,
+    );
 
     const outsideStore = join(ancestorRoot, "outside-store");
     mkdirSync(outsideStore);
@@ -330,9 +459,9 @@ test("source and stored symbolic links are rejected recursively", () => {
       /snapshot store has a symbolic-link ancestor/,
     );
   } finally {
-    rmSync(sourceRoot, { recursive: true, force: true });
-    rmSync(storedRoot, { recursive: true, force: true });
-    rmSync(ancestorRoot, { recursive: true, force: true });
+    removeFixture(sourceRoot);
+    removeFixture(storedRoot);
+    removeFixture(ancestorRoot);
   }
 });
 
@@ -358,6 +487,6 @@ test("Vite serves the validated snapshot without allowing paths outside the work
     assert.equal(denied.status, 403);
   } finally {
     await server?.close();
-    rmSync(root, { recursive: true, force: true });
+    removeFixture(root);
   }
 });

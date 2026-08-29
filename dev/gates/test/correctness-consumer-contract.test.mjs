@@ -11,7 +11,6 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
     "packages/jazz-tools/package.json",
     "packages/inspector/package.json",
     "examples/band-chat/apps/nextjs-betterauth/package.json",
-    "examples/record-player/apps/next-betterauth/package.json",
   ];
   for (const path of packages) {
     const pkg = JSON.parse(read(path));
@@ -26,6 +25,12 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
       `${path} retains a direct mutable-artifact browser command`,
     );
   }
+
+  const recordPlayer = JSON.parse(
+    read("examples/record-player/apps/next-betterauth/package.json"),
+  );
+  assert.match(recordPlayer.scripts["test:topology"], /run-correctness-consumer\.mjs --/);
+  assert.equal(recordPlayer.scripts["test:browser"], "pnpm test:topology");
 
   const focused = read("packages/jazz-tools/scripts/test-browser-focused.mjs");
   assert.match(focused, /run-correctness-consumer\.mjs/);
@@ -65,6 +70,11 @@ test("sealed consumers select immutable artifact paths rather than worktree poin
   for (const config of [
     "packages/jazz-tools/vitest.config.ts",
     "packages/jazz-tools/vitest.config.browser.ts",
+    "packages/jazz-tools/vitest.config.react.ts",
+    "packages/jazz-tools/vitest.config.solid.ts",
+    "packages/jazz-tools/vitest.config.svelte.ts",
+    "examples/band-chat/apps/nextjs-betterauth/vitest.config.browser.ts",
+    "examples/record-player/apps/next-betterauth/vitest.config.browser.ts",
   ]) {
     const source = read(config);
     assert.match(source, /JAZZ_CORRECTNESS_WASM_PACKAGE/);
@@ -72,4 +82,26 @@ test("sealed consumers select immutable artifact paths rather than worktree poin
   }
   const testRuntime = read("packages/jazz-tools/src/runtime/testing/wasm-runtime-test-utils.ts");
   assert.match(testRuntime, /JAZZ_CORRECTNESS_WASM_PACKAGE/);
+  for (const config of ["packages/inspector/vitest.config.ts", "packages/inspector/vite.config.ts"])
+    assert.match(read(config), /JAZZ_CORRECTNESS_WASM_PACKAGE/);
+});
+
+test("every direct Jazz Tools Vitest consumer is sealed before it runs", () => {
+  const pkg = JSON.parse(read("packages/jazz-tools/package.json"));
+  for (const name of [
+    "test:node",
+    "test:topology-fixture",
+    "test:react",
+    "test:solid",
+    "test:svelte",
+    "test:browser",
+    "bench:abstract:node",
+    "bench:abstract:browser",
+    "bench:realistic:browser",
+  ])
+    assert.match(
+      pkg.scripts[name],
+      /run-correctness-consumer\.mjs --/,
+      `${name} bypasses the producer-manifest admission boundary`,
+    );
 });

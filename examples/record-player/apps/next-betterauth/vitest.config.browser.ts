@@ -3,6 +3,7 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
+import { resolve } from "node:path";
 import {
   blockJazzServerNetwork,
   jazzServerInfo,
@@ -10,6 +11,10 @@ import {
   stopJazzServerByUrl,
   unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
+
+const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+  throw new Error("sealed correctness consumer is missing its immutable WASM package");
 
 function jazzBrowserTopologyLog(
   _context: unknown,
@@ -21,6 +26,9 @@ function jazzBrowserTopologyLog(
 }
 
 export default defineConfig({
+  resolve: {
+    alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+  },
   optimizeDeps: {
     include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
   },

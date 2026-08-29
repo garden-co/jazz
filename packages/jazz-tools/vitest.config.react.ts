@@ -1,5 +1,10 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { resolve } from "node:path";
+
+const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+  throw new Error("sealed correctness consumer is missing its immutable WASM package");
 
 /**
  * Vitest configuration for React component/hook tests in react-core.
@@ -8,6 +13,9 @@ import react from "@vitejs/plugin-react";
  */
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+  },
   test: {
     environment: "happy-dom",
     include: ["src/**/*.test.tsx"],

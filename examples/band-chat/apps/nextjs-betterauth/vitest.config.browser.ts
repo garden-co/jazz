@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
 import topLevelAwait from "vite-plugin-top-level-await";
@@ -12,6 +13,10 @@ import {
   unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
+const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
+if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
+  throw new Error("sealed correctness consumer is missing its immutable WASM package");
+
 function jazzBrowserTopologyLog(
   _context: unknown,
   status: "start" | "complete" | "failed",
@@ -22,7 +27,12 @@ function jazzBrowserTopologyLog(
 }
 
 export default defineConfig({
-  resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL(".", import.meta.url)),
+      ...(sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {}),
+    },
+  },
   define: {
     "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("band-chat-browser-tests"),
     "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": JSON.stringify("ws://band-chat.test"),

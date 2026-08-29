@@ -33,7 +33,7 @@ test("the Node package gate excludes the browser-only topology receipt", () => {
   assert.doesNotMatch(packageJson.scripts.test, /test:topology/);
   assert.equal(
     packageJson.scripts["test:topology"],
-    "vitest run --config vitest.config.browser.ts",
+    "node ../../../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
   );
   assert.equal(packageJson.scripts["test:browser"], "pnpm test:topology");
 });
