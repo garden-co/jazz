@@ -3346,16 +3346,6 @@ where
                 progress_waker,
             )
             .await?;
-        // Opening a maintained view is an async ownership boundary: one
-        // stream cannot be published while another is still hydrating its
-        // content witnesses. The bounded opening poll may leave cold storage
-        // pending, but this future remains the real owner until it receives
-        // the complete initial multisink snapshot.
-        let initial_snapshot = self
-            .database
-            .next_multisink_subscription(&subscription)
-            .await
-            .map_err(Error::Groove)?;
         let mut maintained = MaintainedSubscriptionView::default();
         if storage_backed_result_materialization {
             maintained.enable_storage_backed_result_materialization();
@@ -3364,55 +3354,72 @@ where
             maintained.enable_inline_content_branch_key(branch_key);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
-        let snapshot_transitions = maintained.apply_multisink_deltas(
-            initial_snapshot,
-            &terminal_schemas,
-            &tables,
-            &self.node_aliases,
-        )?;
-        transitions.adds.extend(snapshot_transitions.adds);
-        transitions.removes.extend(snapshot_transitions.removes);
-        transitions
-            .result_payload_adds
-            .extend(snapshot_transitions.result_payload_adds);
-        transitions
-            .result_payload_removes
-            .extend(snapshot_transitions.result_payload_removes);
-        transitions
-            .program_fact_adds
-            .extend(snapshot_transitions.program_fact_adds);
-        transitions
-            .program_fact_removes
-            .extend(snapshot_transitions.program_fact_removes);
-        loop {
-            match subscription.try_recv() {
-                Ok(deltas) => {
-                    let delta_transitions = maintained.apply_multisink_deltas(
-                        deltas,
-                        &terminal_schemas,
-                        &tables,
-                        &self.node_aliases,
-                    )?;
-                    transitions.adds.extend(delta_transitions.adds);
-                    transitions.removes.extend(delta_transitions.removes);
-                    transitions
-                        .result_payload_adds
-                        .extend(delta_transitions.result_payload_adds);
-                    transitions
-                        .result_payload_removes
-                        .extend(delta_transitions.result_payload_removes);
-                    transitions
-                        .program_fact_adds
-                        .extend(delta_transitions.program_fact_adds);
-                    transitions
-                        .program_fact_removes
-                        .extend(delta_transitions.program_fact_removes);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Err(Error::InvalidStoredValue(
-                        "seeded maintained subscription disconnected",
-                    ));
+        // A cold opening may depend on a peer that can only be advanced after
+        // this call returns. Keep Stream A unpublished until the first
+        // complete Stream B snapshot arrives; publication drains this same
+        // subscription and gates ViewUpdate on `initial_received`.
+        let initial_received = match subscription.try_recv() {
+            Ok(snapshot) => {
+                let snapshot_transitions = maintained.apply_multisink_deltas(
+                    snapshot,
+                    &terminal_schemas,
+                    &tables,
+                    &self.node_aliases,
+                )?;
+                transitions.adds.extend(snapshot_transitions.adds);
+                transitions.removes.extend(snapshot_transitions.removes);
+                transitions
+                    .result_payload_adds
+                    .extend(snapshot_transitions.result_payload_adds);
+                transitions
+                    .result_payload_removes
+                    .extend(snapshot_transitions.result_payload_removes);
+                transitions
+                    .program_fact_adds
+                    .extend(snapshot_transitions.program_fact_adds);
+                transitions
+                    .program_fact_removes
+                    .extend(snapshot_transitions.program_fact_removes);
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err(Error::InvalidStoredValue(
+                    "seeded maintained subscription disconnected",
+                ));
+            }
+        };
+        if initial_received {
+            loop {
+                match subscription.try_recv() {
+                    Ok(deltas) => {
+                        let delta_transitions = maintained.apply_multisink_deltas(
+                            deltas,
+                            &terminal_schemas,
+                            &tables,
+                            &self.node_aliases,
+                        )?;
+                        transitions.adds.extend(delta_transitions.adds);
+                        transitions.removes.extend(delta_transitions.removes);
+                        transitions
+                            .result_payload_adds
+                            .extend(delta_transitions.result_payload_adds);
+                        transitions
+                            .result_payload_removes
+                            .extend(delta_transitions.result_payload_removes);
+                        transitions
+                            .program_fact_adds
+                            .extend(delta_transitions.program_fact_adds);
+                        transitions
+                            .program_fact_removes
+                            .extend(delta_transitions.program_fact_removes);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        return Err(Error::InvalidStoredValue(
+                            "seeded maintained subscription disconnected",
+                        ));
+                    }
                 }
             }
         }
@@ -3422,7 +3429,7 @@ where
             terminal_schemas,
             transitions,
             tables,
-            true,
+            initial_received,
         ))
     }
 

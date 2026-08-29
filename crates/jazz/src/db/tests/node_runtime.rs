@@ -143,13 +143,22 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     let mut received = None;
     let mut snapshot = RelationSnapshot::default();
     let mut pull_messages = Vec::new();
+    let mut pending_event = None;
     for _ in 0..128 {
         upload_edge.tick().unwrap();
         pull_messages.extend(upload_edge_to_core.borrow().iter().cloned());
         core.tick().unwrap();
         upload_edge.tick().unwrap();
-        while let Some(event) = subscription.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
+        if pending_event.is_none() {
+            pending_event = subscription.try_next_event();
+        }
+        if pull_messages
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_)))
+            && let Some(event) = pending_event.as_mut()
+        {
+            crate::db::block_on(upload_edge.hydrate_subscription_event_for_binding(event)).unwrap();
+            apply_subscription_event(&mut snapshot, pending_event.take().unwrap());
         }
         received = snapshot.rows.first().and_then(|row| row.cell_at(0));
         if received == Some(Value::String(title.clone())) {

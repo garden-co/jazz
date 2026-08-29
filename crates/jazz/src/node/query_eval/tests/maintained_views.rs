@@ -2,11 +2,11 @@
 
 use super::*;
 
-/// A direct maintained-view opening must retain its async owner through a
-/// cold, yielding local scan. Returning an empty Stream A snapshot here lets
-/// a serving peer emit membership before Stream B has its content witness.
+/// A direct maintained-view opening must not wait for a cold source that may
+/// require peer progress after this call returns. The publication owner keeps
+/// Stream A gated until it receives the first complete Stream B snapshot.
 #[test]
-fn maintained_open_awaits_cold_multisink_witnesses() {
+fn maintained_open_defers_cold_multisink_witnesses_to_its_publication_owner() {
     let test_schema = schema();
     let column_families = test_schema.column_families();
     let families = column_families
@@ -63,9 +63,9 @@ fn maintained_open_awaits_cold_multisink_witnesses() {
             Some(plan),
             QueryAuthorizationMode::ClientLocal,
         )
-        .expect("await complete cold maintained snapshot");
-    assert!(local.initial_received);
-    assert_eq!(initial.root_count, 1);
+        .expect("open cold maintained snapshot without waiting for a peer turn");
+    assert!(!local.initial_received);
+    assert_eq!(initial.root_count, 0);
 }
 
 #[test]
