@@ -794,6 +794,73 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
     assert!(node.query_table_versions("todos").unwrap().is_empty());
 }
 
+/// Internal maintained-view witness receipt: a branched writer's large
+/// immutable history record must reload from that exact branch, never from an
+/// implicit default coordinate. This targets the pre-serialization storage
+/// identity boundary that public queries cannot directly expose.
+#[test]
+fn maintained_witness_reloads_the_exact_large_nondefault_branch_version() {
+    // `canonical_history_version_for_maintained_witness` is used before a
+    // maintained result is serialized. A physical row can have both default
+    // and non-default branch versions in one transaction, so table/row/tx
+    // coordinates alone are insufficient: falling back to the default branch
+    // silently ships a different immutable VersionRecord.
+    let schema = branch_view_schema();
+    let (_dir, mut node) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x70; 16]), schema.clone());
+    let row_uuid = row(0x71);
+    let branch = branch_selector(0x72);
+    let owner = AuthorSubject::for_test_bytes([0x73; 16]);
+    let cells = |title: String| {
+        BTreeMap::from([
+            ("title".to_owned(), Value::String(title)),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        ])
+    };
+    // Keep this below the large-value promotion threshold: the regression is
+    // about reloading a large *VersionRecord* from history, not about a query
+    // evaluator materializing an application large value first.
+    let branch_title = "non-default branch canonical body".repeat(1_500);
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(branch.clone())
+                .cells(cells(branch_title.clone())),
+        )
+        .unwrap();
+    let versions = futures::executor::block_on(node.query_versions_for_tx(tx_id)).unwrap();
+    let branched = versions
+        .iter()
+        .find(|version| version.branch_key().is_canonical() && *version.branch_key() != BranchKey::default())
+        .expect("non-default branch row is persisted")
+        .clone();
+    let storage_table = node
+        .version_storage_sources_for_layer(branched.table(), branched.layer())
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("content versions have history storage");
+    assert!(futures::executor::block_on(node.query_version_by_alias_with_storage_in_schema(
+        schema.version_id(),
+        branched.table(),
+        &storage_table,
+        &BranchKey::default(),
+        branched.row_uuid(),
+        branched.tx_time(),
+        branched.tx_node_alias(),
+    ))
+    .unwrap()
+    .is_none(), "a missing branch coordinate must never silently use a default branch");
+    let canonical = futures::executor::block_on(
+        node.canonical_history_version_for_maintained_witness(&branched),
+    )
+    .unwrap();
+    let canonical_wire = node.version_record_from_row(&canonical).unwrap();
+    assert_eq!(canonical.branch_key(), branched.branch_key());
+    assert_eq!(canonical_wire.branch_key(), branched.branch_key());
+    assert_eq!(canonical_wire.cell_at(1), Some(Value::String(branch_title)));
+}
+
 #[test]
 fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen() {
     let schema = branch_view_schema();

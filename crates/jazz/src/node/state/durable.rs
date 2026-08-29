@@ -564,17 +564,11 @@ where
                 .collect::<Vec<_>>();
             if let Some(members) = rewrite {
                 for member in members {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_result_member_key(binding_view_key, member)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_result_member_storage_write(binding_view_key, member)?);
                 }
             } else {
                 for member in adds {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_result_member_key(binding_view_key, member)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_result_member_storage_write(binding_view_key, member)?);
                 }
             }
             store.write_many(&operations).await?;
@@ -588,10 +582,7 @@ where
             });
         }
         for member in adds {
-            operations.push(DirectRecordStoreWrite::Set {
-                key: settled_result_member_key(binding_view_key, member)?,
-                value: vec![Value::U64(1)],
-            });
+            operations.push(settled_result_member_storage_write(binding_view_key, member)?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -756,7 +747,20 @@ where
                 &entry.key,
                 "settled result member binding key must be valid",
             )?;
-            let member_bytes = match &entry.key[3] {
+            let member_digest = match &entry.key[3] {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled result member digest must be bytes",
+                    ));
+                }
+            };
+            if member_digest.len() != 32 {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member digest must be 32 bytes",
+                ));
+            }
+            let member_bytes = match entry.value.get_idx(0)? {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -764,7 +768,12 @@ where
                     ));
                 }
             };
-            let member = result_member_from_storage_bytes(member_bytes)?;
+            if settled_result_member_digest(&member_bytes).as_slice() != member_digest {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member payload does not match its digest",
+                ));
+            }
+            let member = result_member_from_storage_bytes(&member_bytes)?;
             recovered_members.push((binding_view_key, member));
         }
         let mut settled_result_sets =
