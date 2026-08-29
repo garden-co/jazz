@@ -16,19 +16,22 @@ Those crates have Rust contract tests, but they are not wired through this
 package yet. The former UniFFI/JSI surface has been removed rather than left as
 a broken alternative runtime path.
 
-The package now contains the first real foreground-owner substrate. The shared
-JSI HostObject source plus Rust C ABI can open one memory-only foreground `Db`
-only from an already admitted opaque 32-byte capability, run an ordinary bounded
-core `tick`, and close that exact alias. It does not accept storage paths,
-schema, claims, identities, or tokens, and it never reads relay SQLite for a
-foreground operation. Owner work is bounded and capability revocation makes
-all aliases unusable. Android and iOS now install the shared private factory
-through their New-Architecture JSI hooks, including a retained host-state lease
-that makes late finalizers harmless during bridge teardown. The complete
-encoded `NativeDb` read/write/query/subscription codec remains deliberately
-unfinished, so this substrate is not yet an end-to-end RN client. The complete
-ownership/threading/packaging contract and staged acceptance path are specified
-in [`jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
+The package now contains the real foreground-owner substrate. The shared JSI
+HostObject source plus Rust C ABI opens one memory-only foreground `Db` only
+from an already admitted opaque 32-byte capability, runs ordinary bounded core
+turns, and closes that exact alias. It does not accept storage paths, schema,
+claims, identities, or tokens, and it never reads relay SQLite for a foreground
+operation. Owner work is bounded and capability revocation makes all aliases
+unusable. Android and iOS install the shared private factory through their
+New-Architecture JSI hooks, including a retained host-state lease that makes
+late finalizers harmless during bridge teardown. `jazz-tools/react-native` maps
+the shared local-first query/subscription and ordinary full-cell transaction
+commands onto its existing `NativeRuntimeAdapter`, so a packed consumer can use
+the public schema-backed Db API without a WASM fallback. Advanced families
+(remote tiers, branches, restore, large values, and trusted-serving reads) are
+still deliberately unavailable. The complete ownership/threading/packaging
+contract and staged acceptance path are specified in
+[`jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
 
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
 iOS autolink the module, report ABI `0` (unavailable), and explicitly reject
@@ -74,13 +77,16 @@ capabilities and trusted revocation. ABI 7 extends V1 of the shared foreground
 plus pending-operation poll/cancel commands for chunk-backed reads. It is
 deliberately a byte-oriented native-host contract, not
 a new React Native row/query API: the query and row-delta codecs are the same
-ones used by NAPI/WASM. This capability-gated slice supports only ordinary
-local-first reads; remote tiers, structured relation terminal operations, and
-write/transaction commands use the established native encoded-cell and core
-transaction semantics, including the public `txId` receipt identity. Branch
+ones used by NAPI/WASM. This capability-gated slice supports ordinary
+local-first reads plus full-cell write/transaction commands using the
+established native encoded-cell and core transaction semantics, including the
+public `txId` receipt identity. Remote tiers and structured relation terminal
+operations remain unavailable. Branch
 targets, custom write attribution, large-value diffs, structured relation
-terminal operations, and remote read tiers remain unavailable, so
-`jazz-tools/react-native` must not select it as its general runtime yet.
+terminal operations, and remote read tiers remain unavailable.
+`jazz-tools/react-native` selects this adapter for the ordinary
+capability-gated persistent foreground path; it does not select a browser-WASM
+or generic TurboModule runtime as a fallback.
 
 ## Expo development-build install path
 
@@ -108,9 +114,9 @@ it cannot contain the relay module.
 Expo Go is not supported. For a bare Android host set `newArchEnabled=true`;
 for iOS install pods with `RCT_NEW_ARCH_ENABLED=1 bundle exec pod install`.
 Use the `rn-preview-release` pull-request label when a preview must build the
-native relay artifacts. This is still not yet a supported high-level React Native Jazz client:
-the install path is intentionally documented separately
-from the unfinished general runtime facade.
+native relay artifacts. This is still not yet a supported high-level React
+Native Jazz client: the source-level adapter is wired, but the assembled
+platform artifact and Android/iOS device receipts remain outstanding.
 
 Bare React Native uses the same direct dependency and autolinking metadata, but
 has no Expo plugin: enable the New Architecture in the host project before
@@ -128,13 +134,11 @@ at relay use rather than pretend to provide persistence.
 
 ## What remains before React Native is supported
 
-1. Complete the encoded `NativeDb` binding contract against the already
-   attached in-memory clients; do not add a browser-WASM fallback.
-2. Extend the staged host lifecycle codec with shared event/peer-frame drainage
+1. Extend the staged host lifecycle codec with shared event/peer-frame drainage
    (not an object-per-row API).
-3. Build real iOS XCFramework and Android AAR/shared-library slices from that
+2. Build real iOS XCFramework and Android AAR/shared-library slices from that
    module.
-4. Verify bare React Native autolinking plus Expo prebuild/development builds
+3. Verify bare React Native autolinking plus Expo prebuild/development builds
    on Android and iOS in CI, using a first-party device app and structured
    two-foreground-runtime scenario results.
 

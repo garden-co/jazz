@@ -4,23 +4,22 @@ This is the first-party **Expo development-build / bare-host** acceptance app fo
 
 The app has one durable native relay and a scenario plan requiring two UI runtimes. It emits newline-delimited `JAZZ_DEVICE_RESULT {json}` protocol messages automatically on launch. A `passed` state is rejected by the protocol unless it includes platform, device, build, and observation-time evidence. Linked relay admission, foreground JSI byte-ABI execution, foreground mergeable/exclusive transaction commands, local A→B subscription observation, logout revocation, trusted A→B auth-scope switching, and native path-selected data isolation are implemented receipts. The transaction receipt sends canonical fixture cell bytes through JSI to Rust for insert/update/upsert/delete, checks commit `txId`, rollback, and terminal/cross-foreground handle rejection. The local-write-subscription receipt opens two independent JSI foreground aliases against one admitted relay, starts B's subscription, commits A's fixed row, and requires B to observe the Rust-produced binding delta. The isolation receipt makes the two native-selected auth scopes write distinct fixed rows, then proves each foreground can materialize only its own row after trusted native A→B replacement. The device driver terminates the full process and a verification launch repeats both directions through a fresh JS bridge and native relay owner. JavaScript never selects a scope, path, schema, identity, or row payload.
 
-## Experimental native foreground read smoke
+## High-level foreground source receipt
 
 `packages/jazz-tools/src/react-native/create-jazz-client.test.ts` contains the
-source-level contract for the first capability-gated foreground path. It loads
-the **built installed-package** `jazz-rn/relay` entry point (not a Jazz-owned test shim), has the
-native test host install its JSI factory, then opens an already verified local
-session, reads a seeded row, receives a subscription delta, and shuts down the
-exact native alias. The test proves that this flow neither inspects WASM nor
-uses the generic TurboModule frame executor. It also requires local reads to
-continue through the attached relay while the application is offline, and
-requires mutation and remote-tier attempts to fail closed.
+source-level contract for the capability-gated foreground path. It loads the
+**built installed-package** `jazz-rn/relay` entry point (not a Jazz-owned test
+shim), has the native test host install its JSI factory, then opens an already
+verified local session through the normal public Db API. The receipt performs a
+schema-backed insert, query, subscription, local settlement, and shutdown
+against that alias. It proves that this flow neither inspects WASM nor uses the
+generic TurboModule frame executor. Remote-tier reads still fail closed.
 
 That is deliberately a source/ABI contract, complementary to—not a substitute
-for—the installed Android/iOS device receipts. The device fixture only admits
-opaque capabilities; its fixed foreground writes still traverse the compiled
-Rust byte ABI, and it must not smuggle arbitrary path or write authority across
-that boundary.
+for—the installed Android/iOS device receipts. The device app wires the same
+high-level scenario after trusted admission; the platform fixture still admits
+only opaque capabilities and must not smuggle arbitrary path or write authority
+across that boundary.
 
 ## Trusted fixture boundary
 

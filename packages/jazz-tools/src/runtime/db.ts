@@ -1534,6 +1534,7 @@ export class Db {
   }
 
   protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
+    this.rejectInPlaceNativeRelayAuthUpdate();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
@@ -1561,6 +1562,7 @@ export class Db {
   }
 
   protected applyCookieSessionUpdate(session: Session | null): boolean {
+    this.rejectInPlaceNativeRelayAuthUpdate();
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
@@ -1583,6 +1585,20 @@ export class Db {
     this.connection.updateAuth({ cookieSession });
 
     return true;
+  }
+
+  /**
+   * A native foreground is admitted under one trusted platform scope. Changing
+   * the JavaScript-visible session in place would make its outer Db claim a
+   * different identity from the already-admitted native foreground. Platform
+   * auth must instead revoke the old opaque capability and create a Db for the
+   * newly admitted scope (SPEC 19.1).
+   */
+  private rejectInPlaceNativeRelayAuthUpdate(): void {
+    if (!(this.config as { nativeRelay?: unknown }).nativeRelay) return;
+    throw new Error(
+      "React Native native foreground cannot rotate authentication in place; revoke the old native capability and create a Db for the newly admitted session",
+    );
   }
 
   /**

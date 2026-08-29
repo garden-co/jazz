@@ -13,18 +13,14 @@ import {
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import type { ReactNativeSqliteStorageDriver } from "./storage.js";
+import { REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR } from "./storage.js";
 import {
-  REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
-  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
-} from "./storage.js";
-import {
-  NativeForegroundReadDb,
+  NativeForegroundDb,
   type NativeForegroundFactory,
   type NativeForegroundModule,
 } from "./native-foreground-db.js";
 
 export type NativeRelayCapability = Uint8Array;
-export type NativeRelayExecutor = { execute(command: string): Promise<string> };
 
 export type ReactNativeDbConfig = DbConfig & {
   /**
@@ -38,10 +34,12 @@ export type ReactNativeDbConfig = DbConfig & {
    * native ordered-KV runtime exists.
    */
   sqliteStorage?: ReactNativeSqliteStorageDriver;
-  /** Installed-host authority; only the experimental JSI read facade consumes it. */
-  nativeRelay?: Readonly<{ executor: NativeRelayExecutor; capability: NativeRelayCapability }>;
-  /** Capability-gated local read/query/subscription facade over the native relay. */
-  experimentalNativeReadOnly?: true;
+  /**
+   * Opaque authority issued by trusted native platform admission. The normal
+   * persistent RN runtime consumes it through its installed JSI foreground
+   * engine; application JavaScript cannot construct scope configuration.
+   */
+  nativeRelay?: Readonly<{ capability: NativeRelayCapability }>;
 };
 
 export const REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR =
@@ -63,10 +61,9 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
       throw new Error(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
     }
     if (shouldRequireSqliteDriver(config)) {
-      if (config.experimentalNativeReadOnly) {
-        if (!config.nativeRelay) throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
+      if (config.nativeRelay) {
         assertNativeRelay(config.nativeRelay);
-        resolveNativeReadSession(config);
+        resolveNativeSession(config);
         const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         this.foregroundModule = foreground;
@@ -76,7 +73,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
       // Rust ordered-KV runtime. Opening one here and then delegating to WASM
       // only preflights an unrelated database and falsely implies that Jazz
       // rows are persisted there.
-      throw new Error(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
+      throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
     }
 
     if (config.nativeRelay) throw new Error(REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR);
@@ -84,15 +81,15 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   }
 
   override createClient(context: RuntimeClientContext<ReactNativeDbConfig>): JazzClient {
-    if (context.config.experimentalNativeReadOnly) {
+    if (context.config.nativeRelay) {
       const factory = this.foregroundFactory;
       const module = this.foregroundModule;
       const relay = context.config.nativeRelay;
       if (!factory || !module || !relay)
         throw new Error("React Native native foreground runtime is not loaded");
-      const session = resolveNativeReadSession(context.config);
+      const session = resolveNativeSession(context.config);
       const runtime = NativeRuntimeAdapter.fromDb(
-        new NativeForegroundReadDb(factory.openAttached(relay.capability), module),
+        new NativeForegroundDb(factory.openAttached(relay.capability), module),
         context.schema,
         randomNativeNodeBytes(),
         authorBytesForSession(session),
@@ -133,22 +130,18 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
 }
 
 function assertNativeRelay(relay: NonNullable<ReactNativeDbConfig["nativeRelay"]>): void {
-  if (
-    typeof relay.executor?.execute !== "function" ||
-    !(relay.capability instanceof Uint8Array) ||
-    relay.capability.byteLength !== 32
-  )
+  if (!(relay.capability instanceof Uint8Array) || relay.capability.byteLength !== 32)
     throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
 }
 
-function resolveNativeReadSession(config: ReactNativeDbConfig) {
+function resolveNativeSession(config: ReactNativeDbConfig) {
   const session = resolveClientInternalSessionSync({
     ...config,
     trustedReservedSession: getTrustedReservedSession(config),
   });
   if (!session)
     throw new Error(
-      "React Native experimental native read-only runtime requires an already verified jwtToken or cookieSession; native token minting is not implemented",
+      "React Native native foreground requires an already verified jwtToken or cookieSession; native token minting is not implemented",
     );
   return session;
 }

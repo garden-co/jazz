@@ -10,6 +10,7 @@ import {
 const nativeForegroundTest = vi.hoisted(() => ({
   execute: undefined as undefined | ((command: Uint8Array) => Uint8Array),
   tick: vi.fn(),
+  setTickScheduler: vi.fn(),
   close: vi.fn(() => true),
   install: vi.fn(),
   openAttached: vi.fn(),
@@ -36,6 +37,7 @@ vi.mock("react-native", () => ({
             return {
               execute: (command: Uint8Array) => nativeForegroundTest.execute!(command),
               tick: nativeForegroundTest.tick,
+              setTickScheduler: nativeForegroundTest.setTickScheduler,
               close: nativeForegroundTest.close,
             };
           },
@@ -50,7 +52,6 @@ import {
   REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
-  REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   type JazzClient,
   type ReactNativeSqliteStorageDriver,
@@ -104,9 +105,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   });
 
   it("exports the exact installed-package persistence boundary messages", () => {
-    expect(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR).toBe(
-      "React Native persistent storage is not available in this alpha; memory mode is unverified scaffolding, not device-supported persistence",
-    );
     expect(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR).toBe(
       "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)",
     );
@@ -141,30 +139,16 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   });
 
   it("rejects the default persistent configuration", async () => {
-    const error = await createDb({ appId: "react-native-default-persistent-boundary-test" }).catch(
-      (error: unknown) => error,
-    );
+    const error = await createDb({
+      appId: "react-native-default-persistent-boundary-test",
+    }).catch((error: unknown) => error);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
   });
 
-  it("uses one foreground memory runtime connected to the platform-admitted persistent relay", async () => {
-    const relay = nativeRelayReceipt();
-    client = await createJazzClient({
-      appId: "react-native-native-relay-startup-receipt",
-      nativeRelay: relay.config,
-    });
-
-    await expect(client.db.all(app.notes)).resolves.toEqual([]);
-    expect(relay.commands).toEqual(expect.arrayContaining([1, 2]));
-
-    await client.shutdown();
-    client = undefined;
-    expect(relay.commands).toEqual(expect.arrayContaining([3, 4]));
-  });
-
-  it("runs the built installed-package native foreground read smoke without loading WASM", async () => {
+  it("runs a schema-backed foreground insert, query, subscription, and shutdown without loading WASM", async () => {
     nativeForegroundTest.tick.mockClear();
+    nativeForegroundTest.setTickScheduler.mockClear();
     nativeForegroundTest.close.mockClear();
     nativeForegroundTest.install.mockClear();
     nativeForegroundTest.openAttached.mockClear();
@@ -195,6 +179,14 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.of(6, 1);
         case 7:
           return Uint8Array.of(7, 1);
+        case 10:
+          return Uint8Array.of(11, 13);
+        case 11:
+          return Uint8Array.from([12, ...rowId]);
+        case 15:
+          return Uint8Array.from([14, ...new Uint8Array(16).fill(4)]);
+        case 16:
+          return Uint8Array.of(15, 1);
         default:
           throw new Error(`unexpected foreground command ${command[0]}`);
       }
@@ -204,7 +196,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     client = await createJazzClient({
       appId: "react-native-native-foreground-read-receipt",
       nativeRelay: relay.config,
-      experimentalNativeReadOnly: true,
       cookieSession: {
         issuer: "https://issuer.example",
         user_id: "reader",
@@ -229,18 +220,22 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     const ticksBeforeUnsubscribe = nativeForegroundTest.tick.mock.calls.length;
     unsubscribe();
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThan(ticksBeforeUnsubscribe);
-    expect(() => client!.db.insert(app.notes, { title: "unsupported" })).toThrow(
-      /supports local read queries and subscriptions only; insert is unavailable/,
-    );
+    const inserted = client.db.insert(app.notes, { title: "Native note" });
+    await expect(inserted.wait({ tier: "local" })).resolves.toMatchObject({
+      title: "Native note",
+    });
+    await expect(inserted.txId).resolves.toMatch(/[0-9a-f-]{36}/);
     await expect(client.db.all(app.notes, { tier: ReadTier.Remote })).rejects.toThrow(
       /remote tiers.*not implemented/,
     );
-    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6]));
+    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 10, 11, 15]));
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(nativeForegroundTest.install).toHaveBeenCalledTimes(1);
+    expect(nativeForegroundTest.setTickScheduler).toHaveBeenCalledTimes(1);
     expect(nativeForegroundTest.openAttached).toHaveBeenCalledWith(nativeRelayCapability);
-    // The read-only slice only enters the capability-gated JSI host. It must
-    // not fall back to the generic TurboModule frame executor or WASM.
+    // The foreground engine enters only through the capability-gated JSI host;
+    // the high-level insert/query/subscription path must not fall back to the
+    // generic TurboModule frame executor or WASM.
     expect(relay.commands).toEqual([]);
 
     await client.shutdown();
@@ -252,7 +247,11 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   it("fails closed on an in-place auth refresh instead of reading through the prior native capability", async () => {
     nativeForegroundTest.close.mockClear();
     const rows = encodeRows([
-      { table: "notes", rowId: new Uint8Array(16).fill(9), title: "old admitted scope" },
+      {
+        table: "notes",
+        rowId: new Uint8Array(16).fill(9),
+        title: "old admitted scope",
+      },
     ]);
     nativeForegroundTest.execute = (command) => {
       if (command[0] === 2) return Uint8Array.of(2, 21);
@@ -264,7 +263,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     client = await createJazzClient({
       appId: "react-native-native-foreground-auth-rotation",
       nativeRelay: nativeRelayReceipt().config,
-      experimentalNativeReadOnly: true,
       cookieSession: {
         issuer: "https://issuer.example",
         user_id: "old-reader",
@@ -289,37 +287,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       { title: "old admitted scope" },
     ]);
     expect(nativeForegroundTest.close).not.toHaveBeenCalled();
-  });
-
-  it("replaces only the foreground peer alias across explicit offline/reconnect", async () => {
-    const relay = nativeRelayReceipt();
-    client = await createJazzClient({
-      appId: "react-native-native-relay-reconnect-receipt",
-      serverUrl: "wss://relay.example.test",
-      nativeRelay: relay.config,
-    });
-
-    await client.db.all(app.notes, { tier: "local" });
-    await client.db.disconnect();
-    await client.db.reconnect();
-    await client.db.all(app.notes, { tier: "local" });
-
-    expect(relay.commands.filter((tag) => tag === 1)).toHaveLength(2);
-    expect(relay.commands.filter((tag) => tag === 2)).toHaveLength(2);
-    expect(relay.commands).toEqual(expect.arrayContaining([3, 4]));
-  });
-
-  it("names native artifact, admission, and ABI failures at persistent startup", async () => {
-    const relay = nativeRelayReceipt();
-    relay.config.executor.execute = async () => btoa(String.fromCharCode(9));
-    client = await createJazzClient({
-      appId: "react-native-native-relay-abi-receipt",
-      nativeRelay: relay.config,
-    });
-
-    await expect(client.db.all(app.notes)).rejects.toThrow(
-      /installed native artifact, platform admission capability, and relay command ABI/,
-    );
   });
 
   it("rejects an opaque relay capability when memory mode would ignore it", async () => {

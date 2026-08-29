@@ -16,7 +16,10 @@ export const scenarioPlan: readonly ScenarioResult[] = [
     "foreground-write-transaction",
     "JSI foreground commits and rolls back native mergeable/exclusive transactions",
   ],
-  ["local-write-subscription", "Two UI runtimes observe a write through one relay"],
+  [
+    "local-write-subscription",
+    "Public RN Db API inserts, queries, and publishes locally; two UI runtimes also observe a write through one relay",
+  ],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
   ["reopen", "A fresh app process reopens scope A's durable relay store"],
   ["scope-isolation", "Distinct app/storage/auth scopes cannot observe each other"],

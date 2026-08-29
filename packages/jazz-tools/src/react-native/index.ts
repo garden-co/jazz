@@ -18,7 +18,6 @@ export {
   type UseLocalFirstAuthOptions,
 } from "./use-local-first-auth.js";
 export {
-  REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR,
   UnimplementedSqliteStorageDriver,
@@ -33,7 +32,6 @@ export {
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
   type NativeRelayCapability,
-  type NativeRelayExecutor,
   type ReactNativeDbConfig,
 } from "./runtime-source.js";
-export { REACT_NATIVE_READ_ONLY_UNSUPPORTED_ERROR } from "./native-foreground-db.js";
+export { REACT_NATIVE_UNSUPPORTED_ERROR } from "./native-foreground-db.js";

@@ -52,6 +52,12 @@ export type NativeForegroundRuntimeFactory = {
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
+  /**
+   * Private wake registration used by jazz-tools' normal NativeRuntimeAdapter.
+   * The native HostObject coalesces owner-thread wakes onto the current JSI
+   * runtime; this is not an application callback API.
+   */
+  setTickScheduler?(callback: (urgency: string) => void): void;
   close(): boolean;
 };
 
@@ -240,6 +246,12 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
         },
         tick(): void {
           foreground.tick!();
+        },
+        setTickScheduler(callback: (urgency: string) => void): void {
+          if (typeof foreground.setTickScheduler !== 'function') {
+            throw foregroundRuntimeInstallationError();
+          }
+          foreground.setTickScheduler(callback);
         },
         close(): boolean {
           return foreground.close!();

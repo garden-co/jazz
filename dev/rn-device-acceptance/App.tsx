@@ -9,6 +9,7 @@ import {
   proveForegroundWriteAbi,
   proveForegroundWriteSubscription,
 } from "./src/foreground-byte-abi";
+import { proveHighLevelForegroundRuntime } from "./src/high-level-foreground";
 import {
   admittedNativeRelay,
   deviceReceiptContext,
@@ -71,6 +72,7 @@ async function observeTrustedAdmissionLifecycle() {
     admittedNativeRelay,
   );
   const scopeA = await admittedNativeRelay();
+  await proveHighLevelForegroundRuntime(scopeA.capability);
   proveForegroundScopeIsolation(foregroundFactory, scopeA.capability, foregroundCodec, {
     write: "a",
     contains: ["a"],

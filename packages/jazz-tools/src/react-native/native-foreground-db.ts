@@ -5,10 +5,43 @@ type ForegroundCommand =
   | { type: "all"; query: number }
   | { type: "subscribe"; query: number }
   | { type: "drainSubscription"; subscription: number }
-  | { type: "unsubscribe"; subscription: number };
+  | { type: "unsubscribe"; subscription: number }
+  | { type: "poll"; operation: number }
+  | { type: "cancel"; operation: number }
+  | { type: "beginTransaction"; kind: "mergeable" | "exclusive" }
+  | {
+      type: "insert";
+      transaction: number;
+      table: string;
+      cells: Uint8Array;
+      rowId?: Uint8Array;
+    }
+  | {
+      type: "update";
+      transaction: number;
+      table: string;
+      rowId: Uint8Array;
+      patch: Uint8Array;
+    }
+  | {
+      type: "upsert";
+      transaction: number;
+      table: string;
+      rowId: Uint8Array;
+      cells: Uint8Array;
+    }
+  | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
+  | { type: "commitTransaction"; transaction: number }
+  | { type: "rollbackTransaction"; transaction: number };
 
 type ForegroundEvent =
-  | { type: "delta"; reset: boolean; settled: boolean; tier: string; delta: Uint8Array }
+  | {
+      type: "delta";
+      reset: boolean;
+      settled: boolean;
+      tier: string;
+      delta: Uint8Array;
+    }
   | { type: "rejected"; reason: string }
   | { type: "closed" };
 
@@ -19,11 +52,20 @@ type ForegroundResponse =
   | { type: "subscribed"; subscription: number }
   | { type: "subscriptionEvents"; events: ForegroundEvent[] }
   | { type: "unsubscribed"; closed: boolean }
-  | { type: "closed"; closed: boolean };
+  | { type: "closed"; closed: boolean }
+  | { type: "pending"; operation: number }
+  | { type: "operationError"; reason: string }
+  | { type: "cancelled"; cancelled: boolean }
+  | { type: "transactionOpened"; transaction: number }
+  | { type: "inserted"; rowId: Uint8Array }
+  | { type: "mutationStaged" }
+  | { type: "transactionCommitted"; txId: Uint8Array }
+  | { type: "transactionRolledBack"; rolledBack: boolean };
 
 export type NativeForegroundRuntime = {
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
+  setTickScheduler?(callback: (urgency: string) => void): void;
   close(): boolean;
 };
 
@@ -38,8 +80,8 @@ export type NativeForegroundFactory = {
   openAttached(capability: Uint8Array): NativeForegroundRuntime;
 };
 
-export const REACT_NATIVE_READ_ONLY_UNSUPPORTED_ERROR =
-  "React Native experimental native foreground currently supports local read queries and subscriptions only";
+export const REACT_NATIVE_UNSUPPORTED_ERROR =
+  "React Native native foreground does not support this operation yet";
 
 /**
  * Narrow NativeDb consumer for the first JSI foreground slice.
@@ -49,15 +91,32 @@ export const REACT_NATIVE_READ_ONLY_UNSUPPORTED_ERROR =
  * second object-shaped database facade and intentionally grows only as the
  * shared Rust command ABI grows.
  */
-export class NativeForegroundReadDb {
+/**
+ * Thin `NativeDb` adapter over the native foreground command ABI.
+ *
+ * This deliberately contains no row, query, or mutation interpretation: the
+ * normal `NativeRuntimeAdapter` owns the public API and existing codecs. A
+ * direct mutation is represented by one ordinary native mergeable transaction;
+ * explicit public transactions retain their native transaction handle until
+ * commit/rollback.
+ */
+export class NativeForegroundDb {
   private closed = false;
+  private readonly transactions = new Map<string, NativeForegroundTransaction>();
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
     private readonly commands: NativeForegroundModule,
   ) {}
 
-  setTickScheduler(_callback: unknown): void {}
+  setTickScheduler(callback: (first: Error | string | null, second?: string) => void): void {
+    if (!this.runtime.setTickScheduler) {
+      throw new Error(
+        "React Native native foreground runtime does not expose owner wake scheduling",
+      );
+    }
+    this.runtime.setTickScheduler((urgency) => callback(urgency));
+  }
 
   onMutationError(_callback: unknown): void {}
 
@@ -67,7 +126,7 @@ export class NativeForegroundReadDb {
     return { nativeForegroundQuery: response.query };
   }
 
-  all(query: object, opts: unknown): Uint8Array {
+  all(query: object, opts: unknown): Uint8Array | { poll(): Uint8Array | null } {
     assertLocalReadOptions(opts);
     // An attached foreground is an ordinary peer of the native relay. One
     // bounded relay turn admits already-persisted rows before materializing a
@@ -75,11 +134,12 @@ export class NativeForegroundReadDb {
     // after some unrelated caller happens to tick the host.
     this.tick();
     const response = this.execute({ type: "all", query: queryHandle(query) });
-    if (response.type !== "rows") return unexpected("all", response.type);
-    return response.rows;
+    if (response.type === "rows") return response.rows;
+    if (response.type === "pending") return this.pendingRows(response.operation);
+    return unexpected("all", response.type);
   }
 
-  allAsync(query: object, opts: unknown): Uint8Array {
+  allAsync(query: object, opts: unknown): Uint8Array | { poll(): Uint8Array | null } {
     return this.all(query, opts);
   }
 
@@ -87,10 +147,21 @@ export class NativeForegroundReadDb {
     return unsupported("trusted-serving reads");
   }
 
+  allRelationQuery(): never {
+    return unsupported("relation terminal reads");
+  }
+
+  allRelationQueryForIdentity(): never {
+    return unsupported("trusted-serving relation reads");
+  }
+
   subscribe(query: object, opts: unknown): NativeForegroundSubscription {
     assertLocalReadOptions(opts);
     this.tick();
-    const response = this.execute({ type: "subscribe", query: queryHandle(query) });
+    const response = this.execute({
+      type: "subscribe",
+      query: queryHandle(query),
+    });
     if (response.type !== "subscribed") return unexpected("subscribe", response.type);
     return new NativeForegroundSubscription(response.subscription, this);
   }
@@ -103,6 +174,7 @@ export class NativeForegroundReadDb {
   close(): boolean {
     if (this.closed) return false;
     this.closed = true;
+    this.transactions.clear();
     try {
       const response = this.executeAllowClosed("close");
       if (response.type !== "closed") return unexpected("close", response.type);
@@ -124,19 +196,28 @@ export class NativeForegroundReadDb {
       // handle. It is still essential that this JS facade remains closed.
     }
     throw new Error(
-      "React Native experimental native read-only runtime cannot rotate authentication in place; revoke the old native capability and create a new Db for the newly admitted session",
+      "React Native native foreground cannot rotate authentication in place; revoke the old native capability and create a new Db for the newly admitted session",
     );
   }
 
-  drain(subscription: number): unknown[] {
-    const response = this.execute({ type: "drainSubscription", subscription });
-    if (response.type !== "subscriptionEvents") {
-      return unexpected("drainSubscription", response.type);
+  drain(subscription: number, operation?: number): unknown[] | { pendingOperation: number } {
+    const response =
+      operation === undefined
+        ? this.execute({ type: "drainSubscription", subscription })
+        : this.execute({ type: "poll", operation });
+    if (response.type === "pending") return { pendingOperation: response.operation };
+    if (response.type === "operationError") {
+      throw new Error(`React Native native foreground subscription failed: ${response.reason}`);
     }
+    if (response.type !== "subscriptionEvents")
+      return unexpected("drainSubscription", response.type);
     return response.events.map((event) => {
       if (event.type === "delta") return event;
       if (event.type === "closed") return event;
-      return { type: "rejected", reason: { type: "ServerFailure", code: event.reason } };
+      return {
+        type: "rejected",
+        reason: { type: "ServerFailure", code: event.reason },
+      };
     });
   }
 
@@ -157,6 +238,21 @@ export class NativeForegroundReadDb {
     return this.executeAllowClosed(command);
   }
 
+  private pendingRows(operation: number): { poll(): Uint8Array | null } {
+    return {
+      poll: () => {
+        this.tick();
+        const response = this.execute({ type: "poll", operation });
+        if (response.type === "pending") return null;
+        if (response.type === "operationError") {
+          throw new Error(`React Native native foreground read failed: ${response.reason}`);
+        }
+        if (response.type !== "rows") return unexpected("poll", response.type);
+        return response.rows;
+      },
+    };
+  }
+
   private executeAllowClosed(command: ForegroundCommand): ForegroundResponse {
     return this.commands.decodeNativeForegroundResponse(
       this.runtime.execute(this.commands.encodeNativeForegroundCommand(command)),
@@ -167,52 +263,348 @@ export class NativeForegroundReadDb {
     if (this.closed) throw new Error("React Native native foreground runtime is closed");
   }
 
-  // Explicit members make accidental mutation fail at the NativeDb boundary,
-  // rather than later as an opaque missing-method TypeError.
-  insertEncoded(): never {
-    return unsupported("insert");
+  // The admitted native host already owns and validates the schema. A schema
+  // view therefore shares this foreground rather than opening a second store.
+  registerSchema(): NativeForegroundDb {
+    return this;
   }
-  updateEncoded(): never {
-    return unsupported("update");
+
+  beginTransaction(openTransactionId: string, kind: "mergeable" | "exclusive"): void {
+    this.assertOpen();
+    if (this.transactions.has(openTransactionId)) {
+      throw new Error(
+        `React Native native foreground transaction ${openTransactionId} is already open`,
+      );
+    }
+    const response = this.execute({ type: "beginTransaction", kind });
+    if (response.type !== "transactionOpened") return unexpected("beginTransaction", response.type);
+    this.transactions.set(openTransactionId, {
+      handle: response.transaction,
+      kind,
+      closed: false,
+    });
   }
-  upsertEncoded(): never {
-    return unsupported("upsert");
+
+  commitTransaction(openTransactionId: string): NativeForegroundWrite {
+    const transaction = this.openTransaction(openTransactionId, "commit");
+    const response = this.execute({
+      type: "commitTransaction",
+      transaction: transaction.handle,
+    });
+    if (response.type !== "transactionCommitted")
+      return unexpected("commitTransaction", response.type);
+    this.transactions.delete(openTransactionId);
+    transaction.closed = true;
+    return nativeWrite(response.txId);
   }
-  deleteEncoded(): never {
-    return unsupported("delete");
+
+  rollbackTransaction(openTransactionId: string): void {
+    const transaction = this.openTransaction(openTransactionId, "rollback");
+    const response = this.execute({
+      type: "rollbackTransaction",
+      transaction: transaction.handle,
+    });
+    if (response.type !== "transactionRolledBack")
+      return unexpected("rollbackTransaction", response.type);
+    this.transactions.delete(openTransactionId);
+    transaction.closed = true;
   }
-  restoreEncoded(): never {
+
+  attachMergeableTx(openTransactionId: string): NativeForegroundTx {
+    const transaction = this.transaction(openTransactionId, "mergeable");
+    return new NativeForegroundTx(this, transaction);
+  }
+
+  attachExclusiveTx(openTransactionId: string): NativeForegroundTx {
+    const transaction = this.transaction(openTransactionId, "exclusive");
+    return new NativeForegroundTx(this, transaction);
+  }
+
+  insertEncoded(
+    table: string,
+    cells: Uint8Array,
+    options?: { rowId?: Uint8Array },
+  ): NativeForegroundWrite {
+    return this.withOneMutation("insert", (transaction) => {
+      const response = this.execute({
+        type: "insert",
+        transaction: transaction.handle,
+        table,
+        cells,
+        rowId: options?.rowId,
+      });
+      if (response.type !== "inserted") return unexpected("insert", response.type);
+      return response.rowId;
+    });
+  }
+
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): NativeForegroundWrite {
+    return this.withOneMutation("update", (transaction) => {
+      const response = this.execute({
+        type: "update",
+        transaction: transaction.handle,
+        table,
+        rowId,
+        patch,
+      });
+      if (response.type !== "mutationStaged") return unexpected("update", response.type);
+      return rowId;
+    });
+  }
+
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
+    return this.withOneMutation("upsert", (transaction) => {
+      const response = this.execute({
+        type: "upsert",
+        transaction: transaction.handle,
+        table,
+        rowId,
+        cells,
+      });
+      if (response.type !== "mutationStaged") return unexpected("upsert", response.type);
+      return rowId;
+    });
+  }
+
+  deleteEncoded(table: string, rowId: Uint8Array): NativeForegroundWrite {
+    return this.withOneMutation("delete", (transaction) => {
+      const response = this.execute({
+        type: "delete",
+        transaction: transaction.handle,
+        table,
+        rowId,
+      });
+      if (response.type !== "mutationStaged") return unexpected("delete", response.type);
+      return rowId;
+    });
+  }
+
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): NativeForegroundWrite {
+    // The current shared command ABI has no restore discriminant. Upsert is
+    // not equivalent for a tombstoned row, so make the limitation explicit
+    // rather than silently changing restore semantics.
+    void table;
+    void rowId;
+    void cells;
     return unsupported("restore");
   }
-  beginTransaction(): never {
-    return unsupported("beginTransaction");
-  }
-  commitTransaction(): never {
-    return unsupported("commitTransaction");
-  }
-  rollbackTransaction(): never {
-    return unsupported("rollbackTransaction");
-  }
-  attachMergeableTx(): never {
-    return unsupported("attachMergeableTx");
-  }
+
   mergeableTx(): never {
-    return unsupported("mergeableTx");
-  }
-  registerSchema(): never {
-    return unsupported("registerSchema");
+    return unsupported("detached mergeable transaction handles");
   }
   connectUpstream(): never {
     return unsupported("JavaScript upstream transport");
   }
+
+  private withOneMutation(
+    operation: string,
+    stage: (transaction: NativeForegroundTransaction) => Uint8Array,
+  ): NativeForegroundWrite {
+    const response = this.execute({
+      type: "beginTransaction",
+      kind: "mergeable",
+    });
+    if (response.type !== "transactionOpened")
+      return unexpected(`${operation}.begin`, response.type);
+    const transaction: NativeForegroundTransaction = {
+      handle: response.transaction,
+      kind: "mergeable",
+      closed: false,
+    };
+    try {
+      const rowId = stage(transaction);
+      const committed = this.execute({
+        type: "commitTransaction",
+        transaction: transaction.handle,
+      });
+      if (committed.type !== "transactionCommitted") {
+        return unexpected(`${operation}.commit`, committed.type);
+      }
+      transaction.closed = true;
+      return nativeWrite(committed.txId, rowId);
+    } catch (error) {
+      if (!transaction.closed) {
+        try {
+          this.execute({
+            type: "rollbackTransaction",
+            transaction: transaction.handle,
+          });
+        } catch {
+          // The original command failure is the useful error. The native host
+          // retires remaining open transactions during foreground close.
+        }
+      }
+      throw error;
+    }
+  }
+
+  stageInsert(
+    transaction: NativeForegroundTransaction,
+    table: string,
+    cells: Uint8Array,
+    rowId?: Uint8Array,
+  ): Uint8Array {
+    const response = this.execute({
+      type: "insert",
+      transaction: transaction.handle,
+      table,
+      cells,
+      rowId,
+    });
+    if (response.type !== "inserted") return unexpected("insert", response.type);
+    return response.rowId;
+  }
+
+  stageUpdate(
+    transaction: NativeForegroundTransaction,
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+  ): void {
+    const response = this.execute({
+      type: "update",
+      transaction: transaction.handle,
+      table,
+      rowId,
+      patch,
+    });
+    if (response.type !== "mutationStaged") return unexpected("update", response.type);
+  }
+
+  stageUpsert(
+    transaction: NativeForegroundTransaction,
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+  ): void {
+    const response = this.execute({
+      type: "upsert",
+      transaction: transaction.handle,
+      table,
+      rowId,
+      cells,
+    });
+    if (response.type !== "mutationStaged") return unexpected("upsert", response.type);
+  }
+
+  stageDelete(transaction: NativeForegroundTransaction, table: string, rowId: Uint8Array): void {
+    const response = this.execute({
+      type: "delete",
+      transaction: transaction.handle,
+      table,
+      rowId,
+    });
+    if (response.type !== "mutationStaged") return unexpected("delete", response.type);
+  }
+
+  private transaction(id: string, kind: "mergeable" | "exclusive"): NativeForegroundTransaction {
+    const transaction = this.transactions.get(id);
+    if (!transaction || transaction.closed || transaction.kind !== kind) {
+      throw new Error(`React Native native foreground has no open ${kind} transaction ${id}`);
+    }
+    return transaction;
+  }
+
+  private openTransaction(id: string, operation: string): NativeForegroundTransaction {
+    const transaction = this.transactions.get(id);
+    if (!transaction || transaction.closed) {
+      throw new Error(
+        `React Native native foreground cannot ${operation} unknown transaction ${id}`,
+      );
+    }
+    return transaction;
+  }
+}
+
+type NativeForegroundTransaction = {
+  handle: number;
+  kind: "mergeable" | "exclusive";
+  closed: boolean;
+};
+
+type NativeForegroundWrite = {
+  readonly txId: string;
+  readonly payload: Uint8Array;
+  readonly rowId: Uint8Array;
+  wait(tier: string): Promise<void>;
+  writeState(): unknown;
+  close(): boolean;
+};
+
+class NativeForegroundTx {
+  constructor(
+    private readonly db: NativeForegroundDb,
+    private readonly transaction: NativeForegroundTransaction,
+  ) {}
+
+  commit(): NativeForegroundWrite {
+    throw new Error("React Native native foreground transactions are committed by their owning Db");
+  }
+
+  rollback(): void {
+    throw new Error(
+      "React Native native foreground transactions are rolled back by their owning Db",
+    );
+  }
+
+  close(): boolean {
+    return false;
+  }
+
+  insertEncoded(table: string, cells: Uint8Array, options?: { rowId?: Uint8Array }): Uint8Array {
+    return this.db.stageInsert(this.transaction, table, cells, options?.rowId);
+  }
+
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): void {
+    this.db.stageUpdate(this.transaction, table, rowId, patch);
+  }
+
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): void {
+    this.db.stageUpsert(this.transaction, table, rowId, cells);
+  }
+
+  deleteEncoded(table: string, rowId: Uint8Array): void {
+    this.db.stageDelete(this.transaction, table, rowId);
+  }
+
+  restoreEncoded(): never {
+    return unsupported("restore");
+  }
+}
+
+function nativeWrite(
+  txId: Uint8Array<ArrayBufferLike>,
+  rowId: Uint8Array<ArrayBufferLike> = new Uint8Array(16),
+): NativeForegroundWrite {
+  const id = formatUuid(txId);
+  let closed = false;
+  return {
+    txId: id,
+    payload: new Uint8Array(),
+    rowId: rowId.slice(),
+    async wait(tier: string): Promise<void> {
+      if (tier !== "local") {
+        throw new Error(
+          `React Native native foreground only confirms local writes; ${tier} settlement is not implemented`,
+        );
+      }
+    },
+    writeState: () => ({ state: "committed" }),
+    close: () => {
+      if (closed) return false;
+      closed = true;
+      return true;
+    },
+  };
 }
 
 class NativeForegroundSubscription {
   private closed = false;
+  private pendingOperation: number | undefined;
 
   constructor(
     private readonly handle: number,
-    private readonly db: NativeForegroundReadDb,
+    private readonly db: NativeForegroundDb,
   ) {}
 
   readAll(): unknown[] | { retryAfterMs(): number } {
@@ -221,7 +613,12 @@ class NativeForegroundSubscription {
     // therefore also drive one fair relay turn before observing the stream;
     // Drain alone only consumes events which some other caller has advanced.
     this.db.tick();
-    const events = this.db.drain(this.handle);
+    const events = this.db.drain(this.handle, this.pendingOperation);
+    if (!Array.isArray(events)) {
+      this.pendingOperation = events.pendingOperation;
+      return { retryAfterMs: () => 0 };
+    }
+    this.pendingOperation = undefined;
     // The first command slice has no native-to-JS wake callback yet. Keep the
     // normal NativeRuntimeAdapter subscription reader suspended on its
     // existing retry contract so later native deltas are observable without
@@ -246,21 +643,28 @@ function queryHandle(query: object): number {
 }
 
 function assertLocalReadOptions(opts: unknown): void {
-  if (!opts || typeof opts !== "object") throw new Error(REACT_NATIVE_READ_ONLY_UNSUPPORTED_ERROR);
+  if (!opts || typeof opts !== "object") throw new Error(REACT_NATIVE_UNSUPPORTED_ERROR);
   const entries = Object.entries(opts as Record<string, unknown>);
   if (entries.some(([key, value]) => key !== "tier" || value !== "local")) {
     throw new Error(
-      `${REACT_NATIVE_READ_ONLY_UNSUPPORTED_ERROR}; remote tiers, historical views, and include-deleted reads are not implemented`,
+      `${REACT_NATIVE_UNSUPPORTED_ERROR}; remote tiers, historical views, and include-deleted reads are not implemented`,
     );
   }
 }
 
 function unsupported(operation: string): never {
-  throw new Error(`${REACT_NATIVE_READ_ONLY_UNSUPPORTED_ERROR}; ${operation} is unavailable`);
+  throw new Error(`${REACT_NATIVE_UNSUPPORTED_ERROR}; ${operation} is unavailable`);
 }
 
 function unexpected(operation: string, response: string): never {
   throw new Error(
     `React Native native foreground ${operation} returned unexpected ${response} response`,
   );
+}
+
+function formatUuid(bytes: Uint8Array<ArrayBufferLike>): string {
+  if (bytes.byteLength !== 16)
+    throw new Error("React Native native foreground returned malformed transaction id");
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

@@ -26,9 +26,12 @@ If your platform is not supported in the npm package, install with Cargo from so
 
 ## React Native alpha boundary
 
-The `jazz-tools/react-native` entry point currently exposes compile-level binding
-scaffolding only. Persistent React Native/Expo databases are not available in
-this alpha: the default persistent configuration and the proposal-only
-`sqliteStorage` option both fail before opening a driver. Explicit memory mode
-has only been exercised by Node-based wiring tests, not Metro/Hermes or a device,
-and is not a supported persistence alternative.
+`jazz-tools/react-native` has a narrow native-foreground alpha: with a matching
+installed `jazz-rn` development/release artifact and an opaque capability issued
+by trusted platform admission, it opens a normal in-memory foreground Db
+attached to the native SQLite relay. Local-first schema-backed query,
+subscription, and ordinary full-cell write transactions use Jazz's regular API.
+It is not yet a device-support claim: remote tiers, large values, and several
+advanced operation families remain unavailable, and Android/iOS device receipts
+are still required. Configurations without the platform-issued capability, and
+the proposal-only `sqliteStorage` option, still fail before opening a driver.
