@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
-    SeededRowIdSource, block_on,
+    SeededRowIdSource, SubscriptionEvent, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
@@ -113,7 +113,10 @@ struct Config {
 impl Config {
     fn from_env() -> Self {
         Self {
-            table_rows: support::csv_usizes("JAZZ_SELECTIVE_HYDRATION_ROWS", "1000,10000,100000"),
+            table_rows: support::csv_usizes(
+                "JAZZ_SELECTIVE_HYDRATION_ROWS",
+                "10000,100000,1000000",
+            ),
             target_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS", 100),
             result_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_RESULT_ROWS", 50),
             batch_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS", 1000),
@@ -160,10 +163,13 @@ struct RungReceipt {
     db_open_us: u128,
     prepare_us: u128,
     query_us: u128,
+    maintained_subscribe_us: u128,
     result_digest: String,
+    maintained_result_digest: String,
     open_metrics: StorageReadMetrics,
     prepare_metrics: StorageReadMetrics,
     query_metrics: StorageReadMetrics,
+    maintained_metrics: StorageReadMetrics,
 }
 
 impl RungReceipt {
@@ -186,9 +192,18 @@ impl RungReceipt {
         fields.insert("db_open_us".to_owned(), json!(self.db_open_us));
         fields.insert("prepare_us".to_owned(), json!(self.prepare_us));
         fields.insert("query_us".to_owned(), json!(self.query_us));
+        fields.insert(
+            "maintained_subscribe_us".to_owned(),
+            json!(self.maintained_subscribe_us),
+        );
+        fields.insert(
+            "maintained_result_digest".to_owned(),
+            json!(self.maintained_result_digest),
+        );
         insert_read_metrics(&mut fields, "open", &self.open_metrics);
         insert_read_metrics(&mut fields, "prepare", &self.prepare_metrics);
         insert_read_metrics(&mut fields, "query", &self.query_metrics);
+        insert_read_metrics(&mut fields, "maintained", &self.maintained_metrics);
         support::emit_json_line("selective_global_hydration", fields);
     }
 }
@@ -257,6 +272,49 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
     let result_digest = digest_rows(&observed);
     assert_eq!(result_digest, digest_rows(&expected));
 
+    // A maintained subscription must hydrate through the same declared index
+    // and retain a live continuation, not fall back to a separate one-shot
+    // authority read. The fixture is history-complete: its ahead overlay is
+    // empty, so any table-size growth here is attributable to the settled
+    // source selection rather than unfinalized local writes.
+    db.reset_storage_read_metrics_for_test();
+    let subscribe_started = Instant::now();
+    let mut subscription = block_on(db.subscribe(&prepared, local_read_opts()))
+        .expect("open selective maintained subscription");
+    let maintained_subscribe_us = subscribe_started.elapsed().as_micros();
+    let maintained_metrics = db.take_storage_read_metrics_for_test();
+    let SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    } = subscription
+        .try_next_event()
+        .expect("maintained subscription must emit its initial reset")
+    else {
+        panic!("maintained subscription must emit an initial reset");
+    };
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    let maintained_rows = added
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    assert_eq!(maintained_rows, expected);
+    assert!(
+        maintained_metrics.global_current_rows.reads <= config.target_rows,
+        "maintained selective hydration read {} current rows for {} indexed candidates at table size {table_rows}",
+        maintained_metrics.global_current_rows.reads,
+        config.target_rows,
+    );
+    assert!(
+        (1..=config.target_rows).contains(&maintained_metrics.global_current_indexes.reads),
+        "maintained selective hydration must use the declared index without reading more than the fixed candidate set",
+    );
+    let maintained_result_digest = digest_rows(&maintained_rows);
+    assert_eq!(maintained_result_digest, result_digest);
+
     block_on(db.close()).expect("close measured selective-hydration database");
 
     RungReceipt {
@@ -268,10 +326,13 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
         db_open_us: db_open_us_after_seed,
         prepare_us,
         query_us,
+        maintained_subscribe_us,
         result_digest,
+        maintained_result_digest,
         open_metrics,
         prepare_metrics,
         query_metrics,
+        maintained_metrics,
     }
 }
 
@@ -352,6 +413,16 @@ fn global_read_opts() -> ReadOpts {
     ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    }
+}
+
+fn local_read_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Immediate,
         propagation: Propagation::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()
