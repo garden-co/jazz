@@ -356,6 +356,7 @@ where
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     pub(super) downstream_fates: PendingDownstreamFates,
     pub(super) mutation_errors: SharedMutationErrors,
+    pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
     pub(super) observed_session_claim_revision: Cell<u64>,
@@ -2417,6 +2418,7 @@ where
                                 &self.node,
                                 &self.write_state_waiters,
                                 &self.mutation_errors,
+                                &self.browser_relay_recovered_tx_ids,
                                 &self.scheduler,
                                 tx_id,
                             );
@@ -3523,6 +3525,7 @@ where
                                     &self.node,
                                     &self.write_state_waiters,
                                     &self.mutation_errors,
+                                    &self.browser_relay_recovered_tx_ids,
                                     &self.scheduler,
                                     tx_id,
                                 );
@@ -5154,31 +5157,73 @@ fn handle_write_state_update<S>(
     node: &SharedNodeState<S>,
     waiters: &WriteStateWaiters,
     mutation_errors: &SharedMutationErrors,
+    browser_relay_recovered_tx_ids: &Rc<RefCell<BTreeSet<TxId>>>,
     scheduler: &SharedTickScheduler,
     tx_id: TxId,
 ) where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let handled_by_waiter = notify_write_state_waiters(waiters, tx_id);
-    let rejected = node.borrow().rejected_transaction(tx_id);
-    let Some(rejected) = rejected else {
-        return;
-    };
+    if let Some(rejected) = node.borrow().rejected_transaction(tx_id) {
+        if handled_by_waiter {
+            mutation_errors.borrow_mut().pending.remove(&tx_id);
+            if let Err(error) = crate::db::block_on(node.borrow_mut().discard_rejection(tx_id)) {
+                tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
+            }
+            return;
+        }
 
-    if handled_by_waiter {
-        mutation_errors.borrow_mut().pending.remove(&tx_id);
-        if let Err(error) = crate::db::block_on(node.borrow_mut().discard_rejection(tx_id)) {
-            tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
+        let should_schedule = {
+            let mut state = mutation_errors.borrow_mut();
+            state
+                .pending
+                .entry(tx_id)
+                .or_insert_with(|| mutation_error_event(rejected));
+            state.callback.is_some()
+        };
+        if should_schedule {
+            schedule_tick_in(scheduler, TickUrgency::Immediate);
         }
         return;
     }
+
+    // A restarted browser relay re-uploads durable foreground commits whose
+    // TxId node belongs to the former, non-durable foreground runtime. Their
+    // row-version payload is deliberately not retained as this worker's
+    // rejection state (INV-TX-9), but an attached foreground runtime still
+    // needs one live notification when that exact replayed transaction is
+    // rejected. This ownership set is process-local and populated only by the
+    // browser relay recovery path, so it cannot turn arbitrary foreign
+    // history into callbacks or survive an app-less worker interval.
+    let Some(record) = browser_relay_recovered_tx_ids
+        .borrow()
+        .contains(&tx_id)
+        .then(|| crate::db::block_on(node.borrow_mut().transaction_record(tx_id)))
+        .flatten()
+    else {
+        return;
+    };
+
+    let terminal = matches!(record.fate, Fate::Rejected(_))
+        || matches!(record.fate, Fate::Accepted)
+            && record.global_time.is_some()
+            && record.durability >= DurabilityTier::Global;
+    if !terminal || !browser_relay_recovered_tx_ids.borrow_mut().remove(&tx_id) {
+        return;
+    }
+    if handled_by_waiter {
+        return;
+    }
+    let Fate::Rejected(reason) = record.fate else {
+        return;
+    };
 
     let should_schedule = {
         let mut state = mutation_errors.borrow_mut();
         state
             .pending
             .entry(tx_id)
-            .or_insert_with(|| mutation_error_event(rejected));
+            .or_insert_with(|| mutation_error_event_for(tx_id, record.kind, &reason));
         state.callback.is_some()
     };
     if should_schedule {
@@ -5199,14 +5244,22 @@ pub(super) fn take_pending_mutation_error_delivery(
 
 pub(super) fn mutation_error_event(rejected: crate::tx::RejectedTransaction) -> MutationErrorEvent {
     let tx_id = rejected.tx_id();
+    mutation_error_event_for(tx_id, rejected.kind(), &rejected.reason())
+}
+
+fn mutation_error_event_for(
+    tx_id: TxId,
+    kind: TxKind,
+    rejection: &RejectionReason,
+) -> MutationErrorEvent {
     let transaction_id = TransactionId::from_committed_tx(tx_id);
-    let (code, reason) = mutation_error_details(&rejected.reason());
+    let (code, reason) = mutation_error_details(rejection);
     MutationErrorEvent {
         code: code.clone(),
         reason: reason.clone(),
         transaction: LocalTransactionRecord {
             transaction_id,
-            kind: rejected.kind().into(),
+            kind: kind.into(),
             sealed: true,
             latest_settlement: TransactionFate::Rejected {
                 transaction_id,

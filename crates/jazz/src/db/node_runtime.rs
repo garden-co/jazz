@@ -45,6 +45,12 @@ where
     pub(super) admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     pub(super) mutation_errors: SharedMutationErrors,
+    /// Transaction IDs restored from durable browser-relay storage after a
+    /// worker restart. These IDs were authored by an ephemeral foreground
+    /// node, so their rejection payload must never become worker-owned
+    /// durable state. The set exists only until its terminal authority fate is
+    /// observed in this runtime.
+    pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) next_write_state_waiter_id: Cell<u64>,
     pub(super) next_subscription_nonce: Cell<u64>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -106,6 +112,7 @@ where
                 callback: None,
                 pending: pending_mutation_errors,
             })),
+            browser_relay_recovered_tx_ids: Rc::new(RefCell::new(BTreeSet::new())),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -267,7 +274,9 @@ where
         let pending = node.pending_transaction_ids_for_author(author);
         let pending = crate::db::block_on(pending)?;
         drop(node);
+        let mut restored = self.browser_relay_recovered_tx_ids.borrow_mut();
         for tx_id in pending {
+            restored.insert(tx_id);
             self.queue_pending_upload(tx_id, None);
         }
         Ok(())
@@ -969,6 +978,7 @@ where
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             mutation_errors: Rc::clone(&self.mutation_errors),
+            browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
@@ -1219,6 +1229,7 @@ where
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates,
             mutation_errors: Rc::clone(&self.mutation_errors),
+            browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),

@@ -19,7 +19,9 @@ use jazz::protocol::{
 };
 use jazz::query::{BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, TransactionId,
+};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
@@ -223,6 +225,36 @@ fn open_persistent_worker(
         },
     )))
     .expect("open persistent worker")
+}
+
+/// Mirrors the browser worker host: its durable replica node is distinct from
+/// the foreground node, but it opens under the browser session author so it
+/// can recover only that session's unresolved relayed writes.
+fn open_persistent_browser_worker(
+    path: &std::path::Path,
+    node: u8,
+    author: AuthorSubject,
+    schema: &JazzSchema,
+) -> Db<RocksDbStorage> {
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open(path, &refs).expect("open persistent browser worker storage");
+    let db = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )))
+    .expect("open persistent browser worker");
+    db.restore_browser_relay_pending_uploads()
+        .expect("restore browser relay pending uploads");
+    db
 }
 
 /// A browser main-thread write is optimistic but not Local-durable until the
@@ -2882,7 +2914,7 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
 }
 
 #[test]
-fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
+fn reopened_worker_notifies_attached_successor_of_foreground_rejection() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb9; 16]);
@@ -2890,7 +2922,7 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
 
     let first_main = open_db(0x1b, alice, &schema);
     first_main.set_non_durable_client();
-    let first_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
+    let first_worker = open_persistent_browser_worker(storage.path(), 0x2a, alice, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
     let first_main_connection =
         jazz::db::block_on(first_main.connect_upstream(first_main_transport));
@@ -2915,17 +2947,25 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     drop(first_worker);
     drop(first_main);
 
-    let reopened_main = open_db(0x1b, alice, &schema);
+    // A fresh foreground runtime must use a distinct physical node identity.
+    // The worker owns durable replay, while the successor only receives the
+    // worker's live rejection notification.
+    let reopened_main = open_db(0x1c, alice, &schema);
     reopened_main.set_non_durable_client();
-    let reopened_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
+    let reopened_worker = open_persistent_browser_worker(storage.path(), 0x2a, alice, &schema);
+    let mutation_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_errors = Rc::clone(&mutation_errors);
+    reopened_worker.on_mutation_error(Rc::new(move |event| {
+        observed_errors.borrow_mut().push(event.clone());
+    }));
     let core = open_core(0x3a, &schema);
     let (main_transport, worker_subscriber_transport) = duplex();
-    let _main_connection = jazz::db::block_on(reopened_main.connect_upstream(main_transport));
-    let _worker_subscriber = reopened_worker.accept_subscriber(worker_subscriber_transport, alice);
+    let main_connection = jazz::db::block_on(reopened_main.connect_upstream(main_transport));
+    let worker_subscriber = reopened_worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
-    let _worker_upstream =
+    let worker_upstream =
         jazz::db::block_on(reopened_worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, bob);
+    let core_subscriber = core.accept_subscriber(core_transport, bob);
 
     reopened_worker
         .tick()
@@ -2937,6 +2977,9 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     reopened_worker
         .tick()
         .expect("apply and route authority rejection");
+    reopened_worker
+        .tick()
+        .expect("deliver the relay-owned live rejection exactly once");
     reopened_main
         .tick()
         .expect("apply rejection after replayed Local acknowledgement");
@@ -2948,4 +2991,105 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
             .fate,
         Fate::Rejected(_)
     ));
+    assert_eq!(mutation_errors.borrow().len(), 1);
+    assert_eq!(
+        mutation_errors.borrow()[0].transaction.transaction_id,
+        TransactionId::from_committed_tx(tx_id)
+    );
+    drop(main_connection);
+    drop(worker_subscriber);
+    drop(worker_upstream);
+    drop(core_subscriber);
+    drop(reopened_main);
+    drop(reopened_worker);
+
+    // Reopening without an attached browser runtime must not replay the
+    // prior notification. This public lifecycle receipt proves the worker did
+    // not persist foreign rejected payload/version state (INV-TX-9).
+    let after_appless_interval =
+        open_persistent_browser_worker(storage.path(), 0x2a, alice, &schema);
+    let after_restart_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_after_restart = Rc::clone(&after_restart_errors);
+    after_appless_interval.on_mutation_error(Rc::new(move |event| {
+        observed_after_restart.borrow_mut().push(event.clone());
+    }));
+    after_appless_interval
+        .tick()
+        .expect("drive post-rejection browser relay opening");
+    assert!(
+        after_restart_errors.borrow().is_empty(),
+        "a later browser relay must not replay the prior app notification"
+    );
+}
+
+/// A browser relay may have an active programmatic wait for a transaction it
+/// restored from a former foreground runtime. That wait consumes the same live
+/// rejection instead of allowing a duplicate fallback callback.
+#[test]
+fn recovered_browser_relay_wait_suppresses_mutation_error_fallback() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xac; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xbc; 16]);
+    let storage = tempfile::tempdir().expect("worker temp dir");
+
+    let first_main = open_db(0x1d, alice, &schema);
+    first_main.set_non_durable_client();
+    let first_worker = open_persistent_browser_worker(storage.path(), 0x2d, alice, &schema);
+    let (first_main_transport, first_worker_transport) = duplex();
+    let first_main_connection = block_on(first_main.connect_upstream(first_main_transport));
+    let first_worker_connection = first_worker.accept_subscriber(first_worker_transport, alice);
+    let write = first_main
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("wait handles replayed rejection".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("insert pending todo");
+    let tx_id = write.mergeable_tx_id();
+    first_main.tick().expect("upload to first worker");
+    first_worker.tick().expect("persist in first worker");
+    first_main.tick().expect("apply first Local ack");
+    drop(first_worker_connection);
+    drop(first_main_connection);
+    drop(first_worker);
+    drop(first_main);
+
+    let successor = open_db(0x1e, alice, &schema);
+    successor.set_non_durable_client();
+    let worker = open_persistent_browser_worker(storage.path(), 0x2d, alice, &schema);
+    let fallback_errors = Rc::new(RefCell::new(Vec::new()));
+    let observed_fallback_errors = Rc::clone(&fallback_errors);
+    worker.on_mutation_error(Rc::new(move |event| {
+        observed_fallback_errors.borrow_mut().push(event.clone());
+    }));
+    let wait_result = Rc::new(Cell::new(None));
+    let observed_wait = Rc::clone(&wait_result);
+    worker.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
+        observed_wait.set(Some(result.is_err()));
+    });
+
+    let core = open_core(0x3d, &schema);
+    let (successor_transport, worker_subscriber_transport) = duplex();
+    let _successor_connection = block_on(successor.connect_upstream(successor_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, bob);
+
+    worker.tick().expect("replay pending write");
+    successor
+        .tick()
+        .expect("apply replayed Local acknowledgement");
+    core.tick().expect("reject mismatched session author");
+    worker.tick().expect("apply rejection to relay wait");
+    worker.tick().expect("drive any fallback delivery");
+
+    assert_eq!(wait_result.get(), Some(true));
+    assert!(
+        fallback_errors.borrow().is_empty(),
+        "the active wait must consume the relay rejection before fallback delivery"
+    );
 }
