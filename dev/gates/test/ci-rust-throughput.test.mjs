@@ -1082,7 +1082,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/docs-vercel-preview.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
 });

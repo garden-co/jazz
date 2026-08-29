@@ -43,3 +43,24 @@ resources:
   features and API.
 - [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
 - [Fumadocs](https://fumadocs.dev) - learn about Fumadocs
+
+## Vercel deployment
+
+GitHub owns deployments so a preview is an explicit review choice rather than
+an automatic side effect of every branch. The `Docs preview (Vercel)` workflow
+deploys only a trusted, same-repository pull request carrying the `docs` label.
+It rebuilds this app and deploys Vercel's resulting prebuilt artifact. Label
+removal cancels an in-flight preview; forks never receive Vercel credentials.
+
+Before using the label, create/link a Vercel project with `docs` as its Root
+Directory, disable Vercel's automatic Git deployments, then configure these
+repository settings:
+
+- Variables: `VERCEL_DOCS_ORG_ID`, `VERCEL_DOCS_PROJECT_ID`
+- Secret: `VERCEL_DOCS_TOKEN`, scoped only to the docs project/team operations
+  required to create preview deployments
+
+Production deployment is deliberately disabled in the workflow: it has no
+`main` push trigger and its production job is permanently false. At release
+time, enable the documented main-only job and use `vercel deploy --prod
+--prebuilt`; do not enable Vercel's automatic Git deployment as a substitute.

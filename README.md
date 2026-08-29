@@ -45,13 +45,9 @@ pnpm test
 
 `pnpm run ensure:rust-toolchain` runs `dev/scripts/install-jazz-rn-deps.sh` to bootstrap Rust (via `rustup` if needed), required Rust targets, `cargo-ndk`, and platform build tools (`cmake`, `ninja`, `clang-format`).
 
-For docs-only builds (for example on Vercel), set `JAZZ_SKIP_RN_DEPS=1` to skip React Native-specific bootstrap:
-
-```sh
-JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain
-```
-
-Vercel builds can use `dev/scripts/install-vercel-deps.sh`, which runs the same Rust bootstrap in docs-only mode without the React Native extras.
+The homepage and documentation are a self-contained Next.js application under
+`docs/`. Build them with `pnpm build:vercel-docs`; they do not need a Rust or
+React Native bootstrap.
 
 Server builds compile RocksDB from source on first build (cached afterwards by `sccache`); this requires a C/C++ toolchain and `libclang` (`xcode-select --install` on macOS; `libclang-dev`/`clang-devel` on Linux).
 

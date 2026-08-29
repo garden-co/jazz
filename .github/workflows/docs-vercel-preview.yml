@@ -1,0 +1,115 @@
+name: Docs preview (Vercel)
+
+on:
+  pull_request:
+    # An unlabeled event starts a no-op run in the same concurrency group,
+    # cancelling a preview that is no longer explicitly requested.
+    types: [labeled, unlabeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-vercel-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    name: Deploy docs preview
+    # A maintainer label is an explicit opt-in, but it never turns fork code
+    # into trusted code. The deployment token is available only to trusted,
+    # same-repository pull requests.
+    if: >-
+      ${{
+        github.event.pull_request.head.repo.full_name == github.repository
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+        && contains(github.event.pull_request.labels.*.name, 'docs')
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VERCEL_ORG_ID: ${{ vars.VERCEL_DOCS_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_DOCS_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_DOCS_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Guard Vercel preview configuration
+        run: |
+          set -euo pipefail
+          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing ${name}. Configure the Jazz docs Vercel project before applying the docs label."
+              exit 1
+            fi
+          done
+
+      - run: pnpm install --frozen-lockfile
+
+      # Pull only preview environment configuration. The project must have its
+      # Root Directory set to docs; this keeps Vercel's prebuilt artifact and
+      # deployment separate from the rest of the monorepo.
+      - name: Link the docs project
+        run: >-
+          pnpm dlx vercel@latest pull --yes --environment=preview --cwd docs
+          --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}"
+
+      - name: Build homepage and docs
+        run: pnpm build:vercel-docs
+
+      - name: Prepare the Vercel artifact
+        run: >-
+          pnpm dlx vercel@latest build --cwd docs
+          --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}"
+
+      - name: Deploy preview
+        id: deploy
+        run: |
+          set -euo pipefail
+          deployment_url="$(
+            pnpm dlx vercel@latest deploy --prebuilt --yes --cwd docs \
+              --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}" \
+              -m git_pr="${{ github.event.pull_request.number }}" \
+              -m git_sha="${{ github.event.pull_request.head.sha }}" \
+              | tail -n1
+          )"
+          pnpm dlx vercel@latest inspect "${deployment_url}" --wait --timeout 5m \
+            --scope="${VERCEL_ORG_ID}" --token="${VERCEL_TOKEN}" >/dev/null
+          echo "url=${deployment_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish preview URL
+        run: |
+          {
+            echo "### Docs preview"
+            echo
+            echo "${{ steps.deploy.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Production is intentionally disabled until release timing is chosen.
+  # To enable it: add push branches main above and replace false below with the
+  # approved main-only condition. Keep it as a separate job and use Vercel's
+  # production flag against the same docs project.
+  production:
+    if: >-
+      ${{
+        false
+        && github.event_name == 'push'
+        && github.ref == 'refs/heads/main'
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - run: exit 1
