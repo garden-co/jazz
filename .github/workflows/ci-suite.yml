@@ -165,11 +165,33 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  # This is deliberately an exact, named historical-storage partition rather
+  # than an incidental member of the broad nextest shard. A green Rust suite
+  # must mean current code opened the pinned native SQLite/RocksDB corpus.
+  test-storage-compat:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: false
+      - name: Run CI-equivalent native storage compatibility partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
   # Branch protection requires this stable check name. It aggregates both Rust
   # correctness jobs and stays red whenever either dependency fails or is cancelled.
   test-rust:
     if: always()
-    needs: [test-rust-workspace, test-rust-differential]
+    needs: [test-rust-workspace, test-rust-differential, test-storage-compat]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -179,9 +201,11 @@ jobs:
         env:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
           DIFFERENTIAL_RESULT: ${{ needs.test-rust-differential.result }}
+          STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
           test "${DIFFERENTIAL_RESULT}" = success
+          test "${STORAGE_COMPAT_RESULT}" = success
 
   test-ts:
     runs-on: blacksmith-16vcpu-ubuntu-2404

@@ -40,6 +40,7 @@ export const ciPartitionJobs = Object.freeze({
   lint: "lint",
   "rust-workspace": "test-rust-workspace",
   "rust-differential": "test-rust-differential",
+  "storage-compat": "test-storage-compat",
   typescript: "test-ts",
 });
 
@@ -120,6 +121,9 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   "rust-differential": Object.freeze([m3DifferentialCommand]),
+  "storage-compat": Object.freeze([
+    command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
+  ]),
   typescript: Object.freeze([
     command("all Rust workspace target classes", "cargo", [
       "check",
