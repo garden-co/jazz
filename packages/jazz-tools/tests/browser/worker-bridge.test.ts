@@ -24,6 +24,7 @@ import {
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
 } from "../../src/runtime/indexeddb-page-store.js";
+import { createBrowserSharedWorkerBaseName } from "../../src/runtime/native-runtime/browser-shared-worker-connection.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -278,6 +279,44 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 // ---------------------------------------------------------------------------
 
 describe("SharedWorker bridge with IndexedDB", () => {
+  it("fences a generation-advanced worker realm until its live predecessor releases the physical root", async () => {
+    const appId = uniqueDbName("physical-worker-epoch-app");
+    const dbName = uniqueDbName("physical-worker-epoch-root");
+    const secret = generateAuthSecret();
+    const first = track(await createDb({ appId, secret, driver: { type: "persistent", dbName } }));
+    try {
+      // Materialize both the foreground lease and worker runtime before
+      // deliberately advancing the page-side generation key.
+      await first.all(allTodos, { tier: "local" });
+      const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+      localStorage.setItem(`jazz:shared-worker-generation:${workerName}`, "1");
+
+      // Planted overlap: generation one names a distinct SharedWorker even
+      // though generation zero is live. It must fail before it can recover
+      // generation zero's foreground lease pool.
+      await expect(
+        createDb({ appId, secret, driver: { type: "persistent", dbName } }),
+      ).rejects.toThrow("active in another Jazz SharedWorker realm");
+
+      await first.shutdown();
+      untrack(first);
+      await sleep(100);
+
+      const successor = track(
+        await createDb({ appId, secret, driver: { type: "persistent", dbName } }),
+      );
+      try {
+        await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+      } finally {
+        await successor.shutdown();
+        untrack(successor);
+      }
+    } finally {
+      await first.shutdown().catch(() => undefined);
+      untrack(first);
+    }
+  });
+
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
   const errorListeners = new Set<(event: ErrorEvent) => void>();
