@@ -2913,6 +2913,16 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     );
 }
 
+/// A worker restores Alice's former foreground transaction, but only carries
+/// its terminal header/fate long enough to notify Alice's live successor.
+/// Its distinct worker node must never own the rejected retry payload.
+///
+/// ```text
+/// former Alice tab ──Local write──► durable worker ──restart──► successor tab
+///                                        │                         │
+///                                        └──Rejected──► one live callback
+///                                             └── no foreign retry payload
+/// ```
 #[test]
 fn reopened_worker_notifies_attached_successor_of_foreground_rejection() {
     let schema = schema();
@@ -2977,6 +2987,10 @@ fn reopened_worker_notifies_attached_successor_of_foreground_rejection() {
     reopened_worker
         .tick()
         .expect("apply and route authority rejection");
+    assert!(
+        !reopened_worker.has_retained_rejection_for_test(tx_id),
+        "the worker may retain the replayed transaction header/fate for its live notification, but must not retain its foreign retry payload"
+    );
     reopened_worker
         .tick()
         .expect("deliver the relay-owned live rejection exactly once");
@@ -3008,6 +3022,10 @@ fn reopened_worker_notifies_attached_successor_of_foreground_rejection() {
     // not persist foreign rejected payload/version state (INV-TX-9).
     let after_appless_interval =
         open_persistent_browser_worker(storage.path(), 0x2a, alice, &schema);
+    assert!(
+        !after_appless_interval.has_retained_rejection_for_test(tx_id),
+        "reopening the worker must not recover a foreign retry payload"
+    );
     let after_restart_errors = Rc::new(RefCell::new(Vec::new()));
     let observed_after_restart = Rc::clone(&after_restart_errors);
     after_appless_interval.on_mutation_error(Rc::new(move |event| {

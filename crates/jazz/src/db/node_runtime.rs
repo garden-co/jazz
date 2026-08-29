@@ -155,6 +155,14 @@ where
         Rc::clone(&self.node)
     }
 
+    /// Test-only inspection of retry ownership. Rejected foreign transactions
+    /// must never acquire an originating node's retained payload.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
+        self.node.borrow().rejected_transaction(tx_id).is_some()
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large
     /// values. Groove persists timestamps and performs eviction, but does not
     /// choose these product limits.

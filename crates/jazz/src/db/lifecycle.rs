@@ -7,6 +7,15 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Internal test inspection for the retry-payload ownership boundary.
+    /// Foreign rejections may be observed for live notification, but they may
+    /// not become this database's durable retry payload.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
+        self.node.has_retained_rejection_for_test(tx_id)
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
     pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
         self.node.set_large_value_staging_policy(policy);
