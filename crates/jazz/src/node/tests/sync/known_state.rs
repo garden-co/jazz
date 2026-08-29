@@ -1191,7 +1191,7 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
             },
             descriptor: groove::records::encode_record_descriptor(&payload_descriptor).unwrap(),
             record: payload_descriptor
-                .create(&[Value::String("payload".to_owned())])
+                .create(&[Value::String("large settled payload ".repeat(20_000))])
                 .unwrap(),
         },
     );
@@ -1202,6 +1202,25 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
             vec![],
         ))
         .unwrap();
+    let settled_facts_store = reader
+        .database
+        .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
+        .unwrap();
+    let durable_fact = futures::executor::block_on(settled_facts_store.prefix_entries(&[]))
+    .unwrap()
+    .into_iter()
+    .find(|entry| {
+        matches!(
+            entry.value.get_idx(0),
+            Ok(Value::Bytes(bytes)) if bytes.len() > 64 * 1024
+        )
+    })
+    .expect("settled program fact is durable");
+    assert!(matches!(&durable_fact.key[3], Value::Bytes(digest) if digest.len() == 32));
+    assert!(matches!(
+        durable_fact.value.get_idx(0).unwrap(),
+        Value::Bytes(bytes) if bytes.len() > 64 * 1024
+    ));
     drop(reader);
     let reopened = open_node_at(&reader_dir, schema());
     assert_eq!(
@@ -1240,7 +1259,7 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
             terminal_operations: Vec::new(),
-            program_fact_adds: vec![fact],
+            program_fact_adds: vec![fact.clone()],
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
@@ -1253,9 +1272,13 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
                 Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
                 Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
                 Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
-                Value::Bytes(vec![0]),
+                // A full-sized but wrong digest proves recovery verifies the
+                // key/value binding rather than only the digest's shape.
+                Value::Bytes(vec![0xff; 32]),
             ],
-            &[Value::U64(1)],
+            &[Value::Bytes(
+                crate::node::codec::program_fact_storage_bytes(&fact).unwrap(),
+            )],
         ))
     .unwrap();
     assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());

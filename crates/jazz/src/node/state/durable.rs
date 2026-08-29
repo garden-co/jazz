@@ -624,17 +624,11 @@ where
                 .collect::<Vec<_>>();
             if let Some(facts) = rewrite {
                 for fact in facts {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_program_fact_key(binding_view_key, fact)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
                 }
             } else {
                 for fact in adds {
-                    operations.push(DirectRecordStoreWrite::Set {
-                        key: settled_program_fact_key(binding_view_key, fact)?,
-                        value: vec![Value::U64(1)],
-                    });
+                    operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
                 }
             }
             store.write_many(&operations).await?;
@@ -648,10 +642,7 @@ where
             });
         }
         for fact in adds {
-            operations.push(DirectRecordStoreWrite::Set {
-                key: settled_program_fact_key(binding_view_key, fact)?,
-                value: vec![Value::U64(1)],
-            });
+            operations.push(settled_program_fact_storage_write(binding_view_key, fact)?);
         }
         if !operations.is_empty() {
             store.write_many(&operations).await?;
@@ -807,7 +798,20 @@ where
                 &entry.key,
                 "settled program fact binding key must be valid",
             )?;
-            let fact_bytes = match &entry.key[3] {
+            let fact_digest = match &entry.key[3] {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact digest must be bytes",
+                    ));
+                }
+            };
+            if fact_digest.len() != 32 {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact digest must be 32 bytes",
+                ));
+            }
+            let fact_bytes = match entry.value.get_idx(0)? {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -815,7 +819,12 @@ where
                     ));
                 }
             };
-            let fact = codec::program_fact_from_storage_bytes(fact_bytes)?;
+            if settled_program_fact_digest(&fact_bytes).as_slice() != fact_digest {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact payload does not match its digest",
+                ));
+            }
+            let fact = codec::program_fact_from_storage_bytes(&fact_bytes)?;
             settled_program_facts
                 .entry(binding_view_key)
                 .or_default()
