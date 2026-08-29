@@ -155,8 +155,14 @@ async function acquireForegroundNodeLease(
               throw new Error("Invalid foreground node lease high-water");
             }
             const highWater = BigInt(message.confirmedTxTime);
-            settled = true;
+            if (highWater > (1n << 64n) - 1n) {
+              throw new Error("Invalid foreground node lease high-water");
+            }
+            // Do not mark this finished until the durable returned receipt has
+            // committed. A failing return must still take the durable-retire
+            // path; otherwise an active lease could be silently forgotten.
             await owner!.pageStore.returnForegroundNodeLease(lease.leaseId, highWater);
+            settled = true;
             owner!.activeLeaseIds.delete(lease.leaseId);
             post(port, {
               type: "foreground-node-lease-result",

@@ -246,7 +246,7 @@ export class BrowserConnectionManager extends ConnectionManager {
             await lease.retire();
             return;
           }
-          await lease.returnWithHighWater(runtime.foregroundTxTimeHighWater());
+          await lease.returnWithHighWater(await runtime.quiesceForegroundTxTimeHighWater());
         } catch {
           await lease.retire().catch(() => undefined);
         }

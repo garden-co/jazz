@@ -169,6 +169,34 @@ type TxForTest = {
   ): void;
 };
 
+it("quiesces foreground mutation admission before capturing its final HLC", async () => {
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => 41n,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const preexisting = beginTestBatch(runtime);
+  expect(await runtime.quiesceForegroundTxTimeHighWater()).toBe(41n);
+  // This is the P0 handoff ordering: an already-open batch cannot mint H+1
+  // after the high-water was captured, nor can a new synchronous batch start.
+  expect(() => runtime.commitTransaction(preexisting)).toThrow("native runtime is closed");
+  expect(() => beginTestBatch(runtime)).toThrow("native runtime is closed");
+  await runtime.close();
+});
+
 function uuidBytes(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");
   const bytes = new Uint8Array(16);

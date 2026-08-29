@@ -341,6 +341,22 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
+  it("never lowers a returned foreground floor and rejects values native u64 cannot seed", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    const first = await store.acquireForegroundNodeLease();
+    await store.returnForegroundNodeLease(first.leaseId, 99n);
+    const second = await store.acquireForegroundNodeLease();
+    await store.returnForegroundNodeLease(second.leaseId, 1n);
+    const continued = await store.acquireForegroundNodeLease();
+    expect(continued.confirmedTxTime).toBe(99n);
+    await expect(store.returnForegroundNodeLease(continued.leaseId, 1n << 64n)).rejects.toThrow(
+      "Invalid IndexedDB foreground node lease handoff",
+    );
+    await store.retireForegroundNodeLease(continued.leaseId);
+    store.close();
+  });
+
   it("retires an abandoned foreground lease on worker restart", async () => {
     const name = databaseName();
     let store = await IndexedDbPageStore.open(name);
