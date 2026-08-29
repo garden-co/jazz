@@ -282,6 +282,97 @@ test("two installed foreground aliases require B to observe A's committed subscr
   );
 });
 
+test("two installed foreground aliases require B to observe A's committed subscription delta", () => {
+  const command = {
+    encode(value: unknown) {
+      return new TextEncoder().encode(JSON.stringify(value));
+    },
+    decode(bytes: Uint8Array) {
+      const decoded = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+      if (decoded.type === "subscriptionEvents" && Array.isArray(decoded.events)) {
+        for (const event of decoded.events) {
+          if (event?.type === "delta" && Array.isArray(event.delta))
+            event.delta = Uint8Array.from(event.delta);
+        }
+      }
+      return decoded;
+    },
+  } as unknown as ForegroundByteCodec;
+  let committed = false;
+  let opened = 0;
+  const factory = {
+    abiVersion: 4,
+    openAttached(received: Uint8Array) {
+      assert.deepEqual(received, capability);
+      const peer = opened++;
+      return {
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string };
+          const response =
+            request.type === "prepareQuery"
+              ? { type: "preparedQuery", query: 1 }
+              : request.type === "subscribe"
+                ? { type: "subscribed", subscription: 2 }
+                : request.type === "beginTransaction"
+                  ? { type: "transactionOpened", transaction: 3 }
+                  : request.type === "upsert"
+                    ? { type: "mutationStaged" }
+                    : request.type === "commitTransaction"
+                      ? ((committed = true),
+                        { type: "transactionCommitted", txId: new Uint8Array(16).fill(1) })
+                      : request.type === "drainSubscription"
+                        ? {
+                            type: "subscriptionEvents",
+                            events:
+                              peer === 1 && committed
+                                ? [
+                                    {
+                                      type: "delta",
+                                      reset: false,
+                                      settled: true,
+                                      tier: "local",
+                                      delta: Array.from(
+                                        new TextEncoder().encode("foreground-a-subscription-row"),
+                                      ),
+                                    },
+                                  ]
+                                : [],
+                          }
+                        : request.type === "unsubscribe"
+                          ? { type: "unsubscribed", closed: true }
+                          : { type: "closed", closed: true };
+          return command.encode(response);
+        },
+        tick() {},
+        close: () => true,
+      };
+    },
+  };
+  proveForegroundWriteSubscription(factory, capability, command);
+
+  committed = false;
+  opened = 0;
+  const noObservation = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      return {
+        ...foreground,
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string };
+          if (request.type === "drainSubscription")
+            return command.encode({ type: "subscriptionEvents", events: [] });
+          return foreground.execute(bytes);
+        },
+      };
+    },
+  };
+  assert.throws(
+    () => proveForegroundWriteSubscription(noObservation, capability, command),
+    /did not observe foreground A's committed row/,
+  );
+});
+
 function utf8(value: string): number[] {
   return Array.from(new TextEncoder().encode(value));
 }

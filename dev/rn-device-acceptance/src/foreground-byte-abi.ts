@@ -130,6 +130,83 @@ export function proveForegroundWriteAbi(
 }
 
 /**
+ * Actual two-foreground receipt for the installed JSI bridge.  A and B are
+ * separate JS runtime aliases, but both are attached to the same native relay
+ * admitted by the capability.  B starts a local subscription before A writes;
+ * bounded ordinary ticks must then deliver A's committed row as B's binding
+ * delta.  This deliberately stays at the byte ABI boundary: JS only checks a
+ * fixed fixture title in Rust-produced binding bytes.
+ */
+export function proveForegroundWriteSubscription(
+  factory: NativeForegroundRuntimeFactory,
+  capability: Uint8Array,
+  codec: ForegroundByteCodec,
+): void {
+  const a = factory.openAttached(capability);
+  const b = factory.openAttached(capability);
+  const execute = (foreground: NativeForegroundRuntime, command: NativeForegroundCommand) =>
+    codec.decode(foreground.execute(codec.encode(command)));
+  try {
+    const prepared = execute(b, { type: "prepareQuery", query: TODOS_QUERY });
+    if (prepared.type !== "preparedQuery")
+      throw new Error("foreground B could not prepare the todos subscription");
+    const subscribed = execute(b, { type: "subscribe", query: prepared.query });
+    if (subscribed.type !== "subscribed")
+      throw new Error("foreground B could not subscribe to the todos query");
+
+    // Consume the subscription's initial reset before performing A's write.
+    // The resulting evidence must be the cross-foreground update, not B's
+    // initial materialization.
+    drainSubscription(b, subscribed.subscription, codec);
+
+    const transaction = execute(a, { type: "beginTransaction", kind: "mergeable" });
+    if (transaction.type !== "transactionOpened")
+      throw new Error("foreground A write transaction did not open");
+    const rowId = Uint8Array.from({ length: 16 }, () => 0x74);
+    const staged = execute(a, {
+      type: "upsert",
+      transaction: transaction.transaction,
+      table: "todos",
+      rowId,
+      cells: fixtureCells("subscription from foreground A"),
+    });
+    if (staged.type !== "mutationStaged") throw new Error("foreground A write was not staged");
+    const committed = execute(a, {
+      type: "commitTransaction",
+      transaction: transaction.transaction,
+    });
+    if (committed.type !== "transactionCommitted")
+      throw new Error("foreground A write did not commit");
+
+    for (let attempt = 0; attempt < 96; attempt += 1) {
+      // Both aliases get fair ordinary relay turns.  This is the same polling
+      // progression used by the first native subscription slice, not a test
+      // side channel into the persistent SQLite store.
+      a.tick();
+      b.tick();
+      const events = drainSubscription(b, subscribed.subscription, codec);
+      if (
+        events.some(
+          (event) =>
+            event.type === "delta" && containsUtf8(event.delta, "foreground-a-subscription-row"),
+        )
+      ) {
+        const closed = execute(b, { type: "unsubscribe", subscription: subscribed.subscription });
+        if (closed.type !== "unsubscribed" || !closed.closed)
+          throw new Error("foreground B subscription did not close");
+        return;
+      }
+    }
+    throw new Error(
+      "foreground B did not observe foreground A's committed row after bounded ticks",
+    );
+  } finally {
+    a.close();
+    b.close();
+  }
+}
+
+/**
  * Prove the device fixture's trusted A -> B path selection is data-plane
  * isolation, not just control-plane capability revocation. The foreground
  * command surface stays byte-only: the fixed query bytes below are the
@@ -229,6 +306,19 @@ function readTodos(foreground: NativeForegroundRuntime, codec: ForegroundByteCod
   throw new Error("scope isolation fixture read did not settle after bounded ticks");
 }
 
+function drainSubscription(
+  foreground: NativeForegroundRuntime,
+  subscription: number,
+  codec: ForegroundByteCodec,
+): Extract<NativeForegroundResponse, { type: "subscriptionEvents" }>["events"] {
+  const response = codec.decode(
+    foreground.execute(codec.encode({ type: "drainSubscription", subscription })),
+  );
+  if (response.type !== "subscriptionEvents")
+    throw new Error("foreground subscription drain returned an unexpected response");
+  return response.events;
+}
+
 function containsUtf8(bytes: Uint8Array, value: string): boolean {
   const needle = utf8(value);
   return bytes.some(
@@ -253,7 +343,13 @@ function utf8(value: string): Uint8Array {
 }
 
 function fixtureCells(
-  title: "mergeable" | "updated" | "upserted" | "rolled back" | "scope A private row",
+  title:
+    | "mergeable"
+    | "updated"
+    | "upserted"
+    | "rolled back"
+    | "scope A private row"
+    | "subscription from foreground A",
 ): Uint8Array {
   const bytes = {
     mergeable: [
@@ -267,6 +363,10 @@ function fixtureCells(
     "scope A private row": [
       1, 1, 5, 116, 105, 116, 108, 101, 8, 20, 2, 115, 99, 111, 112, 101, 45, 97, 45, 112, 114, 105,
       118, 97, 116, 101, 45, 114, 111, 119,
+    ],
+    "subscription from foreground A": [
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 29, 2, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
+      45, 97, 45, 115, 117, 98, 115, 99, 114, 105, 112, 116, 105, 111, 110, 45, 114, 111, 119,
     ],
   } as const;
   return Uint8Array.from(bytes[title]);

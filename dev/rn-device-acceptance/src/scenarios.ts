@@ -7,7 +7,7 @@ import type { ScenarioResult } from "./protocol";
  * device driver as a green receipt requirement.
  */
 export const scenarioPlan: readonly ScenarioResult[] = [
-  ["linked-abi-admission", "Installed relay admits an opaque scope and reports ABI 3"],
+  ["linked-abi-admission", "Installed relay admits an opaque scope and reports ABI 4"],
   [
     "foreground-byte-abi",
     "Installed JSI foreground executes ABI v1 Probe, Tick, Close, and revoke",
@@ -34,6 +34,7 @@ export const scenarioPlan: readonly ScenarioResult[] = [
     scenario === "linked-abi-admission" ||
     scenario === "foreground-byte-abi" ||
     scenario === "foreground-write-transaction" ||
+    scenario === "local-write-subscription" ||
     scenario === "scope-isolation" ||
     scenario === "logout-revocation" ||
     scenario === "logout-auth-switch"

@@ -7,6 +7,7 @@ import {
   proveForegroundRevoked,
   proveForegroundScopeIsolation,
   proveForegroundWriteAbi,
+  proveForegroundWriteSubscription,
 } from "./src/foreground-byte-abi";
 import {
   admittedNativeRelay,
@@ -65,6 +66,9 @@ async function observeTrustedAdmissionLifecycle() {
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
   proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  // Two independently opened JSI foregrounds communicate only through their
+  // common admitted native relay; B must observe A's committed binding delta.
+  proveForegroundWriteSubscription(foregroundFactory, scopeB.capability, foregroundCodec);
   // Closing B's trusted relay before re-admitting A forces its scope owner and
   // SQLite handle to be recreated. A's row must survive that lifecycle while
   // B's distinct native-selected path never observed it.
