@@ -1254,6 +1254,14 @@ pub enum TickUrgency {
     /// Coalesce bursty local work before ticking. Used for uploads created by
     /// local writes.
     Deferred,
+    /// Service work in a later host turn, rather than recursively entering a
+    /// second database tick from the current transport/query owner turn.
+    ///
+    /// This is for work that may start cold I/O (notably subscriber view
+    /// hydration). It preserves prompt eventual progress without allowing a
+    /// just-admitted subscription to monopolize the owner before later inbound
+    /// frames and durability receipts are observed.
+    AfterCurrentTurn,
 }
 
 /// Runtime-neutral wake hook for thread-affine [`Node`] sync work.

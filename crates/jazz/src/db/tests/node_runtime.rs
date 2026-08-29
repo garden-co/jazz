@@ -552,9 +552,9 @@ fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
     );
 }
 
-/// A Core immediately refreshes a peer-edge subscriber that was visited before
-/// a later client upload in the same service pass, so Bob receives Alice's
-/// later canonical row without needing an unrelated next websocket frame.
+/// A Core schedules a fresh owner turn for a peer-edge subscriber that was
+/// visited before a later client upload, so Bob receives Alice's later
+/// canonical row without an unrelated next websocket frame.
 ///
 /// ```text
 /// bob --empty Global subscribe--> peer edge --> Core
@@ -566,15 +566,18 @@ fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
 ///
 /// The peer connection is deliberately accepted before Alice's connection.
 /// That makes Core service the already-covered peer first, then accept Alice's
-/// write. The one Core tick following Alice's upload must revisit the earlier
-/// peer before it returns; otherwise an event-driven websocket host has no
-/// reason to call Core again and Bob stays indefinitely at the old empty cut.
+/// write. The Core tick following Alice's upload must request a fresh owner
+/// turn for the earlier peer. It deliberately must not recurse into that peer
+/// synchronously: opening the view can suspend on cold storage and would
+/// otherwise withhold inbound write receipts.
 #[test]
-fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
+fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_turn() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let bob_author = AuthorSubject::for_test_bytes([0xb1; 16]);
     let core = open_core(0xd1, AuthorSubject::SYSTEM, &schema);
+    let core_scheduler = Rc::new(RecordingScheduler::default());
+    core.server.set_scheduler(Some(core_scheduler.clone()));
     let peer_edge = open_db(0xd2, AuthorSubject::SYSTEM, &schema);
     let bob = open_db(0xd3, bob_author, &schema);
 
@@ -609,6 +612,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         core_to_peer.borrow().is_empty(),
         "the empty opening has been fully consumed before Alice writes"
     );
+    core_scheduler.take();
 
     let alice_edge = open_db(0xd4, alice, &schema);
     let (alice_transport, core_alice_transport) = duplex();
@@ -626,8 +630,18 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         .unwrap();
 
     // One edge tick uploads Alice's local commit; one Core tick finalizes it
-    // and must also serve the earlier peer connection.
+    // and asks the host for a fresh turn to serve the earlier peer connection.
     alice_edge.tick().unwrap();
+    core.tick().unwrap();
+    let wakes = core_scheduler.take();
+    assert!(
+        wakes.contains(&TickUrgency::AfterCurrentTurn),
+        "the post-receive subscriber refresh yields to a fresh owner turn instead of recursively ticking a potentially cold view"
+    );
+    assert!(
+        core_to_peer.borrow().is_empty(),
+        "the first pass does not synchronously re-enter the earlier subscriber"
+    );
     core.tick().unwrap();
     let later_view_updates = core_to_peer
         .borrow()
@@ -652,7 +666,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         .count();
     assert_eq!(
         later_view_updates, 1,
-        "the first Core service pass after Alice's upload sends the later canonical membership to the already-covered peer"
+        "the scheduled Core owner turn sends the later canonical membership to the already-covered peer"
     );
 
     // Applying that upstream ViewUpdate must dirty and refresh the existing
@@ -667,7 +681,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
-    // The bounded second pass clears its dirty work. A quiet later tick must
+    // The scheduled follow-up clears its dirty work. A quiet later tick must
     // neither replay the unchanged view nor self-arm another serving loop.
     core.tick().unwrap();
     assert!(

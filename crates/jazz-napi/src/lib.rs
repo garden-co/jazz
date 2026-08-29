@@ -279,6 +279,7 @@ impl CoreTickScheduler for NapiTickScheduler {
         let urgency = match urgency {
             CoreTickUrgency::Immediate => "immediate",
             CoreTickUrgency::Deferred => "deferred",
+            CoreTickUrgency::AfterCurrentTurn => "after-current-turn",
         };
         let _ = self.callback.call(
             Ok(urgency.to_string()),

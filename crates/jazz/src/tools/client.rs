@@ -708,6 +708,7 @@ struct TickSchedulerImpl {
 struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
+    after_current_turn: AtomicBool,
     delayed: AtomicBool,
     notify: tokio::sync::Notify,
 }
@@ -731,7 +732,12 @@ impl TickSchedulerImpl {
     fn take(&self) -> Option<TickUrgency> {
         if self.state.immediate.swap(false, Ordering::AcqRel) {
             self.state.deferred.store(false, Ordering::Release);
+            self.state
+                .after_current_turn
+                .store(false, Ordering::Release);
             Some(TickUrgency::Immediate)
+        } else if self.state.after_current_turn.swap(false, Ordering::AcqRel) {
+            Some(TickUrgency::AfterCurrentTurn)
         } else if self.state.deferred.swap(false, Ordering::AcqRel) {
             Some(TickUrgency::Deferred)
         } else {
@@ -743,6 +749,9 @@ impl TickSchedulerImpl {
         match urgency {
             TickUrgency::Immediate => self.state.immediate.store(true, Ordering::Release),
             TickUrgency::Deferred => self.state.deferred.store(true, Ordering::Release),
+            TickUrgency::AfterCurrentTurn => {
+                self.state.after_current_turn.store(true, Ordering::Release)
+            }
         }
         self.state.notify.notify_one();
     }
@@ -1285,6 +1294,8 @@ impl ClientDb {
                     };
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
+                    } else if urgency == TickUrgency::AfterCurrentTurn {
+                        tokio::task::yield_now().await;
                     }
                     let tick_result = match inner.borrow().backend() {
                         Ok(db) => db.tick(),

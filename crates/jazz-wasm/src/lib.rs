@@ -652,6 +652,7 @@ impl TickScheduler for WasmTickScheduler {
         let urgency = match urgency {
             TickUrgency::Immediate => "immediate",
             TickUrgency::Deferred => "deferred",
+            TickUrgency::AfterCurrentTurn => "after-current-turn",
         };
         let _ = self
             .callback

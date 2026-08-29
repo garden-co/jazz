@@ -94,7 +94,7 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
-type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
+type CoreTickWake = "immediate" | "deferred" | "after-current-turn" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
@@ -806,6 +806,7 @@ export class NativeRuntimeAdapter implements Runtime {
       if (
         urgency === "immediate" ||
         urgency === "deferred" ||
+        urgency === "after-current-turn" ||
         (typeof urgency === "string" && urgency.startsWith("after:"))
       ) {
         this.scheduleCoreWake(urgency as CoreTickWake);
@@ -2774,6 +2775,14 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
+    if (urgency === "after-current-turn") {
+      // A microtask would set `coreTickAgain` while a core tick is still
+      // running, recursively entering the next tick before the browser can
+      // deliver newly-produced frames. Cold subscriber hydration must yield
+      // to the host task queue so inbound commits/fates get a fair turn.
+      setTimeout(() => this.scheduleCoreWake("immediate"), 0);
+      return;
+    }
     if (urgency.startsWith("after:")) {
       const delayMs = Number(urgency.slice("after:".length));
       if (!Number.isSafeInteger(delayMs) || delayMs < 0) return;

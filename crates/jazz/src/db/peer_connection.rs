@@ -2512,7 +2512,7 @@ where
                     send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut())?;
                 }
                 let mut applied_inbound = false;
-                let mut scheduled_immediate = false;
+                let mut scheduled_follow_up = false;
                 let mut sent_view_update = false;
                 let mut needs_subscription_refresh = false;
                 let relay_rejections = self
@@ -3344,8 +3344,13 @@ where
                                     ),
                                 );
                             }
-                            schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                            scheduled_immediate = true;
+                            // Opening a subscription creates work that may
+                            // require cold storage. Let the current transport
+                            // owner return first, so other frames (notably
+                            // local write receipts) can be ingressed before
+                            // initial hydration is attempted.
+                            schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
+                            scheduled_follow_up = true;
                             Ok::<bool, Error>(false)
                             })
                             .await?;
@@ -3642,8 +3647,8 @@ where
                     )
                     .await?;
                 }
-                if applied_inbound && !scheduled_immediate {
-                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                if applied_inbound && !scheduled_follow_up {
+                    schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
                 }
                 if applied_inbound {
                     let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
@@ -3655,7 +3660,7 @@ where
                     // is a separately scheduled turn so it cannot withhold the
                     // writer's durability receipt or later cancellation/flush
                     // traffic on this connection.
-                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                    schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
                     return Ok(true);
                 }
                 if *serve_dirty

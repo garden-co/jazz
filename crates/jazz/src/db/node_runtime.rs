@@ -1543,11 +1543,12 @@ where
         }
         let mut remote_sync_applied = false;
         let mut released_outbox_tx_ids = HashSet::new();
-        // A later subscriber can mutate Core state after an earlier peer link
-        // has already had its turn in this pass.  Remember that generation so
-        // the post-receive serve pass below reaches that earlier link too;
-        // websocket hosts are event-driven and need not provide unrelated
-        // follow-up traffic just to flush a freshly accepted row.
+        // A later connection can mutate Core state after an earlier subscriber
+        // has already had its turn in this pass. Remember that generation so
+        // every subscriber is served on a fresh owner turn below. In
+        // particular, do not recursively re-enter a just-admitted subscriber:
+        // its initial view can suspend on cold storage, while later inbound
+        // commit frames and their local fates must still get a turn.
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         let connections = self.connections.borrow().clone();
         for connection in &connections {
@@ -1562,18 +1563,9 @@ where
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
             for connection in &connections {
-                let should_tick = {
-                    let mut connection = connection.lock().await;
-                    connection.mark_subscriber_dirty() || subscriber_state_changed
-                };
-                if should_tick {
-                    let mut connection = connection.lock().await;
-                    let next = connection.tick().await?;
-                    released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
-                    stats.subscription_events += next.subscription_events;
-                    stats.remote_sync_applied += next.remote_sync_applied;
-                }
+                connection.lock().await.mark_subscriber_dirty();
             }
+            self.schedule_tick(TickUrgency::AfterCurrentTurn);
         }
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
