@@ -262,6 +262,75 @@ async fn cold_hydration_yields_before_later_subscription_work() {
     );
 }
 
+/// A large entirely resident graph is CPU work, not a storage wait. Hydration
+/// must therefore schedule bounded owner turns and still produce the same
+/// snapshot as the equivalent shallow subscription.
+#[futures_test::test]
+async fn deep_resident_hydration_yields_without_changing_its_snapshot() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    for id in 1..=3 {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("resident {id}"))],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+
+    let mut deep_graph = GraphBuilder::table("albums");
+    // Deliberately far larger than one cooperative session slice.
+    for _ in 0..128 {
+        deep_graph = deep_graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    let deep = database.subscribe_one_sink(deep_graph).await.unwrap();
+    let shallow = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert!(
+        wakes.0.load(Ordering::Acquire) > 0,
+        "resident graph work schedules a cooperative owner turn"
+    );
+
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_try_recv_vals(&deep),
+        expect_try_recv_vals(&shallow),
+        "bounded deep hydration preserves the shallow graph's snapshot"
+    );
+}
+
 #[futures_test::test]
 async fn subscribe_sends_empty_hydration_snapshot_without_writes() {
     let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");

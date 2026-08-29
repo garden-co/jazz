@@ -13,6 +13,12 @@ use super::evaluation_session::{
 use super::*;
 use crate::storage::OwnedStorage;
 
+/// Hydration can discover a large resident graph in one poll. Keep every
+/// owner turn bounded so a browser worker returns to transport ingress between
+/// CPU-only graph slices. Cold storage takes the separate request-pending path
+/// below and intentionally does not self-wake.
+const MAX_HYDRATION_RUNNABLE_NODES_PER_POLL: usize = 32;
+
 /// Owned preparation state for one interruptible evaluation.
 ///
 /// Storage suspension and dependency ordering live in `EvaluationWorkQueue`.
@@ -1019,145 +1025,157 @@ impl<'a> EvaluationSession<'a> {
         metrics: &mut TickMetrics,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
-        self.requests.poll(cx);
-        let ready = match self.requests.drain_ready() {
-            Ok(ready) => ready,
-            Err(error) => return Poll::Ready(Err(error.1.error)),
-        };
-        self.work_queue.requests_ready(ready.keys().cloned());
-        self.evaluation_inputs.install(ready);
-
-        while let Some(node) = self.work_queue.runnable.pop_front() {
-            let context = if hydrate_arrangements {
-                EvalContext::root_subscription_snapshot()
-            } else {
-                EvalContext::root_snapshot()
+        let mut remaining_runnable_nodes = MAX_HYDRATION_RUNNABLE_NODES_PER_POLL;
+        'owner_turn: loop {
+            self.requests.poll(cx);
+            let ready = match self.requests.drain_ready() {
+                Ok(ready) => ready,
+                Err(error) => return Poll::Ready(Err(error.1.error)),
             };
-            let result = if let Some(records) = self.pending_outputs.remove(&node) {
-                Ok(records)
-            } else {
-                let mut evaluator = TickEvaluator {
-                    schema: &runtime.schema,
-                    graph: &runtime.graph,
-                    variant_projections: &runtime.variant_projections,
-                    table_deltas: &[],
-                    binding_deltas: &[],
-                    binding_snapshots,
-                    current_tick: runtime.current_tick,
-                    operator_states: &mut self.operator_states,
-                    arrangement_states: &mut self.arrangement_states,
-                    arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
-                    eval_memo: &mut self.eval_memo,
-                    eval_memo_bytes: &mut self.eval_memo_bytes,
-                    table_frontiers: &runtime.table_frontiers,
-                    binding_frontiers: &self.binding_frontiers,
-                    memo_use_clock: &mut self.memo_use_clock,
-                    node_meta: &mut self.node_meta,
-                    storage: Some(self.storage.as_ref()),
-                    evaluation_inputs: Some(&mut self.evaluation_inputs),
-                    context,
-                    metrics,
-                    terminal_deltas: HashMap::default(),
-                    root_ordering_windows: HashMap::default(),
+            self.work_queue.requests_ready(ready.keys().cloned());
+            self.evaluation_inputs.install(ready);
+
+            while let Some(node) = self.work_queue.runnable.pop_front() {
+                if remaining_runnable_nodes == 0 {
+                    self.work_queue.requeue_yielded(node);
+                    // This is a resident CPU budget yield, not an external
+                    // dependency. Arrange exactly one fresh owner turn.
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                remaining_runnable_nodes -= 1;
+                let context = if hydrate_arrangements {
+                    EvalContext::root_subscription_snapshot()
+                } else {
+                    EvalContext::root_snapshot()
                 };
-                let mut evaluation = evaluator.update_node(node);
-                match Pin::new(&mut evaluation).poll(cx) {
-                    Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
-                    Poll::Pending => {
-                        self.work_queue.requeue_yielded(node);
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                }
-            };
-            match result {
-                Ok(mut records) => {
-                    if self.work_queue.is_root(node) {
-                        let mut materialized = Vec::with_capacity(records.deltas.len());
-                        let mut blocked = false;
-                        for delta in &records.deltas {
-                            match crate::large_values::materialize_record_attempt(
-                                &records.descriptor,
-                                delta.raw(),
-                                &mut self.evaluation_inputs,
-                            ) {
-                                Ok(record) => materialized.push(RecordDelta {
-                                    record: record.into(),
-                                    weight: delta.weight,
-                                }),
-                                Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
-                                Err(error) => return Poll::Ready(Err(error)),
-                            }
+                let result = if let Some(records) = self.pending_outputs.remove(&node) {
+                    Ok(records)
+                } else {
+                    let mut evaluator = TickEvaluator {
+                        schema: &runtime.schema,
+                        graph: &runtime.graph,
+                        variant_projections: &runtime.variant_projections,
+                        table_deltas: &[],
+                        binding_deltas: &[],
+                        binding_snapshots,
+                        current_tick: runtime.current_tick,
+                        operator_states: &mut self.operator_states,
+                        arrangement_states: &mut self.arrangement_states,
+                        arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
+                        eval_memo: &mut self.eval_memo,
+                        eval_memo_bytes: &mut self.eval_memo_bytes,
+                        table_frontiers: &runtime.table_frontiers,
+                        binding_frontiers: &self.binding_frontiers,
+                        memo_use_clock: &mut self.memo_use_clock,
+                        node_meta: &mut self.node_meta,
+                        storage: Some(self.storage.as_ref()),
+                        evaluation_inputs: Some(&mut self.evaluation_inputs),
+                        context,
+                        metrics,
+                        terminal_deltas: HashMap::default(),
+                        root_ordering_windows: HashMap::default(),
+                    };
+                    let mut evaluation = evaluator.update_node(node);
+                    match Pin::new(&mut evaluation).poll(cx) {
+                        Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
+                        Poll::Pending => {
+                            self.work_queue.requeue_yielded(node);
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
                         }
-                        if blocked {
-                            let requests = self.evaluation_inputs.take_missing();
-                            if requests.is_empty() {
-                                return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                    }
+                };
+                match result {
+                    Ok(mut records) => {
+                        if self.work_queue.is_root(node) {
+                            let mut materialized = Vec::with_capacity(records.deltas.len());
+                            let mut blocked = false;
+                            for delta in &records.deltas {
+                                match crate::large_values::materialize_record_attempt(
+                                    &records.descriptor,
+                                    delta.raw(),
+                                    &mut self.evaluation_inputs,
+                                ) {
+                                    Ok(record) => materialized.push(RecordDelta {
+                                        record: record.into(),
+                                        weight: delta.weight,
+                                    }),
+                                    Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+                                    Err(error) => return Poll::Ready(Err(error)),
+                                }
                             }
-                            for request in requests.iter().cloned() {
-                                self.requests.request(
-                                    request,
-                                    &self.storage,
-                                    Some(&runtime.chunk_provider),
-                                    &runtime.schema,
-                                );
+                            if blocked {
+                                let requests = self.evaluation_inputs.take_missing();
+                                if requests.is_empty() {
+                                    return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                                }
+                                for request in requests.iter().cloned() {
+                                    self.requests.request(
+                                        request,
+                                        &self.storage,
+                                        Some(&runtime.chunk_provider),
+                                        &runtime.schema,
+                                    );
+                                }
+                                self.pending_outputs.insert(node, records);
+                                self.work_queue.wait_for_requests(node, requests);
+                                // Every newly retained future must be polled once
+                                // before returning Pending so it can install the
+                                // caller's waker.
+                                if self.requests.poll(cx) > 0 {
+                                    continue 'owner_turn;
+                                }
+                                if self.requests.has_pending() {
+                                    // Cold storage owns the continuation now.
+                                    // Do not spin through unrelated runnable
+                                    // graph nodes in this owner turn.
+                                    return Poll::Pending;
+                                }
+                                continue;
                             }
-                            self.pending_outputs.insert(node, records);
-                            self.work_queue.wait_for_requests(node, requests);
-                            // Every newly retained future must be polled once
-                            // before returning Pending so it can install the
-                            // caller's waker.
-                            if self.requests.poll(cx) > 0 {
-                                return self.poll(
-                                    runtime,
-                                    binding_snapshots,
-                                    hydrate_arrangements,
-                                    metrics,
-                                    cx,
-                                );
-                            }
-                            continue;
+                            records.deltas = materialized;
+                            self.outputs.insert(node, records);
                         }
-                        records.deltas = materialized;
-                        self.outputs.insert(node, records);
+                        self.work_queue.complete(node);
                     }
-                    self.work_queue.complete(node);
+                    Err(IvmRuntimeError::EvaluationBlocked) => {
+                        let requests = self.evaluation_inputs.take_missing();
+                        if requests.is_empty() {
+                            return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                        }
+                        let mut registered = false;
+                        for request in requests.iter().cloned() {
+                            registered |= self.requests.request(
+                                request,
+                                &self.storage,
+                                Some(&runtime.chunk_provider),
+                                &runtime.schema,
+                            );
+                        }
+                        self.work_queue.wait_for_requests(node, requests);
+                        if (registered || self.requests.has_pending()) && self.requests.poll(cx) > 0
+                        {
+                            continue 'owner_turn;
+                        }
+                        if self.requests.has_pending() {
+                            // A request was polled with this owner's durable
+                            // waker. Yield to it rather than scanning the rest of
+                            // a potentially huge graph while it is cold.
+                            return Poll::Pending;
+                        }
+                    }
+                    Err(error) => return Poll::Ready(Err(error)),
                 }
-                Err(IvmRuntimeError::EvaluationBlocked) => {
-                    let requests = self.evaluation_inputs.take_missing();
-                    if requests.is_empty() {
-                        return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
-                    }
-                    let mut registered = false;
-                    for request in requests.iter().cloned() {
-                        registered |= self.requests.request(
-                            request,
-                            &self.storage,
-                            Some(&runtime.chunk_provider),
-                            &runtime.schema,
-                        );
-                    }
-                    self.work_queue.wait_for_requests(node, requests);
-                    if registered && self.requests.poll(cx) > 0 {
-                        return self.poll(
-                            runtime,
-                            binding_snapshots,
-                            hydrate_arrangements,
-                            metrics,
-                            cx,
-                        );
-                    }
-                }
-                Err(error) => return Poll::Ready(Err(error)),
             }
-        }
 
-        if self.outputs.len() == self.roots.len() {
-            Poll::Ready(Ok(()))
-        } else if self.requests.has_pending() {
-            Poll::Pending
-        } else {
-            Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked))
+            if self.outputs.len() == self.roots.len() {
+                return Poll::Ready(Ok(()));
+            }
+            if self.requests.has_pending() {
+                return Poll::Pending;
+            }
+            return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
         }
     }
 
