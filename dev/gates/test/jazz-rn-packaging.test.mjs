@@ -1088,25 +1088,33 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
 });
 
 test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
-  const [podspec, androidPackage, androidBuild, androidCmake, iosRelay, packageRoot, rootCargo, legacyConfig] =
-    await Promise.all([
-      readFile(new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url), "utf8"),
-      readFile(
-        new URL(
-          "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayPackage.kt",
-          import.meta.url,
-        ),
-        "utf8",
+  const [
+    podspec,
+    androidPackage,
+    androidBuild,
+    androidCmake,
+    iosRelay,
+    packageRoot,
+    rootCargo,
+    legacyConfig,
+  ] = await Promise.all([
+    readFile(new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url), "utf8"),
+    readFile(
+      new URL(
+        "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayPackage.kt",
+        import.meta.url,
       ),
-      readFile(new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url), "utf8"),
-      readFile(new URL("../../../crates/jazz-rn/android/CMakeLists.txt", import.meta.url), "utf8"),
-      readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
-      readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../../../Cargo.toml", import.meta.url), "utf8"),
-      readFile(new URL("../../../crates/jazz-rn/ubrn.config.yaml", import.meta.url), "utf8").catch(
-        () => null,
-      ),
-    ]);
+      "utf8",
+    ),
+    readFile(new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/android/CMakeLists.txt", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../../../Cargo.toml", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/ubrn.config.yaml", import.meta.url), "utf8").catch(
+      () => null,
+    ),
+  ]);
 
   assert.match(podspec, /JazzNativeRelay\.xcframework/);
   assert.equal(
@@ -1136,7 +1144,10 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(androidBuild, /-DREACT_NATIVE_DIR=\$\{reactNativeDir\}/);
   assert.match(androidCmake, /find_package\(ReactAndroid REQUIRED CONFIG\)/);
   assert.match(androidCmake, /find_package\(fbjni REQUIRED CONFIG\)/);
-  assert.match(androidCmake, /\$\{REACT_NATIVE_DIR\}\/ReactAndroid\/src\/main\/jni\/react\/turbomodule/);
+  assert.match(
+    androidCmake,
+    /\$\{REACT_NATIVE_DIR\}\/ReactAndroid\/src\/main\/jni\/react\/turbomodule/,
+  );
   assert.doesNotMatch(androidCmake, /REACT_ANDROID_DIR/);
   assert.doesNotMatch(androidBuild, /generated\/source\/codegen\/java/);
   assert.doesNotMatch(androidBuild, /KotlinCompile/);
