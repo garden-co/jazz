@@ -9,7 +9,7 @@ native adapters under the closed `epoch_1_storage_codec_profile`.
 Its settlement-baseline logical-receipt SHA-256 is:
 
 ```text
-0194e6e7ad2cfdea7650ae9e3c2a50f8ad6429c8d63116cbee3e34a844aa5727
+2de7abdde4b6a7c84bcb8de01e4cfa674883b94c1aaf94096c0646f8178ddf20
 ```
 
 The digest is over sorted system and physical application store names and, for
@@ -41,18 +41,18 @@ intentionally narrow producer cannot quietly become the final corpus.
 The producer's exact logical pack is committed as
 `epoch-1-native-jazz-corpus.pack.base64`; it is base64 only to keep its
 canonical binary values safe in a text repository. Its SHA-256 is
-`d30a5eb83b9ea6efedaaed691ab514b2fa662419e170c556df755e8c85a3439e`.
+`f61811d6750867017e67786ccafd092b965594b06165cc3252fcc1d79c340441`.
 It explicitly lists empty authoritative families as well as entries, so an
 omitted opened family cannot look the same as an empty one.
 
 The same pinned producer has two backend-specific physical receipts:
 
 - `epoch-1-native-jazz.sqlite.gz.base64` — gzip payload SHA-256
-  `717c4f2d7e5ddfeef91aba014c47b0340148c9352b240e0eca84368769f0b039`,
+  `07edc6ac52ff31118ae8ce90390ad942f5fd406187a0f17b2592ee963c8a59d4`,
   decompressed SQLite SHA-256
-  `c6f6aab28154359d800e7ca81739d257b4456f53c2a9b416128afeec67c32356`.
+  `c972bf4b036c2d12cd72637f931f60f784b1e33f2d31ef654c7d9e44f69fbd4c`.
 - `epoch-1-native-jazz-rocksdb.tar.gz.base64` — archive SHA-256
-  `e930e931b74425f788f84f5b2776b8dcb4043fb9b8c7391385571b8bf53653d6`.
+  `03f12e133bab81896db6cc1ee56be720c6c09e3c0d2bfa0c2d9396f155bc106a`.
 
 `committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes`
 checks each payload before materializing it, inspects SQLite and RocksDB using
