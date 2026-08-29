@@ -237,7 +237,12 @@ export class BrowserConnectionManager extends ConnectionManager {
         // persistence retires the node rather than risking reuse.
         try {
           const runtime = client?.getRuntime();
-          if (!runtime || !(runtime instanceof NativeRuntimeAdapter)) {
+          if (!runtime) {
+            // No foreground client existed, hence no transaction identity was
+            // minted after the lease was acquired.
+            await lease.returnWithHighWater(lease.confirmedTxTime);
+            return;
+          } else if (!(runtime instanceof NativeRuntimeAdapter)) {
             await lease.retire();
             return;
           }

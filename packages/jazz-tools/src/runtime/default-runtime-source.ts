@@ -220,12 +220,14 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       selfSignedClientProof,
       backendMode,
     );
+    if (foregroundNodeLease) {
+      mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
+    }
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
       if (!foregroundNodeLease) {
         throw new Error("Persistent browser runtime requires a foreground node lease");
       }
-      mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
     }
 
     const context: AppContext = {
@@ -252,6 +254,22 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       runtimeSources: browserWorkerRuntimeSources(config),
       dbName,
       authSessionKey: createBrowserAuthSessionKey(config),
+    });
+  }
+
+  override async acquireForegroundNodeLease(config: DbConfig) {
+    if (!isNodeRuntime() || (config.driver?.type ?? "persistent") !== "persistent") {
+      return undefined;
+    }
+    // This guarded dynamic import keeps Node filesystem code out of the path
+    // executed by browser/RN bundles while remaining visible to Node test and
+    // package tooling.
+    const { acquireNodeForegroundNodeLease } =
+      await import("./native-runtime/node-foreground-node-lease.js");
+    return await acquireNodeForegroundNodeLease({
+      appId: config.appId,
+      env: config.env ?? "dev",
+      authScope: createBrowserAuthSessionKey(config),
     });
   }
 
@@ -416,6 +434,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof Worker !== "undefined";
+}
+
+function isNodeRuntime(): boolean {
+  return typeof process !== "undefined" && Boolean(process.versions?.node);
 }
 
 function isPersistentBrowserConfig(config: DbConfig): boolean {

@@ -1603,6 +1603,16 @@ export class Db {
     return new Db(config, runtimeSource);
   }
 
+  /** @internal Create a direct Db after its pre-runtime identity bootstrap. */
+  static async createWithDirectConnection(
+    config: DbConfig,
+    runtimeSource: AnyRuntimeSource,
+  ): Promise<Db> {
+    const db = new Db(config, runtimeSource);
+    await db.connection.start();
+    return db;
+  }
+
   /** @internal Create a Db whose durable peer lives in a dedicated browser worker. */
   static async createWithBrowserWorker(
     config: DbConfig,
@@ -2818,7 +2828,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   const db =
     runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent"
       ? await Db.createWithBrowserWorker(resolvedConfig, runtimeSource as AnyRuntimeSource)
-      : Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
+      : await Db.createWithDirectConnection(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);
