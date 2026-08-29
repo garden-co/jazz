@@ -66,10 +66,12 @@ export class BrowserConnectionManager extends ConnectionManager {
       },
       (error: unknown) => {
         this.connectionError = asError(error);
-        throw error;
+        // `connectionReady` is also observed by passive readiness consumers
+        // (for example the initial offline-state probe). Keep it a settled
+        // notification, not a detached rejected promise. Public operations
+        // call ensureReady(), which rethrows this stored error below.
       },
     );
-    void this.connectionReady.catch(() => undefined);
     if (this.disconnected) {
       const ready = this.connectionReady;
       void this.enqueueTransportTransition(async () => {
@@ -203,6 +205,7 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   override async shutdown(): Promise<void> {
     const connection = this.connection;
+    const admissionFailed = this.connectionError !== null;
     this.connection = null;
     this.connectionReady = null;
     this.initialExplicitOfflineStateKnown = false;
@@ -212,7 +215,10 @@ export class BrowserConnectionManager extends ConnectionManager {
 
     await runCleanupSteps([
       () => unregisterInspectorControl?.(),
-      () => connection?.flushLocal(),
+      // A rejected physical-root admission created no follower and therefore
+      // has nothing to flush. Shutdown remains idempotent after a caller has
+      // already received that operation-level error.
+      () => (admissionFailed ? undefined : connection?.flushLocal()),
       () => {
         // The tab runtime is explicitly non-durable; once its worker peer has
         // flushed, graceful evaluator teardown cannot add durability and may wait

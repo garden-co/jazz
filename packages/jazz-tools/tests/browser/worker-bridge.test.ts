@@ -2787,6 +2787,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
   });
 
   it("pins an explicit IndexedDB name to one browser auth scope without mutating it on conflict", async () => {
+    const ambientFailures: string[] = [];
+    const recordAmbientFailure = (event: ErrorEvent | PromiseRejectionEvent) => {
+      const value = "reason" in event ? event.reason : (event.error ?? event.message);
+      ambientFailures.push(value instanceof Error ? value.message : String(value));
+    };
+    globalThis.addEventListener("error", recordAmbientFailure);
+    globalThis.addEventListener("unhandledrejection", recordAmbientFailure);
     const appId = uniqueDbName("explicit-browser-owner-app");
     const dbName = uniqueDbName("explicit-browser-owner-root");
     const alice = track(
@@ -2813,13 +2820,19 @@ describe("SharedWorker bridge with IndexedDB", () => {
         driver: { type: "persistent", dbName },
       }),
     );
+    const conflictingRead = bob.all(allTodos, { tier: "local" });
     await expect(
       withTimeout(
-        bob.all(allTodos, { tier: "local" }),
+        conflictingRead,
         8_000,
-        "conflicting browser owner should fail rather than hang",
+        "conflicting browser owner should reject during durable admission rather than hang",
       ),
     ).rejects.toThrow("incompatible persistent browser configuration");
+
+    // A conflicting durable root is an operation-level error. It must not
+    // additionally escape as an ambient error / unhandled rejection.
+    await sleep(50);
+    expect(ambientFailures).toEqual([]);
 
     // The failed claimant did not clear, replace, or append to the owner's
     // existing physical store.
@@ -2827,6 +2840,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "Alice durable row",
     ]);
     await bob.shutdown();
+    globalThis.removeEventListener("error", recordAmbientFailure);
+    globalThis.removeEventListener("unhandledrejection", recordAmbientFailure);
   });
 
   it("fans out auth loss and accepts same-principal refresh from either tab", async () => {
