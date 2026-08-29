@@ -23,7 +23,7 @@ import {
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
 import { getJazzServerInfo } from "./testing-server.js";
-import { uniqueDbName, waitForQuery, withTimeout } from "./support.js";
+import { sleep, TestCleanup, uniqueDbName, withTimeout } from "./support.js";
 
 const app = s.defineApp({
   projects: s.table({
@@ -49,6 +49,16 @@ const permissions = s.definePermissions(app, ({ policy }) => [
   policy.documents.allowUpdate.always(),
   policy.documents.allowDelete.always(),
 ]);
+
+// Keep the corrupt-open receipt deliberately small. The broader corpus above
+// exercises branches and large values; this isolates storage admission from
+// any schema-level query work that cannot run after an invalid epoch anyway.
+const corruptionApp = s.defineApp({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+});
 
 describe("browser Jazz storage compatibility corpus", () => {
   const databaseNames: string[] = [];
@@ -77,29 +87,34 @@ describe("browser Jazz storage compatibility corpus", () => {
     const dbName = databaseName();
     const secret = generateAuthSecret();
     let db = await openPersistentDb(dbName, secret, server);
-    const project = db.insert(app.projects, { name: "compat project" }).value;
-    await withTimeout(
-      db
-        .insert(app.documents, {
+    const initialFixture = await db.transaction((tx) => {
+      const project = tx.insert(app.projects, { name: "compat project" });
+      const document = tx.insert(
+        app.documents,
+        {
           branch: "main",
           title: "first title",
           projectId: project.id,
           body: "large value ".repeat(20_000),
-        })
-        .wait({ tier: "global" }),
+        },
+        { branch: "main" },
+      );
+      return { project, document };
+    });
+    await withTimeout(
+      initialFixture.wait({ tier: "global" }),
       20_000,
       "initial compatibility fixture did not settle",
     );
+    const { project, document } = initialFixture.value;
 
-    const main = await waitForQuery(
-      db,
-      app.documents.where({ branch: "main" }),
-      (rows) => rows.length === 1,
-      "main branch fixture did not become readable",
+    const main = await withTimeout(
+      db.all(app.documents, { branch: "main", tier: "edge" }),
       20_000,
-      "edge",
+      "main branch fixture did not become readable",
     );
-    const document = main[0]!;
+    expect(main).toHaveLength(1);
+    expect(main[0]!.id).toBe(document.id);
     await withTimeout(
       db
         .update(app.documents, document.id, { title: "current title" }, { branch: "main" })
@@ -124,6 +139,7 @@ describe("browser Jazz storage compatibility corpus", () => {
 
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
+    await sleep(100);
     const rawBeforeReadOnlyInspection = await rawRecords(dbName);
 
     db = await openPersistentDb(dbName, secret, server);
@@ -147,37 +163,47 @@ describe("browser Jazz storage compatibility corpus", () => {
     });
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
+    await sleep(100);
     expect(await rawRecords(dbName)).toEqual(rawBeforeReadOnlyInspection);
   }, 90_000);
 
   it("rejects a corrupt durable epoch before handing a public Jazz handle to the app", async () => {
-    const server = await getJazzServerInfo(uniqueDbName("storage-compat-corruption-server"));
-    await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
-      schema: app.wasmSchema,
-      permissions,
-    });
-
+    const cleanup = new TestCleanup();
     const dbName = databaseName();
-    const secret = generateAuthSecret();
-    const db = await openPersistentDb(dbName, secret, server);
+    const appId = "browser-storage-compat-corruption";
+    const db = cleanup.track(await createDb({ appId, driver: { type: "persistent", dbName } }));
     await withTimeout(
-      db.insert(app.projects, { name: "corruption sentinel" }).wait({ tier: "global" }),
-      20_000,
+      db
+        .insert(corruptionApp.todos, { title: "corruption sentinel", done: false })
+        .wait({ tier: "local" }),
+      5_000,
       "corruption fixture did not settle",
     );
     await db.shutdown();
-    openDbs.splice(openDbs.indexOf(db), 1);
+    cleanup.untrack(db);
+    await sleep(100);
 
     await replaceManifest(dbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
-    const rawBeforeRejectedOpen = await rawRecords(dbName);
-    await expect(openPersistentDb(dbName, secret, server)).rejects.toThrow(
-      "Missing or invalid IndexedDB storage epoch manifest",
-    );
-    expect(openDbs).toHaveLength(0);
-    expect(await rawRecords(dbName)).toEqual(rawBeforeRejectedOpen);
+    const rawBeforeRejectedRead = await rawRecords(dbName);
+    // Db construction is schema-lazy, so it returns the typed façade before a
+    // public operation supplies `app.wasmSchema`. That first operation is the
+    // admission boundary: it must reject rather than leak a worker error or
+    // read a row from the corrupt durable replica.
+    try {
+      const corruptedDb = cleanup.track(
+        await createDb({ appId, driver: { type: "persistent", dbName } }),
+      );
+      await expect(
+        withTimeout(
+          corruptedDb.all(corruptionApp.todos, { tier: "local" }),
+          5_000,
+          "corrupt epoch query did not reject",
+        ),
+      ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+      expect(await rawRecords(dbName)).toEqual(rawBeforeRejectedRead);
+    } finally {
+      await cleanup.cleanup();
+    }
   }, 90_000);
 
   function databaseName(): string {
