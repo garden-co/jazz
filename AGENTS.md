@@ -35,6 +35,16 @@ handoff cases. For nuanced or large changes, make these concrete enough for an
 adversarial reviewer to verify the behavior and for a future reader to recover
 the decision without reconstructing it from the diff or conversation history.
 
+### Stack and restack preflight
+
+Before every `gh stack link`, `gh stack submit`, rebase, merge-based restack,
+or branch propagation, run `dev/gates/require-clean-worktree.sh <checkout>`
+against every checkout that the operation will mutate. It rejects staged index
+changes, unstaged tracked changes, and non-ignored untracked files. Do not
+interpret a clean `git diff` as sufficient: it deliberately does not report a
+dirty index. Preserve or commit the state first; never let a stack operation
+implicitly carry it across branches.
+
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.
