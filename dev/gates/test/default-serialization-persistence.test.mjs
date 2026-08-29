@@ -69,11 +69,9 @@ function writeRegistry(root, allowed, direct = snapshots()) {
       })),
     }),
   );
-  const refreshed = spawnSync(
-    "node",
-    [gate, "--root", root, "--refresh-registry-snapshot"],
-    { encoding: "utf8" },
-  );
+  const refreshed = spawnSync("node", [gate, "--root", root, "--refresh-registry-snapshot"], {
+    encoding: "utf8",
+  });
   assert.equal(refreshed.status, 0, refreshed.stderr);
 }
 
@@ -235,17 +233,17 @@ test("cfg-bound exact endpoints survive every declaration form and reject a same
     // serializer path's location transferred a reviewed test allowance to
     // production.
     const source =
-      'pub struct Holder;\n' +
-      '#[cfg(test)] type Alias = serde_json::Value;\n' +
-      '#[cfg(test)] const VALUE: Option<serde_json::Value> = None;\n' +
-      '#[cfg(test)] static STATIC_VALUE: Option<serde_json::Value> = None;\n' +
-      '#[cfg(test)] struct Tuple(serde_json::Value);\n' +
-      '#[cfg(test)] struct Unit;\n' +
-      '#[cfg(test)] struct Named { #[cfg(test)] field: serde_json::Value }\n' +
+      "pub struct Holder;\n" +
+      "#[cfg(test)] type Alias = serde_json::Value;\n" +
+      "#[cfg(test)] const VALUE: Option<serde_json::Value> = None;\n" +
+      "#[cfg(test)] static STATIC_VALUE: Option<serde_json::Value> = None;\n" +
+      "#[cfg(test)] struct Tuple(serde_json::Value);\n" +
+      "#[cfg(test)] struct Unit;\n" +
+      "#[cfg(test)] struct Named { #[cfg(test)] field: serde_json::Value }\n" +
       '#[cfg(test)] extern "Rust" { fn imported(_: serde_json::Value); }\n' +
-      'pub trait Associated { #[cfg(test)] type Value; #[cfg(test)] const VALUE: Option<serde_json::Value>; }\n' +
-      'impl Associated for Holder { #[cfg(test)] type Value = serde_json::Value; #[cfg(test)] const VALUE: Option<serde_json::Value> = None; }\n' +
-      '#[cfg(test)] mod nested { pub type Alias = serde_json::Value; }\n';
+      "pub trait Associated { #[cfg(test)] type Value; #[cfg(test)] const VALUE: Option<serde_json::Value>; }\n" +
+      "impl Associated for Holder { #[cfg(test)] type Value = serde_json::Value; #[cfg(test)] const VALUE: Option<serde_json::Value> = None; }\n" +
+      "#[cfg(test)] mod nested { pub type Alias = serde_json::Value; }\n";
     const reviewed = endpoints(source);
     assert.ok(reviewed.length >= 10);
     assert.ok(reviewed.every((endpoint) => endpoint.boundary === "test"));
@@ -321,7 +319,10 @@ test("endpoint identity contains the full impl stack, not only a function name",
     fs.writeFileSync(path.join(root, "crates/jazz/src/node/codec.rs"), swapped);
     const result = run(root);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /unregistered default serialization reference|registered serializer endpoint is absent/);
+    assert.match(
+      result.stderr,
+      /unregistered default serialization reference|registered serializer endpoint is absent/,
+    );
     assert.equal(compile(root).status, 0, compile(root).stderr);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -364,7 +365,10 @@ test("dependency feature, requirement, source, and resolved-version snapshot dri
       manifest,
       fs
         .readFileSync(manifest, "utf8")
-        .replace('postcard = { version = "1", features = ["alloc"] }', 'postcard = { version = "1", default-features = false, features = ["alloc", "use-std"] }'),
+        .replace(
+          'postcard = { version = "1", features = ["alloc"] }',
+          'postcard = { version = "1", default-features = false, features = ["alloc", "use-std"] }',
+        ),
     );
     const result = run(root);
     assert.notEqual(result.status, 0);
@@ -466,7 +470,10 @@ test("rejects symlinked audit entries and accepts only physically in-scope liter
     assert.match(result.stderr, /include! is prohibited/);
     assert.equal(compile(root).status, 0, compile(root).stderr);
 
-    writeSource(root, '#[path = "../outside.rs"]\nmod outside;\npub fn f() { outside::outside(); }\n');
+    writeSource(
+      root,
+      '#[path = "../outside.rs"]\nmod outside;\npub fn f() { outside::outside(); }\n',
+    );
     result = run(root);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /#\[path\] mod is prohibited/);
@@ -510,7 +517,10 @@ test("governs explicit serializer reexports from direct path dependencies", () =
   const root = fixture();
   try {
     const workspace = path.join(root, "Cargo.toml");
-    fs.writeFileSync(workspace, '[workspace]\nmembers = ["crates/jazz", "crates/bridge"]\nresolver = "2"\n');
+    fs.writeFileSync(
+      workspace,
+      '[workspace]\nmembers = ["crates/jazz", "crates/bridge"]\nresolver = "2"\n',
+    );
     fs.mkdirSync(path.join(root, "crates/bridge/src"), { recursive: true });
     fs.writeFileSync(
       path.join(root, "crates/bridge/Cargo.toml"),
@@ -518,9 +528,12 @@ test("governs explicit serializer reexports from direct path dependencies", () =
     );
     const bridgeSource = path.join(root, "crates/bridge/src/lib.rs");
     fs.writeFileSync(bridgeSource, "pub use serde_json as json;\n");
-    fs.appendFileSync(path.join(root, "crates/jazz/Cargo.toml"), 'bridge = { path = "../bridge" }\n');
+    fs.appendFileSync(
+      path.join(root, "crates/jazz/Cargo.toml"),
+      'bridge = { path = "../bridge" }\n',
+    );
     writeRegistry(root, []);
-    const source = 'pub fn f() { let _ = bridge::json::to_string(&42); }\n';
+    const source = "pub fn f() { let _ = bridge::json::to_string(&42); }\n";
     writeSource(root, source);
     let result = run(root);
     assert.notEqual(result.status, 0);
@@ -556,7 +569,7 @@ test("governs grouped public serializer-root reexports from reviewer bridges", (
     // member for a root alias.
     fs.writeFileSync(
       bridgeSource,
-      'pub use ::serde_json::{self, self as json, self as wire_json, Value};\n',
+      "pub use ::serde_json::{self, self as json, self as wire_json, Value};\n",
     );
     fs.appendFileSync(
       path.join(root, "crates/jazz/Cargo.toml"),
@@ -565,11 +578,11 @@ test("governs grouped public serializer-root reexports from reviewer bridges", (
     writeRegistry(root, []);
 
     const source =
-      'pub fn f() {\n' +
-      '  let _ = reviewer_bridge::serde_json::to_string(&42);\n' +
-      '  let _ = reviewer_bridge::json::to_string(&42);\n' +
-      '  let _ = reviewer_bridge::wire_json::to_string(&42);\n' +
-      '}\n';
+      "pub fn f() {\n" +
+      "  let _ = reviewer_bridge::serde_json::to_string(&42);\n" +
+      "  let _ = reviewer_bridge::json::to_string(&42);\n" +
+      "  let _ = reviewer_bridge::wire_json::to_string(&42);\n" +
+      "}\n";
     writeSource(root, source);
     let result = run(root);
     assert.notEqual(result.status, 0);
@@ -580,7 +593,7 @@ test("governs grouped public serializer-root reexports from reviewer bridges", (
     // replacing just one grouped root spelling must demand registry review.
     fs.writeFileSync(
       bridgeSource,
-      'pub use ::serde_json::{self, self as json, self as replacement_json, Value};\n',
+      "pub use ::serde_json::{self, self as json, self as replacement_json, Value};\n",
     );
     result = run(root);
     assert.notEqual(result.status, 0);

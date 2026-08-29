@@ -112,7 +112,10 @@ export function rustTokens(source) {
 export function serializerReferences(tokens, roots) {
   const rootPaths = [...roots]
     .map((root) => root.split("::"))
-    .sort((left, right) => right.length - left.length || left.join("::").localeCompare(right.join("::")));
+    .sort(
+      (left, right) =>
+        right.length - left.length || left.join("::").localeCompare(right.join("::")),
+    );
   const references = [];
   for (let index = 0; index < tokens.length; index += 1) {
     if (tokens[index].kind !== "ident") continue;
@@ -219,7 +222,8 @@ export function persistenceSourceEscapes(tokens) {
         escapes.push({
           kind: "#[path] mod",
           line: tokens[index].line,
-          literal: tokens.slice(index + 2, close - 1).find((token) => token.kind === "literal")?.text,
+          literal: tokens.slice(index + 2, close - 1).find((token) => token.kind === "literal")
+            ?.text,
         });
         break;
       }
@@ -274,8 +278,20 @@ function attributeText(tokens, start) {
 }
 
 const itemKeywords = new Set([
-  "mod", "fn", "impl", "trait", "struct", "enum", "union", "const", "static", "type", "use",
-  "extern", "macro", "macro_rules",
+  "mod",
+  "fn",
+  "impl",
+  "trait",
+  "struct",
+  "enum",
+  "union",
+  "const",
+  "static",
+  "type",
+  "use",
+  "extern",
+  "macro",
+  "macro_rules",
 ]);
 
 /**
@@ -408,7 +424,9 @@ function itemName(tokens, start, end) {
 function fieldContext(tokens, target, parents) {
   const owner = [...parents]
     .reverse()
-    .find((item) => ["struct", "union", "enum"].includes(item.kind) && item.openBrace !== undefined);
+    .find(
+      (item) => ["struct", "union", "enum"].includes(item.kind) && item.openBrace !== undefined,
+    );
   if (!owner || target <= owner.openBrace || target >= owner.end) return undefined;
   let start = owner.openBrace + 1;
   let depth = 0;
@@ -425,7 +443,8 @@ function fieldContext(tokens, target, parents) {
   const name =
     colon === -1
       ? "#" + countTupleFields(tokens, owner.openBrace + 1, start)
-      : [...segment.slice(0, colon)].reverse().find((token) => token.kind === "ident")?.text ?? "<anonymous>";
+      : ([...segment.slice(0, colon)].reverse().find((token) => token.kind === "ident")?.text ??
+        "<anonymous>");
   const cfgTest = segment.some(
     (token, index) => token.text === "#" && cfgAttributeImpliesTest(attributeText(segment, index)),
   );
@@ -493,7 +512,8 @@ function parseCfgPredicate(source) {
 function predicateImpliesTest(predicate) {
   if (predicate.kind === "atom") return predicate.name === "test";
   if (predicate.kind === "all") return predicate.children.some(predicateImpliesTest);
-  if (predicate.kind === "any") return predicate.children.length > 0 && predicate.children.every(predicateImpliesTest);
+  if (predicate.kind === "any")
+    return predicate.children.length > 0 && predicate.children.every(predicateImpliesTest);
   return false;
 }
 
