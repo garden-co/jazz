@@ -3,8 +3,9 @@
 This directory is the React Native package for Jazz's native relay boundary.
 It is a narrow alpha rather than general React Native support. React Native is
 not yet a supported high-level React Native Jazz client: a matching native
-development or release build and trusted platform admission are necessary
-building blocks, but do not yet constitute an app-facing support guarantee.
+development or release build, plus a capability issued by trusted platform
+admission, are necessary building blocks, but do not yet constitute an
+app-facing support guarantee.
 Expo Go cannot contain this native module.
 
 The shared JSI
