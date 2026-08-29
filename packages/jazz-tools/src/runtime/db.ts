@@ -2365,50 +2365,17 @@ export class Db {
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
     session?: Session,
-    statusReady = false,
   ): SubscriptionHandle {
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
-    // A newly attached browser peer has no durable runtime until its worker
-    // handshake completes. In particular, do not publish the ordinary local
-    // empty seed before that handshake: a storage-open failure belongs to the
-    // initiating subscription, not to an ambient deferred exception after a
-    // misleading successful result. Direct runtimes and already-ready browser
-    // peers return null and retain their synchronous local subscription path.
-    const initialReadiness = !statusReady ? this.connection.initialExplicitOfflineState() : null;
-    if (initialReadiness) {
-      let unsubscribed = false;
-      let unsubscribe = () => {};
-      const readyAbort = new AbortController();
-      const ready = initialReadiness
-        .then(() => {
-          if (unsubscribed || readyAbort.signal.aborted) return;
-          const installed = this.subscribeDelta(query, callback, options, session, true);
-          // Native subscription installation can synchronously deliver an
-          // opening delta. If that callback unsubscribes the outer handle,
-          // dispose the just-created inner subscription rather than retaining
-          // it after this continuation returns.
-          if (unsubscribed || readyAbort.signal.aborted) installed();
-          else unsubscribe = installed;
-        })
-        .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
-          throw error;
-        });
-      // Direct `Db.subscribe` has historically returned only cancellation, so
-      // retain an internal rejection handler for callers that do not consume
-      // the readiness property. Framework bindings consume `ready` below via
-      // DbSubscriptionSource and surface it as their normal error state.
-      void ready.catch(() => undefined);
-      const handle = (() => {
-        unsubscribed = true;
-        readyAbort.abort();
-        unsubscribe();
-      }) as SubscriptionHandle;
-      Object.defineProperty(handle, "ready", { value: ready });
-      return handle;
-    }
+    // A newly attached browser peer does not yet know whether its worker can
+    // open durable storage.  Keep the native subscription installation in the
+    // old immediate order (several hooks may register together), but hold its
+    // public deltas until that one admission succeeds.  This makes a corrupt
+    // store fail the subscription that triggered it without publishing a
+    // misleading empty opening or perturbing maintained-view registration.
+    const initialReadiness = this.connection.initialExplicitOfflineState();
     const manager = new SubscriptionManager<T>();
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
@@ -2426,9 +2393,19 @@ export class Db {
           builtQuery.partialSelect,
         ),
       );
+    let deliveryReady = initialReadiness === null;
+    const bufferedDeltas: SubscriptionDelta<T>[] = [];
+    let startLocalSeed: (() => void) | null = null;
+    const deliver = (delta: SubscriptionDelta<T>) => {
+      if (!deliveryReady) {
+        bufferedDeltas.push(delta);
+        return;
+      }
+      callback(delta);
+    };
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform);
-      callback(typedDelta);
+      deliver(typedDelta);
     };
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
@@ -2494,8 +2471,41 @@ export class Db {
       builtQuery.table,
       queryOptions,
     );
+    const unsubscribe = () => {
+      unsubscribed = true;
+      readyAbort.abort();
+      this.unregisterActiveQuerySubscriptionTrace(traceId);
+      if (activeSubscription !== null && activeSubscription.id >= 0) {
+        client.unsubscribe(activeSubscription.id);
+      }
+      activeSubscription = null;
+      bufferedDeltas.length = 0;
+      manager.clear();
+    };
+    const ready = initialReadiness
+      ?.then(() => {
+        if (unsubscribed || this.isShuttingDown) return;
+        deliveryReady = true;
+        for (const delta of bufferedDeltas.splice(0)) {
+          callback(delta);
+        }
+        startLocalSeed?.();
+      })
+      .catch((error: unknown) => {
+        if (unsubscribed || this.isShuttingDown) return;
+        // The worker admitted no durable runtime.  Dispose the locally
+        // registered native subscription before surfacing that initiating
+        // operation's error through the handle/orchestrator.
+        unsubscribe();
+        throw error;
+      });
+    // Direct `Db.subscribe` has historically returned only cancellation, so
+    // retain an internal rejection handler for callers that do not consume
+    // the readiness property. Framework bindings consume `ready` below via
+    // DbSubscriptionSource and surface it as their normal error state.
+    if (ready) void ready.catch(() => undefined);
     if (queryOptions.tier == null || queryOptions.tier === "local") {
-      callback(manager.seed([]));
+      deliver(manager.seed([]));
     }
     if (
       this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
@@ -2563,33 +2573,29 @@ export class Db {
           tier: "local",
           propagation: "local-only",
         });
-      const seedRows =
-        session == null
-          ? seedQuery()
-          : this.withRuntimeOperationContext({ session }, () => seedQuery());
-      void seedRows
-        .then((rows) => {
-          if (unsubscribed) return;
-          callback(manager.seed(rows));
-        })
-        .catch((error: unknown) => {
-          setTimeout(() => {
-            throw error;
-          }, 0);
-        });
+      const seedLocal = () => {
+        const seedRows =
+          session == null
+            ? seedQuery()
+            : this.withRuntimeOperationContext({ session }, () => seedQuery());
+        void seedRows
+          .then((rows) => {
+            if (unsubscribed) return;
+            deliver(manager.seed(rows));
+          })
+          .catch((error: unknown) => {
+            setTimeout(() => {
+              throw error;
+            }, 0);
+          });
+      };
+      if (initialReadiness) startLocalSeed = seedLocal;
+      else seedLocal();
     }
 
-    // Return unsubscribe function
-    return () => {
-      unsubscribed = true;
-      readyAbort.abort();
-      this.unregisterActiveQuerySubscriptionTrace(traceId);
-      if (activeSubscription !== null && activeSubscription.id >= 0) {
-        client.unsubscribe(activeSubscription.id);
-      }
-      activeSubscription = null;
-      manager.clear();
-    };
+    const handle = unsubscribe as SubscriptionHandle;
+    if (ready) Object.defineProperty(handle, "ready", { value: ready });
+    return handle;
   }
 
   /**
