@@ -540,6 +540,14 @@ where
             maintained_facts,
             allow_storage_witness_fallback,
         } = inputs;
+        // The storage-backed maintained subset deliberately omits the
+        // source-wide terminal witnesses. Its result-member identity is still
+        // exact, so Stream B must retrieve that immutable payload from the
+        // authoritative node store when shipping a newly admitted member.
+        // Keep callers' explicit fallback flag for the legacy cases that
+        // already use it.
+        let allow_storage_witness_fallback = allow_storage_witness_fallback
+            || maintained_facts.uses_storage_backed_result_materialization();
         program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
         let tuple_source_versions = maintained_facts.tuple_source_versions_for_members(
             &maintained_facts.active_result_members(),

@@ -3022,8 +3022,13 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     assert_eq!(metrics.footprint.result_rows, 1);
     assert_eq!(metrics.footprint.structured_app_rows, 0);
     assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
-    assert!(metrics.footprint.version_identities >= 1);
-    assert!(metrics.footprint.version_tx_entries >= 1);
+    // Simple default-view root queries retain only delivered membership. The
+    // exact immutable content body is loaded by `(table, row, tx)` when it
+    // enters the result, rather than retaining every source witness per
+    // binding.
+    assert_eq!(metrics.footprint.version_identities, 0);
+    assert_eq!(metrics.footprint.version_tx_entries, 0);
+    assert_eq!(metrics.footprint.replacement_entries, 0);
 
     // Flat subscriptions release this duplicate collector after the reset, but
     // membership/version witnesses must still publish a later removal and a
@@ -3060,6 +3065,33 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.footprint.structured_app_rows, 0);
     assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
+
+    // The storage-backed path never needs to read a newer content winner to
+    // retract a deleted row. A restore re-enters through its exact original
+    // content transaction and is shipped from immutable storage.
+    let deleted_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_003).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, deleted_tx, 4);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![],
+        vec![("todos", row(0x51), restored_tx)],
+    );
+    let re_restored_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_004)
+                .deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+    accept_global(&mut core, re_restored_tx, 5);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![("todos", row(0x51), restored_tx)],
+        vec![],
+    );
 }
 
 #[test]

@@ -71,6 +71,10 @@ pub(crate) struct MaintainedSubscriptionView {
     /// collector. Flat unordered subscriptions release it after their reset;
     /// subsequent terminal deltas must not rebuild the duplicate state.
     retains_structured_app_rows: bool,
+    /// This binding retains only result membership. Its exact content bodies
+    /// are loaded from immutable node storage on entry instead of being held
+    /// as source-wide version/replacement terminal witnesses.
+    storage_backed_result_materialization: bool,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -85,6 +89,7 @@ impl Default for MaintainedSubscriptionView {
             structured_app_rows: BTreeMap::new(),
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
+            storage_backed_result_materialization: false,
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -248,6 +253,14 @@ enum NetEvent {
 }
 
 impl MaintainedSubscriptionView {
+    pub(crate) fn uses_storage_backed_result_materialization(&self) -> bool {
+        self.storage_backed_result_materialization
+    }
+
+    pub(crate) fn enable_storage_backed_result_materialization(&mut self) {
+        self.storage_backed_result_materialization = true;
+    }
+
     pub(crate) fn terminal_schemas_for_program(
         program: &QueryProgram,
     ) -> MaintainedTerminalSchemas {

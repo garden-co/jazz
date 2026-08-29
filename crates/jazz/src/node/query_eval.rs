@@ -883,6 +883,27 @@ where
             .catalogue_schemas
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let storage_backed_result_materialization =
+            matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                && storage_backed_maintained_view_eligible(shape.query(), read_view);
+        let mut output_request =
+            current_query_output_request(output, shape.query(), &query_schema.schema);
+        if storage_backed_result_materialization {
+            // A simple current root query carries the exact visible content
+            // transaction in its result-member terminal.  Keeping every
+            // source version/replacement body in every binding merely so the
+            // facade can re-read that immutable version multiplies retained
+            // state by source rows × bindings.  The member's exact identity
+            // is enough to load the immutable body from the node store on
+            // entry; deletion/restore removals need only retire the old
+            // occurrence, never materialize a newer winner.
+            output_request
+                .facts
+                .remove(&ProgramFactKey::VersionWitnesses);
+            output_request
+                .facts
+                .remove(&ProgramFactKey::ReplacementWitnesses);
+        }
         Ok(QueryProgramRequest {
             authorization_mode,
             reads: query_read_set_for_read_view(
@@ -897,7 +918,7 @@ where
             )?,
             policy,
             input,
-            output: current_query_output_request(output, shape.query(), &query_schema.schema),
+            output: output_request,
         })
     }
 
@@ -3245,6 +3266,16 @@ where
                     &program.lowered.parameters,
                 ))
             });
+        let storage_backed_result_materialization = !program
+            .request
+            .output
+            .facts
+            .contains(&ProgramFactKey::VersionWitnesses)
+            && !program
+                .request
+                .output
+                .facts
+                .contains(&ProgramFactKey::ReplacementWitnesses);
         let subscription = self
             .subscribe_lowered_program(
                 program,
@@ -3265,6 +3296,9 @@ where
             .await
             .map_err(Error::Groove)?;
         let mut maintained = MaintainedSubscriptionView::default();
+        if storage_backed_result_materialization {
+            maintained.enable_storage_backed_result_materialization();
+        }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot_transitions = maintained.apply_multisink_deltas(
             initial_snapshot,

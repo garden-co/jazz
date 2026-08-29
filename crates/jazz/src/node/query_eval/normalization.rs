@@ -89,6 +89,32 @@ pub(super) fn current_query_output_request(
     }
 }
 
+/// Whether a maintained current-read can retain only its delivered result
+/// members and re-load their immutable content bodies from storage.
+///
+/// This is intentionally a proof for the small common case, not a heuristic:
+/// one default-view root table, no relation/recursive/output expansion, and
+/// no aggregate.  Direct predicate-only policy alternatives are safe because
+/// their membership decision remains entirely in the root result terminal.
+/// Any shape that needs source provenance beyond that terminal keeps the
+/// self-contained version/replacement witness path.
+pub(super) fn storage_backed_maintained_view_eligible(
+    query: &JazzQuery,
+    read_view: &ReadViewSpec,
+) -> bool {
+    read_view.is_default()
+        && query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && query.policy_branches.iter().all(|branch| {
+            branch.joins.is_empty() && branch.reachable.is_empty() && branch.inherits.is_empty()
+        })
+}
+
 fn app_row_payload_projection(
     query: &JazzQuery,
     schema: &RuntimeSchema,
