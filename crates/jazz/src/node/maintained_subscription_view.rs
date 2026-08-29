@@ -715,7 +715,9 @@ impl MaintainedSubscriptionView {
             .result_weights
             .iter()
             .filter(|(member, weight)| {
-                **weight > 0 && self.result_member_has_bundle_witness(member, node_aliases)
+                **weight > 0
+                    && (self.storage_backed_result_materialization
+                        || self.result_member_has_bundle_witness(member, node_aliases))
             })
             .map(|(member, _)| member.clone())
             .collect::<BTreeSet<_>>();
@@ -2956,6 +2958,26 @@ mod tests {
         assert_eq!(third.removes, vec![member]);
         assert!(third.result_payload_adds.is_empty());
         assert!(third.result_payload_removes.is_empty());
+    }
+
+    #[test]
+    fn storage_backed_membership_publishes_without_bundle_witness() {
+        // This must remain an internal receipt: public test routes cannot
+        // synthesize the deliberately omitted Stream B terminal. The
+        // storage-backed subset instead resolves the exact member `(table,
+        // row, tx)` from node storage at materialization time.
+        let aliases = aliases();
+        let member = ResultMemberEntry::from(result(row(2), 20));
+        let mut maintained = MaintainedSubscriptionView::default();
+        maintained.enable_storage_backed_result_materialization();
+
+        let mut transitions = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut transitions, &aliases);
+
+        assert_eq!(transitions.adds, vec![member]);
+        assert!(transitions.removes.is_empty());
     }
 
     #[test]
