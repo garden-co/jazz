@@ -119,7 +119,7 @@ test("rejects every registered convenience family, including to_writer", () => {
   }
 });
 
-test("resolves aliases, direct imports, groups, globs, and leading crate paths", () => {
+test("rejects serializer imports in every alias, group, glob, and raw form", () => {
   const root = fixture();
   try {
     const file = path.join(root, "crates/jazz/src/node/codec.rs");
@@ -136,7 +136,7 @@ test("resolves aliases, direct imports, groups, globs, and leading crate paths",
       ],
       ["nested glob", "use postcard::{experimental::*}; fn f() { serialized_size(&value); }"],
       ["glob", "use postcard::*; fn f() { to_allocvec(&value); }"],
-      ["leading crate", "fn f() { ::postcard::to_allocvec(&value); }"],
+      ["leading crate", "use ::postcard::to_allocvec; fn f() { to_allocvec(&value); }"],
       ["raw alias", "use postcard::to_allocvec as r#encode; fn f() { r#encode(&value); }"],
       [
         "json namespace alias",
@@ -150,24 +150,19 @@ test("resolves aliases, direct imports, groups, globs, and leading crate paths",
       fs.writeFileSync(file, `${source}\n`);
       const result = run(root);
       assert.notEqual(result.status, 0, name);
-      assert.match(result.stderr, /unregistered default serialization/);
+      assert.match(result.stderr, /serializer imports are prohibited at the persistence boundary/);
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("does not mistake a locally shadowed imported serializer name for a codec call", () => {
+test("does not mistake locally named values for serializer imports", () => {
   const root = fixture();
   try {
     fs.writeFileSync(
       path.join(root, "crates/jazz/src/node/codec.rs"),
-      "use postcard::to_allocvec as encode; fn f() { let encode = || (); encode(); }\n",
-    );
-    assert.equal(run(root).status, 0);
-    fs.writeFileSync(
-      path.join(root, "crates/jazz/src/node/codec.rs"),
-      "use postcard::to_allocvec as r#encode; fn f() { let r#encode = || (); r#encode(); }\n",
+      "fn f() { let postcard = (); let serde_json = (); let encode = || (); encode(); }\n",
     );
     assert.equal(run(root).status, 0);
   } finally {
@@ -200,11 +195,11 @@ test("ignores serializer spellings in Rust comments and string literals", () => 
   }
 });
 
-test("permits an explicitly registered canonical endpoint through a renamed import", () => {
+test("permits an explicitly registered fully-qualified canonical endpoint", () => {
   const root = fixture();
   try {
     const file = path.join(root, "crates/jazz/src/node/codec.rs");
-    fs.writeFileSync(file, "use serde_json::from_str as parse; fn f() { parse(&value); }\n");
+    fs.writeFileSync(file, "fn f() { serde_json::from_str(&value); }\n");
     const registryPath = path.join(root, "dev/storage/default-serialization-registry.json");
     fs.writeFileSync(
       registryPath,

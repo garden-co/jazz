@@ -105,6 +105,12 @@ for (const allowance of registry.allowances) {
 }
 
 for (const [relative, source] of files) {
+  for (const imported of forbiddenPersistenceImports(source)) {
+    const line = source.slice(0, imported.index).split("\n").length;
+    fail(
+      `${relative}:${line}: serializer imports are prohibited at the persistence boundary (${imported.root}); use an explicitly registered fully-qualified canonical endpoint instead`,
+    );
+  }
   for (const match of serializerCalls(source)) {
     const permitted = registry.allowances.some(
       (allowance) => allowance.path === relative && allowance.api === match.api,
@@ -116,58 +122,29 @@ for (const [relative, source] of files) {
   }
 }
 
-/**
- * Finds calls to the forbidden serializer APIs, resolving the simple Rust use
- * trees that make a textual `postcard::` scan evadable. This is intentionally
- * conservative and token-shaped rather than a regex allowlist: aliases,
- * grouped imports, globs, and leading `::` resolve to the canonical API name.
- * Bare imports are ignored where a local binding in the enclosing block shadows
- * them, avoiding a false positive on an unrelated local function or closure.
- */
+/** Finds only explicit serializer calls; imports are rejected separately. */
 function serializerCalls(source) {
   const code = rustCodeMask(source);
-  const imports = parseImports(code);
   const calls = [];
-  const seen = new Set();
-  const add = (api, index) => {
-    const key = `${api}:${index}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      calls.push({ api, index });
-    }
-  };
-
   for (const api of forbiddenApis) {
     const direct = new RegExp(`(?<![A-Za-z0-9_])(?:::)?${escapeRegex(api)}\\b`, "g");
     for (const match of code.matchAll(direct)) {
-      if (isCallAt(code, match.index + match[0].length)) add(api, match.index);
-    }
-  }
-
-  for (const [alias, namespace] of imports.namespaces) {
-    for (const api of forbiddenApis) {
-      if (!api.startsWith(`${namespace}::`)) continue;
-      const suffix = api.slice(namespace.length + 2);
-      const pattern = new RegExp(`\\b${escapeRegex(alias)}::${escapeRegex(suffix)}\\b`, "g");
-      for (const match of code.matchAll(pattern)) {
-        if (isCallAt(code, match.index + match[0].length)) add(api, match.index);
+      if (isCallAt(code, match.index + match[0].length)) {
+        calls.push({ api, index: match.index });
       }
     }
   }
-
-  for (const [local, api] of imports.functions) {
-    const pattern = new RegExp(`\\b${escapeRegex(local)}\\b`, "g");
-    for (const match of code.matchAll(pattern)) {
-      if (
-        isCallAt(code, match.index + match[0].length) &&
-        !isLocallyShadowed(code, match.index, local)
-      ) {
-        add(api, match.index);
-      }
-    }
-  }
-
   return calls.sort((left, right) => left.index - right.index);
+}
+
+function forbiddenPersistenceImports(source) {
+  const code = rustCodeMask(source);
+  const imports = [];
+  for (const match of code.matchAll(/(?:^|\n)\s*(?:pub\s*(?:\([^)]*\)\s*)?)?use\s+([^;]+);/g)) {
+    const root = match[1].match(/(?:^|::)(postcard|serde_json)(?=::|\s|\{|$)/)?.[1];
+    if (root) imports.push({ root, index: match.index });
+  }
+  return imports;
 }
 
 // Keep offsets and newlines intact so diagnostics still point into the source,
@@ -242,137 +219,11 @@ function rustCodeMask(source) {
   return masked.join("");
 }
 
-function parseImports(source) {
-  const namespaces = new Map();
-  const functions = new Map();
-  for (const match of source.matchAll(/(?:^|\n)\s*(?:pub\s*(?:\([^)]*\)\s*)?)?use\s+([^;]+);/g)) {
-    registerUseTree(match[1].trim(), namespaces, functions);
-  }
-  return { namespaces, functions };
-}
-
-function registerUseTree(tree, namespaces, functions) {
-  registerUseTreeAt(tree, "", namespaces, functions);
-}
-
-function registerUseTreeAt(tree, base, namespaces, functions) {
-  const [path, alias] = splitUseAlias(tree);
-  const group = topLevelUseGroup(path);
-  if (group) {
-    const prefix = joinUsePath(base, group.prefix);
-    for (const member of splitUseMembers(group.body)) {
-      registerUseTreeAt(member, prefix, namespaces, functions);
-    }
-    return;
-  }
-  const resolved = joinUsePath(base, path);
-  if (resolved.endsWith("::*")) {
-    registerGlob(normalizePath(resolved.slice(0, -3)), functions);
-  } else if (resolved === "self") {
-    if (base) namespaces.set(alias ?? base, base);
-  } else {
-    registerImportedPath(resolved, alias, namespaces, functions);
-  }
-}
-
-function topLevelUseGroup(tree) {
-  let depth = 0;
-  let start = -1;
-  for (let index = 0; index < tree.length; index += 1) {
-    if (tree[index] === "{") {
-      if (depth === 0) start = index;
-      depth += 1;
-    } else if (tree[index] === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        if (tree.slice(index + 1).trim()) return undefined;
-        return {
-          prefix: tree.slice(0, start).replace(/::$/, "").trim(),
-          body: tree.slice(start + 1, index),
-        };
-      }
-    }
-  }
-  return undefined;
-}
-
-function joinUsePath(base, path) {
-  const normalized = normalizePath(path);
-  if (!base) return normalized;
-  if (normalized === "self") return base;
-  if (normalized === "super") return "";
-  if (normalized.startsWith("super::")) return normalized.slice("super::".length);
-  if (normalized.startsWith("self::")) return `${base}::${normalized.slice("self::".length)}`;
-  return `${base}::${normalized}`;
-}
-
-function splitUseMembers(body) {
-  const members = [];
-  let depth = 0;
-  let start = 0;
-  for (let index = 0; index < body.length; index += 1) {
-    if (body[index] === "{") depth += 1;
-    if (body[index] === "}") depth -= 1;
-    if (body[index] === "," && depth === 0) {
-      members.push(body.slice(start, index).trim());
-      start = index + 1;
-    }
-  }
-  members.push(body.slice(start).trim());
-  return members.filter(Boolean);
-}
-
-function splitUseAlias(member) {
-  if (topLevelUseGroup(member)) return [member.trim(), undefined];
-  const match = member.trim().match(/^(.*?)\s+as\s+((?:r#)?[A-Za-z_][A-Za-z0-9_]*)$/);
-  return match ? [match[1].trim(), match[2]] : [member.trim(), undefined];
-}
-
-function registerImportedPath(path, alias, namespaces, functions) {
-  const canonical = normalizePath(path);
-  if (["postcard", "serde_json", "bincode", "rmp_serde"].includes(canonical)) {
-    namespaces.set(alias ?? canonical, canonical);
-    return;
-  }
-  if (canonical === "serde_json::Serializer" || canonical === "serde_json::Deserializer") {
-    namespaces.set(alias ?? canonical.slice(canonical.lastIndexOf("::") + 2), canonical);
-    return;
-  }
-  if (forbiddenApis.has(canonical)) {
-    functions.set(alias ?? canonical.slice(canonical.lastIndexOf("::") + 2), canonical);
-  }
-}
-
-function registerGlob(namespace, functions) {
-  for (const api of forbiddenApis) {
-    if (api.startsWith(`${namespace}::`) && !api.slice(namespace.length + 2).includes("::")) {
-      functions.set(api.slice(namespace.length + 2), api);
-    }
-  }
-}
-
-function normalizePath(path) {
-  const segments = path.trim().replace(/^::/, "").replace(/\s+/g, "").split("::");
-  const knownRoot = segments.findLastIndex((segment) =>
-    ["postcard", "serde_json", "bincode", "rmp_serde"].includes(segment),
-  );
-  return (knownRoot === -1 ? segments : segments.slice(knownRoot)).join("::");
-}
-
 function isCallAt(source, index) {
   let cursor = index;
   while (/\s/.test(source[cursor] ?? "")) cursor += 1;
   if (source.startsWith("::", cursor)) return true; // turbofish call; the following parser owns syntax.
   return source[cursor] === "(";
-}
-
-function isLocallyShadowed(source, index, name) {
-  const blockStart = source.lastIndexOf("{", index);
-  const prefix = source.slice(blockStart + 1, index);
-  const binding = new RegExp(
-    `\\b(?:let|const|static|fn|struct|enum|mod)\\s+${escapeRegex(name)}\\b`,
-  );
-  return binding.test(prefix);
 }
 
 function escapeRegex(value) {
