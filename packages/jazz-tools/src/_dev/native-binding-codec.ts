@@ -6,6 +6,9 @@
  * React Native application API.
  */
 export {
+  createRecord,
+  decodeRecordBytes,
+  fieldIndex,
   PostcardReader,
   PostcardWriter,
   readNativeSubscriptionDelta,

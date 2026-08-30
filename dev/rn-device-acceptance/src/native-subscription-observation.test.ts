@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
+  nativeSubscriptionDeltaHasFieldBytes,
   nativeSubscriptionDeltaHasRowId,
   nativeSubscriptionDeltaHasRows,
   nativeSubscriptionDeltaRowIds,
@@ -33,6 +34,22 @@ test("subscription observation inspects structured added and updated row identit
   // Removed identities also do not prove a newly visible row.
   assert.equal(nativeSubscriptionDeltaHasRowId(encoded, new Uint8Array(16).fill(0x13)), false);
   assert.equal(nativeSubscriptionDeltaHasRows(encoded), true);
+  assert.equal(
+    nativeSubscriptionDeltaHasFieldBytes(
+      encoded,
+      "title",
+      Uint8Array.from([2, ...new TextEncoder().encode("first")]),
+    ),
+    true,
+  );
+  assert.equal(
+    nativeSubscriptionDeltaHasFieldBytes(
+      encoded,
+      "title",
+      Uint8Array.from([2, ...new TextEncoder().encode("absent")]),
+    ),
+    false,
+  );
   assert.deepEqual(
     nativeSubscriptionDeltaRowIds(encoded).map((rowId) => rowId[0]),
     [0x11, 0x21],

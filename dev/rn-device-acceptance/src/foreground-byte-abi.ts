@@ -7,6 +7,7 @@ import type {
 import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import {
+  nativeSubscriptionDeltaHasFieldBytes,
   nativeSubscriptionDeltaHasRowId,
   nativeSubscriptionDeltaRowIds,
 } from "./native-subscription-observation.ts";
@@ -284,6 +285,18 @@ export async function proveSameJsiRuntimeWriteSubscription(
         if (closed.type !== "unsubscribed" || !closed.closed)
           throw new Error("foreground B subscription did not close");
         return;
+      }
+      if (
+        deltas.some((event) =>
+          nativeSubscriptionDeltaHasFieldBytes(
+            event.delta,
+            "title",
+            Uint8Array.from([2, ...new TextEncoder().encode("subscription from foreground A")]),
+          ),
+        )
+      ) {
+        markFailure("same-runtime-delta-written-content-row-id-failed");
+        continue;
       }
       const hasReset = deltas.some((event) => event.reset);
       const hasIncremental = deltas.some((event) => !event.reset);

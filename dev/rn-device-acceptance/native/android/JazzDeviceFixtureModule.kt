@@ -69,6 +69,7 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "same-runtime-delta-decode-failed",
     "same-runtime-delta-content-failed",
     "same-runtime-delta-row-id-failed",
+    "same-runtime-delta-written-content-row-id-failed",
     "same-runtime-delta-reset-row-id-failed",
     "same-runtime-delta-incremental-row-id-failed",
     "same-runtime-delta-mixed-row-id-failed",

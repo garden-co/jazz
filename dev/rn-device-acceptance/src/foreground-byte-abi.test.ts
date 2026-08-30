@@ -8,7 +8,11 @@ import {
   type ForegroundByteCodec,
 } from "./foreground-byte-abi.ts";
 import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
-import { PostcardWriter, writeDescriptor } from "jazz-tools/_dev/native-binding-codec";
+import {
+  createRecord,
+  PostcardWriter,
+  writeDescriptor,
+} from "jazz-tools/_dev/native-binding-codec";
 
 const capability = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const subscriptionRowId = Uint8Array.from({ length: 16 }, (_, index) => index + 17);
@@ -526,9 +530,12 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                                             added: [
                                               {
                                                 rowId: subscriptionRowId,
-                                                raw: new TextEncoder().encode(
-                                                  "foreground-a-subscription-row",
-                                                ),
+                                                raw: Uint8Array.from([
+                                                  2,
+                                                  ...new TextEncoder().encode(
+                                                    "subscription from foreground A",
+                                                  ),
+                                                ]),
                                               },
                                             ],
                                           }),
@@ -949,6 +956,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   schedulers.length = 0;
   ticks.fill(0);
   let wrongDeltaKind: "incremental" | "reset" | "mixed" = "incremental";
+  let wrongMatchesWrittenContent = false;
   const wrongObservation = {
     ...factory,
     openAttached(received: Uint8Array) {
@@ -977,7 +985,14 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                     added: [
                       {
                         rowId: new Uint8Array(16).fill(0xee),
-                        raw: new TextEncoder().encode("foreground-a-subscription-row"),
+                        raw: Uint8Array.from([
+                          2,
+                          ...new TextEncoder().encode(
+                            wrongMatchesWrittenContent
+                              ? "subscription from foreground A"
+                              : "unrelated pre-existing row",
+                          ),
+                        ]),
                       },
                     ],
                   }),
@@ -1057,6 +1072,30 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
       !wrongMixedStages.includes("same-runtime-delta-incremental-row-id-failed"),
     "a mixed reset/incremental drain cannot be mislabeled as either single event kind",
   );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  wrongDeltaKind = "incremental";
+  wrongMatchesWrittenContent = true;
+  const wrongWrittenContentStages: string[] = [];
+  await assert.rejects(
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        wrongObservation,
+        capability,
+        command,
+        subscriptionRowId,
+        (stage) => wrongWrittenContentStages.push(stage),
+      ),
+    /did not observe foreground A's committed row/,
+  );
+  assert.ok(
+    wrongWrittenContentStages.includes("same-runtime-delta-written-content-row-id-failed") &&
+      !wrongWrittenContentStages.includes("same-runtime-delta-incremental-row-id-failed"),
+    "the written fixture content with another row id is an identity mismatch, not unrelated data",
+  );
 });
 
 function utf8(value: string): number[] {
@@ -1071,6 +1110,7 @@ function encodeSubscriptionDelta({
   updated?: Array<{ rowId: Uint8Array; raw: Uint8Array }>;
 }): Uint8Array {
   const writer = new PostcardWriter();
+  const descriptor = [{ name: "title", valueType: { tag: 8 } }];
   const writeBatches = (
     target: PostcardWriter,
     rows: Array<{ rowId: Uint8Array; raw: Uint8Array }>,
@@ -1078,11 +1118,11 @@ function encodeSubscriptionDelta({
     target.vec(
       (batch) => {
         batch.string("todos");
-        writeDescriptor(batch, []);
+        writeDescriptor(batch, descriptor);
         batch.vec((row, index) => {
           row.bytes(rows[index]!.rowId);
           row.bool(false);
-          row.bytes(rows[index]!.raw);
+          row.bytes(createRecord(descriptor, [rows[index]!.raw]));
         }, rows.length);
       },
       rows.length === 0 ? 0 : 1,
