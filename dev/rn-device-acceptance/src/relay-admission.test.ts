@@ -75,7 +75,26 @@ test("a capability that native admission did not install cannot reach Probe", as
   );
 });
 
+test("relay ABI diagnostics identify the failed operation without exposing command data", async () => {
+  const diagnostics: string[] = [];
+  const capability = Uint8Array.from({ length: 32 }, (_, index) => index);
+  await assert.rejects(() =>
+    proveAdmittedRelay(
+      {
+        async execute() {
+          throw new Error(`native rejected capability=${encodeBase64(capability)}`);
+        },
+      },
+      capability,
+      (stage) => diagnostics.push(stage),
+    ),
+  );
+  assert.deepEqual(diagnostics, ["relay-open-failed"]);
+  assert.doesNotMatch(diagnostics.join("\n"), /capability|AAECAw/);
+});
+
 test("admission proof preserves the primary failure when cleanup also fails", async () => {
+  const diagnostics: string[] = [];
   await assert.rejects(
     () =>
       proveAdmittedRelay(
@@ -89,9 +108,11 @@ test("admission proof preserves the primary failure when cleanup also fails", as
           },
         },
         admitted,
+        (stage) => diagnostics.push(stage),
       ),
     /ABI probe failed/,
   );
+  assert.deepEqual(diagnostics, ["relay-open-failed", "relay-attach-failed", "relay-probe-failed"]);
 });
 
 test("trusted logout removes old capability and aliases before a fresh admission", async () => {

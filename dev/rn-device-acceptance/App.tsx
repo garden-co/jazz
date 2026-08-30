@@ -77,7 +77,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   const admitted = await admittedNativeRelay();
   const { executor, capability } = admitted;
   markFailure("relay-command-abi-failed");
-  await proveAdmittedRelay(executor, capability);
+  await proveAdmittedRelay(executor, capability, markFailure);
   markFailure("foreground-byte-abi-failed");
   const foregroundFactory = installNativeForegroundRuntime();
   const foregroundCodec = {

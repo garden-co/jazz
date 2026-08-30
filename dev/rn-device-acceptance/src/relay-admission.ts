@@ -8,17 +8,30 @@ export type AdmittedRelay = {
   capability: NativeRelayCapability;
 };
 
+/** Fixed safe pre-receipt stages. They identify the failed native ABI
+ * operation without allowing a command, capability, or native error to leave
+ * the installed fixture. */
+export type AdmittedRelayDiagnostic =
+  | "relay-open-failed"
+  | "relay-attach-failed"
+  | "relay-probe-failed"
+  | "relay-cleanup-failed";
+
 /** Probe is public link diagnostics; a successful Open is the admission proof. */
 export async function proveAdmittedRelay(
   executor: NativeRelayExecutor,
   capability: NativeRelayCapability,
+  markFailure?: (stage: AdmittedRelayDiagnostic) => void,
 ): Promise<void> {
   let openedRelay: bigint | undefined;
   let attachedClient: bigint | undefined;
   let primaryFailure: unknown;
   try {
+    markFailure?.("relay-open-failed");
     openedRelay = decodeOpened(await executor.execute(encodeOpen(capability)));
+    markFailure?.("relay-attach-failed");
     attachedClient = decodeAttached(await executor.execute(encodeAttach(openedRelay)));
+    markFailure?.("relay-probe-failed");
     const response = decodeBase64(await executor.execute("AA=="));
     if (response.length !== 2 || response[0] !== 0 || response[1] !== 3)
       throw new Error("installed Jazz relay returned an unexpected ABI probe response");
@@ -28,6 +41,7 @@ export async function proveAdmittedRelay(
   let cleanupFailure: unknown;
   if (attachedClient !== undefined) {
     try {
+      if (!primaryFailure) markFailure?.("relay-cleanup-failed");
       if (!decodeClosed(await executor.execute(encodeCloseClient(attachedClient))))
         cleanupFailure ??= new Error("native relay did not close the admitted UI peer");
     } catch (error) {
@@ -36,6 +50,7 @@ export async function proveAdmittedRelay(
   }
   if (openedRelay !== undefined) {
     try {
+      if (!primaryFailure) markFailure?.("relay-cleanup-failed");
       if (!decodeClosed(await executor.execute(encodeCloseRelay(openedRelay))))
         cleanupFailure ??= new Error("native relay did not close the admitted scope");
     } catch (error) {
