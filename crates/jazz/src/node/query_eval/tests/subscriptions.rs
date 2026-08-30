@@ -283,6 +283,105 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0), row(1)])
     );
+
+    // A newly authored content version can restore the same row in one
+    // transaction. The result member names that content transaction, so the
+    // serving path must include its `Restored` register sibling before the
+    // transaction bundle is marked emitted. A separate receiver otherwise
+    // learns the new body but keeps the row deleted in its ordinary current
+    // register.
+    delete_global(&mut server, "notes", row(0), 5, 5);
+    let second_removal = peer
+        .query_update(&mut server, &shape, &binding)
+        .expect("serve scalar second removal update");
+    reader
+        .apply_sync_message_settled(second_removal)
+        .expect("separate reader applies scalar second removal update");
+    assert!(
+        reader
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .expect("read scalar rows after second deletion")
+            .iter()
+            .all(|current| current.row_uuid() != row(0)),
+        "the reader must observe the precondition deletion"
+    );
+    let same_tx_open = OpenTransactionId::new();
+    server
+        .open_exclusive(same_tx_open)
+        .expect("open exclusive transaction for paired content and restoration");
+    server
+        .tx_write(
+            same_tx_open,
+            "notes",
+            row(0),
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("restored-with-content".to_owned()),
+            )]),
+            None,
+        )
+        .expect("stage visible content in paired transaction");
+    server
+        .tx_write(
+            same_tx_open,
+            "notes",
+            row(0),
+            BTreeMap::<String, Value>::new(),
+            Some(crate::tx::DeletionEvent::Restored),
+        )
+        .expect("stage restoration register sibling in paired transaction");
+    let (same_tx_restore, _) = server
+        .commit_exclusive_settled(same_tx_open, AuthorSubject::SYSTEM, 6)
+        .expect("commit content and restoration together");
+    server
+        .apply_fate_update(
+            same_tx_restore,
+            Fate::Accepted,
+            Some(GlobalTime(6)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept content and restoration together");
+    let same_tx_update = peer
+        .query_update(&mut server, &shape, &binding)
+        .expect("serve same-transaction content restoration");
+    let same_tx_bundles = match &same_tx_update {
+        SyncMessage::ViewUpdate(payload) => {
+            crate::protocol::expand_version_carriers(&payload.version_carriers)
+                .expect("same-transaction restore carriers should expand")
+        }
+        _ => panic!("scalar subscription must produce a view update"),
+    };
+    let same_tx_bundle = same_tx_bundles
+        .iter()
+        .find(|bundle| bundle.tx.tx_id == same_tx_restore)
+        .expect("served update contains the visible content transaction");
+    assert!(
+        same_tx_bundle.versions.iter().any(|version| {
+            version.table() == "notes"
+                && version.row_uuid() == row(0)
+                && version.deletion().is_none()
+        }),
+        "same transaction carries the visible content version"
+    );
+    assert!(
+        same_tx_bundle.versions.iter().any(|version| {
+            version.table() == "notes"
+                && version.row_uuid() == row(0)
+                && version.deletion() == Some(crate::tx::DeletionEvent::Restored)
+        }),
+        "same transaction carries the visible restoration winner"
+    );
+    reader
+        .apply_sync_message_settled(same_tx_update)
+        .expect("separate reader applies same-transaction restoration");
+    assert!(
+        reader
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .expect("ordinary reader lookup after same-transaction restoration")
+            .iter()
+            .any(|current| current.row_uuid() == row(0)),
+        "ordinary reader lookup must expose the row restored alongside content"
+    );
 }
 
 /// Storage-backed scalar subscriptions resolve deletion/restore winners at
