@@ -581,13 +581,18 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        if requires_authoritative_membership_reconcile
-            || (observed_result_delta_batches > 0
-                && result_member_adds.is_empty()
-                && result_member_removes.is_empty()
-                && terminal_operations.is_empty()
-                && program_fact_adds.is_empty()
-                && program_fact_removes.is_empty())
+        let public_result_is_silent = result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && terminal_operations.is_empty();
+        // Deletion witnesses require a one-shot reconciliation only when the
+        // result terminal itself was silent. When Groove already emitted the
+        // complete public delta, reopening the maintained view would discard
+        // that delta and repeatedly rediscover the same deletion witness.
+        if public_result_is_silent
+            && (requires_authoritative_membership_reconcile
+                || (observed_result_delta_batches > 0
+                    && program_fact_adds.is_empty()
+                    && program_fact_removes.is_empty()))
         {
             let (tier, read_view) = self
                 .publication_states

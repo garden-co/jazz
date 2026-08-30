@@ -175,6 +175,85 @@ async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_r
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn forwarded_flat_join_reconciles_joined_source_deletion() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todos_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000027")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+            let (_root, _, tx) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "root", "bucket" => "shared", "done" => false),
+                )
+                .expect("insert root");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            let (joined, _, tx) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "joined", "bucket" => "shared", "done" => true),
+                )
+                .expect("insert joined source");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+
+            let query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
+            let initial = client
+                .query_results_with_read_tier(query.clone(), ReadTier::LocalFirst)
+                .await
+                .expect("query initial joined results");
+            let joined_occurrence = key_for_joined_title(&initial, "joined");
+            let mut stream = client.subscribe(query.clone()).await.expect("subscribe");
+            let reset = next_delta(&mut stream).await;
+            assert!(
+                reset.added.iter().any(|row| row.id == joined_occurrence),
+                "initial reset includes joined-source occurrence"
+            );
+
+            let tx = client.delete(joined).expect("delete joined source");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            let removal = next_delta_with_removed(&mut stream).await;
+            assert!(
+                removal
+                    .removed
+                    .iter()
+                    .any(|row| row.id == joined_occurrence),
+                "deleting a joined source retracts its forwarded occurrence"
+            );
+            assert!(
+                client
+                    .query_results_with_read_tier(query, ReadTier::LocalFirst)
+                    .await
+                    .expect("query after joined-source deletion")
+                    .iter()
+                    .all(|row| row.key != joined_occurrence),
+                "one-shot and maintained membership agree after deletion"
+            );
+
+            client.shutdown().await.expect("shutdown client");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_replacements() {
     tokio::task::LocalSet::new()
         .run_until(async {

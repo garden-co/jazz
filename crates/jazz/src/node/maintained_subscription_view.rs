@@ -181,9 +181,10 @@ pub(crate) struct ResultTransitions {
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_result_delta_batches: usize,
     /// A deletion-register witness changed while its anti-joined result
-    /// terminal may be silent. The caller must replace this tick with an
-    /// authoritative membership reconciliation, even if other terminals
-    /// produced deltas concurrently.
+    /// terminal may be silent. When the public result terminals are silent,
+    /// the caller must replace this tick with an authoritative membership
+    /// reconciliation. A complete public result delta remains authoritative
+    /// and must not be discarded merely because its witness changed too.
     pub(crate) requires_authoritative_membership_reconcile: bool,
 }
 
