@@ -299,11 +299,14 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
-    pub(super) fn poll_queued_mutation_once(&self) {
+    /// Poll one FIFO owner-queue entry and report whether it retained its
+    /// continuation. A retained operation may still own [`NodeState`] across
+    /// a cold-storage or cooperative-evaluation await.
+    pub(super) fn poll_queued_mutation_once(&self) -> bool {
         use std::task::{Context, Poll, Waker};
 
         let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
-            return;
+            return false;
         };
         let owned_waker = self.query_runtime_waker();
         let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
@@ -321,8 +324,12 @@ where
         match outcome {
             Poll::Pending => {
                 self.queued_mutations.borrow_mut().push_front(operation);
+                true
             }
-            Poll::Ready(result) => self.finish_queued_mutation(operation, result),
+            Poll::Ready(result) => {
+                self.finish_queued_mutation(operation, result);
+                false
+            }
         }
     }
 

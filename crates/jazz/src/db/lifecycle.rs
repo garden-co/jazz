@@ -878,8 +878,11 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
-        self.node.poll_queued_mutation_once();
+        let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
+        if queued_mutation_pending {
+            return Ok(());
+        }
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         self.node.tick().await?;
@@ -889,8 +892,11 @@ where
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
-        self.node.poll_queued_mutation_once();
+        let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
+        if queued_mutation_pending {
+            return Ok(DbTickStats::default());
+        }
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         let stats = self.node.tick().await?;

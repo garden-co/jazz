@@ -268,7 +268,7 @@ fn queued_update_retains_cold_preparation_and_its_definitive_identity() {
     let mut first_turn = Box::pin(db.tick());
     assert!(matches!(
         first_turn.as_mut().poll(&mut context),
-        Poll::Pending
+        Poll::Ready(Ok(()))
     ));
     drop(first_turn);
     assert!(
@@ -352,9 +352,18 @@ fn queued_mutations_are_fifo_owned_and_surface_preparation_failures() {
     let mut first_turn = Box::pin(db.tick());
     assert!(matches!(
         first_turn.as_mut().poll(&mut context),
-        Poll::Pending
+        Poll::Ready(Ok(()))
     ));
     drop(first_turn);
+    assert!(
+        control.observed().iter().any(|operation| {
+            matches!(
+                operation,
+                TestStorageOperation::Get | TestStorageOperation::ScanOpen
+            )
+        }),
+        "the first FIFO operation reaches its planted cold storage boundary before the owner yields",
+    );
     assert_eq!(
         db.write_state(accepted_tx)
             .expect("the second reservation remains observable")
@@ -944,8 +953,14 @@ fn queued_mergeable_commit_retains_cold_parent_refresh_and_exact_identity() {
     let mut reached_cold_commit = false;
     for _ in 0..3 {
         let mut turn = Box::pin(db.tick());
-        reached_cold_commit |= matches!(turn.as_mut().poll(&mut context), Poll::Pending);
+        let _ = turn.as_mut().poll(&mut context);
         drop(turn);
+        reached_cold_commit |= control.observed().iter().any(|operation| {
+            matches!(
+                operation,
+                TestStorageOperation::Get | TestStorageOperation::ScanOpen
+            )
+        });
         if reached_cold_commit {
             break;
         }
@@ -1026,8 +1041,14 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     let mut reached_cold_stage = false;
     for _ in 0..3 {
         let mut turn = Box::pin(db.tick());
-        reached_cold_stage |= matches!(turn.as_mut().poll(&mut context), Poll::Pending);
+        let _ = turn.as_mut().poll(&mut context);
         drop(turn);
+        reached_cold_stage |= control.observed().iter().any(|operation| {
+            matches!(
+                operation,
+                TestStorageOperation::Get | TestStorageOperation::ScanOpen
+            )
+        });
         if reached_cold_stage {
             break;
         }
