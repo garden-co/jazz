@@ -3071,6 +3071,9 @@ impl WasmTx {
             cells,
             options,
         ));
+        if let WasmDbInner::Memory(db) = &self.db {
+            db.drive_queued_mutation_once();
+        }
         Ok(row.to_bytes())
     }
 
@@ -3094,6 +3097,9 @@ impl WasmTx {
             patch,
             options,
         ));
+        if let WasmDbInner::Memory(db) = &self.db {
+            db.drive_queued_mutation_once();
+        }
         Ok(())
     }
 
@@ -3117,6 +3123,9 @@ impl WasmTx {
             cells,
             options,
         ));
+        if let WasmDbInner::Memory(db) = &self.db {
+            db.drive_queued_mutation_once();
+        }
         Ok(())
     }
 
@@ -3137,6 +3146,9 @@ impl WasmTx {
             row_id,
             options,
         ));
+        if let WasmDbInner::Memory(db) = &self.db {
+            db.drive_queued_mutation_once();
+        }
         Ok(())
     }
 
@@ -3160,6 +3172,9 @@ impl WasmTx {
             Some(cells),
             options,
         ));
+        if let WasmDbInner::Memory(db) = &self.db {
+            db.drive_queued_mutation_once();
+        }
         Ok(())
     }
 

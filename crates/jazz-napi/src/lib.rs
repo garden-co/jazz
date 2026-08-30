@@ -1124,7 +1124,9 @@ impl Tx {
             .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
         let row_id = match db {
             NapiDbInnerStorage::Memory(db) => {
-                db.enqueue_transaction_insert(open_tx, exclusive, table, cells, options)
+                let row = db.enqueue_transaction_insert(open_tx, exclusive, table, cells, options);
+                db.drive_queued_mutation_once();
+                row
             }
             NapiDbInnerStorage::Persistent(db) => {
                 db.enqueue_transaction_insert(open_tx, exclusive, table, cells, options)
@@ -1153,7 +1155,8 @@ impl Tx {
         let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
         match self.db.as_ref() {
             Some(NapiDbInnerStorage::Memory(db)) => {
-                db.enqueue_transaction_update(open_tx, exclusive, table, row_id, patch, options)
+                db.enqueue_transaction_update(open_tx, exclusive, table, row_id, patch, options);
+                db.drive_queued_mutation_once();
             }
             Some(NapiDbInnerStorage::Persistent(db)) => {
                 db.enqueue_transaction_update(open_tx, exclusive, table, row_id, patch, options)
@@ -1184,7 +1187,8 @@ impl Tx {
         let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
         match self.db.as_ref() {
             Some(NapiDbInnerStorage::Memory(db)) => {
-                db.enqueue_transaction_upsert(open_tx, exclusive, table, row_id, cells, options)
+                db.enqueue_transaction_upsert(open_tx, exclusive, table, row_id, cells, options);
+                db.drive_queued_mutation_once();
             }
             Some(NapiDbInnerStorage::Persistent(db)) => {
                 db.enqueue_transaction_upsert(open_tx, exclusive, table, row_id, cells, options)
@@ -1212,7 +1216,8 @@ impl Tx {
         let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
         match self.db.as_ref() {
             Some(NapiDbInnerStorage::Memory(db)) => {
-                db.enqueue_transaction_delete(open_tx, exclusive, table, row_id, options)
+                db.enqueue_transaction_delete(open_tx, exclusive, table, row_id, options);
+                db.drive_queued_mutation_once();
             }
             Some(NapiDbInnerStorage::Persistent(db)) => {
                 db.enqueue_transaction_delete(open_tx, exclusive, table, row_id, options)
@@ -1243,7 +1248,8 @@ impl Tx {
         let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
         match self.db.as_ref() {
             Some(NapiDbInnerStorage::Memory(db)) => {
-                db.enqueue_transaction_restore(open_tx, exclusive, table, row_id, cells, options)
+                db.enqueue_transaction_restore(open_tx, exclusive, table, row_id, cells, options);
+                db.drive_queued_mutation_once();
             }
             Some(NapiDbInnerStorage::Persistent(db)) => {
                 db.enqueue_transaction_restore(open_tx, exclusive, table, row_id, cells, options)
