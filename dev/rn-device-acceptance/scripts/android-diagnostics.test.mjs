@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  androidAcceptanceFailure,
-  androidDeviceDiagnostic,
-} from "./android-diagnostics.mjs";
+import { androidAcceptanceFailure, androidDeviceDiagnostic } from "./android-diagnostics.mjs";
 
 test("Android timeout reports only the latest exact allowlisted stage", () => {
   const output = [

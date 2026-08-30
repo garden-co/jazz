@@ -22,15 +22,7 @@ const adb = (args) =>
 // bridge; pre-receipt diagnostics use one native tag containing allowlisted
 // codes only.
 const acceptanceLogcat = () =>
-  adb([
-    "logcat",
-    "-d",
-    "-v",
-    "threadtime",
-    "ReactNativeJS:I",
-    "JazzDeviceAcceptance:E",
-    "*:S",
-  ]);
+  adb(["logcat", "-d", "-v", "threadtime", "ReactNativeJS:I", "JazzDeviceAcceptance:E", "*:S"]);
 const startedAt = Date.now();
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
 // Android IDs are scoped per app/signing identity, so use the immutable system
@@ -82,8 +74,7 @@ async function launchAndAssert(phase) {
         throw new Error(androidAcceptanceFailure("invalid-receipt", phase, output));
       }
     }
-    if (Date.now() >= deadline)
-      throw new Error(androidAcceptanceFailure("timeout", phase, output));
+    if (Date.now() >= deadline) throw new Error(androidAcceptanceFailure("timeout", phase, output));
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
 }

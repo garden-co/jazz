@@ -19,8 +19,7 @@ export function androidDeviceDiagnostic(output) {
 }
 
 export function androidAcceptanceFailure(kind, phase, output) {
-  if (phase !== "seed" && phase !== "verify")
-    throw new Error("invalid Android acceptance phase");
+  if (phase !== "seed" && phase !== "verify") throw new Error("invalid Android acceptance phase");
   const summary =
     kind === "invalid-receipt"
       ? `Android app emitted an invalid ${phase} receipt`
