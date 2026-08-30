@@ -13,7 +13,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { createDb, type Db } from "../../src/runtime/db.js";
+import {
+  createDb,
+  resolveDefaultPersistentDbName,
+  type Db,
+  type DbConfig,
+} from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
@@ -61,7 +66,11 @@ const corruptionApp = s.defineApp({
 });
 
 describe("browser Jazz storage compatibility corpus", () => {
-  const databaseNames: string[] = [];
+  // `driver.dbName` is a caller-selected logical base. Browser persistence
+  // deliberately derives a distinct physical root for the complete auth
+  // scope, so raw compatibility inspection and cleanup must use the resolved
+  // root that the public Db actually opened.
+  const databaseNames = new Set<string>();
   const openDbs: Db[] = [];
 
   afterEach(async () => {
@@ -71,7 +80,8 @@ describe("browser Jazz storage compatibility corpus", () => {
         .reverse()
         .map((db) => db.shutdown()),
     );
-    await Promise.all(databaseNames.splice(0).map((name) => IndexedDbPageStore.destroy(name)));
+    await Promise.all([...databaseNames].map((name) => IndexedDbPageStore.destroy(name)));
+    databaseNames.clear();
   });
 
   it("persists a catalogue-backed current/history/branch/large-value replica through the public browser path", async () => {
@@ -86,7 +96,9 @@ describe("browser Jazz storage compatibility corpus", () => {
 
     const dbName = databaseName();
     const secret = generateAuthSecret();
-    let db = await openPersistentDb(dbName, secret, server);
+    const config = persistentConfig(dbName, secret, server);
+    const physicalDbName = trackPhysicalDatabase(config);
+    let db = await openPersistentDb(config);
     const initialFixture = await db.transaction((tx) => {
       const project = tx.insert(app.projects, { name: "compat project" });
       const document = tx.insert(
@@ -140,9 +152,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
     await sleep(100);
-    const rawBeforeReadOnlyInspection = await rawRecords(dbName);
+    const rawBeforeReadOnlyInspection = await rawRecords(physicalDbName);
 
-    db = await openPersistentDb(dbName, secret, server);
+    db = await openPersistentDb(config);
     const reopenedMain = await db.one(app.documents.where({ id: document.id }), { branch: "main" });
     const reopenedDraft = await db.one(app.documents.where({ id: document.id }), {
       branch: "draft",
@@ -164,14 +176,16 @@ describe("browser Jazz storage compatibility corpus", () => {
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
     await sleep(100);
-    expect(await rawRecords(dbName)).toEqual(rawBeforeReadOnlyInspection);
+    expect(await rawRecords(physicalDbName)).toEqual(rawBeforeReadOnlyInspection);
   }, 90_000);
 
   it("rejects a corrupt durable epoch before handing a public Jazz handle to the app", async () => {
     const cleanup = new TestCleanup();
     const dbName = databaseName();
     const appId = "browser-storage-compat-corruption";
-    const db = cleanup.track(await createDb({ appId, driver: { type: "persistent", dbName } }));
+    const config = { appId, driver: { type: "persistent" as const, dbName } } satisfies DbConfig;
+    const physicalDbName = trackPhysicalDatabase(config);
+    const db = cleanup.track(await createDb(config));
     await withTimeout(
       db
         .insert(corruptionApp.todos, { title: "corruption sentinel", done: false })
@@ -183,24 +197,18 @@ describe("browser Jazz storage compatibility corpus", () => {
     cleanup.untrack(db);
     await sleep(100);
 
-    await replaceManifest(dbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
-    const rawBeforeRejectedRead = await rawRecords(dbName);
-    // Db construction is schema-lazy, so it returns the typed façade before a
-    // public operation supplies `app.wasmSchema`. That first operation is the
-    // admission boundary: it must reject rather than leak a worker error or
-    // read a row from the corrupt durable replica.
+    await replaceManifest(physicalDbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
+    const rawBeforeRejectedRead = await rawRecords(physicalDbName);
+    // Schema selection is lazy, but persistent construction must first obtain
+    // a foreground-node lease. Its worker opens the physical root before it
+    // can mint a transaction identity, making createDb the durable admission
+    // boundary. Reject the exact original epoch error rather than leaking a
+    // worker error or returning a handle backed by corrupt state.
     try {
-      const corruptedDb = cleanup.track(
-        await createDb({ appId, driver: { type: "persistent", dbName } }),
-      );
       await expect(
-        withTimeout(
-          corruptedDb.all(corruptionApp.todos, { tier: "local" }),
-          5_000,
-          "corrupt epoch query did not reject",
-        ),
+        withTimeout(createDb(config), 5_000, "corrupt epoch open did not reject"),
       ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
-      expect(await rawRecords(dbName)).toEqual(rawBeforeRejectedRead);
+      expect(await rawRecords(physicalDbName)).toEqual(rawBeforeRejectedRead);
     } finally {
       await cleanup.cleanup();
     }
@@ -208,21 +216,30 @@ describe("browser Jazz storage compatibility corpus", () => {
 
   function databaseName(): string {
     const name = uniqueDbName("jazz-storage-compat");
-    databaseNames.push(name);
     return name;
   }
 
-  async function openPersistentDb(
+  function trackPhysicalDatabase(config: DbConfig): string {
+    const name = resolveDefaultPersistentDbName(config);
+    databaseNames.add(name);
+    return name;
+  }
+
+  function persistentConfig(
     dbName: string,
     secret: string,
     server: Awaited<ReturnType<typeof getJazzServerInfo>>,
-  ): Promise<Db> {
-    const db = await createDb({
+  ): DbConfig {
+    return {
       appId: server.appId,
       serverUrl: server.serverUrl,
       secret,
       driver: { type: "persistent", dbName },
-    });
+    };
+  }
+
+  async function openPersistentDb(config: DbConfig): Promise<Db> {
+    const db = await createDb(config);
     openDbs.push(db);
     return db;
   }
