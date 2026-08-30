@@ -132,17 +132,24 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
       ...(containsA ? utf8("scope-a-private-row") : []),
       ...(containsB ? utf8("scope-b-private-row") : []),
     );
-  const scopeFactory = (bLeaksA: boolean, aLeaksB: boolean, delayedAReads = 0) => ({
+  const scopeFactory = (
+    bLeaksA: boolean,
+    aLeaksB: boolean,
+    delayedAReads = 0,
+    writerMustProgress = false,
+  ) => ({
     abiVersion: NATIVE_RELAY_ABI_VERSION,
     openAttached(capability: Uint8Array) {
       const isA = capability[0] === 1;
+      let stagedWrite = false;
       return {
         execute(command: Uint8Array) {
           switch (command[0]) {
             case 10:
               return Uint8Array.of(11, 1); // TransactionOpened { 1 }
             case 13:
-              if (isA) aWasWritten = true;
+              if (writerMustProgress) stagedWrite = true;
+              else if (isA) aWasWritten = true;
               else bWasWritten = true;
               return Uint8Array.of(13); // MutationStaged
             case 15:
@@ -161,7 +168,12 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
               throw new Error(`unexpected foreground command ${command[0]}`);
           }
         },
-        tick() {},
+        tick() {
+          if (!stagedWrite) return;
+          if (isA) aWasWritten = true;
+          else bWasWritten = true;
+          stagedWrite = false;
+        },
         close: () => true,
       };
     },
@@ -203,6 +215,78 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     contains: ["a"],
     excludes: ["b"],
   });
+
+  aWasWritten = false;
+  bWasWritten = false;
+  const writerProgressRequired = scopeFactory(false, false, 0, true);
+  proveForegroundScopeIsolation(writerProgressRequired, scopeA, scopeCodec, {
+    write: "a",
+    contains: ["a"],
+    excludes: ["b"],
+  });
+
+  const lifecycleReceipt = (failure?: "reader-open" | "reader-read" | "reader-close") => {
+    let opens = 0;
+    const closes: string[] = [];
+    const factory = {
+      abiVersion: NATIVE_RELAY_ABI_VERSION,
+      openAttached() {
+        opens += 1;
+        if (opens === 2 && failure === "reader-open")
+          throw new Error("planted reader open failure");
+        const role = opens === 1 ? "writer" : "reader";
+        return {
+          execute(command: Uint8Array) {
+            if (role === "writer") {
+              if (command[0] === 10) return Uint8Array.of(11, 1);
+              if (command[0] === 13) return Uint8Array.of(13);
+              if (command[0] === 15) return Uint8Array.of(14, ...new Uint8Array(16).fill(1));
+            } else {
+              if (command[0] === 2) return Uint8Array.of(2, 1);
+              if (command[0] === 3) {
+                if (failure === "reader-read") throw new Error("planted reader read failure");
+                return rows(true, false);
+              }
+            }
+            throw new Error(`unexpected ${role} lifecycle command ${command[0]}`);
+          },
+          tick() {},
+          close() {
+            closes.push(role);
+            if (role === "reader" && failure === "reader-close")
+              throw new Error("planted reader close failure");
+            return true;
+          },
+        };
+      },
+    };
+    return { factory, closes };
+  };
+
+  const cleanLifecycle = lifecycleReceipt();
+  proveForegroundScopeIsolation(cleanLifecycle.factory, scopeA, scopeCodec, {
+    write: "a",
+    contains: ["a"],
+    excludes: ["b"],
+  });
+  assert.deepEqual(cleanLifecycle.closes, ["reader", "writer"]);
+
+  for (const failure of ["reader-open", "reader-read", "reader-close"] as const) {
+    const failedLifecycle = lifecycleReceipt(failure);
+    assert.throws(
+      () =>
+        proveForegroundScopeIsolation(failedLifecycle.factory, scopeA, scopeCodec, {
+          write: "a",
+          contains: ["a"],
+          excludes: ["b"],
+        }),
+      new RegExp(`planted ${failure.replace("-", " ")} failure`),
+    );
+    assert.deepEqual(
+      failedLifecycle.closes,
+      failure === "reader-open" ? ["writer"] : ["reader", "writer"],
+    );
+  }
 
   const pendingReceipt = (settles: boolean) => {
     const metrics = { all: 0, poll: 0, tick: 0, close: 0 };

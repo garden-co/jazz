@@ -273,15 +273,19 @@ export function proveForegroundScopeIsolation(
   receipt: ScopeIsolationReceipt,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
 ): void {
-  if (receipt.write) {
-    // The writer and reader are deliberately separate foreground handles. A
-    // row must travel through the admitted relay/store rather than appearing
-    // only in the memory of the handle that staged it.
-    markFailure("scope-isolation-open-failed");
-    const writer = factory.openAttached(capability);
-    try {
+  let writer: NativeForegroundRuntime | undefined;
+  try {
+    if (receipt.write) {
+      // The writer and reader are deliberately separate foreground handles. A
+      // row must travel through the admitted relay/store rather than appearing
+      // only in the memory of the handle that staged it. Keep the writer alive
+      // and progressing until the reader observes the committed row: closing a
+      // foreground is cancellation, not a flush primitive.
+      markFailure("scope-isolation-open-failed");
+      const openedWriter = factory.openAttached(capability);
+      writer = openedWriter;
       const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
-        codec.decode(writer.execute(codec.encode(command)));
+        codec.decode(openedWriter.execute(codec.encode(command)));
       markFailure("scope-isolation-write-failed");
       const transaction = execute({
         type: "beginTransaction",
@@ -305,33 +309,37 @@ export function proveForegroundScopeIsolation(
       });
       if (committed.type !== "transactionCommitted")
         throw new Error("scope fixture foreground transaction did not commit");
-    } finally {
-      writer.close();
     }
-  }
 
-  markFailure("scope-isolation-open-failed");
-  const foreground = factory.openAttached(capability);
-  try {
-    markFailure("scope-isolation-read-failed");
-    const rows = readTodos(foreground, codec, (candidate) =>
-      receipt.contains.every((scope) => containsUtf8(candidate, scopeFixtureTitle(scope))),
-    );
-    markFailure("scope-isolation-assert-failed");
-    for (const scope of receipt.contains) {
-      if (!containsUtf8(rows, scopeFixtureTitle(scope)))
-        throw new Error(
-          `scope ${scope.toUpperCase()} did not materialize its persisted fixture row`,
-        );
-    }
-    for (const scope of receipt.excludes) {
-      if (containsUtf8(rows, scopeFixtureTitle(scope)))
-        throw new Error(
-          `scope ${receipt.write?.toUpperCase() ?? "read"} observed scope ${scope.toUpperCase()}'s persisted fixture row`,
-        );
+    markFailure("scope-isolation-open-failed");
+    const foreground = factory.openAttached(capability);
+    try {
+      markFailure("scope-isolation-read-failed");
+      const rows = readTodos(
+        foreground,
+        codec,
+        (candidate) =>
+          receipt.contains.every((scope) => containsUtf8(candidate, scopeFixtureTitle(scope))),
+        () => writer?.tick(),
+      );
+      markFailure("scope-isolation-assert-failed");
+      for (const scope of receipt.contains) {
+        if (!containsUtf8(rows, scopeFixtureTitle(scope)))
+          throw new Error(
+            `scope ${scope.toUpperCase()} did not materialize its persisted fixture row`,
+          );
+      }
+      for (const scope of receipt.excludes) {
+        if (containsUtf8(rows, scopeFixtureTitle(scope)))
+          throw new Error(
+            `scope ${receipt.write?.toUpperCase() ?? "read"} observed scope ${scope.toUpperCase()}'s persisted fixture row`,
+          );
+      }
+    } finally {
+      foreground.close();
     }
   } finally {
-    foreground.close();
+    writer?.close();
   }
 }
 
@@ -368,6 +376,7 @@ function readTodos(
   foreground: NativeForegroundRuntime,
   codec: ForegroundByteCodec,
   ready: (rows: Uint8Array) => boolean = () => true,
+  progressWriter: () => void = () => {},
 ): Uint8Array {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
@@ -376,6 +385,7 @@ function readTodos(
     throw new Error("scope isolation fixture could not prepare the todos query");
   let pendingOperation: number | undefined;
   for (let attempts = 0; attempts < 96; attempts += 1) {
+    progressWriter();
     foreground.tick();
     const response =
       pendingOperation === undefined
