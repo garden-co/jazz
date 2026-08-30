@@ -27,8 +27,11 @@ function hostNapiTarget() {
   }
 }
 
-const stagedRootNapiArtifact =
-  /^jazz-napi\.(?:linux-x64-gnu|darwin-x64|darwin-arm64|win32-x64-msvc)\.(?:node|manifest\.json)$/;
+// This is deliberately the package's published-artifact namespace, rather
+// than the current list of supported target triples. package.json admits every
+// matching root file, so staging must clear every unselected member even when a
+// stale or malformed suffix was written by an earlier tool.
+const stagedRootNapiArtifact = /^jazz-napi\.[^/]+\.(?:node|manifest\.json)$/;
 
 function pruneStaleRootNapiArtifacts(packageDir, selectedPlatform) {
   const selected = new Set([
@@ -74,8 +77,9 @@ export function stageNapiLoader(root, platform) {
   if (manifest.nativeArtifactFingerprint !== fingerprint)
     throw new Error("active NAPI pointer fingerprint does not match its sealed manifest");
   // A working tree can retain root-level outputs from another platform build.
-  // Only remove the fixed generated names above; leave every user/package file
-  // untouched, and fail closed rather than following a symlink.
+  // Clear only the package-admitted generated-artifact namespace, leaving
+  // unrelated package files untouched, and fail closed rather than following a
+  // symlink.
   pruneStaleRootNapiArtifacts(packageDir, platform);
   copyFileSync(binding, join(packageDir, `jazz-napi.${platform}.node`));
   copyFileSync(join(stage, "index.js"), join(packageDir, "native-loader.cjs"));

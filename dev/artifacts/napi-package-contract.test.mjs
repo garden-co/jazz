@@ -44,6 +44,13 @@ function fixture({ profile = "release" } = {}) {
     join(packageDir, "jazz-napi.darwin-x64.manifest.json"),
     JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: "b".repeat(64) }),
   );
+  // The package glob accepts arbitrary suffixes too; one must never survive
+  // merely because it is not a currently supported target triple.
+  writeFileSync(join(packageDir, "jazz-napi.attacker.node"), "unexpected native bytes\n");
+  writeFileSync(
+    join(packageDir, "jazz-napi.attacker.manifest.json"),
+    JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: "c".repeat(64) }),
+  );
   // This is deliberately an ignored historical output. A package glob must
   // never make it into the final inventory.
   mkdirSync(join(packageDir, ".native-artifacts", "generation-stale"));
@@ -59,6 +66,11 @@ test("NAPI packing stages one sealed release generation and excludes historical 
     assert.equal(existsSync(join(fixtureRoot.packageDir, "jazz-napi.darwin-x64.node")), false);
     assert.equal(
       existsSync(join(fixtureRoot.packageDir, "jazz-napi.darwin-x64.manifest.json")),
+      false,
+    );
+    assert.equal(existsSync(join(fixtureRoot.packageDir, "jazz-napi.attacker.node")), false);
+    assert.equal(
+      existsSync(join(fixtureRoot.packageDir, "jazz-napi.attacker.manifest.json")),
       false,
     );
     const output = execFileSync("npm", ["pack", "--dry-run", "--json"], {
