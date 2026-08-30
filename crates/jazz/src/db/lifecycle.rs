@@ -430,6 +430,10 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
+        // Mutation admission belongs to the binding-facing owner. Once that
+        // owner enters Closing it retains this Db and awaits every operation
+        // it already accepted, in FIFO order, before storage is retired.
+        self.node.drain_queued_mutations().await;
         // Close finalization admission before the first await. This makes the
         // queued retirement set and durable close one lifecycle transition:
         // a stream dropped while storage is shutting down is either in this

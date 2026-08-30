@@ -248,60 +248,82 @@ where
             Poll::Pending => {
                 self.queued_mutations.borrow_mut().push_front(operation);
             }
-            Poll::Ready(result) => {
-                if let Some(tx_id) = operation.tx_id {
-                    self.reserved_mutations.borrow_mut().remove(&tx_id);
-                }
-                if let Err(error) = &result
-                    && let Some(open_tx_id) = operation.open_tx_id
-                {
-                    self.queued_open_transaction_failures
+            Poll::Ready(result) => self.finish_queued_mutation(operation, result),
+        }
+    }
+
+    fn finish_queued_mutation(
+        &self,
+        operation: QueuedMutationOperation,
+        result: Result<(), Error>,
+    ) {
+        if let Some(tx_id) = operation.tx_id {
+            self.reserved_mutations.borrow_mut().remove(&tx_id);
+        }
+        if let Err(error) = &result
+            && let Some(open_tx_id) = operation.open_tx_id
+        {
+            self.queued_open_transaction_failures
+                .borrow_mut()
+                .entry(open_tx_id)
+                .or_insert_with(|| error.clone());
+        }
+        if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
+            let terminal_failed = result.is_err();
+            match result {
+                Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
+                Err(error) => {
+                    *status.borrow_mut() = QueuedMutationStatus::Failed(error.clone());
+                    self.queued_mutation_failures
                         .borrow_mut()
-                        .entry(open_tx_id)
-                        .or_insert_with(|| error.clone());
-                }
-                if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
-                    let terminal_failed = result.is_err();
-                    match result {
-                        Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
-                        Err(error) => {
-                            *status.borrow_mut() = QueuedMutationStatus::Failed(error.clone());
-                            self.queued_mutation_failures
-                                .borrow_mut()
-                                .insert(tx_id, error);
-                        }
-                    }
-                    if let Some(waiters) = self.write_state_waiters.borrow_mut().remove(&tx_id) {
-                        for waiter in waiters {
-                            match waiter.notify {
-                                WriteStateWaiterNotify::Future(sender) => {
-                                    let _ = sender.send(());
-                                }
-                            }
-                        }
-                    }
-                    if terminal_failed && let Some(open_tx_id) = operation.open_tx_id {
-                        let node = Rc::clone(&self.node);
-                        self.enqueue_transaction_cleanup(Box::pin(async move {
-                            let mut node = node.lock().await;
-                            match node.abandon_tx(open_tx_id) {
-                                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
-                                Err(error) => Err(error.into()),
-                            }
-                        }));
-                    }
-                }
-                if operation.tx_id.is_some()
-                    && let Some(open_tx_id) = operation.open_tx_id
-                {
-                    self.queued_open_transaction_failures
-                        .borrow_mut()
-                        .remove(&open_tx_id);
-                }
-                if !self.queued_mutations.borrow().is_empty() {
-                    self.schedule_tick(TickUrgency::Immediate);
+                        .insert(tx_id, error);
                 }
             }
+            if let Some(waiters) = self.write_state_waiters.borrow_mut().remove(&tx_id) {
+                for waiter in waiters {
+                    let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+                    let _ = sender.send(());
+                }
+            }
+            if terminal_failed && let Some(open_tx_id) = operation.open_tx_id {
+                let node = Rc::clone(&self.node);
+                self.enqueue_transaction_cleanup(Box::pin(async move {
+                    let mut node = node.lock().await;
+                    match node.abandon_tx(open_tx_id) {
+                        Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+                        Err(error) => Err(error.into()),
+                    }
+                }));
+            }
+        }
+        if operation.tx_id.is_some()
+            && let Some(open_tx_id) = operation.open_tx_id
+        {
+            self.queued_open_transaction_failures
+                .borrow_mut()
+                .remove(&open_tx_id);
+        }
+        if !self.queued_mutations.borrow().is_empty() {
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    pub(super) async fn drain_queued_mutations(&self) {
+        loop {
+            let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+                return;
+            };
+            let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+                self.queued_open_transaction_failures
+                    .borrow()
+                    .get(&open_tx_id)
+                    .cloned()
+            });
+            let result = match poisoned {
+                Some(error) => Err(error),
+                None => operation.future.as_mut().await,
+            };
+            self.finish_queued_mutation(operation, result);
         }
     }
 

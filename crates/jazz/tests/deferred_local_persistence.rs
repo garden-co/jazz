@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts};
-use jazz::groove::storage::{TestStorage, TestStorageOperation};
+use jazz::groove::storage::{ReopenableStorage, TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
 use jazz::schema::JazzSchema;
@@ -360,6 +360,24 @@ fn queued_mutations_are_fifo_owned_and_surface_preparation_failures() {
     );
 
     control.resume();
+    let mut first_terminal_before_second = false;
+    for _ in 0..4_096 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        let first_terminal = block_on(rejected.write_state()).is_err();
+        let second_published = db
+            .write_state(accepted_tx)
+            .is_ok_and(|state| state.durability >= DurabilityTier::Local);
+        if first_terminal || second_published {
+            first_terminal_before_second = first_terminal && !second_published;
+            break;
+        }
+    }
+    assert!(
+        first_terminal_before_second,
+        "resuming a cold head must terminalize it before the following operation; requeueing Pending at the back overtakes this receipt",
+    );
     for _ in 0..4_096 {
         let mut turn = Box::pin(db.tick());
         let _ = turn.as_mut().poll(&mut context);
@@ -382,6 +400,85 @@ fn queued_mutations_are_fifo_owned_and_surface_preparation_failures() {
     let rows = block_on(db.all(&query, ReadOpts::default())).expect("read inserted row");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), accepted_row);
+}
+
+#[test]
+fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let reopen_handle = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x59; 16]),
+            author: AuthorSubject::for_test_bytes([0x69; 16]),
+        },
+    )))
+    .expect("open yielding database");
+
+    reopen_handle.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let failed = db
+        .enqueue_update(
+            "todos".to_owned(),
+            jazz::ids::RowUuid::from_bytes([0x79; 16]),
+            row! { title: "missing" },
+            Default::default(),
+        )
+        .expect("reserve failing head");
+    db.enqueue_insert(
+        "todos".to_owned(),
+        row! { title: "second" },
+        Default::default(),
+    )
+    .expect("reserve second");
+    db.enqueue_insert(
+        "todos".to_owned(),
+        row! { title: "third" },
+        Default::default(),
+    )
+    .expect("reserve third");
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut close = Box::pin(db.close());
+    assert!(matches!(close.as_mut().poll(&mut context), Poll::Pending));
+    control.resume();
+    let close_result = loop {
+        if let Poll::Ready(result) = close.as_mut().poll(&mut context) {
+            break result;
+        }
+    };
+    close_result.expect("close drains every accepted operation before storage retirement");
+    assert_eq!(
+        block_on(failed.write_state())
+            .expect_err("failed queued operation remains terminally observable")
+            .code,
+        ErrorCode::WriteRejected,
+    );
+    drop(close);
+    drop(db);
+
+    let reopened_storage = block_on(reopen_handle.reopen(families)).expect("reopen drained store");
+    let reopened = block_on(Db::open(DbConfig::new(
+        schema,
+        reopened_storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x59; 16]),
+            author: AuthorSubject::for_test_bytes([0x69; 16]),
+        },
+    )))
+    .expect("reopen database after close");
+    let query = reopened
+        .prepare_query(&reopened.table("todos"))
+        .expect("prepare reopened query");
+    let rows = block_on(reopened.all(&query, ReadOpts::default())).expect("read drained writes");
+    let titles = rows.iter().map(|row| row.cell_at(0)).collect::<Vec<_>>();
+    assert_eq!(titles, vec![Some("second".into()), Some("third".into())]);
 }
 
 #[test]

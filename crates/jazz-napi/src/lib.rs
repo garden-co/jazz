@@ -3625,30 +3625,26 @@ impl NapiDb {
     }
 
     #[napi]
-    pub fn close(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
+    pub fn close(&self) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let inner = self.inner.borrow_mut().take();
-        let result = if !self.owns_runtime {
-            Ok(())
-        } else if let Some(inner) = inner {
-            match inner {
-                NapiDbInnerStorage::Memory(db) => {
-                    // Schema views retain this core through their own Rc. Release every
-                    // N-API-owned callback before the fallible async close so a retained
-                    // view cannot keep Node's event loop alive after its owner closes.
-                    db.set_tick_scheduler(None);
-                    db.clear_mutation_error_callback();
-                    core_block_on(db.close())
-                }
-                NapiDbInnerStorage::Persistent(db) => {
-                    db.set_tick_scheduler(None);
-                    db.clear_mutation_error_callback();
-                    core_block_on(db.close())
+        let owns_runtime = self.owns_runtime;
+        native_read_or_pending(Box::pin(async move {
+            if owns_runtime && let Some(inner) = inner {
+                match inner {
+                    NapiDbInnerStorage::Memory(db) => {
+                        db.close().await.map_err(napi_error)?;
+                        db.set_tick_scheduler(None);
+                        db.clear_mutation_error_callback();
+                    }
+                    NapiDbInnerStorage::Persistent(db) => {
+                        db.close().await.map_err(napi_error)?;
+                        db.set_tick_scheduler(None);
+                        db.clear_mutation_error_callback();
+                    }
                 }
             }
-        } else {
-            Ok(())
-        };
-        immediate_promise(env, result)
+            Ok(Uint8Array::new(Vec::new()))
+        }))
     }
 }
 
@@ -4021,21 +4017,6 @@ fn finish_wait_promise(
     result: std::result::Result<TxId, jazz::db::Error>,
 ) {
     finish_immediate_promise(env, deferred, result.map(|_| ()))
-}
-
-fn immediate_promise(
-    env: Env,
-    result: std::result::Result<(), jazz::db::Error>,
-) -> napi::Result<PromiseRaw<'static, ()>> {
-    let mut deferred = std::ptr::null_mut();
-    let mut promise = std::ptr::null_mut();
-    let env = env.raw();
-    let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
-    if status != sys::Status::napi_ok {
-        return Err(napi::Error::from_reason("failed to create close promise"));
-    }
-    finish_immediate_promise(env, deferred, result);
-    Ok(PromiseRaw::new(env, promise))
 }
 
 fn finish_immediate_promise(
