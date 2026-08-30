@@ -541,6 +541,7 @@ where
             catalogue_bootstrap_marker,
             clock: Clock {
                 tx_time: TxTime::default(),
+                reservation_high_water: Rc::new(Cell::new(TxTime::default())),
                 global_time_register: GlobalTime::default(),
                 locally_minted_global_times: BTreeSet::new(),
                 committed_global_time: GlobalTime(0),
@@ -707,7 +708,13 @@ where
     /// identity to its pool.  It intentionally includes identities allocated
     /// for transactions that were later rolled back or never submitted.
     pub(crate) fn tx_time_high_water(&self) -> TxTime {
-        self.clock.tx_time
+        self.clock
+            .tx_time
+            .max(self.clock.reservation_high_water.get())
+    }
+
+    pub(crate) fn tx_time_reservation_clock(&self) -> Rc<Cell<TxTime>> {
+        Rc::clone(&self.clock.reservation_high_water)
     }
 
     /// Establish a durable-owner supplied lower bound before this runtime can

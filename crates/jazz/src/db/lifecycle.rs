@@ -464,6 +464,13 @@ where
             .seed_tx_time_high_water(high_water);
     }
 
+    /// Reserve a definitive local transaction identity for an owner-retained
+    /// mutation before its asynchronous preparation begins.
+    #[doc(hidden)]
+    pub fn reserve_transaction_id_at_ms(&self, now_ms: u64) -> Result<TxId, Error> {
+        self.node.reserve_transaction_id(now_ms)
+    }
+
     /// Configure this durable process as the internal browser relay that owns
     /// fresh upstream authority sessions for client Edge reads.
     #[doc(hidden)]

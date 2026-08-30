@@ -8,6 +8,7 @@ use super::peer_connection::{
     mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
+use crate::time::TxTime;
 
 /// Node-owned participant surface for upstream and subscriber connections.
 pub struct Node<S>
@@ -15,6 +16,8 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    tx_time_reservation_clock: Rc<Cell<TxTime>>,
+    node_uuid: NodeUuid,
     receives_commits_as_local: bool,
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
@@ -74,6 +77,8 @@ where
         let receives_commits_as_local = !node.is_history_complete();
         let chunk_resolver = PeerChunkResolver::default();
         let local_chunk_reader = node.local_chunk_reader_handle();
+        let tx_time_reservation_clock = node.tx_time_reservation_clock();
+        let node_uuid = node.node_uuid();
         node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
         let pending_mutation_errors = node
             .rejected_transactions()
@@ -85,6 +90,8 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            tx_time_reservation_clock,
+            node_uuid,
             receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(UploadOutbox::default())),
@@ -128,6 +135,17 @@ where
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
         }
+    }
+
+    /// Reserve a definitive local transaction identity without borrowing the
+    /// async storage-owning node. The shared high-water mirror is advanced by
+    /// every ordinary mint and remote observation as well.
+    pub(super) fn reserve_transaction_id(&self, now_ms: u64) -> Result<TxId, Error> {
+        let made_at = TxTime::tick(self.tx_time_reservation_clock.get(), now_ms)
+            .map_err(crate::node::Error::from)
+            .map_err(Error::from)?;
+        self.tx_time_reservation_clock.set(made_at);
+        Ok(TxId::new(made_at, self.node_uuid))
     }
 
     pub(super) fn upstream_register_shape_options(

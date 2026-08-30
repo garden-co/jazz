@@ -6,7 +6,7 @@
 //! [`views`] for sync view payloads. In the layer map it is the core between the
 //! `Db` facade and groove storage/IVM.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -633,6 +633,9 @@ pub(crate) enum CatalogueBootstrapState {
 struct Clock {
     /// Highest local transaction timestamp observed or minted by this node.
     tx_time: TxTime,
+    /// Synchronously reservable high-water mirror shared with the host-facing
+    /// node wrapper. Every mint/merge path advances both clocks.
+    reservation_high_water: Rc<Cell<TxTime>>,
     /// Highest authority settlement timestamp observed or minted by this node.
     global_time_register: GlobalTime,
     /// Authority timestamps allocated here and awaiting accepted application.
@@ -667,7 +670,7 @@ where
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {
         self.clock
-            .allocate_global_time(self.clock.tx_time.physical_ms())
+            .allocate_global_time(self.tx_time_high_water().physical_ms())
             .expect("test global HLC must have capacity")
     }
 

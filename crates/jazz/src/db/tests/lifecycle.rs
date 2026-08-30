@@ -113,3 +113,33 @@ fn foreground_handoff_high_water_includes_an_unsubmitted_public_write() {
         .unwrap();
     assert!(second_write.mergeable_tx_id().time > first_tx.time);
 }
+
+#[test]
+fn synchronous_reservations_are_definitive_and_advance_the_shared_hlc() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let floor = TxTime::new(1_000_000, 41);
+    doctest_support::block_on(db.seed_foreground_tx_time_high_water(floor));
+
+    let first = db.reserve_transaction_id_at_ms(1_000_000).unwrap();
+    let second = db.reserve_transaction_id_at_ms(1_000_000).unwrap();
+    assert_eq!(first.node, second.node);
+    assert!(first.time > floor);
+    assert!(second.time > first.time);
+    assert_eq!(
+        doctest_support::block_on(db.foreground_tx_time_high_water()),
+        second.time,
+        "clean handoff must include identities reserved before async admission",
+    );
+
+    let committed = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("after reservations", false),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(
+        committed.mergeable_tx_id().time > second.time,
+        "ordinary minting must share the reservation high-water clock",
+    );
+}

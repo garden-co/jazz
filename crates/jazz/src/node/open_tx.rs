@@ -129,7 +129,7 @@ where
         {
             return Err(Error::DuplicateOpenBatch(id));
         }
-        let local_base = self.clock.tx_time;
+        let local_base = self.tx_time_high_water();
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
             dots.extend(self.transaction_ids_for_global_time(global_time).await?);
@@ -1116,7 +1116,7 @@ where
 
     /// Return whether local transaction time advanced after this transaction opened.
     pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenTransactionId) -> Result<bool, Error> {
-        Ok(self.clock.tx_time > self.open_tx(tx_id)?.base_snapshot.local_base)
+        Ok(self.tx_time_high_water() > self.open_tx(tx_id)?.base_snapshot.local_base)
     }
 
     pub(super) fn open_tx(&self, tx_id: OpenTransactionId) -> Result<&OpenTransaction, Error> {
