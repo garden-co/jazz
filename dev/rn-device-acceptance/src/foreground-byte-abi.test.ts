@@ -551,6 +551,105 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   opened = 0;
   schedulers.length = 0;
   ticks.fill(0);
+  let pendingPolls = 0;
+  let pendingDrains = 0;
+  let emitPendingWake = true;
+  const pendingHydration = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      let scheduler: ((urgency: string) => void) | undefined;
+      let pendingResponse: Uint8Array | undefined;
+      let pollsForDrain = 0;
+      return {
+        ...foreground,
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string; operation?: number };
+          if (request.type === "drainSubscription") {
+            assert.equal(pendingResponse, undefined);
+            pendingDrains += 1;
+            pendingResponse = foreground.execute(bytes);
+            pollsForDrain = 0;
+            if (emitPendingWake) setTimeout(() => scheduler?.("immediate"), 0);
+            return command.encode({ type: "pending", operation: 57 });
+          }
+          if (request.type === "poll") {
+            assert.equal(request.operation, 57);
+            assert.ok(pendingResponse);
+            pendingPolls += 1;
+            pollsForDrain += 1;
+            if (pollsForDrain === 1) {
+              if (emitPendingWake) setTimeout(() => scheduler?.("immediate"), 0);
+              return command.encode({ type: "pending", operation: 57 });
+            }
+            const response = pendingResponse;
+            pendingResponse = undefined;
+            return response;
+          }
+          return foreground.execute(bytes);
+        },
+        setTickScheduler(callback: (urgency: string) => void) {
+          scheduler = callback;
+          foreground.setTickScheduler?.(callback);
+        },
+      };
+    },
+  };
+  await proveSameJsiRuntimeWriteSubscription(pendingHydration, capability, command);
+  assert.equal(pendingDrains, 2, "a retained operation must not reissue DrainSubscription");
+  assert.equal(pendingPolls, 4, "both drains preserve one operation across repeated Polls");
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  pendingDrains = 0;
+  pendingPolls = 0;
+  emitPendingWake = false;
+  await assert.rejects(
+    async () => proveSameJsiRuntimeWriteSubscription(pendingHydration, capability, command),
+    /subscription drain did not settle after bounded ticks/,
+  );
+  assert.equal(pendingDrains, 1);
+  assert.equal(pendingPolls, 0, "a retained operation cannot Poll without a fresh native wake");
+  emitPendingWake = true;
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  const terminalCloses: number[] = [];
+  let terminalOpened = 0;
+  const terminalOperation = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      const peer = terminalOpened++;
+      return {
+        ...foreground,
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string };
+          if (request.type === "drainSubscription")
+            return command.encode({ type: "operationError", reason: "cancelled" });
+          return foreground.execute(bytes);
+        },
+        close() {
+          terminalCloses.push(peer);
+          return foreground.close();
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    async () => proveSameJsiRuntimeWriteSubscription(terminalOperation, capability, command),
+    /unexpected response/,
+  );
+  assert.deepEqual(terminalCloses, [0, 1], "both foregrounds close after terminal operation error");
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
   emitCommitWake = false;
   await assert.rejects(
     async () => proveSameJsiRuntimeWriteSubscription(factory, capability, command),

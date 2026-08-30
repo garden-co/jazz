@@ -196,7 +196,12 @@ export async function proveSameJsiRuntimeWriteSubscription(
       b.tick();
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       if (!openedB.consumeWake()) continue;
-      const events = drainSubscription(b, subscribed.subscription, codec);
+      const events = await drainSubscription(
+        b,
+        subscribed.subscription,
+        codec,
+        openedB.consumeWake,
+      );
       if (events.some((event) => event.type === "delta" && event.reset && event.settled)) {
         initialResetSettled = true;
         break;
@@ -240,7 +245,12 @@ export async function proveSameJsiRuntimeWriteSubscription(
       // though both aliases are ticked fairly.
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       if (!openedB.consumeWake()) continue;
-      const events = drainSubscription(b, subscribed.subscription, codec);
+      const events = await drainSubscription(
+        b,
+        subscribed.subscription,
+        codec,
+        openedB.consumeWake,
+      );
       if (
         events.some(
           (event) =>
@@ -482,17 +492,25 @@ async function readTodos(
   throw new Error("scope isolation fixture read did not settle after bounded ticks");
 }
 
-function drainSubscription(
+async function drainSubscription(
   foreground: NativeForegroundRuntime,
   subscription: number,
   codec: ForegroundByteCodec,
-): Extract<NativeForegroundResponse, { type: "subscriptionEvents" }>["events"] {
-  const response = codec.decode(
-    foreground.execute(codec.encode({ type: "drainSubscription", subscription })),
-  );
-  if (response.type !== "subscriptionEvents")
-    throw new Error("foreground subscription drain returned an unexpected response");
-  return response.events;
+  consumeWake: () => boolean,
+): Promise<Extract<NativeForegroundResponse, { type: "subscriptionEvents" }>["events"]> {
+  const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
+    codec.decode(foreground.execute(codec.encode(command)));
+  let response = execute({ type: "drainSubscription", subscription });
+  for (let attempt = 0; attempt < 96; attempt += 1) {
+    if (response.type === "subscriptionEvents") return response.events;
+    if (response.type !== "pending")
+      throw new Error("foreground subscription drain returned an unexpected response");
+    foreground.tick();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (!consumeWake()) continue;
+    response = execute({ type: "poll", operation: response.operation });
+  }
+  throw new Error("foreground subscription drain did not settle after bounded ticks");
 }
 
 function containsUtf8(bytes: Uint8Array, value: string): boolean {
