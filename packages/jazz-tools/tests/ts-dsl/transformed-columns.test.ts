@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vites
 import { schema as s, schemaToWasm, TypedTableQueryBuilder } from "../../src/index.js";
 import { schemaDefinitionToAst } from "../../src/migrations.js";
 import type { CompiledPermissions } from "../../src/permissions/index.js";
-import { createDb, type Db } from "../../src/runtime/db.js";
+import { createDb } from "../../src/runtime/default-create-db.js";
+import type { Db } from "../../src/runtime/db.js";
 import { mergePermissionsIntoSchema } from "../../src/schema-permissions.js";
 import { uniqueDbName } from "./factories";
 

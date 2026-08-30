@@ -1,4 +1,5 @@
-import { createDb, type Db } from "../../src/runtime/db.js";
+import { createDb } from "../../src/runtime/default-create-db.js";
+import type { Db } from "../../src/runtime/db.js";
 import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser } from "./factories";
