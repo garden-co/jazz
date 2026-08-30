@@ -323,13 +323,16 @@ fn storage_backed_maintained_deletion_winners_follow_local_and_edge_frontiers() 
                 .request
                 .output
                 .facts
-                .contains(&crate::node::query_engine::ProgramFactKey::VersionWitnesses)
-                && !program
-                    .request
-                    .output
-                    .facts
-                    .contains(&crate::node::query_engine::ProgramFactKey::ReplacementWitnesses),
-            "{tier:?} scalar maintained view uses storage-backed witnesses"
+                .contains(&crate::node::query_engine::ProgramFactKey::VersionWitnesses),
+            "{tier:?} scalar maintained view omits source version witnesses"
+        );
+        assert!(
+            program
+                .request
+                .output
+                .facts
+                .contains(&crate::node::query_engine::ProgramFactKey::ReplacementWitnesses),
+            "{tier:?} scalar maintained view retains replacement witnesses so a deletion/restore transition can name the current register winner"
         );
         let opts = RegisterShapeOptions {
             tier,
