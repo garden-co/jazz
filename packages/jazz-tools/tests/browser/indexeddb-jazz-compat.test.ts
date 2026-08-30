@@ -13,12 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import {
-  createDb,
-  resolveDefaultPersistentDbName,
-  type Db,
-  type DbConfig,
-} from "../../src/runtime/db.js";
+import { createDb, type Db, type DbConfig } from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
@@ -97,8 +92,8 @@ describe("browser Jazz storage compatibility corpus", () => {
     const dbName = databaseName();
     const secret = generateAuthSecret();
     const config = persistentConfig(dbName, secret, server);
-    const physicalDbName = trackPhysicalDatabase(config);
     let db = await openPersistentDb(config);
+    const physicalDbName = await trackPhysicalDatabase(dbName);
     const initialFixture = await db.transaction((tx) => {
       const project = tx.insert(app.projects, { name: "compat project" });
       const document = tx.insert(
@@ -184,8 +179,8 @@ describe("browser Jazz storage compatibility corpus", () => {
     const dbName = databaseName();
     const appId = "browser-storage-compat-corruption";
     const config = { appId, driver: { type: "persistent" as const, dbName } } satisfies DbConfig;
-    const physicalDbName = trackPhysicalDatabase(config);
     const db = cleanup.track(await createDb(config));
+    const physicalDbName = await trackPhysicalDatabase(dbName);
     await withTimeout(
       db
         .insert(corruptionApp.todos, { title: "corruption sentinel", done: false })
@@ -219,8 +214,18 @@ describe("browser Jazz storage compatibility corpus", () => {
     return name;
   }
 
-  function trackPhysicalDatabase(config: DbConfig): string {
-    const name = resolveDefaultPersistentDbName(config);
+  async function trackPhysicalDatabase(logicalBase: string): Promise<string> {
+    const prefix = `${logicalBase}::jazz-browser-v1::`;
+    const names = (await indexedDB.databases())
+      .map((database) => database.name)
+      .filter((name): name is string => typeof name === "string" && name.startsWith(prefix));
+    if (names.length !== 1) {
+      throw new Error(
+        `expected one physical Jazz IndexedDB root for ${logicalBase}, found ${names.length}`,
+      );
+    }
+    const [name] = names;
+    if (!name) throw new Error(`missing physical Jazz IndexedDB root for ${logicalBase}`);
     databaseNames.add(name);
     return name;
   }
