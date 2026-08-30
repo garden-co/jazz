@@ -1164,37 +1164,22 @@ impl WasmDb {
             serde_wasm_bindgen::from_value(mutations).map_err(|error| {
                 JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
             })?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_js_u64(value, "updatedAtMs"))
+            .transpose()?;
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match updated_at_ms
-                    .map(|value| checked_js_u64(value, "updatedAtMs"))
-                    .transpose()?
-                {
-                    Some(now_ms) => block_on(db.update_with_large_value_mutations_at_ms(
-                        &table, row_id, patch, mutations, now_ms,
-                    )),
-                    None => block_on(
-                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
-                    ),
-                }
-                .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                match updated_at_ms
-                    .map(|value| checked_js_u64(value, "updatedAtMs"))
-                    .transpose()?
-                {
-                    Some(now_ms) => block_on(db.update_with_large_value_mutations_at_ms(
-                        &table, row_id, patch, mutations, now_ms,
-                    )),
-                    None => block_on(
-                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
-                    ),
-                }
-                .map_err(to_js_error)?,
+                db.enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
+                    .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }

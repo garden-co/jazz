@@ -1612,30 +1612,19 @@ impl NapiDb {
             .map(|value| checked_u64(value, "updatedAtMs"))
             .transpose()?;
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
-                        &table, row_id, patch, mutations, now_ms,
-                    )),
-                    None => core_block_on(
-                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
-                    ),
-                }
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
-                        &table, row_id, patch, mutations, now_ms,
-                    )),
-                    None => core_block_on(
-                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
-                    ),
-                }
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let write = db
+                    .enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                core_write_memory(Rc::clone(db), write)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let write = db
+                    .enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_write_persistent(Rc::clone(db), write)
+            }
         }
     }
 

@@ -610,6 +610,32 @@ where
         );
         Ok(self.queued_write_handle(row, tx_id, status))
     }
+
+    #[doc(hidden)]
+    pub fn enqueue_large_value_update(
+        &self,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(updated_at_ms)?;
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db
+                    .update_with_large_value_mutations_at_ms(&table, row, patch, mutations, now_ms)
+                    .await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status))
+    }
     /// Read a byte range from an ordinary bytes or string cell without
     /// exposing its physical representation. Inline and indirect cells share
     /// this API; only the intersecting chunk paths are requested.
@@ -925,8 +951,17 @@ where
                     node.seal_large_value_updates(commit, &staged, self.schema_version_id)
                         .await?
                 };
-                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                if let Some(reserved) = self.reserved_tx_id {
+                    node.commit_mergeable_many_in_schema_at(
+                        self.schema_version_id,
+                        vec![commit],
+                        reserved,
+                    )
                     .await?
+                } else {
+                    node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                        .await?
+                }
             };
             Ok::<_, Error>(published)
         }
