@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ReadOpts, try_ready};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ReadOpts};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
@@ -216,56 +216,4 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
             .any(|row| row.row_uuid() == durable_seed.row_uuid())
     );
     assert!(rows.iter().any(|row| row.row_uuid() == fresh.row_uuid()));
-}
-
-#[test]
-fn cold_sync_update_fails_before_mutation_and_async_update_resumes() {
-    let schema = schema();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let (storage, control) = TestStorage::controlled(&family_refs);
-    let storage_control = storage.clone();
-    let db = block_on(Db::open(DbConfig::new(
-        schema,
-        storage,
-        DbIdentity {
-            node: NodeUuid::from_bytes([0x53; 16]),
-            author: AuthorSubject::for_test_bytes([0x63; 16]),
-        },
-    )))
-    .expect("open yielding database");
-    let seeded = block_on(db.insert("todos", row! { title: "before" }, Default::default()))
-        .expect("seed row");
-    block_on(seeded.wait(DurabilityTier::Local)).expect("seed is durable");
-
-    storage_control.evict_all();
-    control.pause_on(TestStorageOperation::Get);
-    control.pause_on(TestStorageOperation::ScanOpen);
-    let error = match try_ready(db.update(
-        "todos",
-        seeded.row_uuid(),
-        row! { title: "must not publish" },
-        Default::default(),
-    )) {
-        Ok(_) => panic!("resident-only wiring must reject the cold update"),
-        Err(error) => error,
-    };
-    assert_eq!(error.code, ErrorCode::ColdMutationRequiresAsync);
-
-    control.resume();
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    let rows = block_on(db.all(&query, ReadOpts::default())).expect("read unchanged row");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].cell_at(0), Some("before".into()));
-
-    let update = block_on(db.update(
-        "todos",
-        seeded.row_uuid(),
-        row! { title: "after" },
-        Default::default(),
-    ))
-    .expect("owner-retained async update resumes");
-    block_on(update.wait(DurabilityTier::Local)).expect("async update is durable");
-    let rows = block_on(db.all(&query, ReadOpts::default())).expect("read updated row");
-    assert_eq!(rows[0].cell_at(0), Some("after".into()));
 }

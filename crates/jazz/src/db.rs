@@ -1438,48 +1438,6 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-/// Assert that an internal resident-only operation completes in one poll.
-///
-/// Unlike [`block_on`], it never spins a thread-affine future after that future
-/// has reported `Pending`. Cold-capable hosts must expose and await an async
-/// operation instead of using this as a retry protocol.
-#[doc(hidden)]
-pub fn try_ready<F, T>(future: F) -> Result<T, Error>
-where
-    F: Future<Output = Result<T, Error>>,
-{
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = pin!(future);
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(result) => result,
-        Poll::Pending => Err(Error::cold_mutation_requires_async()),
-    }
-}
-
-#[cfg(test)]
-mod synchronous_facade_tests {
-    use super::{ErrorCode, try_ready};
-    use std::cell::Cell;
-    use std::future::poll_fn;
-    use std::rc::Rc;
-    use std::task::Poll;
-
-    #[test]
-    fn synchronous_facade_does_not_spin_or_repoll_cold_work() {
-        let polls = Rc::new(Cell::new(0));
-        let observed = Rc::clone(&polls);
-        let error = try_ready(poll_fn(move |_| {
-            observed.set(observed.get() + 1);
-            Poll::<Result<(), super::Error>>::Pending
-        }))
-        .expect_err("cold work must be rejected by the synchronous facade");
-
-        assert_eq!(error.code, ErrorCode::ColdMutationRequiresAsync);
-        assert_eq!(polls.get(), 1, "the cold future must not be spun");
-    }
-}
-
 /// Thread-affine high-level database handle.
 pub struct Db<S>
 where
@@ -2509,16 +2467,6 @@ impl Error {
             message: message.into(),
         }
     }
-
-    /// Internal binding assertion used when a cold-capable database is wired
-    /// through a resident-only synchronous mutation surface.
-    #[doc(hidden)]
-    pub fn cold_mutation_requires_async() -> Self {
-        Self::new(
-            ErrorCode::ColdMutationRequiresAsync,
-            "internal resident-only mutation boundary reached non-resident state",
-        )
-    }
 }
 
 fn row_already_deleted(row: RowUuid) -> Error {
@@ -2556,8 +2504,6 @@ pub enum ErrorCode {
     Backpressure,
     /// Requested observation is not locally available in this slice.
     NotObserved,
-    /// An internal resident-only mutation assertion reached non-resident state.
-    ColdMutationRequiresAsync,
     /// Historical read must be evaluated by a complete-history server.
     HistoricalReadRequiresServer,
 }

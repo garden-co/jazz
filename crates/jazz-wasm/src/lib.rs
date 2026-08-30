@@ -18,7 +18,7 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, try_ready, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MergeableTxOps, MutationErrorCallback,
     PeerConnection, PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts,
     RowCells, SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
@@ -827,25 +827,9 @@ impl WasmDbInner {
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
-        match self {
-            Self::Memory(db) => match author {
-                Some(author) => try_ready(db.begin_exclusive_for_identity(id, author)),
-                None => try_ready(db.begin_exclusive(id)),
-            },
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(_) => Err(jazz::db::Error::cold_mutation_requires_async()),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    async fn begin_exclusive_async(
-        &self,
-        id: OpenTransactionId,
-        author: Option<AuthorSubject>,
-    ) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| match author {
-            Some(author) => db.begin_exclusive_for_identity(id, author).await,
-            None => db.begin_exclusive(id).await,
+            Some(author) => block_on(db.begin_exclusive_for_identity(id, author)),
+            None => block_on(db.begin_exclusive(id)),
         })
     }
 
@@ -915,19 +899,7 @@ impl WasmDbInner {
     }
 
     fn commit_exclusive(&self, tx_id: OpenTransactionId) -> Result<TxId, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => try_ready(db.commit_exclusive_handle(tx_id)),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(_) => Err(jazz::db::Error::cold_mutation_requires_async()),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    async fn commit_exclusive_async(
-        &self,
-        tx_id: OpenTransactionId,
-    ) -> Result<TxId, jazz::db::Error> {
-        with_wasm_db!(self, |db| db.commit_exclusive_handle(tx_id).await)
+        with_wasm_db!(self, |db| block_on(db.commit_exclusive_handle(tx_id)))
     }
 
     fn commit_mergeable(&self, tx_id: OpenTransactionId) -> Result<TxId, jazz::db::Error> {
@@ -1133,45 +1105,15 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                try_ready(db.insert(&table, cells, options)).map_err(to_js_error)?,
+                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
+            ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
-    }
-
-    /// Owner-driven insert for persistent browser storage. The returned
-    /// promise retains the exact Core future across every storage wake.
-    #[wasm_bindgen(js_name = insertEncodedAsync)]
-    pub fn insert_encoded_async(
-        &self,
-        table: String,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let cells = decode_cells(&cells)?;
-        let options = insert_options_from_js(options)?;
-        let inner = self.inner.clone();
-        Ok(future_to_promise(async move {
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_write_memory(
-                    Rc::clone(db),
-                    db.insert(&table, cells, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_write_browser(
-                    Rc::clone(db),
-                    db.insert(&table, cells, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
     }
 
     #[wasm_bindgen(js_name = updateEncoded)]
@@ -1188,45 +1130,15 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                try_ready(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
+                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
+            ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedAsync)]
-    pub fn update_encoded_async(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        let options = update_options_from_js(options)?;
-        let inner = self.inner.clone();
-        Ok(future_to_promise(async move {
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_write_memory(
-                    Rc::clone(db),
-                    db.update(&table, row_id, patch, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_write_browser(
-                    Rc::clone(db),
-                    db.update(&table, row_id, patch, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
     }
 
     #[wasm_bindgen(js_name = updateLargeValuesEncoded)]
@@ -1294,45 +1206,15 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                try_ready(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
+                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
+            ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
-    }
-
-    #[wasm_bindgen(js_name = upsertEncodedAsync)]
-    pub fn upsert_encoded_async(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let options = upsert_options_from_js(options)?;
-        let inner = self.inner.clone();
-        Ok(future_to_promise(async move {
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_write_memory(
-                    Rc::clone(db),
-                    db.upsert(&table, row_id, cells, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_write_browser(
-                    Rc::clone(db),
-                    db.upsert(&table, row_id, cells, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
     }
 
     #[wasm_bindgen(js_name = deleteEncoded)]
@@ -1347,43 +1229,15 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                try_ready(db.delete(&table, row_id, options)).map_err(to_js_error)?,
+                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
+            ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
-    }
-
-    #[wasm_bindgen(js_name = deleteEncodedAsync)]
-    pub fn delete_encoded_async(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let options = delete_options_from_js(options)?;
-        let inner = self.inner.clone();
-        Ok(future_to_promise(async move {
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_write_memory(
-                    Rc::clone(db),
-                    db.delete(&table, row_id, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_write_browser(
-                    Rc::clone(db),
-                    db.delete(&table, row_id, options)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
     }
 
     #[wasm_bindgen(js_name = restoreEncoded)]
@@ -1753,34 +1607,6 @@ impl WasmDb {
         }
     }
 
-    /// Persistent-owner transaction admission. Unlike `beginTransaction`,
-    /// this retains cold storage work until the transaction is actually open.
-    #[wasm_bindgen(js_name = beginTransactionAsync)]
-    pub fn begin_transaction_async(
-        &self,
-        open_transaction_id: String,
-        kind: String,
-        author: Option<Vec<u8>>,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let author = author.as_deref().map(author_id_from_bytes).transpose()?;
-        if kind != "exclusive" {
-            return Err(JsValue::from_str(
-                "beginTransactionAsync currently owns only cold-capable exclusive admission",
-            ));
-        }
-        let inner = self.inner.clone();
-        Ok(future_to_promise(async move {
-            inner
-                .begin_exclusive_async(open_transaction_id, author)
-                .await
-                .map_err(to_js_error)?;
-            Ok(JsValue::UNDEFINED)
-        }))
-    }
-
     /// Begin the only supported attributed transaction shape.  It is distinct
     /// from `beginTransaction` so an older binding fails closed rather than
     /// silently converting external provenance into SYSTEM authorship.
@@ -1842,44 +1668,6 @@ impl WasmDb {
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
-    }
-
-    /// Persistent-owner exclusive commit. The promise owns admission,
-    /// publication and finalization across all storage wakes.
-    #[wasm_bindgen(js_name = commitExclusiveTransactionAsync)]
-    pub fn commit_exclusive_transaction_async(
-        &self,
-        open_transaction_id: String,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let open_transaction_id = open_transaction_id
-            .parse::<OpenTransactionId>()
-            .map_err(|error| JsValue::from_str(&error))?;
-        let inner = self.inner.clone();
-        Ok(future_to_promise(async move {
-            let tx_id = inner
-                .commit_exclusive_async(open_transaction_id)
-                .await
-                .map_err(to_js_error)?;
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_tx_write(
-                    tx_id,
-                    Some(WasmWriteInner::MemoryTx {
-                        db: Rc::clone(db),
-                        tx_id,
-                    }),
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_tx_write(
-                    tx_id,
-                    Some(WasmWriteInner::BrowserTx {
-                        db: Rc::clone(db),
-                        tx_id,
-                    }),
-                ),
-                WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
     }
 
     /// Roll back an owner-wide open transaction by id.
@@ -3205,34 +2993,6 @@ impl WasmTx {
         Ok(row.to_bytes())
     }
 
-    #[wasm_bindgen(js_name = insertEncodedAsync)]
-    pub fn insert_encoded_async(
-        &self,
-        table: String,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let cells = decode_cells(&cells)?;
-        let options = insert_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        let db = self.db.clone();
-        let kind = self.kind;
-        Ok(future_to_promise(async move {
-            let row = with_wasm_db!(&db, |db| match kind {
-                WasmTxKind::Mergeable =>
-                    db.mergeable_tx_ref(open_tx)
-                        .insert(&table, cells, options)
-                        .await,
-                WasmTxKind::Exclusive =>
-                    db.exclusive_tx_ref(open_tx)
-                        .insert(&table, cells, options)
-                        .await,
-            })
-            .map_err(to_js_error)?;
-            Ok(js_sys::Uint8Array::from(row.to_bytes().as_slice()).into())
-        }))
-    }
-
     #[wasm_bindgen(js_name = updateEncoded)]
     pub fn update_encoded_with_options(
         &mut self,
@@ -3256,36 +3016,6 @@ impl WasmTx {
             ),
         })
         .map_err(to_js_error)
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedAsync)]
-    pub fn update_encoded_async(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        let options = update_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        let db = self.db.clone();
-        let kind = self.kind;
-        Ok(future_to_promise(async move {
-            with_wasm_db!(&db, |db| match kind {
-                WasmTxKind::Mergeable =>
-                    db.mergeable_tx_ref(open_tx)
-                        .update(&table, row_id, patch, options)
-                        .await,
-                WasmTxKind::Exclusive =>
-                    db.exclusive_tx_ref(open_tx)
-                        .update(&table, row_id, patch, options)
-                        .await,
-            })
-            .map_err(to_js_error)?;
-            Ok(JsValue::UNDEFINED)
-        }))
     }
 
     #[wasm_bindgen(js_name = upsertEncoded)]
@@ -3313,36 +3043,6 @@ impl WasmTx {
         .map_err(to_js_error)
     }
 
-    #[wasm_bindgen(js_name = upsertEncodedAsync)]
-    pub fn upsert_encoded_async(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let options = upsert_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        let db = self.db.clone();
-        let kind = self.kind;
-        Ok(future_to_promise(async move {
-            with_wasm_db!(&db, |db| match kind {
-                WasmTxKind::Mergeable =>
-                    db.mergeable_tx_ref(open_tx)
-                        .upsert(&table, row_id, cells, options)
-                        .await,
-                WasmTxKind::Exclusive =>
-                    db.exclusive_tx_ref(open_tx)
-                        .upsert(&table, row_id, cells, options)
-                        .await,
-            })
-            .map_err(to_js_error)?;
-            Ok(JsValue::UNDEFINED)
-        }))
-    }
-
     #[wasm_bindgen(js_name = deleteEncoded)]
     pub fn delete_encoded_with_options(
         &mut self,
@@ -3362,34 +3062,6 @@ impl WasmTx {
             }
         })
         .map_err(to_js_error)
-    }
-
-    #[wasm_bindgen(js_name = deleteEncodedAsync)]
-    pub fn delete_encoded_async(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        options: JsValue,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let options = delete_options_from_js(options)?;
-        let open_tx = self.open_tx_for_read()?;
-        let db = self.db.clone();
-        let kind = self.kind;
-        Ok(future_to_promise(async move {
-            with_wasm_db!(&db, |db| match kind {
-                WasmTxKind::Mergeable =>
-                    db.mergeable_tx_ref(open_tx)
-                        .delete(&table, row_id, options)
-                        .await,
-                WasmTxKind::Exclusive =>
-                    db.exclusive_tx_ref(open_tx)
-                        .delete(&table, row_id, options)
-                        .await,
-            })
-            .map_err(to_js_error)?;
-            Ok(JsValue::UNDEFINED)
-        }))
     }
 
     #[wasm_bindgen(js_name = restoreEncoded)]
@@ -4478,13 +4150,6 @@ fn call_controller_method(
 
 fn to_js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn cold_mutation_requires_async() -> JsValue {
-    JsValue::from_str(
-        "ColdMutationRequiresAsync: internal synchronous mutation wiring was used for a cold-capable browser database",
-    )
 }
 
 fn bytes_to_js(bytes: Vec<u8>) -> Result<JsValue, JsValue> {
