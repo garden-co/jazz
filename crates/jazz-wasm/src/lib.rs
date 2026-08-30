@@ -18,7 +18,7 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
+    block_on, try_ready, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MergeableTxOps, MutationErrorCallback,
     PeerConnection, PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts,
     RowCells, SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
@@ -1105,15 +1105,45 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
+                try_ready(db.insert(&table, cells, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
+    }
+
+    /// Owner-driven insert for persistent browser storage. The returned
+    /// promise retains the exact Core future across every storage wake.
+    #[wasm_bindgen(js_name = insertEncodedAsync)]
+    pub fn insert_encoded_async(
+        &self,
+        table: String,
+        cells: Vec<u8>,
+        options: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let cells = decode_cells(&cells)?;
+        let options = insert_options_from_js(options)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let write = match &inner {
+                WasmDbInner::Memory(db) => wasm_write_memory(
+                    Rc::clone(db),
+                    db.insert(&table, cells, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => wasm_write_browser(
+                    Rc::clone(db),
+                    db.insert(&table, cells, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }?;
+            Ok(write.into())
+        }))
     }
 
     #[wasm_bindgen(js_name = updateEncoded)]
@@ -1130,15 +1160,45 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
+                try_ready(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
+    }
+
+    #[wasm_bindgen(js_name = updateEncodedAsync)]
+    pub fn update_encoded_async(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        options: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let options = update_options_from_js(options)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let write = match &inner {
+                WasmDbInner::Memory(db) => wasm_write_memory(
+                    Rc::clone(db),
+                    db.update(&table, row_id, patch, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => wasm_write_browser(
+                    Rc::clone(db),
+                    db.update(&table, row_id, patch, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }?;
+            Ok(write.into())
+        }))
     }
 
     #[wasm_bindgen(js_name = updateLargeValuesEncoded)]
@@ -1206,15 +1266,45 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
+                try_ready(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
+    }
+
+    #[wasm_bindgen(js_name = upsertEncodedAsync)]
+    pub fn upsert_encoded_async(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        options: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let options = upsert_options_from_js(options)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let write = match &inner {
+                WasmDbInner::Memory(db) => wasm_write_memory(
+                    Rc::clone(db),
+                    db.upsert(&table, row_id, cells, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => wasm_write_browser(
+                    Rc::clone(db),
+                    db.upsert(&table, row_id, cells, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }?;
+            Ok(write.into())
+        }))
     }
 
     #[wasm_bindgen(js_name = deleteEncoded)]
@@ -1229,15 +1319,43 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
+                try_ready(db.delete(&table, row_id, options)).map_err(to_js_error)?,
             ),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Browser(_) => Err(cold_mutation_requires_async()),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
+    }
+
+    #[wasm_bindgen(js_name = deleteEncodedAsync)]
+    pub fn delete_encoded_async(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        options: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let options = delete_options_from_js(options)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let write = match &inner {
+                WasmDbInner::Memory(db) => wasm_write_memory(
+                    Rc::clone(db),
+                    db.delete(&table, row_id, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => wasm_write_browser(
+                    Rc::clone(db),
+                    db.delete(&table, row_id, options)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }?;
+            Ok(write.into())
+        }))
     }
 
     #[wasm_bindgen(js_name = restoreEncoded)]
@@ -4150,6 +4268,13 @@ fn call_controller_method(
 
 fn to_js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn cold_mutation_requires_async() -> JsValue {
+    JsValue::from_str(
+        "ColdMutationRequiresAsync: persistent browser mutations must use the owner-driven asynchronous mutation API",
+    )
 }
 
 fn bytes_to_js(bytes: Vec<u8>) -> Result<JsValue, JsValue> {
