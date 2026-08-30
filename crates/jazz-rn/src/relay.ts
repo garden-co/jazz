@@ -135,10 +135,6 @@ export type NativeForegroundSubscriptionEvent =
   | { type: 'rejected'; reason: string }
   | { type: 'closed' };
 
-type NativeRelayWithForegroundInstaller = {
-  installForegroundRuntime?: () => void;
-};
-
 function foregroundRuntimeInstallationError(): Error {
   return new Error(
     'Jazz native foreground runtime installation failed: the native build did not install a compatible JSI foreground engine. Install a matching native development or release build.'
@@ -176,22 +172,12 @@ function requireCompatibleRelay() {
  * native JSI engine instead of the browser/WASM runtime.
  */
 export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory {
-  const relay = requireCompatibleRelay() as typeof nativeRelay &
-    NativeRelayWithForegroundInstaller;
-  if (typeof relay.installForegroundRuntime !== 'function') {
-    throw new Error(
-      'Jazz native foreground runtime is unavailable: install a matching native development or release build containing the JSI foreground engine. Expo Go never includes it.'
-    );
-  }
-
-  // A bridge reload can leave a same-ABI global behind. Remove it before every
-  // install so a native no-op cannot accidentally hand the new adapter a JSI
-  // HostObject owned by a previous runtime. Native installation must replace
-  // this configurable own property synchronously in the current JS runtime.
-  if (!Reflect.deleteProperty(globalThis, NATIVE_FOREGROUND_RUNTIME_GLOBAL)) {
-    throw foregroundRuntimeInstallationError();
-  }
-  relay.installForegroundRuntime();
+  const relay = requireCompatibleRelay();
+  // React Native's TurboModuleWithJSIBindings lifecycle installs this factory
+  // while resolving NativeJazzRelay in exactly the current JSI runtime. A new
+  // runtime has a new global object; deleting the factory and trying to
+  // reconstruct it through an ordinary TurboModule call discards the runtime
+  // binding React Native deliberately provided.
   const descriptor = Object.getOwnPropertyDescriptor(
     globalThis,
     NATIVE_FOREGROUND_RUNTIME_GLOBAL

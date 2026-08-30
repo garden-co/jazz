@@ -37,7 +37,6 @@ struct ForegroundRuntimeInstallation {
 
   std::mutex mutex;
   std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
-  facebook::jsi::Runtime *runtime{nullptr};
 };
 
 std::mutex foreground_installations_mutex;
@@ -137,29 +136,9 @@ Java_com_jazzrn_JazzRelayBridge_nativeForegroundBindingsInstaller(
         auto installation = foregroundInstallation(relay_host, runtime_token, callInvoker);
         if (!installation) return;
         std::lock_guard<std::mutex> lock(installation->mutex);
-        installation->runtime = &runtime;
         jazz::rn::installForegroundRuntime(runtime, installation->lease);
       });
   return holder.release();
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_jazzrn_JazzRelayBridge_nativeInstallForegroundRuntime(
-    JNIEnv *env, jclass, jlong host, jlong runtime_token) {
-  auto *relay_host = reinterpret_cast<jazz_native_relay_host *>(host);
-  const auto installation = foregroundInstallation(relay_host, runtime_token);
-  if (relay_host == nullptr || !installation) {
-    env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
-                  "Jazz native foreground runtime is unavailable for this bridge");
-    return;
-  }
-  std::lock_guard<std::mutex> lock(installation->mutex);
-  if (installation->runtime == nullptr || !installation->lease->active()) {
-    env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),
-                  "Jazz native foreground runtime is unavailable for this bridge");
-    return;
-  }
-  jazz::rn::installForegroundRuntime(*installation->runtime, installation->lease);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -173,6 +152,5 @@ Java_com_jazzrn_JazzRelayBridge_nativeInvalidateForegroundRuntime(
   }
   std::lock_guard<std::mutex> installation_lock(found->second->mutex);
   found->second->lease->invalidate();
-  found->second->runtime = nullptr;
   foreground_installations.erase(found);
 }

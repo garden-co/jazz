@@ -63,16 +63,6 @@ internal object JazzRelayBridge {
     return nativeForegroundBindingsInstaller(ensureHost(), runtimeToken)
   }
 
-  /** Reinstall a fresh factory after the JS wrapper deliberately removes any
-   * stale global left by an earlier bridge/runtime. */
-  @Synchronized
-  fun installForegroundRuntime(runtimeToken: Long) {
-    check(activeRuntimeTokens.contains(runtimeToken)) {
-      "Jazz native foreground runtime is unavailable for this bridge"
-    }
-    nativeInstallForegroundRuntime(ensureHost(), runtimeToken)
-  }
-
   /**
    * The only Android entry for trusted scope configuration. It is deliberately
    * not part of the TurboModule: JS gets the returned random capability but

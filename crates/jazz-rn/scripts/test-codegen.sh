@@ -37,11 +37,47 @@ for platform in android ios; do
     echo "React Native Codegen did not generate the JazzRelay module for $platform" >&2
     exit 1
   fi
-  if [[ "$platform" == android ]] && ! rg -q 'getAbiVersion|installForegroundRuntime|execute' "$output_dir/$platform"; then
+  if [[ "$platform" == android ]] && ! rg -q 'getAbiVersion|execute' "$output_dir/$platform"; then
     echo "React Native Codegen did not generate the JazzRelay command methods for Android" >&2
     exit 1
   fi
 done
+
+# JSI bindings are installed by React Native itself when this TurboModule is
+# resolved, including when it is lazily initialized. Keep the foreground
+# factory on that standard lifecycle on both platforms: an ordinary generated
+# method cannot safely rediscover the current JSI runtime after JavaScript has
+# discarded the bindings-installed factory.
+android_module="$root/android/src/main/java/com/jazzrn/JazzRelayModule.java"
+android_package_source="$root/android/src/main/java/com/jazzrn/JazzRelayPackage.kt"
+ios_module="$root/ios/JazzRelayModule.h"
+ios_implementation="$root/ios/JazzRelay.mm"
+if ! rg -q 'implements TurboModuleWithJSIBindings' "$android_module" \
+  || ! rg -q 'getBindingsInstaller\(\)' "$android_module" \
+  || ! rg -q 'nativeForegroundBindingsInstaller' "$root/android/cpp-relay.cpp" \
+  || rg -q -- 'installation->runtime' "$root/android/cpp-relay.cpp" \
+  || rg -q 'installForegroundRuntime' "$android_module" "$android_package_source" "$root/src/NativeJazzRelay.ts"; then
+  echo "Android foreground factory no longer uses React Native's JSI bindings lifecycle exclusively" >&2
+  exit 1
+fi
+
+# Pin the assumption behind lazy module registration to the installed React
+# Native implementation. Its normal module lookup must invoke and apply a JSI
+# bindings installer before caching/returning a Java TurboModule; eager init is
+# therefore unnecessary and must not become a hidden lifecycle dependency.
+react_native_root=$(node -e 'console.log(require.resolve("react-native/package.json", { paths: [process.argv[1]] }).replace(/\/package\.json$/, ""))' "$root")
+turbo_manager="$react_native_root/ReactAndroid/src/main/jni/react/turbomodule/ReactCommon/TurboModuleManager.cpp"
+if ! rg -Uq 'getTurboJavaModule[\s\S]*JTurboModuleWithJSIBindings[\s\S]*getBindingsInstaller[\s\S]*installBindings\(runtime, jsCallInvoker_\)' "$turbo_manager" \
+  || ! rg -q 'false,[[:space:]]*// needsEagerInit' "$android_package_source"; then
+  echo "Android lazy TurboModule lookup no longer proves foreground JSI binding installation" >&2
+  exit 1
+fi
+if ! rg -q 'RCTTurboModuleWithJSIBindings' "$ios_module" \
+  || ! rg -q 'installJSIBindingsWithRuntime:' "$ios_implementation" \
+  || rg -q -- '- \(void\)installForegroundRuntime' "$ios_implementation"; then
+  echo "iOS foreground factory no longer uses React Native's JSI bindings lifecycle exclusively" >&2
+  exit 1
+fi
 
 # This is the same schema-to-spec invocation made by the React Native Gradle
 # plugin for an Android library. It proves that the Java implementation imports

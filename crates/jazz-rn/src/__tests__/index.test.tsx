@@ -1,7 +1,6 @@
 type FixtureNativeRelay = {
   getAbiVersion(): number;
   execute(commandBase64: string): Promise<string>;
-  installForegroundRuntime?(): void;
 };
 
 const foregroundRuntimeGlobal = '__jazzNativeForegroundRuntimeV1';
@@ -125,7 +124,7 @@ it('forwards opaque commands only after the embedded relay ABI matches', async (
   expect(nativeRelay.execute).toHaveBeenCalledWith('AA==');
 });
 
-it('requires a matching JSI foreground installer instead of attempting browser WASM', () => {
+it('requires the matching bindings-installed foreground factory instead of attempting browser WASM', () => {
   const nativeRelay: FixtureNativeRelay = {
     getAbiVersion: () => 7,
     execute: jest.fn(),
@@ -133,7 +132,7 @@ it('requires a matching JSI foreground installer instead of attempting browser W
   const relay = loadRelay(nativeRelay);
 
   expect(() => relay.installNativeForegroundRuntime()).toThrow(
-    'Jazz native foreground runtime is unavailable: install a matching native development or release build containing the JSI foreground engine. Expo Go never includes it.'
+    'Jazz native foreground runtime installation failed: the native build did not install a compatible JSI foreground engine. Install a matching native development or release build.'
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
@@ -141,22 +140,18 @@ it('requires a matching JSI foreground installer instead of attempting browser W
 it('accepts only the matching capability-only JSI foreground factory', () => {
   const foreground = foregroundFixture();
   const openAttached = jest.fn(() => foreground);
-  const installForegroundRuntime = jest.fn(() => {
-    (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-      abiVersion: 7,
-      openAttached,
-    };
-  });
+  (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
+    abiVersion: 7,
+    openAttached,
+  };
   const nativeRelay: FixtureNativeRelay = {
     getAbiVersion: () => 7,
     execute: jest.fn(),
-    installForegroundRuntime,
   };
   const relay = loadRelay(nativeRelay);
 
   const factory = relay.installNativeForegroundRuntime();
 
-  expect(installForegroundRuntime).toHaveBeenCalledTimes(1);
   expect(factory.abiVersion).toBe(7);
   const capability = new Uint8Array(32);
   expect(factory.openAttached(capability)).toMatchObject({
@@ -168,7 +163,7 @@ it('accepts only the matching capability-only JSI foreground factory', () => {
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
 
-it('rejects a missing, malformed, ABI-incompatible, or stale JSI foreground factory after installation', () => {
+it('rejects a missing, malformed, or ABI-incompatible bindings-installed JSI foreground factory', () => {
   for (const factory of [
     undefined,
     {},
@@ -177,12 +172,10 @@ it('rejects a missing, malformed, ABI-incompatible, or stale JSI foreground fact
     const nativeRelay: FixtureNativeRelay = {
       getAbiVersion: () => 7,
       execute: jest.fn(),
-      installForegroundRuntime: () => {
-        if (factory !== undefined)
-          (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] =
-            factory;
-      },
     };
+    if (factory !== undefined)
+      (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] =
+        factory;
     const relay = loadRelay(nativeRelay);
 
     expect(() => relay.installNativeForegroundRuntime()).toThrow(
@@ -190,26 +183,6 @@ it('rejects a missing, malformed, ABI-incompatible, or stale JSI foreground fact
     );
     delete (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal];
   }
-
-  // Plant a same-ABI HostObject left by a preceding bridge. A native installer
-  // that does not replace it must not make that object callable in this
-  // runtime. This would have passed before the global was cleared first.
-  const staleOpenAttached = jest.fn(() => foregroundFixture());
-  (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: 7,
-    openAttached: staleOpenAttached,
-  };
-  const staleNativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => 7,
-    execute: jest.fn(),
-    installForegroundRuntime: jest.fn(),
-  };
-  const staleRelay = loadRelay(staleNativeRelay);
-  expect(() => staleRelay.installNativeForegroundRuntime()).toThrow(
-    'Jazz native foreground runtime installation failed: the native build did not install a compatible JSI foreground engine. Install a matching native development or release build.'
-  );
-  expect(staleNativeRelay.installForegroundRuntime).toHaveBeenCalledTimes(1);
-  expect(staleOpenAttached).not.toHaveBeenCalled();
 });
 
 it('keeps malformed capability input out of the JSI foreground factory', () => {
@@ -217,12 +190,10 @@ it('keeps malformed capability input out of the JSI foreground factory', () => {
   const nativeRelay: FixtureNativeRelay = {
     getAbiVersion: () => 7,
     execute: jest.fn(),
-    installForegroundRuntime: () => {
-      (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-        abiVersion: 7,
-        openAttached,
-      };
-    },
+  };
+  (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
+    abiVersion: 7,
+    openAttached,
   };
   const relay = loadRelay(nativeRelay);
   const factory = relay.installNativeForegroundRuntime();

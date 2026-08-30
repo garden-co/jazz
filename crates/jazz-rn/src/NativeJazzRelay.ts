@@ -10,7 +10,6 @@ import { TurboModuleRegistry } from "react-native";
  */
 export interface Spec extends TurboModule {
   getAbiVersion(): number;
-  installForegroundRuntime(): void;
   execute(commandBase64: string): Promise<string>;
 }
 

@@ -43,7 +43,6 @@ static uint64_t nextForegroundRuntimeToken = 1;
 // make B's factory or foregrounds uncallable.
 struct ForegroundRuntimeInstallation {
   uint64_t runtimeToken;
-  facebook::jsi::Runtime *runtime;
   std::shared_ptr<jazz::rn::ForegroundRuntimeLease> lease;
 };
 // Objective-C object pointers are not a portable C++ hash key under libc++.
@@ -116,27 +115,6 @@ static NSError *RelayLifecycleError(NSString *message) {
 #endif
 }
 
-- (void)installForegroundRuntime {
-#if JAZZ_RELAY_ARTIFACT_AVAILABLE
-  @synchronized([JazzRelay class]) {
-    const uint64_t runtimeToken = self.foregroundRuntimeToken;
-    const auto found = foregroundRuntimeLeases.find(runtimeToken);
-    if (found == foregroundRuntimeLeases.end() || found->second.runtime == nullptr ||
-        !found->second.lease->active()) {
-      // The JS wrapper validates that native code installed a fresh factory
-      // immediately after this method returns, yielding its normal actionable
-      // development-build diagnostic if React Native has not handed us a live
-      // JSI runtime yet.
-      return;
-    }
-    // The factory was installed by `installJSIBindingsWithRuntime:` for this
-    // exact module/runtime. A later JS call only reinserts into that same JSI
-    // runtime; it cannot select or overwrite a sibling bridge's lease.
-    jazz::rn::installForegroundRuntime(*found->second.runtime, found->second.lease);
-  }
-#endif
-}
-
 - (void)installJSIBindingsWithRuntime:(facebook::jsi::Runtime &)runtime
                           callInvoker:(const std::shared_ptr<facebook::react::CallInvoker> &)callInvoker {
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
@@ -151,7 +129,7 @@ static NSError *RelayLifecycleError(NSString *message) {
     auto lease = std::make_shared<jazz::rn::ForegroundRuntimeLease>(
         EnsureRelayHost(), runtimeToken, callInvoker);
     foregroundRuntimeLeases.emplace(
-        runtimeToken, ForegroundRuntimeInstallation{runtimeToken, &runtime, lease});
+        runtimeToken, ForegroundRuntimeInstallation{runtimeToken, lease});
     jazz::rn::installForegroundRuntime(runtime, lease);
   }
 #else

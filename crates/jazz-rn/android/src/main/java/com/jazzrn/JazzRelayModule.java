@@ -79,15 +79,6 @@ public class JazzRelayModule extends NativeJazzRelaySpec implements TurboModuleW
   }
 
   @Override
-  public void installForegroundRuntime() {
-    if (bridge == null) {
-      throw new IllegalStateException(
-          "Jazz native foreground runtime requires an Android development or release build containing the shared Rust relay artifact.");
-    }
-    bridge.installForegroundRuntime(ensureRuntimeToken());
-  }
-
-  @Override
   public BindingsInstallerHolder getBindingsInstaller() {
     if (bridge == null) {
       throw new IllegalStateException(

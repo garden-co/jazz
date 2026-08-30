@@ -28,6 +28,9 @@ class JazzRelayPackage : TurboReactPackage() {
         JazzRelayModule.NAME,
         JazzRelayModule.NAME,
         false,  // canOverrideExistingModule
+        // Resolving NativeJazzRelay lazily is sufficient: React Native invokes
+        // TurboModuleWithJSIBindings.getBindingsInstaller during that same
+        // lookup, before returning the module to JavaScript.
         false,  // needsEagerInit
         false,  // isCxxModule
         true // isTurboModule
