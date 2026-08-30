@@ -289,7 +289,23 @@ type NativeDb = {
   mergeableTx(openTransactionId: OpenTransactionId): Tx;
   mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
   exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
-  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadResult;
+  /**
+   * Transaction-local reads may wait for the owning runtime to finish queued
+   * staging work or cold storage. Callers must preserve FIFO visibility by
+   * awaiting this result before decoding it.
+   */
+  allInTransaction?(
+    query: PreparedQuery,
+    tx: Tx,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
+  /** Trusted-serving transaction reads must retain the identity fixed at begin. */
+  allInTransactionForIdentity?(
+    query: PreparedQuery,
+    tx: Tx,
+    author: Uint8Array,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -1875,6 +1891,17 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
+    const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+    // These bindings currently have transaction-aware row reads only. Calling
+    // the relation/snapshot APIs here would evaluate the ordinary owner view
+    // and silently omit staged writes, so reject until the relation evaluator
+    // can be retained behind the same transaction queue.
+    if (
+      pendingTx &&
+      (queryUsesNativeRelationApi(coreQueryJson) || queryHasArraySubqueries(coreQueryJson))
+    ) {
+      throw new Error("Native runtime does not support relation reads inside a transaction");
+    }
     // Browser runtimes still materialize row bodies from their in-memory
     // cache, but an Edge/Global read must keep its requested tier while doing
     // so. The settled membership from the worker is the authorization
@@ -1934,7 +1961,6 @@ export class NativeRuntimeAdapter implements Runtime {
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
       const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
       let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
@@ -2434,6 +2460,19 @@ export class NativeRuntimeAdapter implements Runtime {
     pendingTx: PendingTx | undefined,
   ): Promise<Uint8Array> {
     if (!pendingTx) return this.readRowsForHostAsync(query, opts, session?.identity);
+    if (this.readAuthorizationHost === "trusted-serving" && pendingTx.identity) {
+      if (!this.db.allInTransactionForIdentity) {
+        throw new Error("Native runtime does not support trusted-serving transaction reads");
+      }
+      return this.awaitNativeRead(
+        this.db.allInTransactionForIdentity(
+          query,
+          this.txForRead(pendingTx),
+          pendingTx.identity,
+          opts,
+        ),
+      );
+    }
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }

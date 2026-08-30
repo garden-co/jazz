@@ -96,6 +96,14 @@ export declare class NapiDb {
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   /** Read through an open transaction using the identity bound at begin. */
   allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Read through an open transaction as its identity bound at begin.
+   *
+   * The core verifies that `author` matches the capability retained by the
+   * transaction; this ABI exists so trusted-serving hosts never fall back
+   * to their ambient/default read identity.
+   */
+  allInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead

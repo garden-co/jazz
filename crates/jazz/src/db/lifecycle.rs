@@ -497,6 +497,18 @@ where
         self.node.poll_queued_mutation_once();
     }
 
+    /// Queue a transaction-local read behind already-admitted transaction
+    /// work. Bindings retain the returned receiver instead of synchronously
+    /// polling cold storage on their host thread.
+    #[doc(hidden)]
+    pub fn enqueue_transaction_read<T: 'static>(
+        &self,
+        tx_id: OpenTransactionId,
+        read: impl Future<Output = Result<T, Error>> + 'static,
+    ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
+        self.node.enqueue_transaction_read(tx_id, read)
+    }
+
     pub(super) fn clone_for_reserved_transaction(&self, tx_id: TxId) -> Self {
         Self {
             schema: self.schema.clone(),

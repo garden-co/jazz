@@ -1503,6 +1503,99 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ).resolves.toEqual([]);
   });
 
+  it("enforces the opening trusted identity for transaction-local NAPI reads", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-transaction-read-identity:node"),
+      testAuthorBytes("jazz-napi-transaction-read-identity:author"),
+      23,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+    runtimes.push(runtime);
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
+    const aliceTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "allowed for opening Alice" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      aliceSession,
+    );
+    const bobTodo = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "denied to opening Alice" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: BOB_ID },
+      },
+      bobSession,
+    );
+    await Promise.all([
+      runtime.waitForTransaction(await committedTxId(aliceTodo), "local"),
+      runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
+    ]);
+
+    const transactionId = createOpenTransactionId();
+    runtime.beginTransaction("mergeable", transactionId, aliceSession);
+    const staged = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "staged for opening Alice" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      JSON.stringify({ transaction_id: transactionId, session: JSON.parse(aliceSession) }),
+    );
+
+    const rows = (await runtime.query(
+      JSON.stringify({ table: "todos" }),
+      bobSession,
+      "local",
+      JSON.stringify({ transaction_id: transactionId }),
+    )) as Array<{ id: string }>;
+    expect(rows.map((row) => row.id).sort()).toEqual([aliceTodo.id, staged.id].sort());
+    expect(rows.map((row) => row.id)).not.toContain(bobTodo.id);
+
+    // Exercise the real raw NAPI ABI as well as the adapter. The adapter must
+    // retain Alice, but the core is the authority boundary: supplying Bob's
+    // bytes directly cannot re-authorize this Alice-opened mergeable batch.
+    const raw = runtime as unknown as {
+      db: {
+        allInTransactionForIdentity(
+          query: unknown,
+          tx: unknown,
+          author: Uint8Array,
+          opts: unknown,
+        ): Uint8Array | Promise<Uint8Array>;
+      };
+      pendingTxs: Map<OpenTransactionId, { txByView: Map<NativeRuntimeAdapter, unknown> }>;
+      prepareQuery(queryJson: string): unknown;
+    };
+    const tx = raw.pendingTxs.get(transactionId)?.txByView.get(runtime);
+    expect(tx).toBeDefined();
+    const query = raw.prepareQuery(JSON.stringify({ table: "todos" }));
+    const aliceAuthor = new TextEncoder().encode(
+      JSON.stringify(["https://issuer.example", ALICE_ID]),
+    );
+    const bobAuthor = new TextEncoder().encode(JSON.stringify(["https://issuer.example", BOB_ID]));
+    await expect(
+      Promise.resolve().then(() =>
+        raw.db.allInTransactionForIdentity(query, tx, aliceAuthor, undefined),
+      ),
+    ).resolves.toBeInstanceOf(Uint8Array);
+    await expect(
+      Promise.resolve().then(() =>
+        raw.db.allInTransactionForIdentity(query, tx, bobAuthor, undefined),
+      ),
+    ).rejects.toThrow(/open transaction identity.*bound identity/i);
+    await runtime.rollbackTransaction(transactionId);
+  });
+
   it("does not authenticate client-local session identities to an upstream authority", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 

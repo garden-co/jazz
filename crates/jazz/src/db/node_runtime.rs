@@ -203,6 +203,7 @@ where
                 open_tx_id: None,
                 future,
                 status: Some(Rc::clone(&status)),
+                completion: None,
             });
         self.schedule_tick(TickUrgency::Immediate);
         status
@@ -221,9 +222,47 @@ where
                 open_tx_id: Some(open_tx_id),
                 future,
                 status: None,
+                completion: None,
             });
         self.schedule_tick(TickUrgency::Immediate);
         Ok(())
+    }
+
+    /// Put a transaction-local read behind every already-admitted operation
+    /// for that transaction. The receiver owns the eventual result, while the
+    /// owner queue retains the cold storage future and its wake route.
+    pub(super) fn enqueue_transaction_read<T: 'static>(
+        &self,
+        open_tx_id: OpenTransactionId,
+        read: impl Future<Output = Result<T, Error>> + 'static,
+    ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        let sender = Rc::new(RefCell::new(Some(sender)));
+        let read_sender = Rc::clone(&sender);
+        let completion_sender = Rc::clone(&sender);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: Some(open_tx_id),
+                future: Box::pin(async move {
+                    let result = read.await;
+                    if let Some(sender) = read_sender.borrow_mut().take() {
+                        let _ = sender.send(result);
+                    }
+                    Ok(())
+                }),
+                status: None,
+                completion: Some(Box::new(move |outcome| {
+                    if let Err(error) = outcome
+                        && let Some(sender) = completion_sender.borrow_mut().take()
+                    {
+                        let _ = sender.send(Err(error));
+                    }
+                })),
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        receiver
     }
 
     pub(super) fn enqueue_transaction_commit(
@@ -241,6 +280,7 @@ where
                 open_tx_id: Some(open_tx_id),
                 future,
                 status: Some(Rc::clone(&status)),
+                completion: None,
             });
         self.schedule_tick(TickUrgency::Immediate);
         status
@@ -254,6 +294,7 @@ where
                 open_tx_id: None,
                 future,
                 status: None,
+                completion: None,
             });
         self.schedule_tick(TickUrgency::Immediate);
     }
@@ -287,9 +328,12 @@ where
 
     fn finish_queued_mutation(
         &self,
-        operation: QueuedMutationOperation,
+        mut operation: QueuedMutationOperation,
         result: Result<(), Error>,
     ) {
+        if let Some(completion) = operation.completion.take() {
+            completion(result.clone());
+        }
         if let Some(tx_id) = operation.tx_id {
             self.reserved_mutations.borrow_mut().remove(&tx_id);
         }

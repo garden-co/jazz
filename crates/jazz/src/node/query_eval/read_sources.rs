@@ -937,7 +937,7 @@ where
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let (graph, descriptor) = if include_deleted {
+            let (base, descriptor) = if include_deleted {
                 let rows = rows
                     .into_iter()
                     .map(|row| {
@@ -958,6 +958,79 @@ where
                     })?,
                     current_row_descriptor(&table),
                 )
+            };
+            // An open transaction is a snapshot plus its staged overlay, not
+            // an authorization result. Filter the effective rows through the
+            // same identity-bound read policy as an ordinary trusted-serving
+            // source. The matching policy dependency is compiled against this
+            // overlay below, so staged rows are subject to the opening
+            // transaction identity as well.
+            let graph = match &authorization {
+                SourceAuthorizationRequest::System => base,
+                SourceAuthorizationRequest::PolicyFiltered {
+                    permission_subject,
+                    plan,
+                }
+                | SourceAuthorizationRequest::PolicyProof {
+                    permission_subject,
+                    plan,
+                } => {
+                    if plan.protected_source.table != table.name
+                        || plan.role != PolicyDecisionRole::Read
+                        || plan.protected_row_field != "row_uuid"
+                    {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                    let policy_request = if include_deleted {
+                        self.node
+                            .table_read_policy_authorization_request_for_include_deleted(
+                                self.read_view.policy_schema,
+                                &table.name,
+                                *permission_subject,
+                                DurabilityTier::Global,
+                                plan.binding_source_shape.clone(),
+                                plan.binding_user_params.clone(),
+                                plan.binding_claim_params.clone(),
+                            )
+                    } else {
+                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
+                        self.node.table_read_policy_authorization_request(
+                            self.read_view.policy_schema,
+                            &table.name,
+                            *permission_subject,
+                            param_binding_mode,
+                            DurabilityTier::Global,
+                            plan.binding_source_shape.clone(),
+                            plan.binding_user_params.clone(),
+                            plan.binding_claim_params.clone(),
+                        )
+                    };
+                    let policy_request = policy_request.map(|mut request| {
+                        request.reads.primary = policy_read_view_projected_through(
+                            &request.reads.primary,
+                            self.read_view,
+                        );
+                        request
+                    });
+                    let mut output_fields = descriptor_field_names(&descriptor).map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?;
+                    if include_deleted {
+                        output_fields.push("__jazz_deleted".to_owned());
+                    }
+                    self.node
+                        .compose_policy_filtered_current_source_graph(
+                            policy_request,
+                            base,
+                            &output_fields,
+                        )
+                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+                        .graph
+                }
             };
             (graph, descriptor, BTreeMap::new(), BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
@@ -1650,7 +1723,8 @@ where
             ),
             SourceExpr::VisibleCurrent { .. }
             | SourceExpr::BranchView { .. }
-            | SourceExpr::SettledBindingView { .. } => {
+            | SourceExpr::SettledBindingView { .. }
+            | SourceExpr::WithOverlays { .. } => {
                 let tier = source.current_tier().unwrap_or(DurabilityTier::Global);
                 if request.visibility == RowVisibility::IncludeDeleted {
                     self.node
@@ -1681,9 +1755,6 @@ where
                     )
                 }
             }
-            // Transaction overlays already carry explicitly captured rows and
-            // do not apply a second read-policy program in source preparation.
-            SourceExpr::WithOverlays { .. } => return Ok(None),
             _ => return Ok(None),
         };
         match dependency {

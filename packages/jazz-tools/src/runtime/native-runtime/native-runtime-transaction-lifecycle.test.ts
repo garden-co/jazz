@@ -719,8 +719,16 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
         fakeDb({
           all: () => encodeRows([]),
           allForIdentity: () => encodeRows([]),
-          allInTransaction: (_query: object, receivedTx: TxForTest) => {
+          allInTransaction: () => {
+            throw new Error("trusted-serving reads must not use the ambient transaction method");
+          },
+          allInTransactionForIdentity: (
+            _query: object,
+            receivedTx: TxForTest,
+            receivedIdentity: Uint8Array,
+          ) => {
             expect(receivedTx).toBe(tx);
+            expect(new TextDecoder().decode(receivedIdentity)).toBe(`["${issuer}","${alice}"]`);
             return encodeRows([
               {
                 table: "todos",

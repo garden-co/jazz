@@ -1656,9 +1656,10 @@ fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
     db.commit_mergeable_handle(hidden_open).unwrap();
 }
 
-/// Mergeable serving reads retain their existing per-call identity semantics.
+/// A mergeable transaction opened for alice is an identity capability: its
+/// serving reads cannot be re-authorized as bob.
 #[test]
-fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
+fn identity_bound_mergeable_transaction_rejects_cross_identity_reads() {
     let schema = owner_read_schema();
     let db = open_db(0xd3, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
@@ -1708,11 +1709,6 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
             .all_prepared_for_identity(&prepared, alice),
     )
     .unwrap();
-    let bob_rows = doctest_support::block_on(
-        db.mergeable_tx_ref(open)
-            .all_prepared_for_identity(&prepared, bob),
-    )
-    .unwrap();
     assert_eq!(
         alice_rows
             .iter()
@@ -1720,13 +1716,13 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
             .collect::<Vec<_>>(),
         vec![alice_row]
     );
-    assert_eq!(
-        bob_rows
-            .iter()
-            .map(CurrentRow::row_uuid)
-            .collect::<Vec<_>>(),
-        vec![bob_row]
-    );
+    assert!(matches!(
+        doctest_support::block_on(
+            db.mergeable_tx_ref(open)
+                .all_prepared_for_identity(&prepared, bob),
+        ),
+        Err(error) if error.code == ErrorCode::Protocol
+    ));
     db.abandon_transaction_handle(open).unwrap();
 }
 

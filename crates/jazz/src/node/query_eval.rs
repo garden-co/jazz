@@ -2908,7 +2908,24 @@ where
                 bound_identity
             }
             OpenTransactionKind::Exclusive { bound_author: None } => identity,
-            OpenTransactionKind::Mergeable { .. } => identity,
+            OpenTransactionKind::Mergeable {
+                permission_subject: Some(bound_identity),
+                ..
+            } => {
+                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                    && identity != bound_identity
+                {
+                    return Err(Error::OpenTransactionIdentityMismatch);
+                }
+                // A serving-side mergeable batch is also an identity
+                // capability. The raw foreign-function argument selects no
+                // authority beyond the subject fixed at begin.
+                bound_identity
+            }
+            OpenTransactionKind::Mergeable {
+                permission_subject: None,
+                ..
+            } => identity,
         };
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();

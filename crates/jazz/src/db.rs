@@ -1510,6 +1510,7 @@ type PendingRelaySubscriptionRejections =
     Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type QueuedMutationFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
+type QueuedMutationCompletion = Box<dyn FnOnce(Result<(), Error>) + 'static>;
 type TransactionWaitObserver = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1523,6 +1524,7 @@ struct QueuedMutationOperation {
     open_tx_id: Option<OpenTransactionId>,
     future: QueuedMutationFuture,
     status: Option<Rc<RefCell<QueuedMutationStatus>>>,
+    completion: Option<QueuedMutationCompletion>,
 }
 
 enum QueuedMutationStatus {

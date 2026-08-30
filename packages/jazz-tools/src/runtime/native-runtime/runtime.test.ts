@@ -3562,6 +3562,60 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual([]);
   });
 
+  it("rejects relation and array reads inside a transaction before ordinary relation APIs", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              calls.push("allRelationQuery");
+              return new Uint8Array();
+            },
+            allRelationSnapshot: () => {
+              calls.push("allRelationSnapshot");
+              return new Uint8Array();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const transactionId = "relation-read-batch" as never;
+    runtime.beginTransaction("mergeable", transactionId);
+    const opts = JSON.stringify({ transaction_id: transactionId });
+
+    for (const query of [
+      {
+        table: "todos",
+        relation_ir: { Gather: {} },
+      },
+      {
+        table: "todos",
+        array_subqueries: [
+          {
+            column_name: "children",
+            table: "todos",
+            inner_column: "id",
+            outer_column: "todos.id",
+          },
+        ],
+      },
+    ]) {
+      await expect(
+        runtime.query(JSON.stringify(query), undefined, undefined, opts),
+      ).rejects.toThrow("does not support relation reads inside a transaction");
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("rejects permission introspection in array subqueries before native snapshot prep", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(

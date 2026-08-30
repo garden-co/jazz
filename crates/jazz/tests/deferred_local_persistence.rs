@@ -742,6 +742,167 @@ fn reopened_reservation_clock_dominates_durable_local_history() {
 }
 
 #[test]
+fn queued_transaction_read_waits_for_staging_and_cold_storage_without_sync_polling() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let storage_control = storage.clone();
+    let db = Rc::new(
+        block_on(Db::open(DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x5a; 16]),
+                author: AuthorSubject::for_test_bytes([0x6a; 16]),
+            },
+        )))
+        .expect("open yielding database"),
+    );
+    let open_tx = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open_tx)).expect("open transaction");
+    let row_id = db
+        .enqueue_transaction_insert(
+            open_tx,
+            false,
+            "todos".to_owned(),
+            row! { title: "staged before read" },
+            Default::default(),
+        )
+        .expect("queue transaction staging before the read");
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+
+    // IndexedDB can yield at all three storage boundaries. The binding must
+    // retain this future on its owner queue instead of no-op-waker polling it.
+    storage_control.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::ScanBatch);
+    let read_db = Rc::clone(&db);
+    let pending = db.enqueue_transaction_read(open_tx, async move {
+        read_db
+            .mergeable_tx_ref(open_tx)
+            .all_prepared_with_opts(&query, ReadOpts::default())
+            .await
+    });
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut pending = Box::pin(pending);
+    for _ in 0..8 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        if control.observed().iter().any(|operation| {
+            matches!(
+                operation,
+                TestStorageOperation::Get
+                    | TestStorageOperation::ScanOpen
+                    | TestStorageOperation::ScanBatch
+            )
+        }) {
+            break;
+        }
+    }
+    assert!(
+        control.observed().iter().any(|operation| matches!(
+            operation,
+            TestStorageOperation::Get
+                | TestStorageOperation::ScanOpen
+                | TestStorageOperation::ScanBatch
+        )),
+        "the owner-queued read reaches a planted cold storage boundary",
+    );
+    assert!(matches!(pending.as_mut().poll(&mut context), Poll::Pending));
+
+    control.resume();
+    let mut settled = None;
+    for _ in 0..4_096 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        if let Poll::Ready(result) = pending.as_mut().poll(&mut context) {
+            settled = Some(
+                result
+                    .expect("queued read owner operation remains retained")
+                    .expect("queued read settles after storage wake"),
+            );
+            break;
+        }
+    }
+    let rows = settled.expect("bounded owner turns settle the queued read after storage wakes");
+    assert!(
+        rows.iter().any(|row| row.row_uuid() == row_id),
+        "the read executes after its staged FIFO predecessor and sees its row",
+    );
+    for operation in [
+        TestStorageOperation::Get,
+        TestStorageOperation::ScanOpen,
+        TestStorageOperation::ScanBatch,
+    ] {
+        assert!(
+            control.observed().contains(&operation),
+            "the transaction read exercises the cold {operation:?} storage boundary",
+        );
+    }
+}
+
+#[test]
+fn queued_transaction_read_reports_prior_staging_failure_without_running_outside_transaction() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = Rc::new(
+        block_on(Db::open(DbConfig::new(
+            schema,
+            TestStorage::new(&family_refs),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x5b; 16]),
+                author: AuthorSubject::for_test_bytes([0x6b; 16]),
+            },
+        )))
+        .expect("open database"),
+    );
+    let open_tx = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open_tx)).expect("open transaction");
+    db.enqueue_transaction_update(
+        open_tx,
+        false,
+        "missing".to_owned(),
+        jazz::ids::RowUuid::from_bytes([0x9b; 16]),
+        row! { title: "missing" },
+        Default::default(),
+    )
+    .expect("queue intentionally failing staging operation");
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    let read_db = Rc::clone(&db);
+    let pending = db.enqueue_transaction_read(open_tx, async move {
+        read_db
+            .mergeable_tx_ref(open_tx)
+            .all_prepared_with_opts(&query, ReadOpts::default())
+            .await
+    });
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut pending = Box::pin(pending);
+    let mut outcome = None;
+    for _ in 0..64 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        if let Poll::Ready(result) = pending.as_mut().poll(&mut context) {
+            outcome = Some(result.expect("read receiver remains owned by the queue"));
+            break;
+        }
+    }
+    let error = outcome
+        .expect("the poisoned transaction resolves its queued read")
+        .expect_err("a queued read must not bypass a failed staged predecessor");
+    assert_eq!(error.code, ErrorCode::Schema);
+}
+
+#[test]
 fn queued_mergeable_commit_retains_cold_parent_refresh_and_exact_identity() {
     let schema = schema();
     let families = schema.column_families();

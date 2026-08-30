@@ -10,6 +10,7 @@ use std::task::{Context, Poll, Waker};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_channel::mpsc::{unbounded, UnboundedSender};
+use futures_channel::oneshot;
 use futures_util::future::{AbortHandle, Abortable};
 use futures_util::lock::Mutex as LocalMutex;
 use futures_util::stream;
@@ -18,7 +19,7 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode, ExclusiveTxOps,
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MergeableTxOps, MutationErrorCallback,
     PeerConnection, PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts,
     RowCells, SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
@@ -859,54 +860,30 @@ impl WasmDbInner {
         }
     }
 
-    fn exclusive_all_for_identity(
+    async fn transaction_rows(
         &self,
         tx_id: OpenTransactionId,
-        query: &PreparedQuery,
-        author: AuthorSubject,
+        kind: WasmTxKind,
+        query: PreparedQuery,
+        author: Option<AuthorSubject>,
         opts: ReadOpts,
-    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.exclusive_tx_ref(tx_id)
-                .all_prepared_for_identity_with_opts(query, author, opts)
-        ))
-    }
-
-    fn exclusive_all(
-        &self,
-        tx_id: OpenTransactionId,
-        query: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.exclusive_tx_ref(tx_id)
-                .all_prepared_with_opts(query, opts)
-        ))
-    }
-
-    fn mergeable_all_for_identity(
-        &self,
-        tx_id: OpenTransactionId,
-        query: &PreparedQuery,
-        author: AuthorSubject,
-        opts: ReadOpts,
-    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.mergeable_tx_ref(tx_id)
-                .all_prepared_for_identity_with_opts(query, author, opts)
-        ))
-    }
-
-    fn mergeable_all(
-        &self,
-        tx_id: OpenTransactionId,
-        query: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.mergeable_tx_ref(tx_id)
-                .all_prepared_with_opts(query, opts)
-        ))
+    ) -> Result<Vec<jazz::node::CurrentRow>, Error> {
+        match self {
+            Self::Memory(db) => {
+                let pending = start_transaction_rows(db, tx_id, kind, query, author, opts);
+                db.drive_queued_mutation_once();
+                pending.await.map_err(transaction_read_cancelled)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                let pending = start_transaction_rows(db, tx_id, kind, query, author, opts);
+                pending.await.map_err(transaction_read_cancelled)?
+            }
+            Self::Closed => Err(Error {
+                code: ErrorCode::Protocol,
+                message: "WasmDb is closed".into(),
+            }),
+        }
     }
 
     fn abandon_transaction(&self, tx_id: OpenTransactionId) -> Result<(), jazz::db::Error> {
@@ -1103,6 +1080,55 @@ impl WasmDbInner {
 
     async fn tick(&self) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| db.tick().await)
+    }
+}
+
+fn start_transaction_rows<S>(
+    db: &Rc<Db<S>>,
+    tx_id: OpenTransactionId,
+    kind: WasmTxKind,
+    query: PreparedQuery,
+    author: Option<AuthorSubject>,
+    opts: ReadOpts,
+) -> oneshot::Receiver<Result<Vec<jazz::node::CurrentRow>, Error>>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let owner = Rc::clone(db);
+    db.enqueue_transaction_read(tx_id, async move {
+        match (kind, author) {
+            (WasmTxKind::Mergeable, Some(author)) => {
+                owner
+                    .mergeable_tx_ref(tx_id)
+                    .all_prepared_for_identity_with_opts(&query, author, opts)
+                    .await
+            }
+            (WasmTxKind::Mergeable, None) => {
+                owner
+                    .mergeable_tx_ref(tx_id)
+                    .all_prepared_with_opts(&query, opts)
+                    .await
+            }
+            (WasmTxKind::Exclusive, Some(author)) => {
+                owner
+                    .exclusive_tx_ref(tx_id)
+                    .all_prepared_for_identity_with_opts(&query, author, opts)
+                    .await
+            }
+            (WasmTxKind::Exclusive, None) => {
+                owner
+                    .exclusive_tx_ref(tx_id)
+                    .all_prepared_with_opts(&query, opts)
+                    .await
+            }
+        }
+    })
+}
+
+fn transaction_read_cancelled(_: oneshot::Canceled) -> Error {
+    Error {
+        code: ErrorCode::Protocol,
+        message: "transaction read owner operation was cancelled".into(),
     }
 }
 
@@ -1814,16 +1840,8 @@ impl WasmDb {
         query: &WasmPreparedQuery,
         tx: &WasmTx,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
-        ensure_transaction_runtime(&self.inner, tx)?;
-        let opts = read_opts_from_js(opts)?;
-        let tx_id = tx.open_tx_for_read()?;
-        let rows = match tx.kind {
-            WasmTxKind::Mergeable => self.inner.mergeable_all(tx_id, &query.inner, opts),
-            WasmTxKind::Exclusive => self.inner.exclusive_all(tx_id, &query.inner, opts),
-        }
-        .map_err(to_js_error)?;
-        encode_synchronous_rows(&rows)
+    ) -> Result<js_sys::Promise, JsValue> {
+        transaction_rows_promise(&self.inner, query, tx, None, opts, false)
     }
 
     #[wasm_bindgen(js_name = allInTransactionForIdentity)]
@@ -1833,23 +1851,9 @@ impl WasmDb {
         tx: &WasmTx,
         author: Vec<u8>,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
-        ensure_transaction_runtime(&self.inner, tx)?;
-        let opts = read_opts_from_js(opts)?;
+    ) -> Result<js_sys::Promise, JsValue> {
         let author = author_id_from_bytes(&author)?;
-        let tx_id = tx.open_tx_for_read()?;
-        let rows = match tx.kind {
-            WasmTxKind::Mergeable => {
-                self.inner
-                    .mergeable_all_for_identity(tx_id, &query.inner, author, opts)
-            }
-            WasmTxKind::Exclusive => {
-                self.inner
-                    .exclusive_all_for_identity(tx_id, &query.inner, author, opts)
-            }
-        }
-        .map_err(to_js_error)?;
-        encode_synchronous_rows(&rows)
+        transaction_rows_promise(&self.inner, query, tx, Some(author), opts, false)
     }
 
     #[wasm_bindgen(js_name = oneInTransaction)]
@@ -1858,10 +1862,8 @@ impl WasmDb {
         query: &WasmPreparedQuery,
         tx: &WasmTx,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
-        let mut rows = read_rows_for_transaction(&self.inner, query, tx, None, opts)?;
-        rows.truncate(1);
-        encode_synchronous_rows(&rows)
+    ) -> Result<js_sys::Promise, JsValue> {
+        transaction_rows_promise(&self.inner, query, tx, None, opts, true)
     }
 
     #[wasm_bindgen(js_name = oneInTransactionForIdentity)]
@@ -1871,11 +1873,9 @@ impl WasmDb {
         tx: &WasmTx,
         author: Vec<u8>,
         opts: JsValue,
-    ) -> Result<Vec<u8>, JsValue> {
+    ) -> Result<js_sys::Promise, JsValue> {
         let author = author_id_from_bytes(&author)?;
-        let mut rows = read_rows_for_transaction(&self.inner, query, tx, Some(author), opts)?;
-        rows.truncate(1);
-        encode_synchronous_rows(&rows)
+        transaction_rows_promise(&self.inner, query, tx, Some(author), opts, true)
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
@@ -3225,30 +3225,35 @@ impl WasmTx {
     }
 }
 
-fn read_rows_for_transaction(
+fn transaction_rows_promise(
     db: &WasmDbInner,
     query: &WasmPreparedQuery,
     tx: &WasmTx,
     author: Option<AuthorSubject>,
     opts: JsValue,
-) -> Result<Vec<jazz::node::CurrentRow>, JsValue> {
+    one: bool,
+) -> Result<js_sys::Promise, JsValue> {
     ensure_transaction_runtime(db, tx)?;
     let opts = read_opts_from_js(opts)?;
     let tx_id = tx.open_tx_for_read()?;
-    match (tx.kind, author) {
-        (WasmTxKind::Mergeable, Some(author)) => db
-            .mergeable_all_for_identity(tx_id, &query.inner, author, opts)
-            .map_err(to_js_error),
-        (WasmTxKind::Mergeable, None) => db
-            .mergeable_all(tx_id, &query.inner, opts)
-            .map_err(to_js_error),
-        (WasmTxKind::Exclusive, Some(author)) => db
-            .exclusive_all_for_identity(tx_id, &query.inner, author, opts)
-            .map_err(to_js_error),
-        (WasmTxKind::Exclusive, None) => db
-            .exclusive_all(tx_id, &query.inner, opts)
-            .map_err(to_js_error),
+    if !query.inner.shape().query().array_subqueries.is_empty() {
+        return Err(JsValue::from_str(
+            "transaction-local reads do not support relation array subqueries",
+        ));
     }
+    let db = db.clone();
+    let query = query.inner.clone();
+    let kind = tx.kind;
+    Ok(future_to_promise(async move {
+        let mut rows = db
+            .transaction_rows(tx_id, kind, query, author, opts)
+            .await
+            .map_err(to_js_error)?;
+        if one {
+            rows.truncate(1);
+        }
+        bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
+    }))
 }
 
 fn ensure_transaction_runtime(db: &WasmDbInner, tx: &WasmTx) -> Result<(), JsValue> {
@@ -4868,9 +4873,14 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         let prepared = view.prepare_query(&view.table("items")).unwrap();
-        let rows = WasmDbInner::Memory(Rc::clone(&view))
-            .mergeable_all(batch, &prepared, ReadOpts::default())
-            .unwrap();
+        let rows = block_on(WasmDbInner::Memory(Rc::clone(&view)).transaction_rows(
+            batch,
+            WasmTxKind::Mergeable,
+            prepared,
+            None,
+            ReadOpts::default(),
+        ))
+        .unwrap();
         assert_eq!(rows.len(), 1, "the attached view reads staged rows");
         block_on(owner.commit_mergeable_handle(batch)).unwrap();
 

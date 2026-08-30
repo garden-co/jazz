@@ -2607,6 +2607,110 @@ impl NapiDb {
         }
     }
 
+    /// Read through an open transaction as its identity bound at begin.
+    ///
+    /// The core verifies that `author` matches the capability retained by the
+    /// transaction; this ABI exists so trusted-serving hosts never fall back
+    /// to their ambient/default read identity.
+    #[napi(js_name = "allInTransactionForIdentity")]
+    pub fn all_in_transaction_for_identity(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        author: Uint8Array,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let tx_db = tx
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        if !db.shares_runtime_with(tx_db) {
+            return Err(napi::Error::from_reason(
+                "transaction belongs to a different database runtime",
+            ));
+        }
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let open_tx = tx.open_tx()?;
+        match (db, tx.kind) {
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_for_identity_with_opts(&query, author, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_for_identity_with_opts(&query, author, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_for_identity_with_opts(&query, author, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_for_identity_with_opts(&query, author, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+        }
+    }
+
     #[napi(js_name = "setIdentityClaims")]
     pub fn set_identity_claims(
         &self,
