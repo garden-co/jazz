@@ -29,6 +29,11 @@ RN / Swift / Kotlin UI instance B ─ in-memory client Db ├─ persistent nati
 The relay is a normal non-history-complete `Db`:
 
 - UI writes are ordinary local client commits sent to the relay.
+- Each in-memory UI `Db` is explicitly non-durable: its optimistic state has
+  `None` durability until the persistent relay acknowledges it. This also
+  selects the ordinary relay-authority handoff for Local subscriptions, so a
+  foreground observes a sibling foreground's relay-persisted write without
+  waiting for the relay's own upstream to settle it.
 - The relay persists them, forwards them to its own upstream when present, and
   carries fate/view updates back over the ordinary peer protocol.
 - UI query and subscription semantics are the existing `Db` semantics.

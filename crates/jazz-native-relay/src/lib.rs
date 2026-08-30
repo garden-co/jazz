@@ -3017,6 +3017,11 @@ impl RelayWorker {
             }))
             .map_err(RelayError::Db)?,
         );
+        // A foreground owns only an in-memory preview. Its paired persistent
+        // relay provides Local durability and the relay-authority subscription
+        // handoff; treating this Db as durable makes sibling subscriptions wait
+        // for the relay's upstream authority instead of consuming local state.
+        db.set_non_durable_client();
         if let Some(high_water) = tx_time_floor {
             block_on(db.reserve_minted_tx_time_after(high_water)).map_err(RelayError::Db)?;
         }
@@ -3935,7 +3940,7 @@ mod tests {
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
     use jazz::time::TxTime;
     use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-    use jazz::tx::{DurabilityTier, TxId};
+    use jazz::tx::TxId;
     use std::sync::atomic::AtomicBool;
 
     fn schema() -> JazzSchema {
@@ -5145,7 +5150,7 @@ mod tests {
 
         first_client
             .with_db(|db| {
-                let write = block_on(db.insert(
+                block_on(db.insert(
                     "todos",
                     BTreeMap::from([("title".to_owned(), Value::String("native".to_owned()))]),
                     InsertOptions {
@@ -5154,13 +5159,12 @@ mod tests {
                     },
                 ))
                 .map_err(RelayError::Db)?;
-                block_on(write.wait(DurabilityTier::Local)).map_err(RelayError::Db)?;
                 Ok(())
             })
             .unwrap();
         second_client
             .with_db(|db| {
-                let write = block_on(db.insert(
+                block_on(db.insert(
                     "todos",
                     BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
                     InsertOptions {
@@ -5169,7 +5173,6 @@ mod tests {
                     },
                 ))
                 .map_err(RelayError::Db)?;
-                block_on(write.wait(DurabilityTier::Local)).map_err(RelayError::Db)?;
                 Ok(())
             })
             .unwrap();
@@ -5221,6 +5224,96 @@ mod tests {
                 .count(),
             2,
             "each in-memory UI client must reach the shared persistent relay and its upstream"
+        );
+    }
+
+    #[test]
+    fn sibling_ui_subscription_observes_another_ui_client_write() {
+        // Internal relay-topology receipt: each UI runtime owns an isolated
+        // in-memory Db, so a sibling write is observable only if the ordinary
+        // client -> persistent relay -> sibling protocol path is complete.
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let mut relay_config = config(directory.path().join("shared.sqlite"), Some("alice"));
+        relay_config.schema = permissive_schema();
+        let relay = registry.open(relay_config).unwrap();
+        let writer = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xb1; 16]),
+                    author: AuthorSubject::for_test_bytes([0xb2; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let reader = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xc1; 16]),
+                    author: AuthorSubject::for_test_bytes([0xb2; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let prepared = reader.prepare_foreground_query(query).unwrap();
+        let subscription = reader.subscribe_foreground_query(prepared).unwrap();
+        let reader_id = reader.id();
+        for _ in 0..16 {
+            relay.pump().unwrap();
+        }
+        relay
+            .run(move |worker| {
+                let reader = worker.foreground_client_mut(reader_id)?;
+                let stream = reader.subscriptions.get_mut(&subscription).unwrap();
+                while stream.try_next_event().is_some() {}
+                Ok(())
+            })
+            .unwrap();
+
+        let expected = RowUuid::from_bytes([0xd1; 16]);
+        writer
+            .with_db(move |db| {
+                block_on(db.insert(
+                    "todos",
+                    BTreeMap::from([("title".to_owned(), Value::String("native".to_owned()))]),
+                    InsertOptions {
+                        row_id: Some(expected),
+                        ..Default::default()
+                    },
+                ))
+                .map_err(RelayError::Db)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let mut observed = false;
+        for _ in 0..32 {
+            relay.pump().unwrap();
+            observed |= relay
+                .run(move |worker| {
+                    let reader = worker.foreground_client_mut(reader_id)?;
+                    let stream = reader.subscriptions.get_mut(&subscription).unwrap();
+                    let mut observed = false;
+                    while let Some(event) = stream.try_next_event() {
+                        if let SubscriptionEvent::Delta { added, updated, .. } = event {
+                            observed |= added
+                                .iter()
+                                .chain(updated.iter())
+                                .any(|row| row.row_uuid() == expected);
+                        }
+                    }
+                    Ok(observed)
+                })
+                .unwrap();
+            if observed {
+                break;
+            }
+        }
+        assert!(
+            observed,
+            "the persistent relay must route a UI write to a sibling UI subscription"
         );
     }
 
