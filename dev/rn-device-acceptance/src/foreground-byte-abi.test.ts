@@ -99,6 +99,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         commitTransaction: 15,
         rollbackTransaction: 16,
       } as const;
+      if (command.type === "poll") return Uint8Array.of(tags.poll, command.operation);
       return Uint8Array.of(tags[command.type]);
     },
     decode(bytes) {
@@ -115,6 +116,8 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
           return { type: "mutationStaged" };
         case 14:
           return { type: "transactionCommitted", txId: bytes.subarray(1) };
+        case 15:
+          return { type: "pending", operation: bytes[1]! };
         default:
           throw new Error(`unexpected mock response ${bytes[0]}`);
       }
@@ -129,7 +132,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
       ...(containsA ? utf8("scope-a-private-row") : []),
       ...(containsB ? utf8("scope-b-private-row") : []),
     );
-  const scopeFactory = (bLeaksA: boolean, aLeaksB: boolean) => ({
+  const scopeFactory = (bLeaksA: boolean, aLeaksB: boolean, delayedAReads = 0) => ({
     abiVersion: NATIVE_RELAY_ABI_VERSION,
     openAttached(capability: Uint8Array) {
       const isA = capability[0] === 1;
@@ -147,6 +150,10 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
             case 2:
               return Uint8Array.of(2, 1); // PreparedQuery { 1 }
             case 3:
+              if (isA && delayedAReads > 0) {
+                delayedAReads -= 1;
+                return rows(false, false);
+              }
               return rows(isA ? aWasWritten : bLeaksA, isA ? aLeaksB : bWasWritten);
             case 7:
               return Uint8Array.of(7, 1);
@@ -189,6 +196,69 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     contains: ["a"],
     excludes: ["b"],
   });
+
+  const eventuallyVisible = scopeFactory(false, false, 2);
+  proveForegroundScopeIsolation(eventuallyVisible, scopeA, scopeCodec, {
+    write: "a",
+    contains: ["a"],
+    excludes: ["b"],
+  });
+
+  const pendingReceipt = (settles: boolean) => {
+    const metrics = { all: 0, poll: 0, tick: 0, close: 0 };
+    const factory = {
+      abiVersion: NATIVE_RELAY_ABI_VERSION,
+      openAttached() {
+        return {
+          execute(command: Uint8Array) {
+            switch (command[0]) {
+              case 2:
+                return Uint8Array.of(2, 1);
+              case 3:
+                metrics.all += 1;
+                if (metrics.all > 1)
+                  throw new Error("scope receipt reissued all instead of polling");
+                return Uint8Array.of(15, 42);
+              case 8:
+                metrics.poll += 1;
+                assert.equal(command[1], 42);
+                return settles && metrics.poll === 2 ? rows(true, false) : Uint8Array.of(15, 42);
+              case 7:
+                return Uint8Array.of(7, 1);
+              default:
+                throw new Error(`unexpected pending foreground command ${command[0]}`);
+            }
+          },
+          tick() {
+            metrics.tick += 1;
+          },
+          close() {
+            metrics.close += 1;
+            return true;
+          },
+        };
+      },
+    };
+    return { factory, metrics };
+  };
+
+  const pendingThenVisible = pendingReceipt(true);
+  proveForegroundScopeIsolation(pendingThenVisible.factory, scopeA, scopeCodec, {
+    contains: ["a"],
+    excludes: ["b"],
+  });
+  assert.deepEqual(pendingThenVisible.metrics, { all: 1, poll: 2, tick: 3, close: 1 });
+
+  const pendingForever = pendingReceipt(false);
+  assert.throws(
+    () =>
+      proveForegroundScopeIsolation(pendingForever.factory, scopeA, scopeCodec, {
+        contains: ["a"],
+        excludes: ["b"],
+      }),
+    /did not settle after bounded ticks/,
+  );
+  assert.deepEqual(pendingForever.metrics, { all: 1, poll: 95, tick: 96, close: 1 });
 
   aWasWritten = false;
   bWasWritten = false;

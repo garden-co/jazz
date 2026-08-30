@@ -314,7 +314,9 @@ export function proveForegroundScopeIsolation(
   const foreground = factory.openAttached(capability);
   try {
     markFailure("scope-isolation-read-failed");
-    const rows = readTodos(foreground, codec);
+    const rows = readTodos(foreground, codec, (candidate) =>
+      receipt.contains.every((scope) => containsUtf8(candidate, scopeFixtureTitle(scope))),
+    );
     markFailure("scope-isolation-assert-failed");
     for (const scope of receipt.contains) {
       if (!containsUtf8(rows, scopeFixtureTitle(scope)))
@@ -362,21 +364,31 @@ const TODOS_QUERY = Uint8Array.of(
   0,
 );
 
-function readTodos(foreground: NativeForegroundRuntime, codec: ForegroundByteCodec): Uint8Array {
+function readTodos(
+  foreground: NativeForegroundRuntime,
+  codec: ForegroundByteCodec,
+  ready: (rows: Uint8Array) => boolean = () => true,
+): Uint8Array {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
   const prepared = execute({ type: "prepareQuery", query: TODOS_QUERY });
   if (prepared.type !== "preparedQuery")
     throw new Error("scope isolation fixture could not prepare the todos query");
-  for (let attempts = 0; attempts < 64; attempts += 1) {
+  let pendingOperation: number | undefined;
+  for (let attempts = 0; attempts < 96; attempts += 1) {
     foreground.tick();
-    const response = execute({ type: "all", query: prepared.query });
-    if (response.type === "rows") return response.rows;
+    const response =
+      pendingOperation === undefined
+        ? execute({ type: "all", query: prepared.query })
+        : execute({ type: "poll", operation: pendingOperation });
+    if (response.type === "rows") {
+      pendingOperation = undefined;
+      if (ready(response.rows)) return response.rows;
+      continue;
+    }
     if (response.type === "pending") {
-      foreground.tick();
-      const settled = execute({ type: "poll", operation: response.operation });
-      if (settled.type === "rows") return settled.rows;
-      if (settled.type === "pending") continue;
+      pendingOperation = response.operation;
+      continue;
     }
     throw new Error("scope isolation fixture read returned an unexpected response");
   }
