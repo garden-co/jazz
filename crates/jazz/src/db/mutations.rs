@@ -1442,6 +1442,7 @@ where
             None,
             updated_at_ms.unwrap_or_else(|| self.next_now_ms()),
             branch,
+            None,
         )
         .await
     }
@@ -2239,35 +2240,42 @@ where
                     .await
                     .visible_current_cells_in_branch(table, &head, row)
                     .await?;
-                let (mut cells, parents, authored_columns) = if let Some(cells) = local {
-                    let parent = self
-                        .node
-                        .node
-                        .lock()
-                        .await
-                        .local_content_winner_tx_id_in_branch(table, &head, row)
-                        .await?;
-                    (
-                        visible_to_session.unwrap_or(cells),
-                        parent.into_iter().collect(),
-                        Some(patch.keys().cloned().collect()),
-                    )
-                } else {
-                    let inherited = self
-                        .node
-                        .node
-                        .lock()
-                        .await
-                        .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
-                        .await?
-                        .ok_or_else(|| {
-                            Error::new(
-                                ErrorCode::NotObserved,
-                                format!("row is not visible in branch view: {}", row.0),
-                            )
-                        })?;
-                    (visible_to_session.unwrap_or(inherited), Vec::new(), None)
-                };
+                let (mut cells, parents, authored_columns, verified_inherited_cells) =
+                    if let Some(cells) = local {
+                        let parent = self
+                            .node
+                            .node
+                            .lock()
+                            .await
+                            .local_content_winner_tx_id_in_branch(table, &head, row)
+                            .await?;
+                        (
+                            visible_to_session.unwrap_or(cells),
+                            parent.into_iter().collect(),
+                            Some(patch.keys().cloned().collect()),
+                            None,
+                        )
+                    } else {
+                        let inherited = self
+                            .node
+                            .node
+                            .lock()
+                            .await
+                            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                            .await?
+                            .ok_or_else(|| {
+                                Error::new(
+                                    ErrorCode::NotObserved,
+                                    format!("row is not visible in branch view: {}", row.0),
+                                )
+                            })?;
+                        let cells = visible_to_session.unwrap_or(inherited);
+                        // This complete cell map came from the locally observed
+                        // branch base. Retain it as engine-only provenance for
+                        // unchanged large descriptors when creating the overlay.
+                        let verified_inherited_cells = cells.clone();
+                        (cells, Vec::new(), None, Some(verified_inherited_cells))
+                    };
                 cells.extend(patch);
                 self.write_mergeable_at_ms_with_authorship_in_branch(
                     made_by,
@@ -2280,6 +2288,7 @@ where
                     authored_columns,
                     now_ms,
                     head,
+                    verified_inherited_cells,
                 )
                 .await
             }
@@ -2420,6 +2429,7 @@ where
             authored_columns,
             now_ms,
             branch,
+            None,
         )
         .await
     }
@@ -2515,6 +2525,7 @@ where
             None,
             now_ms,
             branch,
+            None,
         )
         .await
     }
@@ -2765,6 +2776,7 @@ where
             authored_columns,
             now_ms,
             BranchSelector::default(),
+            None,
         )
         .await
     }
@@ -2782,6 +2794,7 @@ where
         authored_columns: Option<BTreeSet<String>>,
         now_ms: u64,
         branch: BranchSelector,
+        verified_inherited_cells: Option<BTreeMap<String, Value>>,
     ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
@@ -2810,6 +2823,9 @@ where
             .cells(cells);
         if let Some(authored_columns) = authored_columns {
             commit = commit.authored_columns(authored_columns);
+        }
+        if let Some(inherited) = verified_inherited_cells.as_ref() {
+            commit = commit.verified_inherited_large_cells(inherited);
         }
         if let Some(subject) = permission_subject {
             commit = commit.permission_subject(subject);

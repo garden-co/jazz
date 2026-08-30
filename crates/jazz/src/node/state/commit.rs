@@ -1389,7 +1389,15 @@ where
             .unwrap_or_default();
         for (column, value) in &commit.cells {
             if value_contains_indirect_descriptor(value) {
-                if inherited.get(column) != Some(value) {
+                // A branch-view write can carry an unchanged descriptor from
+                // a locally read base snapshot while the target branch has no
+                // physical row yet. That exact cell is marked privately by
+                // `verified_inherited_large_cells`; public mutation input can
+                // never create this marker. Every other descriptor still has
+                // to equal the target branch's observed physical cell.
+                if inherited.get(column) != Some(value)
+                    && !commit.prepared_large_columns.contains(column)
+                {
                     return Err(Error::InvalidMergeableCommit(
                         "row update contains an unverified large-value descriptor",
                     ));

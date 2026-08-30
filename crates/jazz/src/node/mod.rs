@@ -1710,6 +1710,25 @@ impl MergeableCommit {
         self
     }
 
+    /// Carry an engine-proven physical preimage into a branch-view write.
+    ///
+    /// A branch overlay starts with cells read from its base. An unchanged
+    /// indirect descriptor in that snapshot is not caller-authored: it was
+    /// already admitted by the local physical read that produced `inherited`.
+    /// Mark only an exact still-present cell, so a later patch cannot use this
+    /// provenance to smuggle in a different descriptor.
+    pub(crate) fn verified_inherited_large_cells(
+        mut self,
+        inherited: &BTreeMap<String, Value>,
+    ) -> Self {
+        for (column, value) in inherited {
+            if value_contains_indirect_descriptor(value) && self.cells.get(column) == Some(value) {
+                self.prepared_large_columns.insert(column.clone());
+            }
+        }
+        self
+    }
+
     /// Preserve which cells were explicitly authored when `cells` is a
     /// materialized snapshot assembled for a partial update.
     pub fn authored_columns(mut self, columns: BTreeSet<String>) -> Self {
