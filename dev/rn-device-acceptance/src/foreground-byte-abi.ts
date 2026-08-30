@@ -5,6 +5,7 @@ import type {
   NativeForegroundRuntimeFactory,
 } from "jazz-rn";
 import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
+import type { DeviceDiagnosticCode } from "./device-diagnostics";
 
 export type ForegroundByteCodec = {
   encode(command: NativeForegroundCommand): Uint8Array;
@@ -270,15 +271,18 @@ export function proveForegroundScopeIsolation(
   capability: Uint8Array,
   codec: ForegroundByteCodec,
   receipt: ScopeIsolationReceipt,
+  markFailure: (code: DeviceDiagnosticCode) => void = () => {},
 ): void {
   if (receipt.write) {
     // The writer and reader are deliberately separate foreground handles. A
     // row must travel through the admitted relay/store rather than appearing
     // only in the memory of the handle that staged it.
+    markFailure("scope-isolation-open-failed");
     const writer = factory.openAttached(capability);
     try {
       const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
         codec.decode(writer.execute(codec.encode(command)));
+      markFailure("scope-isolation-write-failed");
       const transaction = execute({
         type: "beginTransaction",
         kind: "mergeable",
@@ -306,9 +310,12 @@ export function proveForegroundScopeIsolation(
     }
   }
 
+  markFailure("scope-isolation-open-failed");
   const foreground = factory.openAttached(capability);
   try {
+    markFailure("scope-isolation-read-failed");
     const rows = readTodos(foreground, codec);
+    markFailure("scope-isolation-assert-failed");
     for (const scope of receipt.contains) {
       if (!containsUtf8(rows, scopeFixtureTitle(scope)))
         throw new Error(

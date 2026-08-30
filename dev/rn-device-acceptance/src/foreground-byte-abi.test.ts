@@ -161,11 +161,25 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   });
 
   const passing = scopeFactory(false, false);
-  proveForegroundScopeIsolation(passing, scopeA, scopeCodec, {
-    write: "a",
-    contains: ["a"],
-    excludes: ["b"],
-  });
+  const stages: string[] = [];
+  proveForegroundScopeIsolation(
+    passing,
+    scopeA,
+    scopeCodec,
+    {
+      write: "a",
+      contains: ["a"],
+      excludes: ["b"],
+    },
+    (stage) => stages.push(stage),
+  );
+  assert.deepEqual(stages, [
+    "scope-isolation-open-failed",
+    "scope-isolation-write-failed",
+    "scope-isolation-open-failed",
+    "scope-isolation-read-failed",
+    "scope-isolation-assert-failed",
+  ]);
   proveForegroundScopeIsolation(passing, scopeB, scopeCodec, {
     write: "b",
     contains: ["b"],

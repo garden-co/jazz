@@ -60,17 +60,29 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
       decode: decodeNativeForegroundResponse,
     };
     markFailure("scope-isolation-failed");
-    proveForegroundScopeIsolation(foregroundFactory, reopened.capability, foregroundCodec, {
-      contains: ["a"],
-      excludes: ["b"],
-    });
+    proveForegroundScopeIsolation(
+      foregroundFactory,
+      reopened.capability,
+      foregroundCodec,
+      {
+        contains: ["a"],
+        excludes: ["b"],
+      },
+      markFailure,
+    );
     markFailure("auth-switch-failed");
     const scopeB = await switchNativeRelayAuthScope();
     markFailure("scope-isolation-failed");
-    proveForegroundScopeIsolation(foregroundFactory, scopeB.capability, foregroundCodec, {
-      contains: ["b"],
-      excludes: ["a"],
-    });
+    proveForegroundScopeIsolation(
+      foregroundFactory,
+      scopeB.capability,
+      foregroundCodec,
+      {
+        contains: ["b"],
+        excludes: ["a"],
+      },
+      markFailure,
+    );
     markFailure("logout-revocation-failed");
     await logoutNativeRelay();
     return { phase, receipt };
@@ -104,11 +116,17 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("public-client-seed-failed");
   await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce, markFailure);
   markFailure("scope-isolation-failed");
-  proveForegroundScopeIsolation(foregroundFactory, scopeA.capability, foregroundCodec, {
-    write: "a",
-    contains: ["a"],
-    excludes: ["b"],
-  });
+  proveForegroundScopeIsolation(
+    foregroundFactory,
+    scopeA.capability,
+    foregroundCodec,
+    {
+      write: "a",
+      contains: ["a"],
+      excludes: ["b"],
+    },
+    markFailure,
+  );
   const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
   markFailure("auth-switch-failed");
   const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
@@ -116,11 +134,17 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
   proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec, markFailure);
   markFailure("scope-isolation-failed");
-  proveForegroundScopeIsolation(foregroundFactory, scopeB.capability, foregroundCodec, {
-    write: "b",
-    contains: ["b"],
-    excludes: ["a"],
-  });
+  proveForegroundScopeIsolation(
+    foregroundFactory,
+    scopeB.capability,
+    foregroundCodec,
+    {
+      write: "b",
+      contains: ["b"],
+      excludes: ["a"],
+    },
+    markFailure,
+  );
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
   markFailure("foreground-write-failed");
@@ -137,10 +161,16 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("scope-reopen-failed");
   await logoutNativeRelay();
   const reopenedScopeA = await admittedNativeRelay();
-  proveForegroundScopeIsolation(foregroundFactory, reopenedScopeA.capability, foregroundCodec, {
-    contains: ["a"],
-    excludes: ["b"],
-  });
+  proveForegroundScopeIsolation(
+    foregroundFactory,
+    reopenedScopeA.capability,
+    foregroundCodec,
+    {
+      contains: ["a"],
+      excludes: ["b"],
+    },
+    markFailure,
+  );
   markFailure("logout-revocation-failed");
   await logoutNativeRelay();
   return { phase, receipt };
