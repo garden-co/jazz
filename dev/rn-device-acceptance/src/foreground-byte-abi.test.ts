@@ -593,6 +593,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   ticks.fill(0);
   let splitOpened = 0;
   let unsettledResetDrains = 0;
+  const unsettledOrder: string[] = [];
   const unsettledInitialReset = {
     ...factory,
     openAttached(received: Uint8Array) {
@@ -602,6 +603,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         ...foreground,
         execute(bytes: Uint8Array) {
           const request = command.decode(bytes) as { type?: string };
+          if (peer === 0 && request.type === "beginTransaction") unsettledOrder.push("begin");
           if (peer === 1 && request.type === "drainSubscription") {
             unsettledResetDrains += 1;
             if (unsettledResetDrains === 1) {
@@ -609,9 +611,34 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
               // semantics; durability settlement is orthogonal to proving
               // that the later content delta was not the opening snapshot.
               foreground.execute(bytes);
+              unsettledOrder.push("reset");
               return command.encode({
                 type: "subscriptionEvents",
                 events: [{ type: "delta", reset: true, settled: false, tier: "local", delta: [] }],
+              });
+            }
+            if (unsettledResetDrains === 2) {
+              unsettledOrder.push("settled");
+              return command.encode({
+                type: "subscriptionEvents",
+                events: [
+                  {
+                    type: "delta",
+                    reset: false,
+                    settled: true,
+                    tier: "local",
+                    delta: Array.from(
+                      encodeSubscriptionDelta({
+                        added: [
+                          {
+                            rowId: new Uint8Array(16).fill(0x75),
+                            raw: new TextEncoder().encode("scope-b-private-row"),
+                          },
+                        ],
+                      }),
+                    ),
+                  },
+                ],
               });
             }
           }
@@ -626,7 +653,12 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     command,
     subscriptionRowId,
   );
-  assert.equal(unsettledResetDrains, 2, "unsettled reset and committed delta drain separately");
+  assert.equal(unsettledResetDrains, 3, "unsettled reset, settlement, and commit drain separately");
+  assert.deepEqual(
+    unsettledOrder.slice(0, 3),
+    ["reset", "settled", "begin"],
+    "the writer cannot start before B consumes the settled initial baseline",
+  );
 
   committed = false;
   opened = 0;

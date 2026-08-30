@@ -198,6 +198,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     // requires a fresh native wake before every Poll.
     markFailure("same-runtime-initial-reset-failed");
     let initialResetSeen = false;
+    let initialResetSettled = false;
     for (let attempt = 0; attempt < 96; attempt += 1) {
       const initialEvents = await drainSubscription(
         b,
@@ -208,8 +209,9 @@ export async function proveSameJsiRuntimeWriteSubscription(
       for (const event of initialEvents) {
         if (event.type !== "delta") continue;
         if (event.reset) initialResetSeen = true;
+        if (initialResetSeen && event.settled) initialResetSettled = true;
       }
-      if (initialResetSeen) break;
+      if (initialResetSettled) break;
       // Ready-but-empty means the subscription exists but its initial IVM
       // reset has not reached the stream yet. It owns no retained operation,
       // so a later turn may issue a new Drain after advancing the foreground.
@@ -218,6 +220,8 @@ export async function proveSameJsiRuntimeWriteSubscription(
     }
     if (!initialResetSeen)
       throw new Error("foreground B initial subscription reset did not materialize");
+    if (!initialResetSettled)
+      throw new Error("foreground B initial subscription reset did not settle");
     while (openedB.consumeWake()) {
       // Retire already-delivered initial-settlement notifications before A's
       // write establishes the post-commit wake epoch.
