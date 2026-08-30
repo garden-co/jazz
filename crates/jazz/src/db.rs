@@ -3709,7 +3709,11 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub async fn wait(&self, tier: DurabilityTier) -> Result<TxId, Error> {
-        if tier <= self.local_tier {
+        let reservation_is_pending = self
+            .queued_status
+            .as_ref()
+            .is_some_and(|status| matches!(*status.borrow(), QueuedMutationStatus::Pending));
+        if tier <= self.local_tier && !reservation_is_pending {
             return Ok(self.tx_id);
         }
         let state = self.write_state().await?;

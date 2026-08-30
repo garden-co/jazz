@@ -760,7 +760,7 @@ where
             return Some(Err(error.clone()));
         }
         if self.reserved_mutations.borrow().contains(&tx_id) {
-            return (tier <= DurabilityTier::None).then_some(Ok(tx_id));
+            return None;
         }
         let state = crate::db::block_on(self.node.borrow_mut().transaction_state(tx_id));
         let Some((fate, global_time, durability)) = state else {

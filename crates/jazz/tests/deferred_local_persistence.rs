@@ -252,10 +252,16 @@ fn queued_update_retains_cold_preparation_and_its_definitive_identity() {
     let reserved = queued.mergeable_tx_id();
     let state = block_on(queued.write_state()).expect("reserved state is observable");
     assert_eq!(state.durability, DurabilityTier::None);
-
-    let mut first_turn = Box::pin(db.tick());
+    let mut resident_wait = Box::pin(db.wait_for_transaction(reserved, DurabilityTier::None));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
+    assert!(
+        matches!(resident_wait.as_mut().poll(&mut context), Poll::Pending),
+        "identity reservation alone is not the resident publication milestone",
+    );
+    drop(resident_wait);
+
+    let mut first_turn = Box::pin(db.tick());
     assert!(matches!(
         first_turn.as_mut().poll(&mut context),
         Poll::Pending
