@@ -542,6 +542,82 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   opened = 0;
   schedulers.length = 0;
   ticks.fill(0);
+  let splitOpened = 0;
+  let splitDrains = 0;
+  const splitInitialSettlement = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      const peer = splitOpened++;
+      return {
+        ...foreground,
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string };
+          if (peer === 1 && request.type === "drainSubscription") {
+            splitDrains += 1;
+            if (splitDrains === 1) {
+              // Consume the underlying reset, but split its settlement into a
+              // later ordinary delta as the native stream is allowed to do.
+              foreground.execute(bytes);
+              return command.encode({
+                type: "subscriptionEvents",
+                events: [{ type: "delta", reset: true, settled: false, tier: "local", delta: [] }],
+              });
+            }
+            if (splitDrains === 2)
+              return command.encode({
+                type: "subscriptionEvents",
+                events: [{ type: "delta", reset: false, settled: true, tier: "local", delta: [] }],
+              });
+          }
+          return foreground.execute(bytes);
+        },
+      };
+    },
+  };
+  await proveSameJsiRuntimeWriteSubscription(splitInitialSettlement, capability, command);
+  assert.equal(splitDrains, 3, "reset, settlement, and committed delta drain separately");
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  let prematureOpened = 0;
+  const settlementBeforeReset = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      const peer = prematureOpened++;
+      let drained = false;
+      return {
+        ...foreground,
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string };
+          if (peer === 1 && request.type === "drainSubscription") {
+            if (!drained) {
+              drained = true;
+              foreground.execute(bytes);
+              return command.encode({
+                type: "subscriptionEvents",
+                events: [{ type: "delta", reset: false, settled: true, tier: "local", delta: [] }],
+              });
+            }
+            return command.encode({ type: "subscriptionEvents", events: [] });
+          }
+          return foreground.execute(bytes);
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    async () => proveSameJsiRuntimeWriteSubscription(settlementBeforeReset, capability, command),
+    /initial subscription reset did not settle/,
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
   let delayedOpened = 0;
   let delayedEmptyDrains = 0;
   let delayedTicks = 0;
