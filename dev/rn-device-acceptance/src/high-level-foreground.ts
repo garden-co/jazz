@@ -1,5 +1,7 @@
 import { createJazzClient, schema as s, type JazzClientConfig } from "jazz-tools/react-native";
 import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
+import type { DeviceDiagnosticCode } from "./device-diagnostics";
+import { finishSeedClient } from "./seed-teardown";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }),
@@ -33,16 +35,24 @@ function clientConfig(capability: Uint8Array): JazzClientConfig {
 export async function seedHighLevelForegroundRuntime(
   capability: Uint8Array,
   runNonce: string,
+  markFailure: (code: DeviceDiagnosticCode) => void,
 ): Promise<void> {
+  markFailure("public-client-open-failed");
   const client = await createJazzClient(clientConfig(capability));
   const title = persistedTitleForRun(runNonce);
   let observed = false;
-  const unsubscribe = client.db.subscribe(app.todos, (todos) => {
-    observed ||= todos.some((todo) => todo.title === title);
-  });
+  let completed = false;
+  let failed = false;
+  let unsubscribe = () => {};
   try {
+    markFailure("public-client-subscribe-failed");
+    unsubscribe = client.db.subscribe(app.todos, (todos) => {
+      observed ||= todos.some((todo) => todo.title === title);
+    });
+    markFailure("public-client-write-failed");
     const write = client.db.insert(app.todos, { title });
     await write.wait({ tier: "local" });
+    markFailure("public-client-read-failed");
     const rows = await client.db.all(app.todos);
     if (!rows.some((row) => row.title === title)) {
       throw new Error("high-level React Native foreground did not materialize its local write");
@@ -52,15 +62,20 @@ export async function seedHighLevelForegroundRuntime(
     // raw foreground `tick` or byte command is used here. The bound makes a
     // missing owner wake a receipt failure rather than an unbounded device
     // test hang.
+    markFailure("public-client-publish-failed");
     for (let attempt = 0; attempt < 8 && !observed; attempt += 1) {
       await Promise.resolve();
     }
     if (!observed) {
       throw new Error("high-level React Native foreground did not publish its local write");
     }
+    completed = true;
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    unsubscribe();
-    await client.shutdown();
+    if (completed && !failed) markFailure("public-client-shutdown-failed");
+    await finishSeedClient(unsubscribe, () => client.shutdown(), failed);
   }
 }
 

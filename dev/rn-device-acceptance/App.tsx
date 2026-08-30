@@ -102,7 +102,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("native-admission-failed");
   const scopeA = await admittedNativeRelay();
   markFailure("public-client-seed-failed");
-  await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce);
+  await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce, markFailure);
   markFailure("scope-isolation-failed");
   proveForegroundScopeIsolation(foregroundFactory, scopeA.capability, foregroundCodec, {
     write: "a",

@@ -93,6 +93,28 @@ function assertAtomicAndroidDiagnostic(fixture) {
   );
 }
 
+function assertPublicClientSeedStages(source) {
+  const stages = ["open", "subscribe", "write", "read", "publish", "shutdown"];
+  let previous = -1;
+  for (const stage of stages) {
+    const marker = `markFailure("public-client-${stage}-failed")`;
+    const position = source.indexOf(marker);
+    assert.ok(position >= 0, `public client seed is missing its ${stage} stage`);
+    assert.ok(position > previous, `public client seed stage ${stage} is out of order`);
+    previous = position;
+  }
+  for (const pattern of [
+    /markFailure\("public-client-open-failed"\);\s*const client = await createJazzClient/,
+    /markFailure\("public-client-subscribe-failed"\);\s*unsubscribe = client\.db\.subscribe/,
+    /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
+    /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
+    /markFailure\("public-client-publish-failed"\);\s*for \(let attempt = 0; attempt < 8 && !observed;/,
+    /if \(completed && !failed\) markFailure\("public-client-shutdown-failed"\);\s*await finishSeedClient/,
+  ]) {
+    assert.match(source, pattern, "public client seed stage moved away from its native boundary");
+  }
+}
+
 test("Android fixture BuildConfig fields and package registration remain compile-shaped", () => {
   const gradle = read("android/app/build.gradle");
   const fixture = read(
@@ -450,10 +472,28 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     app,
     /await proveHighLevelForegroundRestart\(reopened\.capability, receipt\.runNonce\)/,
   );
-  assert.match(app, /seedHighLevelForegroundRuntime\(scopeA\.capability, receipt\.runNonce\)/);
+  assert.match(
+    app,
+    /seedHighLevelForegroundRuntime\(scopeA\.capability, receipt\.runNonce, markFailure\)/,
+  );
   assert.match(highLevelForeground, /createJazzClient\(clientConfig\(capability\)\)/);
   assert.match(highLevelForeground, /client\.db\.all\(app\.todos\)/);
   assert.match(highLevelForeground, /assertPersistedTitleForRun/);
+  assertPublicClientSeedStages(highLevelForeground);
+  for (const stage of ["open", "subscribe", "write", "read", "publish", "shutdown"]) {
+    assert.throws(
+      () =>
+        assertPublicClientSeedStages(
+          highLevelForeground.replace(`markFailure("public-client-${stage}-failed")`, "void 0"),
+        ),
+      new RegExp(`missing its ${stage} stage|moved away`),
+    );
+  }
+  const misorderedStages = highLevelForeground
+    .replace('markFailure("public-client-write-failed")', 'markFailure("public-client-TEMP-failed")')
+    .replace('markFailure("public-client-read-failed")', 'markFailure("public-client-write-failed")')
+    .replace('markFailure("public-client-TEMP-failed")', 'markFailure("public-client-read-failed")');
+  assert.throws(() => assertPublicClientSeedStages(misorderedStages), /stage read is out of order/);
   assert.match(app, /\{\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
   assert.match(app, /\{\s*contains: \["b"\],\s*excludes: \["a"\],?\s*\}/);
   assert.match(app, /\{\s*write: "a",\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
