@@ -309,6 +309,18 @@ export async function proveForegroundScopeIsolation(
       });
       if (committed.type !== "transactionCommitted")
         throw new Error("scope fixture foreground transaction did not commit");
+
+      // First prove that the commit entered the writer's own materialized
+      // view. This separates write/admission failures from propagation to the
+      // independently attached reader below without exposing runtime details.
+      markFailure("scope-isolation-writer-read-failed");
+      await readTodos(
+        openedWriter.runtime,
+        codec,
+        (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
+        undefined,
+        openedWriter.consumeWake,
+      );
     }
 
     markFailure("scope-isolation-open-failed");

@@ -210,6 +210,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   assert.deepEqual(stages, [
     "scope-isolation-open-failed",
     "scope-isolation-write-failed",
+    "scope-isolation-writer-read-failed",
     "scope-isolation-open-failed",
     "scope-isolation-read-failed",
     "scope-isolation-assert-failed",
@@ -265,6 +266,8 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
               if (command[0] === 10) return Uint8Array.of(11, 1);
               if (command[0] === 13) return Uint8Array.of(13);
               if (command[0] === 15) return Uint8Array.of(14, ...new Uint8Array(16).fill(1));
+              if (command[0] === 2) return Uint8Array.of(2, 1);
+              if (command[0] === 3) return rows(true, false);
             } else {
               if (command[0] === 2) return Uint8Array.of(2, 1);
               if (command[0] === 3) {

@@ -50,6 +50,7 @@ static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
     @"scope-isolation-failed",
     @"scope-isolation-open-failed",
     @"scope-isolation-write-failed",
+    @"scope-isolation-writer-read-failed",
     @"scope-isolation-read-failed",
     @"scope-isolation-assert-failed",
     @"auth-switch-failed",
