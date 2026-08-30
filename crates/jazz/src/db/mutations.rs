@@ -2850,10 +2850,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
         let local_tier = if self.node.defer_local_persistence.get() {
-            // Admission stays synchronous, but maintained-view refresh can
-            // suspend on storage. The scheduled owner turn publishes it after
-            // persistence rather than polling cold query work in this write.
-            self.node.queue_local_publication(published, None);
+            self.admit_deferred_local_publication(published, None)
+                .await?;
             DurabilityTier::None
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
@@ -2867,6 +2865,23 @@ where
             local_tier,
             queued_status: None,
         })
+    }
+
+    /// Admit a local publication whose durable storage is owned by a later
+    /// runtime tick. The current-view refresh is part of admission, rather
+    /// than a property of one CRUD entry point: direct writes, mergeable
+    /// commits, and exclusive commits all become resident at this boundary.
+    pub(super) async fn admit_deferred_local_publication(
+        &self,
+        published: PublishedTransaction,
+        upload_unit: Option<SyncMessage>,
+    ) -> Result<(), Error> {
+        // Publication is the synchronous visibility boundary. Refresh resident
+        // subscribers before returning, then let the host tick own suspendable
+        // persistence and later peer visibility.
+        self.refresh_subscriptions().await?;
+        self.node.queue_local_publication(published, upload_unit);
+        Ok(())
     }
 
     pub(super) fn finish_publication_outcome<'a, T: 'a>(

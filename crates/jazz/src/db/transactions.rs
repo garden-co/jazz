@@ -590,7 +590,8 @@ where
             .await?;
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.node.queue_local_publication(published, None);
+            self.admit_deferred_local_publication(published, None)
+                .await?;
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
@@ -1249,7 +1250,8 @@ where
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.node.queue_local_publication(published, Some(unit));
+            self.admit_deferred_local_publication(published, Some(unit))
+                .await?;
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
