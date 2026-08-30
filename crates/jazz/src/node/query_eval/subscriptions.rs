@@ -375,6 +375,24 @@ where
             .insert(binding_view_key);
     }
 
+    #[cfg(test)]
+    pub(crate) fn inject_pending_authoritative_reset_with_program_facts_for_test(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        members: impl IntoIterator<Item = ResultMemberEntry>,
+        program_facts: impl IntoIterator<Item = ProgramFactEntry>,
+        settled_through: GlobalTime,
+    ) {
+        self.inject_pending_authoritative_reset_for_test(
+            binding_view_key,
+            members,
+            settled_through,
+        );
+        self.query
+            .settled_program_facts
+            .insert(binding_view_key, program_facts.into_iter().collect());
+    }
+
     pub(crate) fn take_pending_authoritative_reset_binding_views(
         &mut self,
     ) -> BTreeSet<BindingViewKey> {

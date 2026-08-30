@@ -1076,6 +1076,17 @@ self.database.finish_persistence(persisted)?;
         self.groove_runtime_token
     }
 
+    /// Simulate a live catalogue change that invalidates prepared Groove
+    /// handles without replacing the durable node state.
+    ///
+    /// Production takes this path for changes such as same-version policy
+    /// updates: existing subscriptions must rehydrate against the new runtime
+    /// token while already-received authority state remains available.
+    #[cfg(feature = "testing")]
+    pub(crate) fn invalidate_groove_runtime_for_test(&mut self) {
+        self.groove_runtime_token = crate::node::next_groove_runtime_token();
+    }
+
     /// Return metrics for the most recent committed storage batch, if any.
     pub fn last_commit_metrics(&self) -> Option<&CommitMetrics> {
         self.database.last_commit_metrics()

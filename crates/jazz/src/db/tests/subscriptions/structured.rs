@@ -507,6 +507,95 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     );
 }
 
+/// A structured authority reset can arrive after a live catalogue change has
+/// invalidated the local terminal, but before Groove has rebuilt that
+/// terminal's structured collector. The reset still has authoritative root
+/// rows, so its public occurrence sidecar must be rebuilt from those roots
+/// rather than the intentionally cold local collector.
+#[test]
+fn structured_authoritative_reset_rehydrates_with_cold_occurrence_sidecar() {
+    let schema = relation_schema();
+    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
+    let query = Query::from("users").array_subquery(ArraySubquery::new(
+        "todosViaOwner",
+        "todos",
+        "owner_id",
+        "id",
+    ));
+    let prepared_query = prepared(&db, &query);
+    let opts = ReadOpts::default();
+    let mut subscription = block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
+    let opening = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert!(opening.rows.is_empty(), "the local collector starts cold");
+
+    let binding_view_key = BindingViewKey::new(
+        prepared_query.shape().shape_id(),
+        prepared_query.binding().binding_id(),
+        RegisterShapeOptions {
+            tier: opts.tier,
+            read_view: opts.read_view,
+            ..RegisterShapeOptions::default()
+        }
+        .read_view_key(),
+    );
+    let member = ResultMemberEntry::from(
+        crate::protocol::RealRowMemberEntry::current_content((
+            "users".to_owned().into(),
+            row(0xc2),
+            TxId::new(TxTime::from(42), NodeUuid::from_bytes([0xc2; 16])),
+        ))
+        .with_row_digest(vec![0xc2]),
+    );
+    let payload_descriptor =
+        RecordDescriptor::new([("id", ValueType::Uuid), ("name", ValueType::String)]);
+    let payload = crate::protocol::ProgramFactEntry::ResultPayload(
+        crate::protocol::ResultMemberPayloadEntry {
+            member: member.clone(),
+            descriptor: groove::records::encode_record_descriptor(&payload_descriptor).unwrap(),
+            record: payload_descriptor
+                .create(&[Value::Uuid(row(0xc2).0), Value::String("alice".to_owned())])
+                .unwrap(),
+        },
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .inject_pending_authoritative_reset_with_program_facts_for_test(
+            binding_view_key,
+            [member],
+            [payload],
+            GlobalTime(42),
+        );
+
+    // Same-version policy activation keeps the authority reset but gives the
+    // stream a replacement prepared-runtime token. Do not create local roots
+    // before this reset: the new terminal must be genuinely cold here.
+    db.invalidate_groove_runtime_for_test();
+    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    let mut reset = block_on(subscription.next_raw()).unwrap();
+    while !matches!(reset, SubscriptionEvent::Delta { reset: true, .. }) {
+        reset = block_on(subscription.next_raw()).unwrap();
+    }
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = reset
+    else {
+        panic!("expected rehydrated structured authority reset")
+    };
+    assert!(reset);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![row(0xc2)],
+        "the authoritative root survives the cold structured replacement"
+    );
+}
+
 #[test]
 fn flat_subscription_hydrates_in_declared_root_order() {
     let schema = relation_schema();

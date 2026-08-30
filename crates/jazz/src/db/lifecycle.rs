@@ -7,6 +7,17 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Test-only simulation of a live catalogue change that invalidates
+    /// prepared Groove handles while preserving received authority state.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn invalidate_groove_runtime_for_test(&self) {
+        self.node
+            .node
+            .borrow_mut()
+            .invalidate_groove_runtime_for_test();
+    }
+
     /// Internal test inspection for the retry-payload ownership boundary.
     /// Foreign rejections may be observed for live notification, but they may
     /// not become this database's durable retry payload.
