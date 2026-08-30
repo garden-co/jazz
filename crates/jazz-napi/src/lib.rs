@@ -1876,17 +1876,24 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let options = jazz::db::RestoreOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.restore_attributed(author, &table, row, cells))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.restore_attributed(author, &table, row, cells))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let write = db
+                    .enqueue_restore(table, row, Some(cells), options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                core_write_memory(Rc::clone(db), write)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let write = db
+                    .enqueue_restore(table, row, Some(cells), options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_write_persistent(Rc::clone(db), write)
+            }
         }
     }
 
@@ -3550,28 +3557,29 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => Ok(Tx {
-                db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
-                kind: NapiTxKind::Mergeable,
-                open_tx: Some({
-                    core_block_on(db.begin_mergeable(open_transaction_id))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_transaction_id
-                }),
-                owns_lifetime: true,
-                attributed: false,
-            }),
-            NapiDbInnerStorage::Persistent(db) => Ok(Tx {
-                db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
-                kind: NapiTxKind::Mergeable,
-                open_tx: Some({
-                    core_block_on(db.begin_mergeable(open_transaction_id))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_transaction_id
-                }),
-                owns_lifetime: true,
-                attributed: false,
-            }),
+            NapiDbInnerStorage::Memory(db) => {
+                db.enqueue_begin_mergeable(open_transaction_id, None, None)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                Ok(Tx {
+                    db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
+                    kind: NapiTxKind::Mergeable,
+                    open_tx: Some(open_transaction_id),
+                    owns_lifetime: true,
+                    attributed: false,
+                })
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                db.enqueue_begin_mergeable(open_transaction_id, None, None)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                Ok(Tx {
+                    db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
+                    kind: NapiTxKind::Mergeable,
+                    open_tx: Some(open_transaction_id),
+                    owns_lifetime: true,
+                    attributed: false,
+                })
+            }
         }
     }
 
@@ -3590,28 +3598,29 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => Ok(Tx {
-                db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
-                kind: NapiTxKind::Mergeable,
-                open_tx: Some({
-                    core_block_on(db.begin_mergeable_for_identity(open_transaction_id, author))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_transaction_id
-                }),
-                owns_lifetime: true,
-                attributed: false,
-            }),
-            NapiDbInnerStorage::Persistent(db) => Ok(Tx {
-                db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
-                kind: NapiTxKind::Mergeable,
-                open_tx: Some({
-                    core_block_on(db.begin_mergeable_for_identity(open_transaction_id, author))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                    open_transaction_id
-                }),
-                owns_lifetime: true,
-                attributed: false,
-            }),
+            NapiDbInnerStorage::Memory(db) => {
+                db.enqueue_begin_mergeable(open_transaction_id, Some(author), None)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                Ok(Tx {
+                    db: Some(NapiDbInnerStorage::Memory(Rc::clone(db))),
+                    kind: NapiTxKind::Mergeable,
+                    open_tx: Some(open_transaction_id),
+                    owns_lifetime: true,
+                    attributed: false,
+                })
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                db.enqueue_begin_mergeable(open_transaction_id, Some(author), None)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                Ok(Tx {
+                    db: Some(NapiDbInnerStorage::Persistent(Rc::clone(db))),
+                    kind: NapiTxKind::Mergeable,
+                    open_tx: Some(open_transaction_id),
+                    owns_lifetime: true,
+                    attributed: false,
+                })
+            }
         }
     }
 
