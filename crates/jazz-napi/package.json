@@ -12,6 +12,7 @@
     "index.mjs",
     "index.js",
     "index.d.ts",
+    "close-pollable.cjs",
     "native-binding.cjs",
     "native-binding.pointer.cjs",
     "native-loader.cjs",
@@ -37,7 +38,7 @@
     "build:debug": "node scripts/build.js --debug",
     "build:perf": "node scripts/build.js --profile perf",
     "build:perf:sccache": "RUSTC_WRAPPER=sccache node scripts/build.js --profile perf",
-    "test": "pnpm typecheck:consumer",
+    "test": "node --test tests/*.test.cjs && pnpm typecheck:consumer",
     "typecheck:consumer": "tsc --project tests/types/tsconfig.json"
   },
   "devDependencies": {

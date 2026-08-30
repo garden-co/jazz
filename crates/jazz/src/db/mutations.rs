@@ -724,6 +724,7 @@ where
         column: &str,
         bytes: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let (value, nullable) =
             unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
         match value {
@@ -782,6 +783,7 @@ where
         delete_length: u64,
         insert: Vec<u8>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let (value, nullable) =
             unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
         match value {
@@ -1601,6 +1603,7 @@ where
         cells: &RowCells,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let (kind, _) = self.validate_streaming_column(table, cells, column)?;
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let emitted_for_stage = Rc::clone(&emitted);
@@ -1626,6 +1629,7 @@ where
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         let initialized_now = !upload.initialized;
         if !upload.initialized {
             self.node
@@ -1682,6 +1686,7 @@ where
         &self,
         mut upload: StreamingValueUpload,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         upload.preparation.take();
         self.node
             .node
@@ -1708,6 +1713,7 @@ where
         base: Option<BranchViewBase>,
         attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let attribution_rejection = match attribution {
             Some(author) if author != self.identity.author && !self.backend_attribution => {
                 Some("attribution requires a trusted serving node")

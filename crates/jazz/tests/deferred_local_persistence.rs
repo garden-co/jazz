@@ -6,7 +6,9 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts, StreamingMutationKind,
+};
 use jazz::groove::storage::{ReopenableStorage, TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
@@ -569,6 +571,122 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     let rows = block_on(reopened.all(&query, ReadOpts::default())).expect("read drained writes");
     let titles = rows.iter().map(|row| row.cell_at(0)).collect::<Vec<_>>();
     assert_eq!(titles, vec![Some("second".into()), Some("third".into())]);
+}
+
+#[test]
+fn retained_streaming_uploads_cannot_mutate_storage_after_sibling_owner_close_starts() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let storage_control = storage.clone();
+    let owner = block_on(Db::open_history_complete(DbConfig::new(
+        empty_schema(),
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x5a; 16]),
+            author: AuthorSubject::for_test_bytes([0x6a; 16]),
+        },
+    )))
+    .expect("open yielding owner");
+    let db = block_on(owner.register_schema_view(schema)).expect("register sibling schema view");
+    let cells = Default::default();
+
+    let mut push_upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .expect("begin retained push upload");
+    let mut finish_upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .expect("begin retained finish upload");
+    let mut abort_upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .expect("begin retained abort upload");
+    block_on(db.push_streaming_value_upload(&mut push_upload, b"before close"))
+        .expect("initialize push upload");
+    block_on(db.push_streaming_value_upload(&mut finish_upload, b"before close"))
+        .expect("initialize finish upload");
+    block_on(db.push_streaming_value_upload(&mut abort_upload, b"before close"))
+        .expect("initialize abort upload");
+
+    storage_control.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    db.enqueue_update(
+        "todos".to_owned(),
+        jazz::ids::RowUuid::from_bytes([0x7a; 16]),
+        row! { title: "cold close head" },
+        Default::default(),
+    )
+    .expect("queue cold head");
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut close = Box::pin(owner.close());
+    assert!(matches!(close.as_mut().poll(&mut context), Poll::Pending));
+    control.take_observed();
+
+    let begin_error = match db.begin_streaming_value_upload("todos", &cells, "title") {
+        Ok(_) => panic!("streaming begin after close unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert_eq!(begin_error.code, ErrorCode::WriteRejected);
+    let mut append = Box::pin(db.append_value(
+        "todos",
+        jazz::ids::RowUuid::from_bytes([0x7c; 16]),
+        "title",
+        b"after close".to_vec(),
+    ));
+    let Poll::Ready(Err(append_error)) = append.as_mut().poll(&mut context) else {
+        panic!("append after close must reject before touching cold storage");
+    };
+    assert_eq!(append_error.code, ErrorCode::WriteRejected);
+    let mut splice = Box::pin(db.splice_value(
+        "todos",
+        jazz::ids::RowUuid::from_bytes([0x7d; 16]),
+        "title",
+        0,
+        0,
+        b"after close".to_vec(),
+    ));
+    let Poll::Ready(Err(splice_error)) = splice.as_mut().poll(&mut context) else {
+        panic!("splice after close must reject before touching cold storage");
+    };
+    assert_eq!(splice_error.code, ErrorCode::WriteRejected);
+    assert_eq!(
+        block_on(db.push_streaming_value_upload(&mut push_upload, b"after close"))
+            .expect_err("retained push after close must fail")
+            .code,
+        ErrorCode::WriteRejected,
+    );
+    let finish_error = match block_on(db.finish_streaming_value_upload(
+        finish_upload,
+        StreamingMutationKind::Insert,
+        "todos",
+        jazz::ids::RowUuid::from_bytes([0x7b; 16]),
+        cells.clone(),
+        "title",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )) {
+        Ok(_) => panic!("retained finish after close unexpectedly published"),
+        Err(error) => error,
+    };
+    assert_eq!(finish_error.code, ErrorCode::WriteRejected);
+    assert_eq!(
+        block_on(db.abort_streaming_value_upload(abort_upload))
+            .expect_err("retained abort after close must fail")
+            .code,
+        ErrorCode::WriteRejected,
+    );
+    assert!(
+        control.observed().is_empty(),
+        "post-close streaming calls must not touch journal, chunks, or roots"
+    );
+
+    control.resume();
+    while close.as_mut().poll(&mut context).is_pending() {}
 }
 
 #[test]

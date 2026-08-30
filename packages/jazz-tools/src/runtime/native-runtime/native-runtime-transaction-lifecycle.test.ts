@@ -383,8 +383,11 @@ it("does not let a concurrent close preempt foreground HLC capture", async () =>
   expect(order).toEqual(["high-water", "close"]);
 });
 
-it("keeps polling an owner-retained native close after the first cold turn", async () => {
-  let polls = 0;
+it("awaits the binding-owned native close promise", async () => {
+  let releaseClose!: () => void;
+  const closeGate = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
@@ -392,9 +395,7 @@ it("keeps polling an owner-retained native close after the first cold turn", asy
           foregroundTxTimeHighWater: () => 0n,
           prepareQuery: () => ({}),
           tick: () => undefined,
-          close: () => ({
-            poll: () => (++polls < 2 ? null : new Uint8Array()),
-          }),
+          close: () => closeGate,
         }),
       openBrowser: async () => {
         throw new Error("not used");
@@ -407,8 +408,15 @@ it("keeps polling an owner-retained native close after the first cold turn", asy
     true,
   );
 
-  await runtime.close();
-  expect(polls).toBe(2);
+  let settled = false;
+  const close = runtime.close().then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  releaseClose();
+  await close;
+  expect(settled).toBe(true);
 });
 
 it("waits for every concurrently admitted stream before foreground handoff", async () => {

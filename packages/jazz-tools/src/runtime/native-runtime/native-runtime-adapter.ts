@@ -157,7 +157,7 @@ type NativeDb = {
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
   // owns idempotence, so callers never observe that implementation detail.
-  close?(): void | boolean | Uint8Array | NativeReadResult | Promise<void | boolean>;
+  close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openTransactionId: string, kind: TransactionKind, author?: Uint8Array): void;
   beginTransactionAttributed?(openTransactionId: string, attribution: Uint8Array): void;
@@ -1145,9 +1145,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     await this.coreTickCompletion?.catch(() => undefined);
     this.closeRuntimeState(true);
-    const close = this.db.close?.();
-    if (isPendingNativeRead(close)) await this.awaitNativeClose(close);
-    else await close;
+    await this.db.close?.();
     // wasm-bindgen futures may retain this receiver after logical closure.
     // Its registered finalizer owns physical release; explicit `free()` here
     // creates a second, unsynchronised lifetime and can corrupt the WASM heap.
@@ -2493,14 +2491,6 @@ export class NativeRuntimeAdapter implements Runtime {
       const bytes = result.poll();
       if (bytes !== null) return bytes;
       await this.pumpServerTransport();
-      await sleep(0);
-    }
-  }
-
-  /** Closing owns already-admitted native work after the public runtime is closed. */
-  private async awaitNativeClose(close: PendingNativeRead): Promise<void> {
-    for (;;) {
-      if (close.poll() !== null) return;
       await sleep(0);
     }
   }

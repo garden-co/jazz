@@ -3633,7 +3633,7 @@ impl NapiDb {
         }
     }
 
-    #[napi]
+    #[napi(js_name = "__closePollable")]
     pub fn close(&self) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let inner = self.inner.borrow_mut().take();
         let owns_runtime = self.owns_runtime;
