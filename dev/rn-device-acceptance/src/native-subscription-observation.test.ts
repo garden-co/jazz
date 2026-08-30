@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   nativeSubscriptionDeltaHasRowId,
   nativeSubscriptionDeltaHasRows,
+  nativeSubscriptionDeltaRowIds,
 } from "./native-subscription-observation.ts";
 
 const fixture = JSON.parse(
@@ -32,4 +33,12 @@ test("subscription observation inspects structured added and updated row identit
   // Removed identities also do not prove a newly visible row.
   assert.equal(nativeSubscriptionDeltaHasRowId(encoded, new Uint8Array(16).fill(0x13)), false);
   assert.equal(nativeSubscriptionDeltaHasRows(encoded), true);
+  assert.deepEqual(
+    nativeSubscriptionDeltaRowIds(encoded).map((rowId) => rowId[0]),
+    [0x11, 0x21],
+  );
+  assert.throws(
+    () => nativeSubscriptionDeltaRowIds(encoded.subarray(0, encoded.length - 1)),
+    /postcard|subscription|unexpected/i,
+  );
 });

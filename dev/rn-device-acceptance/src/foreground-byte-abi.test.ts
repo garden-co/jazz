@@ -581,7 +581,9 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     "same-runtime-delta-failed",
     "same-runtime-postcommit-wake-failed",
     "same-runtime-delta-drain-failed",
+    "same-runtime-delta-decode-failed",
     "same-runtime-delta-content-failed",
+    "same-runtime-delta-row-id-failed",
     "same-runtime-unsubscribe-failed",
   ]);
 
@@ -937,8 +939,9 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   );
   assert.ok(noObservationStages.includes("same-runtime-delta-drain-failed"));
   assert.ok(
-    !noObservationStages.includes("same-runtime-delta-content-failed"),
-    "an empty settlement event is not evidence of row-bearing delta content",
+    noObservationStages.includes("same-runtime-delta-content-failed") &&
+      !noObservationStages.includes("same-runtime-delta-row-id-failed"),
+    "an empty settlement decodes but stops before row-identity classification",
   );
 
   committed = false;
@@ -999,7 +1002,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   );
   assert.ok(wrongObservationStages.includes("same-runtime-delta-drain-failed"));
   assert.ok(
-    wrongObservationStages.includes("same-runtime-delta-content-failed"),
+    wrongObservationStages.includes("same-runtime-delta-content-failed") &&
+      wrongObservationStages.includes("same-runtime-delta-row-id-failed"),
     "a title-only payload reaches content diagnostics without satisfying row-id observation",
   );
 });

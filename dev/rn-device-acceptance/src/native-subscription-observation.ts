@@ -8,15 +8,16 @@ export function nativeSubscriptionDeltaHasRowId(
   expectedRowId: Uint8Array,
 ): boolean {
   if (expectedRowId.byteLength !== 16) return false;
-  const delta = readNativeSubscriptionDelta(new PostcardReader(payload));
-  return [...delta.added, ...delta.updated].some((batch) =>
-    batch.rows.some((row) => sameBytes(row.rowId, expectedRowId)),
-  );
+  return nativeSubscriptionDeltaRowIds(payload).some((rowId) => sameBytes(rowId, expectedRowId));
 }
 
 export function nativeSubscriptionDeltaHasRows(payload: Uint8Array): boolean {
+  return nativeSubscriptionDeltaRowIds(payload).length > 0;
+}
+
+export function nativeSubscriptionDeltaRowIds(payload: Uint8Array): Uint8Array[] {
   const delta = readNativeSubscriptionDelta(new PostcardReader(payload));
-  return [...delta.added, ...delta.updated].some((batch) => batch.rows.length > 0);
+  return [...delta.added, ...delta.updated].flatMap((batch) => batch.rows.map((row) => row.rowId));
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

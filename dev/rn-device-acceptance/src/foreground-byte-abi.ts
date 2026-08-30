@@ -8,7 +8,7 @@ import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import {
   nativeSubscriptionDeltaHasRowId,
-  nativeSubscriptionDeltaHasRows,
+  nativeSubscriptionDeltaRowIds,
 } from "./native-subscription-observation.ts";
 
 export type ForegroundByteCodec = {
@@ -269,18 +269,13 @@ export async function proveSameJsiRuntimeWriteSubscription(
         codec,
         openedB.consumeWake,
       );
-      if (
-        events.some(
-          (event) => event.type === "delta" && nativeSubscriptionDeltaHasRows(event.delta),
-        )
-      ) {
-        markFailure("same-runtime-delta-content-failed");
-      }
-      if (
-        events.some(
-          (event) => event.type === "delta" && nativeSubscriptionDeltaHasRowId(event.delta, rowId),
-        )
-      ) {
+      markFailure("same-runtime-delta-decode-failed");
+      const deltas = events.filter((event) => event.type === "delta");
+      const visibleRowIds = deltas.flatMap((event) => nativeSubscriptionDeltaRowIds(event.delta));
+      markFailure("same-runtime-delta-content-failed");
+      if (visibleRowIds.length === 0) continue;
+      markFailure("same-runtime-delta-row-id-failed");
+      if (deltas.some((event) => nativeSubscriptionDeltaHasRowId(event.delta, rowId))) {
         markFailure("same-runtime-unsubscribe-failed");
         const closed = execute(b, {
           type: "unsubscribe",
