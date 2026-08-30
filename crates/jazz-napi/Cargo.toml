@@ -40,3 +40,6 @@ mimalloc-safe = { version = "0.1", features = ["local_dynamic_tls"] }
 
 [build-dependencies]
 napi-build = "2"
+
+[dev-dependencies]
+groove = { workspace = true, default-features = false, features = ["test"] }

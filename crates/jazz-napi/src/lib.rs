@@ -5265,10 +5265,10 @@ mod tests {
         PendingSubscriptionBatchOutcome, PendingSubscriptionBatchPoll, PreparedQuery,
         RestoreOptions, Tx, UpdateOptions, UpsertOptions, authority_epoch_from_bigint,
         close_after_cleanup, core_author_id_from_bytes, core_block_on, core_claim_value_from_json,
-        core_insert_options, core_open_backend_identity, core_open_identity,
-        core_read_opts_from_json, core_read_tier_from_str, core_restore_options,
-        core_subscription_event_to_napi, core_update_options, core_upsert_options,
-        encode_core_subscription_delta, requeue_retryable_subscription_batch,
+        core_drive_direct_mutation_once, core_insert_options, core_open_backend_identity,
+        core_open_identity, core_read_opts_from_json, core_read_tier_from_str,
+        core_restore_options, core_subscription_event_to_napi, core_update_options,
+        core_upsert_options, encode_core_subscription_delta, requeue_retryable_subscription_batch,
         unknown_transaction_kind_message,
     };
 
@@ -5616,6 +5616,7 @@ mod tests {
         );
         drop(active_request);
     }
+    use groove::storage::TestStorage;
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
@@ -5637,6 +5638,117 @@ mod tests {
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
     use std::cell::RefCell;
+
+    /// The direct NAPI mutation surface is intentionally synchronous only for
+    /// its first resident admission turn. This internal receipt needs a
+    /// controlled storage future because neither public NAPI storage adapter
+    /// can be made to yield at one precise write boundary.
+    #[test]
+    fn direct_mutation_admission_polls_yielding_storage_once_and_keeps_fifo() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = jazz::schema::JazzSchema::new(&source)
+            .expect("controlled NAPI mutation fixture schema compiles");
+        let column_families = schema.column_families();
+        let column_families = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let (storage, control) = TestStorage::controlled(&column_families);
+        let author = CoreAuthorSubject::for_test_bytes([0xa7; 16]);
+        let db = Rc::new(
+            core_block_on(CoreDb::open(CoreDbConfig::new(
+                schema,
+                storage,
+                CoreDbIdentity {
+                    node: CoreNodeUuid::from_bytes([0x47; 16]),
+                    author: author.clone(),
+                },
+            )))
+            .expect("controlled NAPI mutation fixture opens"),
+        );
+        let row = CoreRowUuid::from_bytes([0x57; 16]);
+        db.seed_settled_mergeable_for_bootstrap(
+            "items",
+            row,
+            author,
+            BTreeMap::from([("label".to_owned(), CoreValue::String("before".to_owned()))]),
+        )
+        .expect("seed existing row");
+
+        let first = db
+            .enqueue_update(
+                "items".to_owned(),
+                row,
+                BTreeMap::from([("label".to_owned(), CoreValue::String("first".to_owned()))]),
+                Default::default(),
+            )
+            .expect("queue first update");
+        let second = db
+            .enqueue_update(
+                "items".to_owned(),
+                row,
+                BTreeMap::from([("label".to_owned(), CoreValue::String("second".to_owned()))]),
+                Default::default(),
+            )
+            .expect("queue second update");
+
+        let polls_before = control.total_poll_count();
+        core_drive_direct_mutation_once(&db, &first)
+            .expect("a yielding local write stays queued for its normal wait path");
+        assert_eq!(
+            control.total_poll_count(),
+            polls_before + 1,
+            "the synchronous NAPI boundary polls its resident write exactly once"
+        );
+        assert_eq!(
+            core_block_on(first.write_state())
+                .expect("first queued write state")
+                .durability,
+            DurabilityTier::None,
+            "a yielding first write was not completed synchronously"
+        );
+        assert_eq!(
+            core_block_on(second.write_state())
+                .expect("second queued write state")
+                .durability,
+            DurabilityTier::None,
+            "the later queued write did not leapfrog the pending first write"
+        );
+
+        db.drive_queued_mutation_once();
+        assert_eq!(
+            core_block_on(first.wait(DurabilityTier::Local)).expect("first wait resolves later"),
+            first.mergeable_tx_id(),
+            "the original pending operation resolves exactly once through its write handle"
+        );
+        assert_eq!(
+            core_block_on(second.write_state())
+                .expect("second remains queued after first completion")
+                .durability,
+            DurabilityTier::None,
+            "completing the first operation still leaves the FIFO successor untouched"
+        );
+
+        db.drive_queued_mutation_once();
+        db.drive_queued_mutation_once();
+        assert_eq!(
+            core_block_on(second.wait(DurabilityTier::Local)).expect("second wait resolves"),
+            second.mergeable_tx_id(),
+            "the retained FIFO successor eventually completes normally"
+        );
+    }
 
     #[test]
     fn identity_claim_ingress_namespaces_provider_values_and_derives_reserved_fields() {

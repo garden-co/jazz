@@ -591,6 +591,27 @@ describe("forRequest concurrent session isolation", () => {
       { timeout: 10_000 },
     );
 
+    // Existing rows retain their ordinary own-row UPSERT path. The direct
+    // admission turn must not turn all existing-row UPSERTs into synchronous
+    // failures merely to surface a foreign-row denial.
+    await aliceDb
+      .upsert(todoApp.todos, aliceRow.id, {
+        title: "alice-upserted",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.user,
+      })
+      .wait({ tier: "edge" });
+    await vi.waitFor(
+      async () => {
+        const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "edge",
+        });
+        expect(rows.map((row) => row.title)).toEqual(["alice-upserted"]);
+      },
+      { timeout: 10_000 },
+    );
+
     // Cross-user update must be rejected.
     expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
       'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
@@ -611,6 +632,22 @@ describe("forRequest concurrent session isolation", () => {
       }),
     ).toThrow(
       'Upsert failed: WriteError("read policy denied UPSERT on table todos: the operation requires read permission on the target row")',
+    );
+
+    // A synchronous admission denial has no returned write handle. It must be
+    // terminal and quiet: a later permitted write cannot inherit a stale queued
+    // failure from the rejected attempt.
+    await bobDb.update(todoApp.todos, bobRow.id, { title: "bob-still-writable" }).wait({
+      tier: "edge",
+    });
+    await vi.waitFor(
+      async () => {
+        const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
+          tier: "edge",
+        });
+        expect(rows.map((row) => row.title)).toEqual(["bob-still-writable"]);
+      },
+      { timeout: 10_000 },
     );
   }, 30_000);
 
