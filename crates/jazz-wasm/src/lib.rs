@@ -1268,14 +1268,18 @@ impl WasmDb {
         let cells = decode_cells(&cells)?;
         let options = restore_options_from_js(options)?;
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.restore(&table, row_id, Some(cells), options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_restore(table, row_id, Some(cells), options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.restore(&table, row_id, Some(cells), options)).map_err(to_js_error)?,
+                db.enqueue_restore(table, row_id, Some(cells), options)
+                    .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1295,16 +1299,23 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         let author = author_id_from_bytes(&author)?;
+        let options = jazz::db::InsertOptions {
+            row_id: Some(row_id),
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.insert_with_id_attributed(author, &table, row_id, cells))
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_insert(table, cells, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.insert_with_id_attributed(author, &table, row_id, cells))
+                db.enqueue_insert(table, cells, options)
                     .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
@@ -1323,16 +1334,22 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let patch = decode_cells(&patch)?;
         let author = author_id_from_bytes(&author)?;
+        let options = jazz::db::UpdateOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.update_attributed(author, &table, row_id, patch))
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_update(table, row_id, patch, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.update_attributed(author, &table, row_id, patch))
+                db.enqueue_update(table, row_id, patch, options)
                     .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
@@ -1351,16 +1368,22 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         let author = author_id_from_bytes(&author)?;
+        let options = jazz::db::UpsertOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.upsert_attributed(author, &table, row_id, cells))
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_upsert(table, row_id, cells, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.upsert_attributed(author, &table, row_id, cells))
+                db.enqueue_upsert(table, row_id, cells, options)
                     .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
@@ -1377,15 +1400,23 @@ impl WasmDb {
         self.require_trusted_backend()?;
         let row_id = row_uuid_from_bytes(&row_id)?;
         let author = author_id_from_bytes(&author)?;
+        let options = jazz::db::DeleteOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.delete_attributed(author, &table, row_id)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_delete(table, row_id, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.delete_attributed(author, &table, row_id)).map_err(to_js_error)?,
+                db.enqueue_delete(table, row_id, options)
+                    .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1403,16 +1434,22 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         let author = author_id_from_bytes(&author)?;
+        let options = jazz::db::RestoreOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.restore_attributed(author, &table, row_id, cells))
-                    .map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_restore(table, row_id, Some(cells), options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.restore_attributed(author, &table, row_id, cells))
+                db.enqueue_restore(table, row_id, Some(cells), options)
                     .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),

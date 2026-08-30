@@ -586,6 +586,30 @@ where
         );
         Ok(self.queued_write_handle(row, tx_id, status))
     }
+
+    #[doc(hidden)]
+    pub fn enqueue_restore(
+        &self,
+        table: String,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        mut options: RestoreOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.restore(&table, row, cells, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status))
+    }
     /// Read a byte range from an ordinary bytes or string cell without
     /// exposing its physical representation. Inline and indirect cells share
     /// this API; only the intersecting chunk paths are requested.

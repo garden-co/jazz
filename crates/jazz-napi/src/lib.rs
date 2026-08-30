@@ -1717,16 +1717,19 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.restore(&table, row_id, cells, options))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.restore(&table, row_id, cells, options))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let write = db
+                    .enqueue_restore(table, row_id, cells, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                core_write_memory(Rc::clone(db), write)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let write = db
+                    .enqueue_restore(table, row_id, cells, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_write_persistent(Rc::clone(db), write)
+            }
         }
     }
 
