@@ -486,6 +486,7 @@ where
             now_ms,
             refresh_parents_at_commit: false,
             known_fresh_row: false,
+            verified_inherited_cells: None,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
@@ -575,6 +576,42 @@ where
         branch: BranchSelector,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
+        self.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            cells,
+            deletion,
+            parents,
+            now_ms,
+            refresh_parents_at_commit,
+            branch,
+            known_fresh_row,
+            None,
+        )
+    }
+
+    /// Stage a branch-local replacement whose unchanged cells were read from
+    /// a visible branch-view base. Commit construction reuses an indirect
+    /// descriptor only when its final cell still exactly matches this private
+    /// engine provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, Value>,
+        deletion: Option<DeletionEvent>,
+        parents: Vec<TxId>,
+        now_ms: Option<u64>,
+        refresh_parents_at_commit: bool,
+        branch: BranchSelector,
+        known_fresh_row: bool,
+        verified_inherited_cells: Option<BTreeMap<String, Value>>,
+    ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -599,6 +636,7 @@ where
                 now_ms,
                 refresh_parents_at_commit,
                 known_fresh_row,
+                verified_inherited_cells,
             },
         )
     }
@@ -692,6 +730,7 @@ where
                 now_ms,
                 refresh_parents_at_commit: false,
                 known_fresh_row: false,
+                verified_inherited_cells: None,
             },
         )
     }
@@ -713,6 +752,14 @@ where
                     && write.deletion.is_none()
             }) {
                 pending.known_fresh_row |= existing.known_fresh_row;
+                // A patch extends a previously materialized branch-view
+                // replacement, so it keeps its engine-proven preimage. A
+                // later complete replacement deliberately replaces that proof.
+                if matches!(pending.cells, PendingCells::Patch(_))
+                    && pending.verified_inherited_cells.is_none()
+                {
+                    pending.verified_inherited_cells = existing.verified_inherited_cells.clone();
+                }
                 let cells = match (&existing.cells, &pending.cells) {
                     (PendingCells::Replace(existing), PendingCells::Patch(patch)) => {
                         let mut cells = existing.clone();
@@ -1136,6 +1183,9 @@ where
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
+            if let Some(inherited) = write.verified_inherited_cells.as_ref() {
+                commit = commit.verified_inherited_large_cells(inherited);
+            }
             if let Some(authored_columns) = authored_columns {
                 commit = commit.authored_columns(authored_columns);
             }
@@ -1543,6 +1593,9 @@ pub(super) struct PendingWrite {
     /// The production UUID source generated this staged insert's id, so it may
     /// use the trusted fresh-coordinate fast path.
     pub(super) known_fresh_row: bool,
+    /// Engine-private cells read from a branch-view base while creating the
+    /// first target-branch overlay. This never originates in public input.
+    verified_inherited_cells: Option<BTreeMap<String, Value>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

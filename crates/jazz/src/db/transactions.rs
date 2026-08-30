@@ -231,11 +231,38 @@ where
         now_ms: Option<u64>,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            branch,
+            row,
+            cells,
+            now_ms,
+            known_fresh_row,
+            None,
+        )
+        .await
+    }
+
+    /// Stage an exact branch write and, only for a branch-view fallback, carry
+    /// the engine-read base cells that may safely retain indirect values.
+    #[allow(clippy::too_many_arguments)]
+    async fn stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+        known_fresh_row: bool,
+        verified_inherited_cells: Option<RowCells>,
+    ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
-        node.tx_write_mergeable_in_schema_and_branch(
+        node.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
             tx_id,
             self.schema_version_id,
             table,
@@ -247,6 +274,7 @@ where
             false,
             branch,
             known_fresh_row,
+            verified_inherited_cells,
         )?;
         Ok(())
     }
@@ -337,9 +365,19 @@ where
                 format!("row is not visible in branch view: {}", row.0),
             ));
         };
+        let verified_inherited_cells = inherited.clone();
         inherited.extend(patch);
-        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms, false)
-            .await
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            head,
+            row,
+            inherited,
+            now_ms,
+            false,
+            Some(verified_inherited_cells),
+        )
+        .await
     }
 
     pub(super) async fn require_mergeable_transaction_upsert_visibility(

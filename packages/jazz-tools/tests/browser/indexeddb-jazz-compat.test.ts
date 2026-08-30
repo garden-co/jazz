@@ -180,8 +180,18 @@ describe("browser Jazz storage compatibility corpus", () => {
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
     await sleep(100);
-    expect(normalizeRuntimeLeaseRecords(await rawRecords(physicalDbName))).toEqual(
+    const rawAfterReadOnlyInspection = await rawRecords(physicalDbName);
+    expectCleanForegroundLeaseHandoff(rawBeforeReadOnlyInspection, rawAfterReadOnlyInspection);
+    expect(normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)).toEqual(
       normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
+    );
+
+    // This planted high-water regression must remain visible through the raw
+    // receipt. In particular, normalization may hide a fresh opaque lease
+    // token, but never a node identity, retired set, or HLC floor.
+    const plantedLeaseRegression = corruptReusableLeaseHighWater(rawAfterReadOnlyInspection);
+    expect(normalizeRuntimeLeaseRecords(plantedLeaseRegression)).not.toEqual(
+      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
     );
   }, 90_000);
 
@@ -297,21 +307,120 @@ async function rawRecords(name: string): Promise<Record<string, string>> {
 
 /**
  * A clean foreground shutdown returns its node lease to the durable owner;
- * reopening claims it again. That coordination record is intentionally
- * rewritten across a restart, unlike the replica pages and storage epoch this
- * compatibility corpus is protecting.
+ * reopening claims it again. Only the opaque random lease token is expected
+ * to change. Node identity, HLC high-water, and retired-node history remain
+ * part of the durable compatibility surface.
  */
 function normalizeRuntimeLeaseRecords(records: Record<string, string>): Record<string, string> {
-  const manifest = JSON.parse(records[INDEXEDDB_STORAGE_MANIFEST_STORE] ?? "[]") as [
-    string,
-    unknown,
-  ][];
+  const manifest = rawManifest(records);
   return {
     ...records,
     [INDEXEDDB_STORAGE_MANIFEST_STORE]: JSON.stringify(
-      manifest.filter(([key]) => key !== "foreground-node-leases-v1"),
+      manifest.map(([key, value]) =>
+        key === "foreground-node-leases-v1"
+          ? [key, normalizeForegroundNodeLeasePool(value)]
+          : [key, value],
+      ),
     ),
   };
+}
+
+type RawForegroundNodeLease = {
+  leaseId: string;
+  node: unknown;
+  confirmedTxTime: string;
+};
+
+type RawForegroundNodeLeasePool = {
+  format: string;
+  active: RawForegroundNodeLease[];
+  reusable: RawForegroundNodeLease[];
+  retired: unknown[];
+};
+
+function rawManifest(records: Record<string, string>): [string, unknown][] {
+  const manifest = JSON.parse(records[INDEXEDDB_STORAGE_MANIFEST_STORE] ?? "[]") as unknown;
+  if (!Array.isArray(manifest) || !manifest.every(isRawManifestEntry)) {
+    throw new Error("expected raw IndexedDB manifest entries");
+  }
+  return manifest;
+}
+
+function isRawManifestEntry(value: unknown): value is [string, unknown] {
+  return Array.isArray(value) && value.length === 2 && typeof value[0] === "string";
+}
+
+function foregroundNodeLeasePool(records: Record<string, string>): RawForegroundNodeLeasePool {
+  const entry = rawManifest(records).find(([key]) => key === "foreground-node-leases-v1");
+  if (!entry || !isRawForegroundNodeLeasePool(entry[1])) {
+    throw new Error("expected a valid raw foreground-node lease pool");
+  }
+  return entry[1];
+}
+
+function isRawForegroundNodeLeasePool(value: unknown): value is RawForegroundNodeLeasePool {
+  if (!value || typeof value !== "object") return false;
+  const pool = value as Partial<RawForegroundNodeLeasePool>;
+  return (
+    typeof pool.format === "string" &&
+    Array.isArray(pool.active) &&
+    Array.isArray(pool.reusable) &&
+    Array.isArray(pool.retired) &&
+    [...pool.active, ...pool.reusable].every(isRawForegroundNodeLease)
+  );
+}
+
+function isRawForegroundNodeLease(value: unknown): value is RawForegroundNodeLease {
+  if (!value || typeof value !== "object") return false;
+  const lease = value as Partial<RawForegroundNodeLease>;
+  return (
+    typeof lease.leaseId === "string" &&
+    typeof lease.confirmedTxTime === "string" &&
+    lease.node !== undefined
+  );
+}
+
+function normalizeForegroundNodeLeasePool(value: unknown): RawForegroundNodeLeasePool {
+  if (!isRawForegroundNodeLeasePool(value)) {
+    throw new Error("expected a valid raw foreground-node lease pool");
+  }
+  const normalizeLease = ({ leaseId: _leaseId, ...lease }: RawForegroundNodeLease) => ({
+    ...lease,
+    leaseId: "<opaque-random-lease-id>",
+  });
+  return {
+    ...value,
+    active: value.active.map(normalizeLease),
+    reusable: value.reusable.map(normalizeLease),
+  };
+}
+
+function expectCleanForegroundLeaseHandoff(
+  beforeRecords: Record<string, string>,
+  afterRecords: Record<string, string>,
+): void {
+  const before = foregroundNodeLeasePool(beforeRecords);
+  const after = foregroundNodeLeasePool(afterRecords);
+  expect(before.active).toEqual([]);
+  expect(after.active).toEqual([]);
+  expect(before.reusable).toHaveLength(1);
+  expect(after.reusable).toHaveLength(1);
+  expect(after.reusable[0]!.leaseId).not.toBe(before.reusable[0]!.leaseId);
+  expect(after.reusable[0]!.node).toEqual(before.reusable[0]!.node);
+  expect(after.reusable[0]!.confirmedTxTime).toBe(before.reusable[0]!.confirmedTxTime);
+  expect(after.retired).toEqual(before.retired);
+}
+
+function corruptReusableLeaseHighWater(records: Record<string, string>): Record<string, string> {
+  const corrupted = { ...records };
+  const manifest = rawManifest(corrupted);
+  const entry = manifest.find(([key]) => key === "foreground-node-leases-v1");
+  if (!entry || !isRawForegroundNodeLeasePool(entry[1]) || entry[1].reusable.length !== 1) {
+    throw new Error("expected one reusable foreground-node lease to corrupt");
+  }
+  entry[1].reusable[0]!.confirmedTxTime = "0";
+  corrupted[INDEXEDDB_STORAGE_MANIFEST_STORE] = JSON.stringify(manifest);
+  return corrupted;
 }
 
 async function replaceManifest(name: string, manifest: unknown): Promise<void> {
@@ -328,6 +437,12 @@ function serializeRawRecord(value: unknown): unknown {
   if (value instanceof ArrayBuffer) return Array.from(new Uint8Array(value));
   if (ArrayBuffer.isView(value)) {
     return Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  }
+  if (Array.isArray(value)) return value.map(serializeRawRecord);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, serializeRawRecord(nested)]),
+    );
   }
   return value;
 }

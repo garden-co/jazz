@@ -199,6 +199,159 @@ fn exclusive_transactions_lower_oversized_scalars_before_publication() {
     assert!(error.message.contains("unverified large-value descriptor"));
 }
 
+/// A branch-view update starts a physical overlay with every visible base
+/// cell. Its untouched large descriptor is engine-derived, while a descriptor
+/// from another source remains untrusted even if both have the same shape.
+#[test]
+fn mergeable_branch_view_tx_retains_only_exact_inherited_large_values() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("branch", PublicColumnType::Text)
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .branch_by("branch"),
+        ),
+    );
+    let db = open_db(0x4f, AuthorSubject::SYSTEM, &schema);
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+    });
+    let main = BranchSelector::new([("branch", Value::String("main".to_owned()))]);
+    let draft = BranchSelector::new([("branch", Value::String("draft".to_owned()))]);
+    let target_row = row(0x4f);
+    let body = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 1);
+    let seeded = db
+        .insert(
+            "documents",
+            BTreeMap::from([
+                ("branch".to_owned(), Value::String("main".to_owned())),
+                ("title".to_owned(), Value::String("base".to_owned())),
+                ("body".to_owned(), Value::String(body)),
+            ]),
+            InsertOptions {
+                row_id: Some(target_row),
+                target: ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    block_on(seeded.wait(DurabilityTier::Local)).unwrap();
+    let other = row(0x50);
+    let other_seeded = db
+        .insert(
+            "documents",
+            BTreeMap::from([
+                ("branch".to_owned(), Value::String("main".to_owned())),
+                ("title".to_owned(), Value::String("other".to_owned())),
+                (
+                    "body".to_owned(),
+                    Value::String("y".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 2)),
+                ),
+            ]),
+            InsertOptions {
+                row_id: Some(other),
+                target: ExactWriteTarget::Branch(main.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    block_on(other_seeded.wait(DurabilityTier::Local)).unwrap();
+    let inherited = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .visible_current_physical_cells_in_branch_schema(
+                db.schema_version_id,
+                "documents",
+                &main,
+                target_row,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    });
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.update(
+        "documents",
+        target_row,
+        BTreeMap::from([("title".to_owned(), Value::String("draft".to_owned()))]),
+        UpdateOptions {
+            target: WriteTarget::BranchView {
+                head: draft.clone(),
+                base: Some(BranchViewBase::Current(main.clone())),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let draft_cells = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .visible_current_physical_cells_in_branch_schema(
+                db.schema_version_id,
+                "documents",
+                &draft,
+                target_row,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(draft_cells.get("body"), inherited.get("body"));
+
+    let unrelated = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .visible_current_physical_cells_in_branch_schema(
+                db.schema_version_id,
+                "documents",
+                &main,
+                other,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .remove("body")
+            .unwrap()
+    });
+    assert!(matches!(unrelated, Value::Large(_)));
+    let forged = MergeableCommit::new("documents", target_row, 1)
+        .branch(draft)
+        .cells(BTreeMap::from([("body".to_owned(), unrelated)]))
+        .verified_inherited_large_cells(&inherited);
+    let result = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .seal_inherited_large_values(forged, db.schema_version_id, true)
+            .await
+    });
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("cross-source descriptor must remain unverified"),
+    };
+    assert!(matches!(
+        error,
+        crate::node::Error::InvalidMergeableCommit(
+            "row update contains an unverified large-value descriptor"
+        )
+    ));
+}
+
 #[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
