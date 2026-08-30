@@ -10,14 +10,14 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts, SubscriptionEvent,
     TickScheduler, TickUrgency, Transport, block_on,
 };
-use jazz::groove::records::Value;
+use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::node::CurrentRow;
 use jazz::protocol::{
     RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
-use jazz::query::{BindingId, OrderDirection, Query, col, eq, lit};
+use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, TransactionId,
@@ -1829,6 +1829,178 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
         )),
         "fresh included Edge subscription must publish the authority result, got {events:?}"
     );
+}
+
+/// A cold browser foreground must finish one complete structured authority
+/// reset when the worker already has no local query runtime for the new Edge
+/// usage site. Alice's main runtime opens a bounded ordered message relation;
+/// the worker relays Core's one reset, which contains both the root members and
+/// the profile facts required to materialize the nested `sender` records.
+///
+/// ```text
+/// alice main ──Edge structured subscribe──► worker ──Global──► core
+/// alice main ◄──complete reset (roots + sender facts)── worker ◄── core
+/// ```
+#[test]
+fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
+    let schema = included_relation_schema();
+    let alice = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let main_thread = open_db(0x24, alice, &schema);
+    let worker = open_db(0x34, alice, &schema);
+    let core = open_core(0x44, &schema);
+    main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner();
+    let scheduler = Rc::new(CountingScheduler::default());
+    worker.set_tick_scheduler(Some(scheduler.clone()));
+
+    let seeder = open_db(0x54, alice, &schema);
+    let (seeder_transport, core_seed_transport) = duplex();
+    let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
+    let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let mut messages = Vec::new();
+    let mut sender_names = Vec::new();
+    for created in 1..=5 {
+        let sender_name = format!("structured sender {created}");
+        let profile = seeder
+            .insert(
+                "profiles",
+                BTreeMap::from([("name".to_owned(), Value::String(sender_name.clone()))]),
+                Default::default(),
+            )
+            .expect("seed structured sender profile");
+        messages.push(
+            seeder
+                .insert(
+                    "messages",
+                    BTreeMap::from([
+                        ("author".to_owned(), Value::Uuid(profile.row_uuid().0)),
+                        (
+                            "body".to_owned(),
+                            Value::String(format!("cold structured message {created}")),
+                        ),
+                        ("created".to_owned(), Value::U64(created)),
+                    ]),
+                    Default::default(),
+                )
+                .expect("seed structured message"),
+        );
+        sender_names.push(sender_name);
+    }
+    for _ in 0..8 {
+        seeder.tick().expect("upload structured fixture");
+        core.tick().expect("accept structured fixture");
+        seeder.tick().expect("settle structured fixture");
+    }
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    let query = main_thread
+        .prepare_query(
+            &Query::from("messages")
+                .array_subquery(ArraySubquery::new("sender", "profiles", "id", "author"))
+                .order_by("created", OrderDirection::Desc)
+                .limit(21),
+        )
+        .expect("prepare cold structured Edge query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe through cold worker relay");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the provisional structured opening must wait for the authority reset"
+    );
+
+    let mut authority_update_scheduled = false;
+    for _ in 0..8 {
+        main_thread
+            .tick()
+            .expect("register structured worker coverage");
+        worker
+            .tick()
+            .expect("forward structured authority coverage");
+        core.tick().expect("serve structured authority reset");
+        let schedules_before = scheduler.calls.get();
+        worker.tick().expect("relay structured authority reset");
+        authority_update_scheduled |= scheduler.calls.get() > schedules_before;
+        main_thread
+            .tick()
+            .expect("apply complete structured authority reset");
+    }
+
+    assert!(
+        authority_update_scheduled,
+        "the worker must schedule its post-reset Edge serve pass"
+    );
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    let resets = events
+        .iter()
+        .filter(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resets.len(),
+        1,
+        "the bounded owner turns must publish exactly one reset, got {events:?}"
+    );
+    let reset = resets[0];
+    let SubscriptionEvent::Delta {
+        settled,
+        added,
+        updated,
+        removed,
+        ..
+    } = reset
+    else {
+        unreachable!("the reset was matched above")
+    };
+    assert!(*settled, "the single reset must settle the Edge receipt");
+    assert!(updated.is_empty(), "a reset cannot carry root updates");
+    assert!(
+        removed.is_empty(),
+        "a fresh reset cannot remove prior roots"
+    );
+    assert_eq!(added.len(), messages.len());
+    assert_eq!(
+        added
+            .iter()
+            .map(|row| row.row.row_uuid())
+            .collect::<Vec<_>>(),
+        messages
+            .iter()
+            .rev()
+            .map(|message| message.row_uuid())
+            .collect::<Vec<_>>(),
+        "the complete reset must preserve the authority's descending root order"
+    );
+    for (root, expected_sender) in added.iter().zip(sender_names.iter().rev()) {
+        let (descriptor, raw) = root.row.encoded_record();
+        let record = BorrowedRecord::new(raw, descriptor);
+        let Value::Array(sender) = record.get("sender").expect("nested sender field") else {
+            panic!("the reset must materialize sender as a nested array")
+        };
+        assert_eq!(
+            sender.len(),
+            1,
+            "root {:?} must retain exactly one sender fact",
+            root.row.row_uuid()
+        );
+        let Value::Record(sender) = &sender[0] else {
+            panic!("the nested sender must be a record")
+        };
+        assert!(matches!(
+            sender.get("name"),
+            Ok(Value::String(name)) if name == *expected_sender
+        ));
+    }
 }
 
 /// A reopened browser tab receives a new Edge receipt after the persistent
