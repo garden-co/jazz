@@ -1724,10 +1724,10 @@ impl ClientDbInner {
                             .iter()
                             .map(|row| row.occurrence_id.clone())
                             .collect();
-                        let reset_updates_tracked_row = updated.iter().any(|updated| {
+                        let reset_updates_tracked_row = added.iter().chain(&updated).any(|row| {
                             current_rows
                                 .iter()
-                                .any(|current| current.occurrence_id == updated.occurrence_id)
+                                .any(|current| current.occurrence_id == row.occurrence_id)
                         });
                         let reset_replaces_initial_view =
                             initial_hydration && reset && !reset_updates_tracked_row;
@@ -1748,12 +1748,17 @@ impl ClientDbInner {
                                     .iter()
                                     .any(|removed| removed.occurrence_id == row.occurrence_id)
                             })
-                            .map(|row| row.occurrence_id.clone())
-                            .collect::<std::collections::BTreeSet<_>>();
-                        let (effective_added, effective_updated) =
-                            normalize_subscription_updates(surviving_rows, added, updated, |row| {
-                                &row.occurrence_id
-                            });
+                            .map(|row| (row.occurrence_id.clone(), row.index))
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        let (effective_added, effective_updated) = normalize_subscription_updates(
+                            surviving_rows,
+                            added,
+                            updated,
+                            |row| &row.occurrence_id,
+                            |row, previous_index| {
+                                row.previous_index.get_or_insert(previous_index);
+                            },
+                        );
                         let change_delta = if reset_replaces_initial_view {
                             None
                         } else {
@@ -1926,20 +1931,30 @@ impl ClientDbInner {
 /// additions. A relay replacement may cross a locally retracted aggregate
 /// member, so public streams may never observe that as an update.
 fn normalize_subscription_updates<T>(
-    surviving: std::collections::BTreeSet<OutputOccurrenceId>,
-    mut added: Vec<T>,
+    surviving: std::collections::BTreeMap<OutputOccurrenceId, usize>,
+    added: Vec<T>,
     updated: Vec<T>,
     occurrence_id: impl Fn(&T) -> &OutputOccurrenceId,
+    mut retain_previous_index: impl FnMut(&mut T, usize),
 ) -> (Vec<T>, Vec<T>) {
+    let mut effective_added = Vec::new();
     let mut effective_updated = Vec::new();
-    for row in updated {
-        if surviving.contains(occurrence_id(&row)) {
+    for mut row in added {
+        if let Some(previous_index) = surviving.get(occurrence_id(&row)).copied() {
+            retain_previous_index(&mut row, previous_index);
             effective_updated.push(row);
         } else {
-            added.push(row);
+            effective_added.push(row);
         }
     }
-    (added, effective_updated)
+    for row in updated {
+        if surviving.contains_key(occurrence_id(&row)) {
+            effective_updated.push(row);
+        } else {
+            effective_added.push(row);
+        }
+    }
+    (effective_added, effective_updated)
 }
 
 /// Transaction-scoped Jazz client handle.
@@ -3788,23 +3803,35 @@ mod tests {
         let held = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(1)));
         let crossed = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(2)));
         let (added, updated) = normalize_subscription_updates(
-            std::collections::BTreeSet::from([held.clone()]),
-            Vec::<OutputOccurrenceId>::new(),
-            vec![crossed.clone()],
-            |id| id,
+            std::collections::BTreeMap::from([(held.clone(), 7)]),
+            Vec::<(OutputOccurrenceId, Option<usize>)>::new(),
+            vec![(crossed.clone(), None)],
+            |row| &row.0,
+            |row, previous_index| row.1 = Some(previous_index),
         );
 
-        assert_eq!(added, vec![crossed]);
+        assert_eq!(added, vec![(crossed, None)]);
         assert!(updated.is_empty());
 
         let (added, updated) = normalize_subscription_updates(
-            std::collections::BTreeSet::from([held.clone()]),
-            Vec::<OutputOccurrenceId>::new(),
-            vec![held.clone()],
-            |id| id,
+            std::collections::BTreeMap::from([(held.clone(), 7)]),
+            Vec::<(OutputOccurrenceId, Option<usize>)>::new(),
+            vec![(held.clone(), Some(7))],
+            |row| &row.0,
+            |row, previous_index| row.1 = Some(previous_index),
         );
         assert!(added.is_empty());
-        assert_eq!(updated, vec![held]);
+        assert_eq!(updated, vec![(held.clone(), Some(7))]);
+
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeMap::from([(held.clone(), 7)]),
+            vec![(held.clone(), None)],
+            Vec::<(OutputOccurrenceId, Option<usize>)>::new(),
+            |row| &row.0,
+            |row, previous_index| row.1 = Some(previous_index),
+        );
+        assert!(added.is_empty());
+        assert_eq!(updated, vec![(held, Some(7))]);
     }
 
     #[test]
