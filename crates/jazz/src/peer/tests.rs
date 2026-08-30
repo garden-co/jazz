@@ -3102,7 +3102,7 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     // binding.
     assert_eq!(metrics.footprint.version_identities, 0);
     assert_eq!(metrics.footprint.version_tx_entries, 0);
-    assert_eq!(metrics.footprint.replacement_entries, 0);
+    assert_eq!(metrics.footprint.replacement_entries, 1);
 
     // Flat subscriptions release this duplicate collector after the reset, but
     // membership/version witnesses must still publish a later removal and a
@@ -3165,6 +3165,85 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
         peer.query_update(&mut core, &shape, &binding).unwrap(),
         vec![("todos", row(0x51), restored_tx)],
         vec![],
+    );
+}
+
+#[test]
+fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
+    let query_schema = schema.clone();
+    let (_dir, mut core) = open_node_with_schema(node(0x99), schema);
+    let first = row(0x9a);
+    let second = row(0x9b);
+    let first_tx = core
+        .commit_mergeable_settled(MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")))
+        .unwrap();
+    accept_global(&mut core, first_tx, 1);
+    let second_tx = core
+        .commit_mergeable_settled(MergeableCommit::new("todos", second, 1_001).cells(title_cells("match")))
+        .unwrap();
+    accept_global(&mut core, second_tx, 2);
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("title")))
+        .validate(&query_schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("match".to_owned()),
+        )]))
+        .unwrap();
+    let mut peer = PeerState::new();
+    peer.set_ship_complete_exclusive_payloads(true);
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+    let tx = OpenTransactionId::new();
+    core.open_exclusive(tx).unwrap();
+    core.tx_write(tx, "todos", first, title_cells("other"), None)
+        .unwrap();
+    core.tx_write(tx, "todos", second, title_cells("other"), None)
+        .unwrap();
+    let unrelated = row(0x9c);
+    core.tx_write(
+        tx,
+        "users",
+        unrelated,
+        BTreeMap::from([("name".to_owned(), Value::String("unrelated".to_owned()))]),
+        None,
+    )
+    .unwrap();
+    let (replacement_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_002).unwrap();
+    accept_global(&mut core, replacement_tx, 3);
+
+    let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        update.clone(),
+        Vec::new(),
+        vec![("todos", first, first_tx), ("todos", second, second_tx)],
+    );
+    let bundles = version_bundles_for_update(&update);
+    assert_eq!(bundles.len(), 1);
+    assert_eq!(bundles[0].tx.tx_id, replacement_tx);
+    assert_eq!(
+        bundles[0].scope,
+        crate::protocol::VersionBundleScope::CompleteTransaction
+    );
+    assert_eq!(bundles[0].versions.len(), 3);
+    assert_eq!(
+        bundles[0]
+            .versions
+            .iter()
+            .map(|version| (version.table().to_owned(), version.row_uuid()))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            ("todos".to_owned(), first),
+            ("todos".to_owned(), second),
+            ("users".to_owned(), unrelated),
+        ]),
     );
 }
 

@@ -957,9 +957,6 @@ where
             output_request
                 .facts
                 .remove(&ProgramFactKey::VersionWitnesses);
-            output_request
-                .facts
-                .remove(&ProgramFactKey::ReplacementWitnesses);
         }
         Ok(QueryProgramRequest {
             authorization_mode,
@@ -3344,12 +3341,7 @@ where
             .request
             .output
             .facts
-            .contains(&ProgramFactKey::VersionWitnesses)
-            && !program
-                .request
-                .output
-                .facts
-                .contains(&ProgramFactKey::ReplacementWitnesses);
+            .contains(&ProgramFactKey::VersionWitnesses);
         let inline_content_branch_keys = program
             .request
             .reads
