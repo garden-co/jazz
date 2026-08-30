@@ -1438,12 +1438,12 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-/// Complete an operation only when every dependency is already resident.
+/// Assert that an internal resident-only operation completes in one poll.
 ///
-/// This is the compatibility boundary for synchronous host facades. Unlike
-/// [`block_on`], it never spins a thread-affine future after that future has
-/// reported `Pending`: persistent hosts must retain and drive the equivalent
-/// async operation from their owner turn instead.
+/// Unlike [`block_on`], it never spins a thread-affine future after that future
+/// has reported `Pending`. Cold-capable hosts must expose and await an async
+/// operation instead of using this as a retry protocol.
+#[doc(hidden)]
 pub fn try_ready<F, T>(future: F) -> Result<T, Error>
 where
     F: Future<Output = Result<T, Error>>,
@@ -1455,7 +1455,7 @@ where
         Poll::Ready(result) => result,
         Poll::Pending => Err(Error::new(
             ErrorCode::ColdMutationRequiresAsync,
-            "mutation requires non-resident state; retry through the asynchronous mutation API",
+            "internal resident-only mutation boundary reached non-resident state",
         )),
     }
 }
@@ -2549,8 +2549,7 @@ pub enum ErrorCode {
     Backpressure,
     /// Requested observation is not locally available in this slice.
     NotObserved,
-    /// A synchronous mutation reached non-resident state and must be retried
-    /// through an owner-driven asynchronous host operation.
+    /// An internal resident-only mutation assertion reached non-resident state.
     ColdMutationRequiresAsync,
     /// Historical read must be evaluated by a complete-history server.
     HistoricalReadRequiresServer,

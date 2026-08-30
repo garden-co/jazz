@@ -4273,7 +4273,7 @@ fn to_js_error(error: impl std::fmt::Display) -> JsValue {
 #[cfg(target_arch = "wasm32")]
 fn cold_mutation_requires_async() -> JsValue {
     JsValue::from_str(
-        "ColdMutationRequiresAsync: persistent browser mutations must use the owner-driven asynchronous mutation API",
+        "ColdMutationRequiresAsync: internal synchronous mutation wiring was used for a cold-capable browser database",
     )
 }
 
