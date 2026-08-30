@@ -82,6 +82,7 @@ use jazz::ids::{
 };
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
+    PermissionAdvice as CorePermissionAdvice, PermissionAdviceAction as CorePermissionAdviceAction,
     ReadViewSpec as CoreReadViewSpec,
 };
 use jazz::query::{
@@ -339,6 +340,15 @@ pub struct PendingNativeRead {
     future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
 }
 
+/// A JavaScript-thread-owned permission preflight which is waiting for an
+/// authenticated upstream authority.  Like pending reads, this remains on the
+/// owning JavaScript thread: NAPI's worker-pool promises require `Send`, while
+/// the request future deliberately owns thread-affine connection state.
+#[napi]
+pub struct PendingNativePermissionAdvice {
+    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<String>>>>>,
+}
+
 /// Thread-affine large-value mutation setup which is waiting for local or
 /// routed chunks. The completed value is the ordinary write receipt.
 #[napi]
@@ -504,6 +514,37 @@ impl PendingNativeRead {
     }
 }
 
+impl PendingNativePermissionAdvice {
+    fn new(future: LocalBoxFuture<'static, napi::Result<String>>) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+
+    fn poll_once(&self) -> napi::Result<Option<String>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending permission advice is already complete",
+            ));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+
+    fn cancel_inner(&self) {
+        // Dropping PermissionAdviceFuture removes only its opaque waiter and
+        // makes late/replayed authority responses inert.
+        self.future.borrow_mut().take();
+    }
+}
+
 #[napi]
 impl PendingNativeSubscriptionBatch {
     /// The host should wait this bounded delay before asking the subscription
@@ -530,6 +571,19 @@ impl PendingNativeRead {
     }
 }
 
+#[napi]
+impl PendingNativePermissionAdvice {
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<String>> {
+        self.poll_once()
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancel_inner();
+    }
+}
+
 fn native_read_or_pending(
     future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
 ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
@@ -548,6 +602,25 @@ fn native_write_or_pending(
         Some(write) => Ok(Either::A(write)),
         None => Ok(Either::B(pending)),
     }
+}
+
+fn native_permission_advice_or_pending(
+    future: LocalBoxFuture<'static, napi::Result<String>>,
+) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+    let pending = PendingNativePermissionAdvice::new(future);
+    match pending.poll_once()? {
+        Some(advice) => Ok(Either::A(advice)),
+        None => Ok(Either::B(pending)),
+    }
+}
+
+fn permission_advice_for_js(advice: CorePermissionAdvice) -> String {
+    match advice {
+        CorePermissionAdvice::Allowed => "allowed",
+        CorePermissionAdvice::Denied => "denied",
+        CorePermissionAdvice::Unknown => "unknown",
+    }
+    .to_owned()
 }
 
 fn napi_error(error: impl std::fmt::Display) -> napi::Error {
@@ -1510,6 +1583,75 @@ impl NapiDb {
     #[napi(js_name = "wireFeatures")]
     pub fn wire_features(&self) -> u32 {
         jazz::wire::current_wire_features() as u32
+    }
+
+    fn request_permission_advice(
+        &self,
+        action: CorePermissionAdviceAction,
+    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+        let advice = {
+            let db = self.inner.borrow();
+            let db = db
+                .as_ref()
+                .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+            match db {
+                NapiDbInnerStorage::Memory(db) => db.request_permission_advice(action),
+                NapiDbInnerStorage::Persistent(db) => db.request_permission_advice(action),
+            }
+        };
+        native_permission_advice_or_pending(Box::pin(async move {
+            Ok(permission_advice_for_js(advice.await))
+        }))
+    }
+
+    #[napi(js_name = "requestInsertPermissionAdviceEncoded")]
+    pub fn request_insert_permission_advice_encoded(
+        &self,
+        table: String,
+        cells: Uint8Array,
+    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+        self.request_permission_advice(CorePermissionAdviceAction::Insert {
+            table,
+            cells: decode_core_cells(&cells)?,
+        })
+    }
+
+    #[napi(js_name = "requestReadPermissionAdvice")]
+    pub fn request_read_permission_advice(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+        self.request_permission_advice(CorePermissionAdviceAction::Read {
+            table,
+            row: core_row_uuid_from_bytes(&row_id)?,
+        })
+    }
+
+    #[napi(js_name = "requestUpdatePermissionAdviceEncoded")]
+    pub fn request_update_permission_advice_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+        self.request_permission_advice(CorePermissionAdviceAction::Update {
+            table,
+            row: core_row_uuid_from_bytes(&row_id)?,
+            patch: decode_core_cells(&patch)?,
+        })
+    }
+
+    #[napi(js_name = "requestDeletePermissionAdvice")]
+    pub fn request_delete_permission_advice(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+        self.request_permission_advice(CorePermissionAdviceAction::Delete {
+            table,
+            row: core_row_uuid_from_bytes(&row_id)?,
+        })
     }
 
     fn require_trusted_backend(&self) -> napi::Result<()> {

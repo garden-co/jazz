@@ -1596,6 +1596,116 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await runtime.rollbackTransaction(transactionId);
   });
 
+  it("keeps NAPI websocket preflights unknown when the browser link is authority-unbound", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    expect(Object.getOwnPropertyNames(NapiDb.prototype)).toEqual(
+      expect.arrayContaining([
+        "requestInsertPermissionAdviceEncoded",
+        "requestReadPermissionAdvice",
+        "requestUpdatePermissionAdviceEncoded",
+        "requestDeletePermissionAdvice",
+      ]),
+    );
+    const appId = "00000000-0000-0000-0000-00000000d006";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-permission-advice-backend",
+      adminSecret: "core-napi-permission-advice-admin",
+      schema: encodeSchema(OWNED_TODOS_SCHEMA),
+    });
+
+    const openRuntime = (userId: string, sourceId: number) => {
+      const runtime = new NativeRuntimeAdapter(
+        { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+        OWNED_TODOS_SCHEMA,
+        deterministicBytes(`jazz-napi-permission-advice:${userId}:node`),
+        new TextEncoder().encode(JSON.stringify(["https://issuer.example", userId])),
+        sourceId,
+        true,
+      );
+      runtimes.push(runtime);
+      runtime.connect(
+        webSocketUrl(server!.url, appId),
+        JSON.stringify({
+          backend_secret: server!.backendSecret,
+          backend_session: {
+            issuer: "https://issuer.example",
+            user_id: userId,
+            claims: { sub: userId },
+          },
+        }),
+      );
+      return runtime;
+    };
+
+    const alice = openRuntime(ALICE_ID, 61);
+    const bob = openRuntime(BOB_ID, 62);
+    const aliceTodo = alice.insert("todos", {
+      title: { type: "Text", value: "alice authority advice row" },
+      done: { type: "Boolean", value: false },
+      owner_id: { type: "Text", value: ALICE_ID },
+    });
+    const bobTodo = bob.insert("todos", {
+      title: { type: "Text", value: "bob authority advice row" },
+      done: { type: "Boolean", value: false },
+      owner_id: { type: "Text", value: BOB_ID },
+    });
+    await Promise.all([
+      waitForPromise(
+        alice.waitForTransaction(await committedTxId(aliceTodo), "edge"),
+        "alice authority row did not settle",
+      ),
+      waitForPromise(
+        bob.waitForTransaction(await committedTxId(bobTodo), "edge"),
+        "bob authority row did not settle",
+      ),
+    ]);
+
+    await expect(
+      alice.requestInsertPermissionAdvice("todos", {
+        title: { type: "Text", value: "allowed candidate" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      }),
+    ).resolves.toBe("unknown");
+    await expect(
+      alice.requestInsertPermissionAdvice("todos", {
+        title: { type: "Text", value: "denied candidate" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: BOB_ID },
+      }),
+    ).resolves.toBe("unknown");
+
+    await expect(alice.requestReadPermissionAdvice("todos", aliceTodo.id)).resolves.toBe("unknown");
+    await expect(alice.requestReadPermissionAdvice("todos", bobTodo.id)).resolves.toBe("unknown");
+    await expect(
+      alice.requestUpdatePermissionAdvice("todos", aliceTodo.id, {
+        done: { type: "Boolean", value: true },
+      }),
+    ).resolves.toBe("unknown");
+    await expect(
+      alice.requestUpdatePermissionAdvice("todos", bobTodo.id, {
+        done: { type: "Boolean", value: true },
+      }),
+    ).resolves.toBe("unknown");
+    await expect(alice.requestDeletePermissionAdvice("todos", aliceTodo.id)).resolves.toBe(
+      "unknown",
+    );
+    await expect(alice.requestDeletePermissionAdvice("todos", bobTodo.id)).resolves.toBe("unknown");
+
+    await alice.disconnect();
+    await expect(
+      alice.requestInsertPermissionAdvice("todos", {
+        title: { type: "Text", value: "offline candidate" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      }),
+    ).resolves.toBe("unknown");
+  }, 20_000);
+
   it("does not authenticate client-local session identities to an upstream authority", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 

@@ -20,6 +20,10 @@ export declare class NapiDb {
    * native artifact cannot decode.
    */
   wireFeatures(): number
+  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**
@@ -136,6 +140,17 @@ export declare class NapiDb {
   mergeableTx(openTransactionId: string): Tx
   mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
+}
+
+/**
+ * A JavaScript-thread-owned permission preflight which is waiting for an
+ * authenticated upstream authority.  Like pending reads, this remains on the
+ * owning JavaScript thread: NAPI's worker-pool promises require `Send`, while
+ * the request future deliberately owns thread-affine connection state.
+ */
+export declare class PendingNativePermissionAdvice {
+  poll(): string | null
+  cancel(): void
 }
 
 /**

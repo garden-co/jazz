@@ -127,6 +127,10 @@ type PendingNativeRead = { poll(): Uint8Array | null };
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativeWrite = { poll(): Write | null };
+type PendingNativePermissionAdvice = {
+  poll(): string | null;
+  cancel(): void;
+};
 
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
@@ -134,6 +138,11 @@ function isPendingNativeRead(value: unknown): value is PendingNativeRead {
 
 function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
   return typeof (value as PendingNativeWrite | null)?.poll === "function";
+}
+
+function isPendingNativePermissionAdvice(value: unknown): value is PendingNativePermissionAdvice {
+  const candidate = value as PendingNativePermissionAdvice | null;
+  return typeof candidate?.poll === "function" && typeof candidate.cancel === "function";
 }
 
 type NativeInsertOptions = NativeWriteOptions & {
@@ -278,14 +287,14 @@ type NativeDb = {
   requestInsertPermissionAdviceEncoded?(
     table: string,
     cells: Uint8Array,
-  ): NativePermissionAdviceRequest;
-  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  ): NativePermissionAdviceResult;
+  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
   requestUpdatePermissionAdviceEncoded?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-  ): NativePermissionAdviceRequest;
-  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  ): NativePermissionAdviceResult;
+  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
   mergeableTx(openTransactionId: OpenTransactionId): Tx;
   mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
   exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
@@ -393,6 +402,11 @@ type NativePermissionAdviceRequest = {
   readonly promise: Promise<PermissionAdvice>;
   cancel(): void;
 };
+
+type NativePermissionAdviceResult =
+  | NativePermissionAdviceRequest
+  | string
+  | PendingNativePermissionAdvice;
 
 type PreparedQuery = object;
 
@@ -2900,13 +2914,28 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private withPermissionAdviceTimeout(
-    start: () => NativePermissionAdviceRequest,
+    start: () => NativePermissionAdviceResult,
   ): Promise<PermissionAdvice> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
     if (this.closed || !this.serverTransport || !this.serverCarrier) {
       return Promise.resolve("unknown");
     }
-    const request = start();
+    const started = start();
+    const request: NativePermissionAdviceRequest = isPendingNativePermissionAdvice(started)
+      ? {
+          promise: this.awaitNativePermissionAdvice(started),
+          cancel: () => started.cancel(),
+        }
+      : typeof started === "string"
+        ? {
+            promise: Promise.resolve(
+              started === "allowed" || started === "denied" || started === "unknown"
+                ? started
+                : "unknown",
+            ),
+            cancel: () => {},
+          }
+        : started;
     return new Promise((resolve) => {
       let settled = false;
       const finish = (advice: PermissionAdvice) => {
@@ -2921,6 +2950,30 @@ export class NativeRuntimeAdapter implements Runtime {
       }, 2_000);
       request.promise.then(finish, () => finish("unknown"));
     });
+  }
+
+  /**
+   * Keep a permission request's cancel-safe core future on its owning JS
+   * thread, allowing the normal peer pump to deliver its authority receipt
+   * between polls.  A missing or malformed native result fails closed.
+   */
+  private async awaitNativePermissionAdvice(
+    pending: PendingNativePermissionAdvice,
+  ): Promise<PermissionAdvice> {
+    for (;;) {
+      if (this.closed) {
+        pending.cancel();
+        return "unknown";
+      }
+      const advice = pending.poll();
+      if (advice !== null) {
+        return advice === "allowed" || advice === "denied" || advice === "unknown"
+          ? advice
+          : "unknown";
+      }
+      await this.pumpServerTransport();
+      await sleep(0);
+    }
   }
 
   private scheduleCoreWake(urgency: CoreTickWake): void {
