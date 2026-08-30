@@ -1450,10 +1450,24 @@ where
                                                 request.intent_sent = true;
                                             }
                                         } else {
+                                            let Some(expected) = expected_scope_authority else {
+                                                continue;
+                                            };
+                                            let identity = expected.link;
+                                            let claims = self
+                                                .node
+                                                .borrow()
+                                                .session_claims_with_revisions()
+                                                .into_iter()
+                                                .find_map(|(subject, claims, _)| {
+                                                    (subject == identity).then_some(claims)
+                                                })
+                                                .unwrap_or_default();
                                             scope_lease_manager.requests.insert(
                                                 *request_id,
                                                 AuthorizationScopeLeaseRequest {
                                                     action: action.clone(),
+                                                    session_claim_binding: (identity, claims),
                                                     waiters: BTreeSet::from([*request_id]),
                                                     intent_sent: false,
                                                     key: None,
@@ -2172,12 +2186,14 @@ where
                                     let retry_id =
                                         PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
                                     let action = request.action.clone();
+                                    let session_claim_binding = request.session_claim_binding.clone();
                                     let waiters = request.waiters.clone();
                                     scope_lease_manager.requests.remove(&request_id);
                                     scope_lease_manager.requests.insert(
                                         retry_id,
                                         AuthorizationScopeLeaseRequest {
                                             action: action.clone(),
+                                            session_claim_binding,
                                             waiters,
                                             intent_sent: false,
                                             key: None,
@@ -2222,20 +2238,14 @@ where
                                     continue;
                                 }
                                 let action = request.action.clone();
+                                let session_claim_binding = request.session_claim_binding.clone();
                                 let waiter_ids = request.waiters.clone();
                                 scope_lease_manager.requests.remove(&request_id);
                                 let advice = {
                                     let mut node = self.node.lock().await;
                                     let mut node = node.scoped_active_session_claims(
-                                        session_claim_binding
-                                            .as_ref()
-                                            .expect("subscriber claims")
-                                            .0,
-                                        session_claim_binding
-                                            .as_ref()
-                                            .expect("subscriber claims")
-                                            .1
-                                            .clone(),
+                                        session_claim_binding.0,
+                                        session_claim_binding.1,
                                     );
                                     evaluate_authoritative_permission_advice(
                                         &mut node,

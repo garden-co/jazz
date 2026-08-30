@@ -2116,6 +2116,10 @@ type ScopeAggregate = AuthorityScopeAggregate;
 /// aggregate receipt names only the final completing subscription.
 struct AuthorizationScopeLeaseRequest {
     action: PermissionAdviceAction,
+    /// Immutable requesting-session claims captured when this upstream advice
+    /// operation is allocated. Receipts are evaluated on an Upstream link,
+    /// which has no subscriber-side ambient claims to consult.
+    session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
     /// Every local caller sharing this authority hydration.  The first id is
     /// the wire correlation id; later ids never cause another support view.
     waiters: BTreeSet<PermissionAdviceRequestId>,
