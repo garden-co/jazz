@@ -150,9 +150,16 @@ describe("browser Jazz storage compatibility corpus", () => {
     const rawBeforeReadOnlyInspection = await rawRecords(physicalDbName);
 
     db = await openPersistentDb(config);
-    const reopenedMain = await db.one(app.documents.where({ id: document.id }), { branch: "main" });
+    // Reopen must materialize the durable local replica without depending on
+    // a fresh remote-coverage round trip. The earlier edge read proves the
+    // synced fixture; this is specifically the offline persistence boundary.
+    const reopenedMain = await db.one(app.documents.where({ id: document.id }), {
+      branch: "main",
+      tier: "local",
+    });
     const reopenedDraft = await db.one(app.documents.where({ id: document.id }), {
       branch: "draft",
+      tier: "local",
     });
     expect(reopenedMain).toMatchObject({
       id: document.id,
