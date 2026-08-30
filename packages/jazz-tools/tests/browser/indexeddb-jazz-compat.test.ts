@@ -156,10 +156,12 @@ describe("browser Jazz storage compatibility corpus", () => {
     const reopenedMain = await db.one(app.documents.where({ id: document.id }), {
       branch: "main",
       tier: "local",
+      propagation: "local-only",
     });
     const reopenedDraft = await db.one(app.documents.where({ id: document.id }), {
       branch: "draft",
       tier: "local",
+      propagation: "local-only",
     });
     expect(reopenedMain).toMatchObject({
       id: document.id,
@@ -178,7 +180,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
     await sleep(100);
-    expect(await rawRecords(physicalDbName)).toEqual(rawBeforeReadOnlyInspection);
+    expect(normalizeRuntimeLeaseRecords(await rawRecords(physicalDbName))).toEqual(
+      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
+    );
   }, 90_000);
 
   it("rejects a corrupt durable epoch before handing a public Jazz handle to the app", async () => {
@@ -289,6 +293,25 @@ async function rawRecords(name: string): Promise<Record<string, string>> {
   await transactionDone(transaction);
   database.close();
   return records;
+}
+
+/**
+ * A clean foreground shutdown returns its node lease to the durable owner;
+ * reopening claims it again. That coordination record is intentionally
+ * rewritten across a restart, unlike the replica pages and storage epoch this
+ * compatibility corpus is protecting.
+ */
+function normalizeRuntimeLeaseRecords(records: Record<string, string>): Record<string, string> {
+  const manifest = JSON.parse(records[INDEXEDDB_STORAGE_MANIFEST_STORE] ?? "[]") as [
+    string,
+    unknown,
+  ][];
+  return {
+    ...records,
+    [INDEXEDDB_STORAGE_MANIFEST_STORE]: JSON.stringify(
+      manifest.filter(([key]) => key !== "foreground-node-leases-v1"),
+    ),
+  };
 }
 
 async function replaceManifest(name: string, manifest: unknown): Promise<void> {
