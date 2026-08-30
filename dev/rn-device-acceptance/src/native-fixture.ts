@@ -1,6 +1,7 @@
 import { NativeModules } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
 import { decodeBase64 } from "./base64.ts";
+import type { DeviceDiagnosticCode } from "./device-diagnostics.ts";
 import type { Platform } from "./protocol";
 import type { AdmittedRelay } from "./relay-admission";
 
@@ -20,9 +21,6 @@ type FixtureModule = {
   recordDiagnostic(code: DeviceDiagnosticCode): Promise<void>;
   acceptancePhase(): Promise<"seed" | "verify">;
 };
-
-/** Public, non-secret categories the host is allowed to print from the app sandbox. */
-export type DeviceDiagnosticCode = "linked-abi-admission-failed";
 
 /**
  * The native fixture is an adapter for the public command function, not part of

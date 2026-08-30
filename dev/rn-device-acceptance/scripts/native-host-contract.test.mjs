@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { DEVICE_DIAGNOSTIC_CODES } from "../src/device-diagnostics.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
@@ -131,8 +132,10 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /@ReactMethod fun recordReceipt/);
   assert.match(fixture, /jazz-device-receipt\.ndjson/);
   assert.match(fixture, /@ReactMethod fun recordDiagnostic/);
-  assert.match(fixture, /require\(code == "linked-abi-admission-failed"\)/);
+  assert.match(fixture, /require\(code in diagnosticCodes\)/);
+  for (const code of DEVICE_DIAGNOSTIC_CODES) assert.match(fixture, new RegExp(`"${code}"`));
   assert.match(fixture, /jazz-device-diagnostic\.txt/);
+  assert.match(fixture, /Log\.e\("JazzDeviceAcceptance", code\)/);
   assertAtomicAndroidDiagnostic(fixture);
   // A tempting direct write makes a timeout expose torn bytes. This plant
   // proves the contract rejects it even though the rest of the fixture stays
@@ -165,6 +168,23 @@ test("iOS fixture imports the public JazzRn pod header, not its private relay fr
     read("ios/JazzDeviceFixture.mm"),
     "the checked-in iOS host fixture must match the prebuild template",
   );
+});
+
+test("Android acceptance reads only bounded receipt and allowlisted diagnostic tags", () => {
+  const driver = read("scripts/run-android.mjs");
+  assert.match(
+    driver,
+    /"logcat",[\s\S]*"-d",[\s\S]*"-v",[\s\S]*"threadtime",[\s\S]*"ReactNativeJS:I",[\s\S]*"JazzDeviceAcceptance:E",[\s\S]*"\*:S"/,
+  );
+  assert.doesNotMatch(driver, /adb\(\["logcat", "-d"\]\)/);
+  assert.match(driver, /adb\(\["logcat", "-c"\]\)/);
+  assert.ok(
+    driver.indexOf('adb(["logcat", "-c"])') <
+      driver.indexOf('"dev.jazz.rndeviceacceptance\/.MainActivity"'),
+    "each launched phase must clear stale log diagnostics before starting its app process",
+  );
+  assert.match(driver, /androidAcceptanceFailure\("invalid-receipt", phase, output\)/);
+  assert.match(driver, /androidAcceptanceFailure\("timeout", phase, output\)/);
 });
 
 test("each native JSI runtime owns an independent foreground lease", () => {
@@ -686,8 +706,8 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   assert.match(fixture, /RCT_REMAP_METHOD\(recordReceipt/);
   assert.match(fixture, /RCT_REMAP_METHOD\(recordDiagnostic/);
   assert.match(fixture, /jazz-device-diagnostic\.txt/);
-  assert.match(fixture, /isEqualToString:JazzDeviceDiagnosticLinkedAbiAdmissionFailed/);
-  assert.match(fixture, /@"linked-abi-admission-failed"/);
+  assert.match(fixture, /JazzDeviceDiagnosticCodes\(\) containsObject:detail/);
+  for (const code of DEVICE_DIAGNOSTIC_CODES) assert.match(fixture, new RegExp(`@"${code}"`));
   assert.match(fixture, /JAZZ_DEVICE_RESULT/);
   assert.match(fixture, /NSDataWritingAtomic/);
   assert.doesNotMatch(fixture, /recordReceipt[\s\S]*JazzRelayTrustedAdmission/);
@@ -738,7 +758,7 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
     /proveForegroundByteAbi\(foregroundFactory, scopeB\.capability, foregroundCodec\)/,
   );
   assert.match(app, /await recordDeviceReceipt\(results\.join\("\\n"\)\)/);
-  assert.match(app, /recordDeviceDiagnostic\("linked-abi-admission-failed"\)/);
+  assert.match(app, /recordDeviceDiagnostic\(diagnosticCode\)/);
   assert.doesNotMatch(app, /reason instanceof Error|String\(reason\)|\.message/);
   assert.ok(
     app.indexOf("await observeTrustedAdmissionLifecycle()") <

@@ -38,7 +38,7 @@ test("iOS diagnostics do not echo raw command errors", () => {
 });
 
 test("device diagnostic printing is an allowlist, not bounded arbitrary text", () => {
-  assert.equal(safeDeviceDiagnostic("linked-abi-admission-failed\n"), "linked-abi-admission-failed");
+  assert.equal(safeDeviceDiagnostic("native-admission-failed\n"), "native-admission-failed");
   const plantedSecret = "capability=secret-device-token";
   const printed = safeDeviceDiagnostic(plantedSecret);
   assert.equal(printed, "[no recognized device diagnostic]");

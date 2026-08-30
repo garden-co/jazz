@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { assertDeviceReceipt } from "./device-driver.mjs";
+import { androidAcceptanceFailure } from "./android-diagnostics.mjs";
 import { verifyAndroidRelayStage } from "./android-relay-stage.mjs";
 import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
 
@@ -16,6 +17,20 @@ verifyAndroidRelayStage({
 });
 const adb = (args) =>
   execFileSync("adb", serial ? ["-s", serial, ...args] : args, { encoding: "utf8" });
+// The unfiltered emulator buffer is noisy enough to make `adb logcat -d`
+// unreliable on hosted runners. Receipts come from React Native's console
+// bridge; pre-receipt diagnostics use one native tag containing allowlisted
+// codes only.
+const acceptanceLogcat = () =>
+  adb([
+    "logcat",
+    "-d",
+    "-v",
+    "threadtime",
+    "ReactNativeJS:I",
+    "JazzDeviceAcceptance:E",
+    "*:S",
+  ]);
 const startedAt = Date.now();
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
 // Android IDs are scoped per app/signing identity, so use the immutable system
@@ -57,11 +72,18 @@ async function launchAndAssert(phase) {
       .map((item) => item.scenario),
   };
   const deadline = Date.now() + 2 * 60 * 1000;
+  let output = "";
   for (;;) {
-    const output = adb(["logcat", "-d"]);
-    if (output.includes("JAZZ_DEVICE_RESULT ")) return assertDeviceReceipt(output, expected);
+    output = acceptanceLogcat();
+    if (output.includes("JAZZ_DEVICE_RESULT ")) {
+      try {
+        return assertDeviceReceipt(output, expected);
+      } catch {
+        throw new Error(androidAcceptanceFailure("invalid-receipt", phase, output));
+      }
+    }
     if (Date.now() >= deadline)
-      throw new Error(`Timed out waiting for phase ${phase} from the launched Android app`);
+      throw new Error(androidAcceptanceFailure("timeout", phase, output));
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
 }

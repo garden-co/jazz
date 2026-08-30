@@ -10,6 +10,7 @@ import com.jazzrn.TrustedRelayScopeConfig
 import android.util.Base64
 import android.os.Build
 import android.system.Os
+import android.util.Log
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -24,6 +25,21 @@ import java.security.MessageDigest
  */
 class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   private var capability: ByteArray? = null
+  private val diagnosticCodes = setOf(
+    "fixture-metadata-failed",
+    "native-admission-failed",
+    "relay-command-abi-failed",
+    "foreground-byte-abi-failed",
+    "logout-revocation-failed",
+    "public-client-seed-failed",
+    "scope-isolation-failed",
+    "auth-switch-failed",
+    "foreground-write-failed",
+    "same-runtime-subscription-failed",
+    "scope-reopen-failed",
+    "public-client-restart-failed",
+    "receipt-write-failed",
+  )
   override fun getName() = "JazzDeviceFixture"
 
   private fun scopeConfig(authScope: String): TrustedRelayScopeConfig {
@@ -125,8 +141,9 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
   /** Only fixed, non-secret categories may cross from JS into CI diagnostics. */
   @ReactMethod fun recordDiagnostic(code: String, promise: Promise) {
     try {
-      require(code == "linked-abi-admission-failed") { "invalid device diagnostic" }
+      require(code in diagnosticCodes) { "invalid device diagnostic" }
       writeAtomicDiagnostic(code)
+      Log.e("JazzDeviceAcceptance", code)
       promise.resolve(null)
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
   }

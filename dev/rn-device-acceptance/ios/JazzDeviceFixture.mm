@@ -24,7 +24,23 @@ static NSURL *JazzDeviceDiagnosticURL(void) {
   return [caches URLByAppendingPathComponent:@"jazz-device-diagnostic.txt"];
 }
 
-static NSString * const JazzDeviceDiagnosticLinkedAbiAdmissionFailed = @"linked-abi-admission-failed";
+static NSSet<NSString *> *JazzDeviceDiagnosticCodes(void) {
+  return [NSSet setWithArray:@[
+    @"fixture-metadata-failed",
+    @"native-admission-failed",
+    @"relay-command-abi-failed",
+    @"foreground-byte-abi-failed",
+    @"logout-revocation-failed",
+    @"public-client-seed-failed",
+    @"scope-isolation-failed",
+    @"auth-switch-failed",
+    @"foreground-write-failed",
+    @"same-runtime-subscription-failed",
+    @"scope-reopen-failed",
+    @"public-client-restart-failed",
+    @"receipt-write-failed",
+  ]];
+}
 
 /** Hash the executable selected by the installed app bundle. The host driver
  * compares this to the artifact it installed; JavaScript and launch arguments
@@ -131,7 +147,7 @@ RCT_REMAP_METHOD(recordReceipt, recordReceipt:(NSString *)receipt resolver:(RCTP
 }
 
 RCT_REMAP_METHOD(recordDiagnostic, recordDiagnostic:(NSString *)detail resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
-  if (![detail isEqualToString:JazzDeviceDiagnosticLinkedAbiAdmissionFailed]) {
+  if (![JazzDeviceDiagnosticCodes() containsObject:detail]) {
     reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", @"Invalid device diagnostic", nil);
     return;
   }

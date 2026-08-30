@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { SafeAreaView, ScrollView, StyleSheet, Text, Pressable } from "react-native";
 import { encodeResult } from "./src/protocol";
 import { scenarioPlan, scenariosForAcceptancePhase } from "./src/scenarios";
+import type { DeviceDiagnosticCode } from "./src/device-diagnostics";
 import {
   proveForegroundByteAbi,
   proveForegroundRevoked,
@@ -33,11 +34,12 @@ import {
   proveLogoutRevocation,
 } from "./src/relay-admission";
 
-async function observeTrustedAdmissionLifecycle() {
+async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagnosticCode) => void) {
   // The native fixture returns the same host-issued nonce from both launches.
   // It is also bound into every accepted device receipt, so use it to make
   // retained app data from an old install unable to satisfy this run's reopen
   // assertion.
+  markFailure("fixture-metadata-failed");
   const receipt = await deviceReceiptContext();
   const phase = await nativeAcceptancePhase();
   if (phase === "verify") {
@@ -45,28 +47,38 @@ async function observeTrustedAdmissionLifecycle() {
     // through `createJazzClient` by the previous seed launch; this launch must
     // materialize it through a newly admitted relay/SQLite owner using that
     // same public app surface, before the byte-level scope isolation receipt.
+    markFailure("native-admission-failed");
     const reopened = await admittedNativeRelay();
+    markFailure("public-client-restart-failed");
     await proveHighLevelForegroundRestart(reopened.capability, receipt.runNonce);
+    markFailure("foreground-byte-abi-failed");
     const foregroundFactory = installNativeForegroundRuntime();
     const foregroundCodec = {
       encode: encodeNativeForegroundCommand,
       decode: decodeNativeForegroundResponse,
     };
+    markFailure("scope-isolation-failed");
     proveForegroundScopeIsolation(foregroundFactory, reopened.capability, foregroundCodec, {
       contains: ["a"],
       excludes: ["b"],
     });
+    markFailure("auth-switch-failed");
     const scopeB = await switchNativeRelayAuthScope();
+    markFailure("scope-isolation-failed");
     proveForegroundScopeIsolation(foregroundFactory, scopeB.capability, foregroundCodec, {
       contains: ["b"],
       excludes: ["a"],
     });
+    markFailure("logout-revocation-failed");
     await logoutNativeRelay();
     return { phase, receipt };
   }
+  markFailure("native-admission-failed");
   const admitted = await admittedNativeRelay();
   const { executor, capability } = admitted;
+  markFailure("relay-command-abi-failed");
   await proveAdmittedRelay(executor, capability);
+  markFailure("foreground-byte-abi-failed");
   const foregroundFactory = installNativeForegroundRuntime();
   const foregroundCodec = {
     encode: encodeNativeForegroundCommand,
@@ -74,6 +86,7 @@ async function observeTrustedAdmissionLifecycle() {
   };
   proveForegroundByteAbi(foregroundFactory, capability, foregroundCodec);
   const revocableForeground = foregroundFactory.openAttached(capability);
+  markFailure("logout-revocation-failed");
   await proveLogoutRevocation(
     admitted,
     async () => {
@@ -82,17 +95,23 @@ async function observeTrustedAdmissionLifecycle() {
     },
     admittedNativeRelay,
   );
+  markFailure("native-admission-failed");
   const scopeA = await admittedNativeRelay();
+  markFailure("public-client-seed-failed");
   await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce);
+  markFailure("scope-isolation-failed");
   proveForegroundScopeIsolation(foregroundFactory, scopeA.capability, foregroundCodec, {
     write: "a",
     contains: ["a"],
     excludes: ["b"],
   });
   const oldScopeForeground = foregroundFactory.openAttached(scopeA.capability);
+  markFailure("auth-switch-failed");
   const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
+  markFailure("foreground-byte-abi-failed");
   proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
   proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  markFailure("scope-isolation-failed");
   proveForegroundScopeIsolation(foregroundFactory, scopeB.capability, foregroundCodec, {
     write: "b",
     contains: ["b"],
@@ -100,21 +119,25 @@ async function observeTrustedAdmissionLifecycle() {
   });
   // This remains byte-only JSI transport: the fixed test record envelope is
   // decoded by the compiled Rust relay, never reconstructed as a JS row API.
+  markFailure("foreground-write-failed");
   proveForegroundWriteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
   // Two aliases opened in this one installed JSI runtime communicate only
   // through their common admitted native relay; B must observe A's committed
   // binding delta. This is deliberately not evidence for two physical JSI
   // runtimes; that installed-app receipt remains an explicit gap below.
+  markFailure("same-runtime-subscription-failed");
   proveSameJsiRuntimeWriteSubscription(foregroundFactory, scopeB.capability, foregroundCodec);
   // Closing B's trusted relay before re-admitting A forces its scope owner and
   // SQLite handle to be recreated. A's row must survive that lifecycle while
   // B's distinct native-selected path never observed it.
+  markFailure("scope-reopen-failed");
   await logoutNativeRelay();
   const reopenedScopeA = await admittedNativeRelay();
   proveForegroundScopeIsolation(foregroundFactory, reopenedScopeA.capability, foregroundCodec, {
     contains: ["a"],
     excludes: ["b"],
   });
+  markFailure("logout-revocation-failed");
   await logoutNativeRelay();
   return { phase, receipt };
 }
@@ -123,8 +146,11 @@ export default function App() {
   const [shown, setShown] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
+    let diagnosticCode: DeviceDiagnosticCode = "fixture-metadata-failed";
     void (async () => {
-      const observed = await observeTrustedAdmissionLifecycle();
+      const observed = await observeTrustedAdmissionLifecycle((code) => {
+        diagnosticCode = code;
+      });
       const results = scenariosForAcceptancePhase(observed.phase)
         .filter((scenario) => scenario.state === "passed")
         .map((scenario, index) =>
@@ -140,6 +166,7 @@ export default function App() {
       // The host validates this independently. Persisting it is necessary on
       // iOS release builds, where console output is not a dependable receipt
       // transport; it must happen after the JS-side relay proof.
+      diagnosticCode = "receipt-write-failed";
       await recordDeviceReceipt(results.join("\n"));
       for (const result of results) console.log(result);
       return observed;
@@ -151,7 +178,7 @@ export default function App() {
         // This is deliberately a fixed code, not an exception message: both
         // the app-private file and a failing CI job may expose it. The native
         // fixtures accept only this small allowlist, too.
-        void recordDeviceDiagnostic("linked-abi-admission-failed").catch(() => {});
+        void recordDeviceDiagnostic(diagnosticCode).catch(() => {});
         setError("The device acceptance proof failed.");
       });
   }, []);
