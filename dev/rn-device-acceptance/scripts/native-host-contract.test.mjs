@@ -93,6 +93,39 @@ function assertAtomicAndroidDiagnostic(fixture) {
   );
 }
 
+function extractAndroidDiagnosticCodes(fixture) {
+  const body = /private val diagnosticCodes = setOf\(([\s\S]*?)\n  \)/.exec(fixture)?.[1];
+  assert.ok(body, "Android fixture must declare its diagnostic allowlist");
+  return [...body.matchAll(/^\s*"([^"]+)",?$/gm)].map((match) => match[1]);
+}
+
+function extractIosDiagnosticCodes(fixture) {
+  const body = /static NSSet<NSString \*> \*JazzDeviceDiagnosticCodes\(void\) \{[\s\S]*?setWithArray:@\[([\s\S]*?)\n  \]\];/.exec(
+    fixture,
+  )?.[1];
+  assert.ok(body, "iOS fixture must declare its diagnostic allowlist");
+  return [...body.matchAll(/^\s*@"([^"]+)",?$/gm)].map((match) => match[1]);
+}
+
+function assertOrderedDiagnosticCodes(fixture, platform) {
+  const actual =
+    platform === "android"
+      ? extractAndroidDiagnosticCodes(fixture)
+      : extractIosDiagnosticCodes(fixture);
+  assert.deepEqual(
+    actual,
+    DEVICE_DIAGNOSTIC_CODES,
+    `${platform} fixture diagnostic allowlist must exactly follow the shared order`,
+  );
+}
+
+function swapSubscriptionWriteStages(fixture) {
+  return fixture
+    .replace("same-runtime-transaction-open-failed", "__diagnostic-stage-swap__")
+    .replace("same-runtime-mutation-stage-failed", "same-runtime-transaction-open-failed")
+    .replace("__diagnostic-stage-swap__", "same-runtime-mutation-stage-failed");
+}
+
 function assertPublicClientSeedStages(source) {
   const stages = ["open", "subscribe", "write", "read", "publish", "shutdown"];
   let previous = -1;
@@ -155,7 +188,17 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /jazz-device-receipt\.ndjson/);
   assert.match(fixture, /@ReactMethod fun recordDiagnostic/);
   assert.match(fixture, /require\(code in diagnosticCodes\)/);
-  for (const code of DEVICE_DIAGNOSTIC_CODES) assert.match(fixture, new RegExp(`"${code}"`));
+  for (const candidate of [
+    fixture,
+    read("native/android/JazzDeviceFixtureModule.kt"),
+  ]) {
+    assertOrderedDiagnosticCodes(candidate, "android");
+    assert.throws(
+      () => assertOrderedDiagnosticCodes(swapSubscriptionWriteStages(candidate), "android"),
+      /must exactly follow the shared order/,
+      "swapping two codes must fail even when generated and checked-in fixtures agree",
+    );
+  }
   assert.match(fixture, /jazz-device-diagnostic\.txt/);
   assert.match(fixture, /Log\.e\("JazzDeviceAcceptance", code\)/);
   assertAtomicAndroidDiagnostic(fixture);
@@ -770,9 +813,12 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
     assert.match(candidate, /RCT_REMAP_METHOD\(clearDiagnostic/);
     assert.match(candidate, /jazz-device-diagnostic\.txt/);
     assert.match(candidate, /JazzDeviceDiagnosticCodes\(\) containsObject:detail/);
-    for (const code of DEVICE_DIAGNOSTIC_CODES) {
-      assert.match(candidate, new RegExp(`@"${code}"`));
-    }
+    assertOrderedDiagnosticCodes(candidate, "ios");
+    assert.throws(
+      () => assertOrderedDiagnosticCodes(swapSubscriptionWriteStages(candidate), "ios"),
+      /must exactly follow the shared order/,
+      "swapping two codes must fail even when generated and checked-in fixtures agree",
+    );
   }
   assert.match(fixture, /JAZZ_DEVICE_RESULT/);
   assert.match(fixture, /NSDataWritingAtomic/);

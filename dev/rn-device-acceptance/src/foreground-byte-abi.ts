@@ -218,6 +218,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     }
 
     markFailure("same-runtime-write-failed");
+    markFailure("same-runtime-transaction-open-failed");
     const transaction = execute(a, {
       type: "beginTransaction",
       kind: "mergeable",
@@ -225,6 +226,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     if (transaction.type !== "transactionOpened")
       throw new Error("foreground A write transaction did not open");
     const rowId = Uint8Array.from({ length: 16 }, () => 0x74);
+    markFailure("same-runtime-mutation-stage-failed");
     const staged = execute(a, {
       type: "upsert",
       transaction: transaction.transaction,
@@ -233,6 +235,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
       cells: fixtureCells("subscription from foreground A"),
     });
     if (staged.type !== "mutationStaged") throw new Error("foreground A write was not staged");
+    markFailure("same-runtime-commit-failed");
     const committed = execute(a, {
       type: "commitTransaction",
       transaction: transaction.transaction,
