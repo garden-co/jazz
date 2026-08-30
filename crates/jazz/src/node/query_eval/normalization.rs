@@ -372,7 +372,10 @@ pub(super) fn select_current_access_path(
     let mut probes = Vec::new();
     for column in table.global_current_indexed_columns() {
         if let Some(value) = equalities.get(&column).cloned() {
-            probes.push((column, vec![Value::Nullable(Some(Box::new(value)))]));
+            probes.push((
+                column.clone(),
+                vec![physical_current_index_value(table, &column, value)],
+            ));
         }
     }
     let (column, prefix) = probes.first()?.clone();
@@ -383,6 +386,35 @@ pub(super) fn select_current_access_path(
         maintained: false,
         source_limit: None,
     })
+}
+
+/// Current storage uses one nullable envelope to represent an un-authored
+/// cell. A logically nullable column has its own, inner envelope as well.
+/// Predicates use logical values, but secondary-index keys are physical
+/// current-row values, so preserve that declared nullable shape before adding
+/// the storage envelope.
+fn physical_current_index_value(table: &TableSchema, column: &str, value: Value) -> Value {
+    let logical_value = match table
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+    {
+        Some(candidate) => coerce_literal_preserving_nullable(value, &candidate.column_type),
+        None => value,
+    };
+    Value::Nullable(Some(Box::new(logical_value)))
+}
+
+fn coerce_literal_preserving_nullable(value: Value, column_type: &ColumnType) -> Value {
+    match (value, column_type) {
+        (Value::Nullable(value), ColumnType::Nullable(inner)) => Value::Nullable(
+            value.map(|value| Box::new(coerce_literal_preserving_nullable(*value, inner))),
+        ),
+        (value, ColumnType::Nullable(inner)) => Value::Nullable(Some(Box::new(
+            coerce_literal_preserving_nullable(value, inner),
+        ))),
+        (value, column_type) => coerce_literal_for_column_type(value, column_type),
+    }
 }
 
 pub(super) fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) -> StaticScanSpec {

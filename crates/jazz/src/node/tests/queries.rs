@@ -563,6 +563,94 @@ fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_join
     assert_eq!(metrics.source_index_probes, 0, "join policies must retain the full-scan path");
 }
 
+/// Current-row index probes must preserve the logical nullable reference
+/// inside the separate physical envelope for authored-cell presence.
+#[test]
+fn nullable_reference_index_matches_present_uuid_and_excludes_nulls() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("owners").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("optional_docs")
+                    .nullable_fk_column("owner", "owners")
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("required_docs")
+                    .fk_column("owner", "owners")
+                    .column("title", PublicColumnType::Text),
+            ),
+    );
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x91), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x92), schema);
+    let matching_owner = user(0xa1);
+    let other_owner = user(0xb2);
+    let matching_optional = row(0x11);
+    let nonmatching_optional = row(0x22);
+    let null_optional = row(0x33);
+    let matching_required = row(0x44);
+
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("optional_docs", matching_optional, 10).cells(BTreeMap::from([
+            (
+                "owner".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(matching_owner.test_uuid())))),
+            ),
+            ("title".to_owned(), Value::String("match".to_owned())),
+        ])),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("optional_docs", nonmatching_optional, 11).cells(BTreeMap::from([
+            (
+                "owner".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(other_owner.test_uuid())))),
+            ),
+            ("title".to_owned(), Value::String("other".to_owned())),
+        ])),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("optional_docs", null_optional, 12).cells(BTreeMap::from([
+            ("owner".to_owned(), Value::Nullable(None)),
+            ("title".to_owned(), Value::String("null".to_owned())),
+        ])),
+    );
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("required_docs", matching_required, 13).cells(BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(matching_owner.test_uuid())),
+            ("title".to_owned(), Value::String("control".to_owned())),
+        ])),
+    );
+
+    let optional = Query::from("optional_docs").filter(eq(
+        col("owner"),
+        lit(Value::Uuid(matching_owner.test_uuid())),
+    ));
+    let required = Query::from("required_docs").filter(eq(
+        col("owner"),
+        lit(Value::Uuid(matching_owner.test_uuid())),
+    ));
+    let explicit_null = Query::from("optional_docs").filter(is_null(col("owner")));
+
+    for tier in [DurabilityTier::Local, DurabilityTier::Global] {
+        let (optional_rows, optional_metrics) =
+            query_rows_by_uuid(&mut core, optional.clone(), tier);
+        assert_eq!(optional_rows, vec![matching_optional]);
+        assert_eq!(optional_metrics.source_index_probes, 1);
+        let (required_rows, _) = query_rows_by_uuid(&mut core, required.clone(), tier);
+        assert_eq!(required_rows, vec![matching_required]);
+        let (null_rows, _) = query_rows_by_uuid(&mut core, explicit_null.clone(), tier);
+        assert_eq!(null_rows, vec![null_optional]);
+    }
+}
+
 #[test]
 fn one_shot_filtered_read_uses_primary_key_scan_for_id_equality() {
     let schema = access_path_schema();
