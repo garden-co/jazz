@@ -895,17 +895,90 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         execute(bytes: Uint8Array) {
           const request = command.decode(bytes) as { type?: string };
           if (request.type === "drainSubscription" && initialResetDrained)
-            return command.encode({ type: "subscriptionEvents", events: [] });
+            return command.encode({
+              type: "subscriptionEvents",
+              events: [
+                {
+                  type: "delta",
+                  reset: false,
+                  settled: true,
+                  tier: "local",
+                  delta: [],
+                },
+              ],
+            });
           if (request.type === "drainSubscription") initialResetDrained = true;
           return foreground.execute(bytes);
         },
       };
     },
   };
+  const noObservationStages: string[] = [];
   await assert.rejects(
     async () =>
-      proveSameJsiRuntimeWriteSubscription(noObservation, capability, command, subscriptionRowId),
+      proveSameJsiRuntimeWriteSubscription(
+        noObservation,
+        capability,
+        command,
+        subscriptionRowId,
+        (stage) => noObservationStages.push(stage),
+      ),
     /did not observe foreground A's committed row/,
+  );
+  assert.ok(noObservationStages.includes("same-runtime-delta-drain-failed"));
+  assert.ok(
+    !noObservationStages.includes("same-runtime-delta-content-failed"),
+    "an empty settlement event is not evidence of row-bearing delta content",
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  const wrongObservation = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      let initialResetDrained = false;
+      return {
+        ...foreground,
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string };
+          if (request.type === "drainSubscription" && initialResetDrained)
+            return command.encode({
+              type: "subscriptionEvents",
+              events: [
+                {
+                  type: "delta",
+                  reset: false,
+                  settled: true,
+                  tier: "local",
+                  delta: Array.from(new TextEncoder().encode("wrong-row")),
+                },
+              ],
+            });
+          if (request.type === "drainSubscription") initialResetDrained = true;
+          return foreground.execute(bytes);
+        },
+      };
+    },
+  };
+  const wrongObservationStages: string[] = [];
+  await assert.rejects(
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        wrongObservation,
+        capability,
+        command,
+        subscriptionRowId,
+        (stage) => wrongObservationStages.push(stage),
+      ),
+    /did not observe foreground A's committed row/,
+  );
+  assert.ok(wrongObservationStages.includes("same-runtime-delta-drain-failed"));
+  assert.ok(
+    wrongObservationStages.includes("same-runtime-delta-content-failed"),
+    "a non-empty wrong-row payload reaches content diagnostics without satisfying observation",
   );
 });
 

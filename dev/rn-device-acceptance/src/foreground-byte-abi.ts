@@ -265,7 +265,9 @@ export async function proveSameJsiRuntimeWriteSubscription(
         codec,
         openedB.consumeWake,
       );
-      if (events.length > 0) markFailure("same-runtime-delta-content-failed");
+      if (events.some((event) => event.type === "delta" && event.delta.byteLength > 0)) {
+        markFailure("same-runtime-delta-content-failed");
+      }
       if (
         events.some(
           (event) =>
