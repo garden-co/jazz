@@ -4103,40 +4103,25 @@ fn finish_immediate_promise(
     let _ = unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
 }
 
-fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenTransactionId) -> napi::Result<TxId>
-where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
-{
-    core_block_on(db.commit_mergeable_handle(open_tx))
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
-}
-
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
-    let tx_id = core_commit_tx(db, open_tx)?;
-    core_tx_write(
-        tx_id,
-        Some(NapiWrite::Memory {
-            db: Rc::clone(db),
-            tx_id,
-        }),
-    )
+    let write = db
+        .enqueue_commit_mergeable_handle(open_tx)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    db.drive_queued_mutation_once();
+    core_write_memory(Rc::clone(db), write)
 }
 
 fn core_commit_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
-    let tx_id = core_commit_tx(db, open_tx)?;
-    core_tx_write(
-        tx_id,
-        Some(NapiWrite::Persistent {
-            db: Rc::clone(db),
-            tx_id,
-        }),
-    )
+    let write = db
+        .enqueue_commit_mergeable_handle(open_tx)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    core_write_persistent(Rc::clone(db), write)
 }
 
 fn core_commit_exclusive_tx_memory(

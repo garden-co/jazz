@@ -987,6 +987,28 @@ where
         open_batch_id: OpenTransactionId,
         mut next_now_ms: impl FnMut() -> u64,
     ) -> Result<PublishedTransaction, Error> {
+        self.commit_mergeable_open_inner(open_batch_id, &mut next_now_ms, None)
+            .await
+    }
+
+    /// Commit an open mergeable transaction at an identity synchronously
+    /// reserved by the owning runtime before cold preparation begins.
+    pub(crate) async fn commit_mergeable_open_at(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        reserved: TxId,
+        mut next_now_ms: impl FnMut() -> u64,
+    ) -> Result<PublishedTransaction, Error> {
+        self.commit_mergeable_open_inner(open_batch_id, &mut next_now_ms, Some(reserved))
+            .await
+    }
+
+    async fn commit_mergeable_open_inner(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        next_now_ms: &mut impl FnMut() -> u64,
+        reserved: Option<TxId>,
+    ) -> Result<PublishedTransaction, Error> {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -1055,7 +1077,7 @@ where
             let mut commit = MergeableCommit::new(
                 &write.table,
                 write.row_uuid,
-                write.now_ms.unwrap_or_else(&mut next_now_ms),
+                write.now_ms.unwrap_or_else(&mut *next_now_ms),
             )
             .branch(write.branch)
             .made_by(made_by)
@@ -1095,7 +1117,27 @@ where
                 self.merge_tx_time(parent.time);
             }
         }
-        let made_at = self.mint_tx_time(first.1.now_ms)?;
+        let made_at = match reserved {
+            Some(reserved) => {
+                if reserved.node != self.node_uuid {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity belongs to another node",
+                    ));
+                }
+                if commits
+                    .iter()
+                    .flat_map(|(_, commit)| commit.parents.iter())
+                    .any(|parent| parent.time >= reserved.time)
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity must dominate every parent",
+                    ));
+                }
+                self.merge_tx_time(reserved.time);
+                reserved.time
+            }
+            None => self.mint_tx_time(first.1.now_ms)?,
+        };
         let committed = self
             .commit_mergeable_many_at_with_schema_versions(commits, made_at)
             .await?;

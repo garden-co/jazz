@@ -473,7 +473,7 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    fn queued_write_handle(
+    pub(super) fn queued_write_handle(
         &self,
         row: RowUuid,
         tx_id: TxId,

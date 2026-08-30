@@ -560,6 +560,41 @@ where
         Ok(tx_id)
     }
 
+    /// Reserve the final identity and retain mergeable commit/finalization on
+    /// the node owner. Binding callers use this after synchronous staging so
+    /// cold parent refresh or persistence cannot strand the commit future.
+    #[doc(hidden)]
+    pub fn enqueue_commit_mergeable_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<WriteHandle<S>, Error> {
+        let now_ms = self.next_now_ms();
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let published = db
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .commit_mergeable_open_at(open_tx_id, tx_id, || now_ms)
+                    .await?;
+                debug_assert_eq!(published.tx_id, tx_id);
+                if db.node.defer_local_persistence.get() {
+                    db.node.queue_local_publication(published, None);
+                } else {
+                    db.finish_publication_outcome(PublicationOutcome::published((), published))
+                        .await?;
+                    db.finalize_local_commit(tx_id)?;
+                }
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status))
+    }
+
     /// Abandon an owned open transaction handle.
     pub fn abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) -> Result<(), Error> {
         self.node

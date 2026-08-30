@@ -4,12 +4,12 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ReadOpts};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -428,4 +428,77 @@ fn reopened_reservation_clock_dominates_durable_local_history() {
         second_write.mergeable_tx_id().time > first_tx.time,
         "the synchronously returned identity must dominate durable history for the reused node",
     );
+}
+
+#[test]
+fn queued_mergeable_commit_retains_cold_parent_refresh_and_exact_identity() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let storage_control = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x57; 16]),
+            author: AuthorSubject::for_test_bytes([0x67; 16]),
+        },
+    )))
+    .expect("open yielding database");
+    let seed = block_on(db.insert("todos", row! { title: "before" }, Default::default()))
+        .expect("seed row");
+    block_on(seed.wait(DurabilityTier::Local)).expect("seed is durable");
+
+    let open_tx = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open_tx)).expect("begin mergeable transaction");
+    block_on(db.mergeable_tx_ref(open_tx).update(
+        "todos",
+        seed.row_uuid(),
+        row! { title: "after" },
+        Default::default(),
+    ))
+    .expect("stage update");
+    storage_control.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let queued = db
+        .enqueue_commit_mergeable_handle(open_tx)
+        .expect("reserve final transaction identity");
+    let reserved = queued.mergeable_tx_id();
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut first_turn = Box::pin(db.tick());
+    assert!(matches!(
+        first_turn.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(first_turn);
+    assert_eq!(queued.mergeable_tx_id(), reserved);
+    assert_eq!(
+        block_on(queued.write_state())
+            .expect("reservation remains observable")
+            .durability,
+        DurabilityTier::None,
+    );
+
+    control.resume();
+    for _ in 0..4_096 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        if block_on(queued.write_state())
+            .is_ok_and(|state| state.durability >= DurabilityTier::Local)
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        block_on(queued.wait(DurabilityTier::Local)).expect("queued transaction settles"),
+        reserved,
+    );
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    let rows = block_on(db.all(&query, ReadOpts::default())).expect("read committed row");
+    assert_eq!(rows[0].cell_at(0), Some("after".into()));
 }
