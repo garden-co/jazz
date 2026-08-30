@@ -534,7 +534,18 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
       };
     },
   };
-  await proveSameJsiRuntimeWriteSubscription(factory, capability, command);
+  const subscriptionStages: string[] = [];
+  await proveSameJsiRuntimeWriteSubscription(factory, capability, command, (stage) =>
+    subscriptionStages.push(stage),
+  );
+  assert.deepEqual(subscriptionStages, [
+    "same-runtime-open-failed",
+    "same-runtime-subscribe-failed",
+    "same-runtime-initial-reset-failed",
+    "same-runtime-write-failed",
+    "same-runtime-delta-failed",
+    "same-runtime-unsubscribe-failed",
+  ]);
 
   committed = false;
   opened = 0;

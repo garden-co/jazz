@@ -154,7 +154,12 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   // binding delta. This is deliberately not evidence for two physical JSI
   // runtimes; that installed-app receipt remains an explicit gap below.
   markFailure("same-runtime-subscription-failed");
-  await proveSameJsiRuntimeWriteSubscription(foregroundFactory, scopeB.capability, foregroundCodec);
+  await proveSameJsiRuntimeWriteSubscription(
+    foregroundFactory,
+    scopeB.capability,
+    foregroundCodec,
+    markFailure,
+  );
   // Closing B's trusted relay before re-admitting A forces its scope owner and
   // SQLite handle to be recreated. A's row must survive that lifecycle while
   // B's distinct native-selected path never observed it.

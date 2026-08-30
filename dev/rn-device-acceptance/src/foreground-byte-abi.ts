@@ -168,7 +168,9 @@ export async function proveSameJsiRuntimeWriteSubscription(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
+  markFailure: (code: DeviceDiagnosticCode) => void = () => {},
 ): Promise<void> {
+  markFailure("same-runtime-open-failed");
   const openedA = openScopeForeground(factory, capability);
   const openedB = openScopeForeground(factory, capability);
   const a = openedA.runtime;
@@ -176,6 +178,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
   const execute = (foreground: NativeForegroundRuntime, command: NativeForegroundCommand) =>
     codec.decode(foreground.execute(codec.encode(command)));
   try {
+    markFailure("same-runtime-subscribe-failed");
     const prepared = execute(b, { type: "prepareQuery", query: TODOS_QUERY });
     if (prepared.type !== "preparedQuery")
       throw new Error("foreground B could not prepare the todos subscription");
@@ -187,6 +190,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     // a CallInvoker barrier: the reset wake may arrive several turns later.
     // Observing the wake-driven settled reset establishes the new notification
     // epoch, so that reset cannot masquerade as evidence for A's later commit.
+    markFailure("same-runtime-initial-reset-failed");
     let initialResetSettled = false;
     for (let attempt = 0; attempt < 96; attempt += 1) {
       b.tick();
@@ -201,6 +205,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     if (!initialResetSettled)
       throw new Error("foreground B initial subscription reset did not settle");
 
+    markFailure("same-runtime-write-failed");
     const transaction = execute(a, {
       type: "beginTransaction",
       kind: "mergeable",
@@ -223,6 +228,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
     if (committed.type !== "transactionCommitted")
       throw new Error("foreground A write did not commit");
 
+    markFailure("same-runtime-delta-failed");
     for (let attempt = 0; attempt < 96; attempt += 1) {
       // Both aliases get fair ordinary relay turns.  This is the same polling
       // progression used by the first native subscription slice, not a test
@@ -241,6 +247,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
             event.type === "delta" && containsUtf8(event.delta, "foreground-a-subscription-row"),
         )
       ) {
+        markFailure("same-runtime-unsubscribe-failed");
         const closed = execute(b, {
           type: "unsubscribe",
           subscription: subscribed.subscription,
