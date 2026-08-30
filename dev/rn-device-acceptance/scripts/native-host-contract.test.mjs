@@ -725,14 +725,14 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   assert.match(fixture, /CC_SHA256\(data\.bytes, \(CC_LONG\)data\.length, digest\)/);
   assert.doesNotMatch(fixture, /JazzDeviceBuildFingerprint/);
   assert.match(fixture, /RCT_REMAP_METHOD\(recordReceipt/);
-  assert.match(fixture, /RCT_REMAP_METHOD\(recordDiagnostic/);
-  assert.match(fixture, /RCT_REMAP_METHOD\(clearDiagnostic/);
-  assert.match(fixture, /jazz-device-diagnostic\.txt/);
-  assert.match(fixture, /JazzDeviceDiagnosticCodes\(\) containsObject:detail/);
-  for (const code of DEVICE_DIAGNOSTIC_CODES) {
-    const literal = new RegExp(`@"${code}"`);
-    assert.match(fixture, literal);
-    assert.match(checkedInFixture, literal);
+  for (const candidate of [fixture, checkedInFixture]) {
+    assert.match(candidate, /RCT_REMAP_METHOD\(recordDiagnostic/);
+    assert.match(candidate, /RCT_REMAP_METHOD\(clearDiagnostic/);
+    assert.match(candidate, /jazz-device-diagnostic\.txt/);
+    assert.match(candidate, /JazzDeviceDiagnosticCodes\(\) containsObject:detail/);
+    for (const code of DEVICE_DIAGNOSTIC_CODES) {
+      assert.match(candidate, new RegExp(`@"${code}"`));
+    }
   }
   assert.match(fixture, /JAZZ_DEVICE_RESULT/);
   assert.match(fixture, /NSDataWritingAtomic/);

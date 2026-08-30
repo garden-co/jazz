@@ -26,6 +26,35 @@ test("a never-settling diagnostic write cannot delay the marked native call", ()
   assert.deepEqual(observed, ["foreground-probe-failed", "native-call-entered"]);
 });
 
+test("a rejected diagnostic write is contained and retryable before native entry", async () => {
+  const observed: string[] = [];
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const tracker = createDeviceDiagnosticTracker(
+      async (code) => {
+        observed.push(code);
+        throw new Error("planted secret-bearing rejected sink");
+      },
+      async () => {},
+    );
+    tracker.mark("foreground-install-failed");
+    observed.push("native-call-entered");
+    tracker.retry();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(observed, [
+      "foreground-install-failed",
+      "native-call-entered",
+      "foreground-install-failed",
+    ]);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("successful lifecycle clearing runs only through the native clear boundary", async () => {
   const observed: string[] = [];
   const tracker = createDeviceDiagnosticTracker(
