@@ -9,7 +9,7 @@ where
 {
     /// Test-only simulation of a live catalogue change that invalidates
     /// prepared Groove handles while preserving received authority state.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn invalidate_groove_runtime_for_test(&self) {
         self.node

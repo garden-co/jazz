@@ -1082,7 +1082,7 @@ self.database.finish_persistence(persisted)?;
     /// Production takes this path for changes such as same-version policy
     /// updates: existing subscriptions must rehydrate against the new runtime
     /// token while already-received authority state remains available.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn invalidate_groove_runtime_for_test(&mut self) {
         self.groove_runtime_token = crate::node::next_groove_runtime_token();
     }
