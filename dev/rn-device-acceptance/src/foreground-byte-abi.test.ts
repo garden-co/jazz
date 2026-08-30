@@ -427,7 +427,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   );
 });
 
-test("two aliases in one installed JSI runtime require B to observe A's committed subscription delta", () => {
+test("two aliases in one installed JSI runtime require B to observe A's committed subscription delta", async () => {
   const command = {
     encode(value: unknown) {
       return new TextEncoder().encode(JSON.stringify(value));
@@ -445,11 +445,15 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   } as unknown as ForegroundByteCodec;
   let committed = false;
   let opened = 0;
+  let emitCommitWake = true;
+  const schedulers: Array<((urgency: string) => void) | undefined> = [];
+  const ticks = [0, 0];
   const factory = {
     abiVersion: NATIVE_RELAY_ABI_VERSION,
     openAttached(received: Uint8Array) {
       assert.deepEqual(received, capability);
       const peer = opened++;
+      let initialResetDrained = false;
       return {
         execute(bytes: Uint8Array) {
           const request = command.decode(bytes) as { type?: string };
@@ -457,13 +461,31 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
             request.type === "prepareQuery"
               ? { type: "preparedQuery", query: 1 }
               : request.type === "subscribe"
-                ? { type: "subscribed", subscription: 2 }
+                ? (setTimeout(
+                    () =>
+                      setTimeout(() => {
+                        const ticksBeforeWake = ticks[peer];
+                        schedulers[peer]?.("immediate");
+                        assert.equal(ticks[peer], ticksBeforeWake);
+                      }, 0),
+                    0,
+                  ),
+                  { type: "subscribed", subscription: 2 })
                 : request.type === "beginTransaction"
                   ? { type: "transactionOpened", transaction: 3 }
                   : request.type === "upsert"
                     ? { type: "mutationStaged" }
                     : request.type === "commitTransaction"
-                      ? ((committed = true),
+                      ? (setTimeout(() => {
+                          committed = true;
+                          const bTicksBeforeWake = ticks[1];
+                          if (emitCommitWake) schedulers[1]?.("immediate");
+                          assert.equal(
+                            ticks[1],
+                            bTicksBeforeWake,
+                            "subscription wake must not re-enter foreground.tick",
+                          );
+                        }, 0),
                         {
                           type: "transactionCommitted",
                           txId: new Uint8Array(16).fill(1),
@@ -472,51 +494,98 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                         ? {
                             type: "subscriptionEvents",
                             events:
-                              peer === 1 && committed
-                                ? [
+                              peer === 1 && !initialResetDrained
+                                ? ((initialResetDrained = true),
+                                  [
                                     {
                                       type: "delta",
-                                      reset: false,
+                                      reset: true,
                                       settled: true,
                                       tier: "local",
-                                      delta: Array.from(
-                                        new TextEncoder().encode("foreground-a-subscription-row"),
-                                      ),
+                                      delta: [],
                                     },
-                                  ]
-                                : [],
+                                  ])
+                                : peer === 1 && committed
+                                  ? [
+                                      {
+                                        type: "delta",
+                                        reset: false,
+                                        settled: true,
+                                        tier: "local",
+                                        delta: Array.from(
+                                          new TextEncoder().encode("foreground-a-subscription-row"),
+                                        ),
+                                      },
+                                    ]
+                                  : [],
                           }
                         : request.type === "unsubscribe"
                           ? { type: "unsubscribed", closed: true }
                           : { type: "closed", closed: true };
           return command.encode(response);
         },
-        tick() {},
+        tick() {
+          ticks[peer] += 1;
+        },
+        setTickScheduler(callback: (urgency: string) => void) {
+          schedulers[peer] = callback;
+        },
         close: () => true,
       };
     },
   };
-  proveSameJsiRuntimeWriteSubscription(factory, capability, command);
+  await proveSameJsiRuntimeWriteSubscription(factory, capability, command);
 
   committed = false;
   opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  emitCommitWake = false;
+  await assert.rejects(
+    async () => proveSameJsiRuntimeWriteSubscription(factory, capability, command),
+    /did not observe foreground A's committed row/,
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  emitCommitWake = true;
+  const missingNativeWake = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      return { ...foreground, setTickScheduler() {} };
+    },
+  };
+  await assert.rejects(
+    async () => proveSameJsiRuntimeWriteSubscription(missingNativeWake, capability, command),
+    /initial subscription reset did not settle/,
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
   const noObservation = {
     ...factory,
     openAttached(received: Uint8Array) {
       const foreground = factory.openAttached(received);
+      let initialResetDrained = false;
       return {
         ...foreground,
         execute(bytes: Uint8Array) {
           const request = command.decode(bytes) as { type?: string };
-          if (request.type === "drainSubscription")
+          if (request.type === "drainSubscription" && initialResetDrained)
             return command.encode({ type: "subscriptionEvents", events: [] });
+          if (request.type === "drainSubscription") initialResetDrained = true;
           return foreground.execute(bytes);
         },
       };
     },
   };
-  assert.throws(
-    () => proveSameJsiRuntimeWriteSubscription(noObservation, capability, command),
+  await assert.rejects(
+    async () => proveSameJsiRuntimeWriteSubscription(noObservation, capability, command),
     /did not observe foreground A's committed row/,
   );
 });

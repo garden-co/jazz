@@ -164,13 +164,15 @@ export function proveForegroundWriteAbi(
  * delta.  This deliberately stays at the byte ABI boundary: JS only checks a
  * fixed fixture title in Rust-produced binding bytes.
  */
-export function proveSameJsiRuntimeWriteSubscription(
+export async function proveSameJsiRuntimeWriteSubscription(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
-): void {
-  const a = factory.openAttached(capability);
-  const b = factory.openAttached(capability);
+): Promise<void> {
+  const openedA = openScopeForeground(factory, capability);
+  const openedB = openScopeForeground(factory, capability);
+  const a = openedA.runtime;
+  const b = openedB.runtime;
   const execute = (foreground: NativeForegroundRuntime, command: NativeForegroundCommand) =>
     codec.decode(foreground.execute(codec.encode(command)));
   try {
@@ -181,10 +183,23 @@ export function proveSameJsiRuntimeWriteSubscription(
     if (subscribed.type !== "subscribed")
       throw new Error("foreground B could not subscribe to the todos query");
 
-    // Consume the subscription's initial reset before performing A's write.
-    // The resulting evidence must be the cross-foreground update, not B's
-    // initial materialization.
-    drainSubscription(b, subscribed.subscription, codec);
+    // Settle and acknowledge B's initial reset before A writes. A timer is not
+    // a CallInvoker barrier: the reset wake may arrive several turns later.
+    // Observing the wake-driven settled reset establishes the new notification
+    // epoch, so that reset cannot masquerade as evidence for A's later commit.
+    let initialResetSettled = false;
+    for (let attempt = 0; attempt < 96; attempt += 1) {
+      b.tick();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!openedB.consumeWake()) continue;
+      const events = drainSubscription(b, subscribed.subscription, codec);
+      if (events.some((event) => event.type === "delta" && event.reset && event.settled)) {
+        initialResetSettled = true;
+        break;
+      }
+    }
+    if (!initialResetSettled)
+      throw new Error("foreground B initial subscription reset did not settle");
 
     const transaction = execute(a, {
       type: "beginTransaction",
@@ -214,6 +229,11 @@ export function proveSameJsiRuntimeWriteSubscription(
       // side channel into the persistent SQLite store.
       a.tick();
       b.tick();
+      // SQLite/IVM completion reaches this runtime through React Native's
+      // CallInvoker. A synchronous drain loop starves that callback even
+      // though both aliases are ticked fairly.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!openedB.consumeWake()) continue;
       const events = drainSubscription(b, subscribed.subscription, codec);
       if (
         events.some(
