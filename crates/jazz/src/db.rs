@@ -1454,6 +1454,9 @@ where
     next_now_ms: Rc<Cell<u64>>,
     /// Set only on the private clone owned by one queued mutation operation.
     reserved_tx_id: Option<TxId>,
+    /// True only for a future accepted while the shared owner was Open. Such
+    /// futures must remain executable while close drains the accepted FIFO.
+    owner_operation_admitted: bool,
     // Minted only by the explicitly unsafe trusted-backend open path. SYSTEM
     // itself is an admission identity, not proof that a Db may forge external
     // row provenance.

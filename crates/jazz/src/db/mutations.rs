@@ -841,6 +841,7 @@ where
         patch: RowCells,
         mutations: Vec<LargeValueUpdate>,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.update_with_large_value_mutations_at_ms_option(table, row, patch, mutations, None)
             .await
     }
@@ -855,6 +856,7 @@ where
         mutations: Vec<LargeValueUpdate>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.update_with_large_value_mutations_at_ms_option(
             table,
             row,
@@ -1397,6 +1399,7 @@ where
         cells: RowCells,
         options: InsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let InsertOptions {
             row_id,
             identity,
@@ -2148,6 +2151,7 @@ where
         patch: RowCells,
         options: UpdateOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let UpdateOptions {
             identity,
             target,
@@ -2304,6 +2308,7 @@ where
         cells: RowCells,
         options: UpsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let UpsertOptions {
             identity,
             target,
@@ -2440,6 +2445,7 @@ where
         row: RowUuid,
         options: DeleteOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let DeleteOptions {
             identity,
             target,
@@ -2632,6 +2638,7 @@ where
         cells: Option<RowCells>,
         options: RestoreOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_mutation_operation_admitted()?;
         let RestoreOptions {
             identity,
             target,

@@ -3641,20 +3641,41 @@ impl NapiDb {
             if owns_runtime && let Some(inner) = inner {
                 match inner {
                     NapiDbInnerStorage::Memory(db) => {
-                        db.close().await.map_err(napi_error)?;
-                        db.set_tick_scheduler(None);
-                        db.clear_mutation_error_callback();
+                        close_owned_napi_runtime(db).await?;
                     }
                     NapiDbInnerStorage::Persistent(db) => {
-                        db.close().await.map_err(napi_error)?;
-                        db.set_tick_scheduler(None);
-                        db.clear_mutation_error_callback();
+                        close_owned_napi_runtime(db).await?;
                     }
                 }
             }
             Ok(Uint8Array::new(Vec::new()))
         }))
     }
+}
+
+async fn close_owned_napi_runtime<S>(db: Rc<CoreDb<S>>) -> napi::Result<()>
+where
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+{
+    let cleanup_db = Rc::clone(&db);
+    close_after_cleanup(
+        move || {
+            cleanup_db.set_tick_scheduler(None);
+            cleanup_db.clear_mutation_error_callback();
+        },
+        async move { db.close().await.map_err(napi_error) },
+    )
+    .await
+}
+
+async fn close_after_cleanup<F>(cleanup: impl FnOnce(), close: F) -> napi::Result<()>
+where
+    F: Future<Output = napi::Result<()>>,
+{
+    // JS resources must not remain retained merely because durable close
+    // fails. Detach them before entering the fallible storage lifecycle.
+    cleanup();
+    close.await
 }
 
 fn unknown_transaction_kind_message(kind: &str) -> String {
@@ -4979,12 +5000,37 @@ mod tests {
         NapiDb, NapiDbInnerStorage, NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
         PendingSubscriptionBatchOutcome, PendingSubscriptionBatchPoll, PreparedQuery,
         RestoreOptions, Tx, UpdateOptions, UpsertOptions, authority_epoch_from_bigint,
-        core_author_id_from_bytes, core_block_on, core_claim_value_from_json, core_insert_options,
-        core_open_backend_identity, core_open_identity, core_read_opts_from_json,
-        core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
-        core_update_options, core_upsert_options, encode_core_subscription_delta,
-        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
+        close_after_cleanup, core_author_id_from_bytes, core_block_on, core_claim_value_from_json,
+        core_insert_options, core_open_backend_identity, core_open_identity,
+        core_read_opts_from_json, core_read_tier_from_str, core_restore_options,
+        core_subscription_event_to_napi, core_update_options, core_upsert_options,
+        encode_core_subscription_delta, requeue_retryable_subscription_batch,
+        unknown_transaction_kind_message,
     };
+
+    #[test]
+    fn failing_close_releases_scheduler_and_mutation_callback() {
+        let scheduler = Rc::new(());
+        let scheduler_weak = Rc::downgrade(&scheduler);
+        let callback = Rc::new(());
+        let callback_weak = Rc::downgrade(&callback);
+        let result = core_block_on(close_after_cleanup(
+            move || {
+                drop(scheduler);
+                drop(callback);
+            },
+            async { Err(napi::Error::from_reason("injected close failure")) },
+        ));
+        assert!(result.is_err());
+        assert!(
+            scheduler_weak.upgrade().is_none(),
+            "a failed storage close must not retain the JS scheduler"
+        );
+        assert!(
+            callback_weak.upgrade().is_none(),
+            "a failed storage close must not retain the JS mutation callback"
+        );
+    }
 
     fn encode_persistent_open_config(author: CoreAuthorSubject) -> Vec<u8> {
         #[derive(serde::Serialize)]

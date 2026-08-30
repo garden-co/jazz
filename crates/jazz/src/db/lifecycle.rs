@@ -86,6 +86,7 @@ where
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         })
     }
@@ -136,6 +137,7 @@ where
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         };
         Ok((db, receipt))
@@ -173,6 +175,7 @@ where
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         })
     }
@@ -226,6 +229,7 @@ where
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         })
     }
@@ -338,6 +342,7 @@ where
             row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
             next_now_ms: Rc::clone(&self.next_now_ms),
             reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: self.backend_attribution,
         })
     }
@@ -504,6 +509,7 @@ where
             row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
             next_now_ms: Rc::clone(&self.next_now_ms),
             reserved_tx_id: Some(tx_id),
+            owner_operation_admitted: true,
             backend_attribution: self.backend_attribution,
         }
     }
@@ -520,7 +526,16 @@ where
             row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
             next_now_ms: Rc::clone(&self.next_now_ms),
             reserved_tx_id: None,
+            owner_operation_admitted: true,
             backend_attribution: self.backend_attribution,
+        }
+    }
+
+    pub(super) fn ensure_mutation_operation_admitted(&self) -> Result<(), Error> {
+        if self.owner_operation_admitted {
+            Ok(())
+        } else {
+            self.node.ensure_mutation_admission_open()
         }
     }
 

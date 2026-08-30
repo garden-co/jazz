@@ -872,6 +872,13 @@ where
         tier: DurabilityTier,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
+        if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing {
+            callback(Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("database is closed; transaction {tx_id:?} cannot be observed"),
+            )));
+            return;
+        }
         let node = Rc::clone(self);
         self.transaction_wait_observers
             .borrow_mut()

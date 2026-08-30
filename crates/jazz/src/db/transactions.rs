@@ -76,6 +76,7 @@ where
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.node
             .node
             .lock()
@@ -93,6 +94,7 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.node
             .node
             .lock()
@@ -110,6 +112,7 @@ where
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         if made_by != self.identity.author && !self.backend_attribution {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -678,6 +681,7 @@ where
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
     pub async fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.open_exclusive_handle(id).await
     }
 
@@ -691,6 +695,7 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.open_exclusive_handle_for_identity(id, author).await
     }
 

@@ -411,8 +411,8 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let (storage, control) = TestStorage::controlled(&family_refs);
     let reopen_handle = storage.clone();
-    let db = block_on(Db::open(DbConfig::new(
-        schema.clone(),
+    let owner = block_on(Db::open_history_complete(DbConfig::new(
+        empty_schema(),
         storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x59; 16]),
@@ -420,6 +420,9 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
         },
     )))
     .expect("open yielding database");
+    let db = Rc::new(
+        block_on(owner.register_schema_view(schema.clone())).expect("register sibling schema view"),
+    );
 
     reopen_handle.evict_all();
     control.pause_on(TestStorageOperation::Get);
@@ -449,8 +452,14 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
 
     let local_waits = Rc::new(RefCell::new(Vec::new()));
     let local_wait_results = Rc::clone(&local_waits);
+    let reentrant_waits = Rc::new(RefCell::new(Vec::new()));
+    let reentrant_wait_results = Rc::clone(&reentrant_waits);
+    let reentrant_db = Rc::clone(&db);
     db.wait_for_transaction_with(second_tx, DurabilityTier::Local, move |result| {
         local_wait_results.borrow_mut().push(result);
+        reentrant_db.wait_for_transaction_with(second_tx, DurabilityTier::Edge, move |result| {
+            reentrant_wait_results.borrow_mut().push(result)
+        });
     });
     let edge_waits = Rc::new(RefCell::new(Vec::new()));
     let edge_wait_results = Rc::clone(&edge_waits);
@@ -460,7 +469,7 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
 
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    let mut close = Box::pin(db.close());
+    let mut close = Box::pin(owner.close());
     assert!(matches!(close.as_mut().poll(&mut context), Poll::Pending));
 
     let after_closing = match db.enqueue_insert(
@@ -472,12 +481,36 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
         Err(error) => error,
     };
     assert_eq!(after_closing.code, ErrorCode::WriteRejected);
+    let direct_after_closing = block_on(db.insert(
+        "todos",
+        row! { title: "direct Rust mutation must share the owner gate" },
+        Default::default(),
+    ))
+    .err()
+    .expect("direct mutation through a sibling schema view must be rejected");
+    assert_eq!(direct_after_closing.code, ErrorCode::WriteRejected);
     let late_open_tx = OpenTransactionId::new();
     assert_eq!(
         db.enqueue_begin_mergeable(late_open_tx, None, None)
             .expect_err("transaction entry after close starts must be rejected")
             .code,
         ErrorCode::WriteRejected,
+    );
+    assert_eq!(
+        block_on(db.begin_exclusive(OpenTransactionId::new()))
+            .expect_err("direct transaction entry through a sibling view must be rejected")
+            .code,
+        ErrorCode::WriteRejected,
+    );
+    let late_waits = Rc::new(RefCell::new(Vec::new()));
+    let late_wait_results = Rc::clone(&late_waits);
+    db.wait_for_transaction_with(second_tx, DurabilityTier::Global, move |result| {
+        late_wait_results.borrow_mut().push(result);
+    });
+    assert_eq!(late_waits.borrow().len(), 1);
+    assert_eq!(
+        late_waits.borrow()[0].as_ref().unwrap_err().code,
+        ErrorCode::NotObserved,
     );
     assert_eq!(
         db.enqueue_transaction_insert(
@@ -505,6 +538,11 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
         edge_waits.borrow()[0].as_ref().unwrap_err().code,
         ErrorCode::NotObserved,
     );
+    assert_eq!(reentrant_waits.borrow().len(), 1);
+    assert_eq!(
+        reentrant_waits.borrow()[0].as_ref().unwrap_err().code,
+        ErrorCode::NotObserved,
+    );
     assert_eq!(
         block_on(failed.write_state())
             .expect_err("failed queued operation remains terminally observable")
@@ -513,6 +551,7 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     );
     drop(close);
     drop(db);
+    drop(owner);
 
     let reopened_storage = block_on(reopen_handle.reopen(families)).expect("reopen drained store");
     let reopened = block_on(Db::open(DbConfig::new(
