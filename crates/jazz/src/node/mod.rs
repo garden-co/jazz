@@ -509,6 +509,10 @@ pub struct NodeState<S> {
     session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
     session_claim_revisions: BTreeMap<AuthorSubject, u64>,
+    /// Claims scoped to the subscriber whose query is currently compiling.
+    /// This never escapes the node lock, so equal authenticated identities on
+    /// concurrent transports cannot change each other's policy inputs.
+    active_session_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     /// Whether this authority has installed the permissions head that governs
     /// session-scoped reads and writes.
     permissions_ready: bool,
@@ -845,6 +849,7 @@ struct ReadPolicyAuthorizationRequestCacheKey {
     binding_source_shape: Option<String>,
     binding_user_params: String,
     binding_claim_params: String,
+    active_session_claims: String,
     include_deleted_root: bool,
 }
 

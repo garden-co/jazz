@@ -2420,3 +2420,63 @@ fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
         .is_empty());
     assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
 }
+/// Keeps the active query claim scope opaque and deterministic, and restores
+/// the prior node state when a future holding the scope is cancelled.
+///
+/// ```text
+/// session A scope ──poll pending──► cancel ──► no active scope
+/// session B scope ───────────────────────────► distinct opaque key
+/// ```
+#[test]
+fn active_session_claim_scope_is_deterministic_and_cancellation_safe() {
+    let (_dir, mut node) = open_node();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let admin = BTreeMap::from([("admin".to_owned(), Value::Bool(true))]);
+    let denied = BTreeMap::from([("admin".to_owned(), Value::Bool(false))]);
+
+    let first = {
+        let scope = node.scoped_active_session_claims(alice, admin.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("active scope has an opaque key")
+    };
+    let repeat = {
+        let scope = node.scoped_active_session_claims(alice, admin.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("same scope has an opaque key")
+    };
+    let different_claims = {
+        let scope = node.scoped_active_session_claims(alice, denied.clone());
+        scope
+            .active_session_claim_scope_key(alice)
+            .expect("different claims have an opaque key")
+    };
+    let different_identity = {
+        let scope = node.scoped_active_session_claims(bob, admin.clone());
+        scope
+            .active_session_claim_scope_key(bob)
+            .expect("different identity has an opaque key")
+    };
+    assert_eq!(first, repeat, "scope identities must be deterministic");
+    assert_ne!(first, different_claims, "claims must partition scope keys");
+    assert_ne!(first, different_identity, "identity must partition scope keys");
+    assert!(node.active_session_claim_scope_key(alice).is_none());
+
+    let mut cancelled = Box::pin(async {
+        let _scope = node.scoped_active_session_claims(alice, admin);
+        std::future::pending::<()>().await;
+    });
+    let waker = futures::task::noop_waker();
+    let mut context = std::task::Context::from_waker(&waker);
+    assert!(matches!(
+        std::future::Future::poll(cancelled.as_mut(), &mut context),
+        std::task::Poll::Pending
+    ));
+    drop(cancelled);
+    assert!(
+        node.active_session_claim_scope_key(alice).is_none(),
+        "cancelling a scoped query must restore the prior claim context"
+    );
+}

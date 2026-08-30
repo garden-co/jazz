@@ -1,3 +1,32 @@
+/// A cancellation-safe temporary claim scope for one node-locked operation.
+///
+/// The scope owns the mutable node borrow, so its [`Drop`] implementation runs
+/// before the node lock is released if an awaited query is cancelled.
+pub(crate) struct ActiveSessionClaimsScope<'a, S> {
+    node: &'a mut NodeState<S>,
+    previous: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+}
+
+impl<S> std::ops::Deref for ActiveSessionClaimsScope<'_, S> {
+    type Target = NodeState<S>;
+
+    fn deref(&self) -> &Self::Target {
+        self.node
+    }
+}
+
+impl<S> std::ops::DerefMut for ActiveSessionClaimsScope<'_, S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.node
+    }
+}
+
+impl<S> Drop for ActiveSessionClaimsScope<'_, S> {
+    fn drop(&mut self) {
+        self.node.active_session_claims = self.previous.take();
+    }
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -600,6 +629,7 @@ where
             merge_head_reachability_walks: 0,
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
+            active_session_claims: None,
             permissions_ready: true,
             catalogue_activation_failed: false,
             #[cfg(any(test, feature = "testing"))]
@@ -758,6 +788,36 @@ where
             .expect("session claim revision overflow must stop authorization delivery");
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+    }
+
+    /// Scope one node-locked operation to this subscriber's admitted claims.
+    /// Dropping the returned guard restores the prior scope even if an awaited
+    /// operation is cancelled before it returns.
+    pub(crate) fn scoped_active_session_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> ActiveSessionClaimsScope<'_, S> {
+        let previous = self.active_session_claims.replace((identity, claims));
+        ActiveSessionClaimsScope {
+            node: self,
+            previous,
+        }
+    }
+
+    /// Return an opaque, domain-separated identity for the active session
+    /// scope. It is runtime-only and deliberately never formats raw claims.
+    pub(crate) fn active_session_claim_scope_key(&self, identity: AuthorSubject) -> Option<String> {
+        let (_, claims) = self
+            .active_session_claims
+            .as_ref()
+            .filter(|(active_identity, _)| *active_identity == identity)?;
+        let encoded = postcard::to_allocvec(&(identity, claims))
+            .expect("author identity and claim values are postcard encodable");
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"jazz/active-session-claim-scope/v1\\0");
+        hasher.update(&encoded);
+        Some(hasher.finalize().to_hex().to_string())
     }
 
     /// Admit application/provider claims for a synthetic test topology.

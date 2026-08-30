@@ -739,22 +739,30 @@ where
         *session_claim_revision = session_claim_revision.saturating_add(1);
     }
 
-    /// Bind the process-local query compiler to this subscriber's authenticated
-    /// session immediately before it serves work for that subscriber. NodeState
-    /// retains a cache keyed by identity, while several websocket sessions can
-    /// legitimately share an identity with different claim maps.
-    fn bind_subscriber_session_claims(&self) {
+    /// Return the claims admitted for this subscriber session. They are scoped
+    /// while the node lock is held instead of being installed under the shared
+    /// author identity.
+    fn subscriber_session_claim_binding(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             ingest_context,
             session_claims,
             ..
         }) = &self.link
         else {
+            return None;
+        };
+        Some((ingest_context.identity, session_claims.clone()))
+    }
+
+    /// Keep the legacy admission map available to write-policy evaluation and
+    /// upstream propagation. Read compilation uses the scoped context above,
+    /// so this author-keyed compatibility state cannot select another live
+    /// session's maintained view.
+    fn bind_subscriber_session_claims(&self) {
+        let Some((identity, claims)) = self.subscriber_session_claim_binding() else {
             return;
         };
-        self.node
-            .borrow_mut()
-            .set_session_claims(ingest_context.identity, session_claims.clone());
+        self.node.borrow_mut().set_session_claims(identity, claims);
     }
 
     fn subscriber_session_claim_revision(&self) -> u64 {
@@ -782,7 +790,7 @@ where
             }
             ConnectionLink::Upstream(_) => return Ok(false),
         };
-        self.bind_subscriber_session_claims();
+        let session_claim_binding = self.subscriber_session_claim_binding();
         let current_revision = self.subscriber_session_claim_revision();
         if self.observed_session_claim_revision.get() == current_revision {
             return Ok(false);
@@ -819,6 +827,14 @@ where
             };
             let update = {
                 let mut node = self.node.lock().await;
+                let mut node = node.scoped_active_session_claims(
+                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                    session_claim_binding
+                        .as_ref()
+                        .expect("subscriber claims")
+                        .1
+                        .clone(),
+                );
                 peer.rehydrate_query_for_subscription_with_opts_and_waker(
                     &mut node,
                     maintained_subscription,
@@ -844,6 +860,7 @@ where
                     refresh_authorized_scope_purpose(
                         &self.node.borrow(),
                         identity,
+                        &session_claim_binding.as_ref().expect("subscriber claims").1,
                         subscription,
                         &shape,
                         &binding,
@@ -1006,7 +1023,7 @@ where
             .borrow()
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker());
-        self.bind_subscriber_session_claims();
+        let session_claim_binding = self.subscriber_session_claim_binding();
         let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
@@ -1040,6 +1057,14 @@ where
             };
             let update = {
                 let mut node = self.node.lock().await;
+                let mut node = node.scoped_active_session_claims(
+                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                    session_claim_binding
+                        .as_ref()
+                        .expect("subscriber claims")
+                        .1
+                        .clone(),
+                );
                 peer.rehydrate_query_for_subscription_with_opts_and_waker(
                     &mut node,
                     group_subscription,
@@ -1067,6 +1092,7 @@ where
                     refresh_authorized_scope_purpose(
                         &self.node.borrow(),
                         ingest_context.identity,
+                        &session_claim_binding.as_ref().expect("subscriber claims").1,
                         subscription,
                         &shape,
                         &binding,
@@ -1154,6 +1180,7 @@ where
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
+        let session_claim_binding = self.subscriber_session_claim_binding();
         self.bind_subscriber_session_claims();
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
@@ -2199,6 +2226,17 @@ where
                                 scope_lease_manager.requests.remove(&request_id);
                                 let advice = {
                                     let mut node = self.node.lock().await;
+                                    let mut node = node.scoped_active_session_claims(
+                                        session_claim_binding
+                                            .as_ref()
+                                            .expect("subscriber claims")
+                                            .0,
+                                        session_claim_binding
+                                            .as_ref()
+                                            .expect("subscriber claims")
+                                            .1
+                                            .clone(),
+                                    );
                                     evaluate_authoritative_permission_advice(
                                         &mut node,
                                         receipt.key.subject,
@@ -2698,6 +2736,11 @@ where
                                 peer,
                                 &mut self.pending_control_responses,
                                 ingest_context.identity,
+                                session_claim_binding
+                                    .as_ref()
+                                    .expect("subscriber claims")
+                                    .1
+                                    .clone(),
                                 connection_epoch,
                                 request_id,
                                 action,
@@ -2810,11 +2853,13 @@ where
                                             continue;
                                         }
                                     };
-                                    let supported = self
-                                        .node
-                                        .lock()
-                                        .await
-                                        .ensure_peer_maintained_subscription_view_supported(
+                                    let supported = {
+                                        let mut node = self.node.lock().await;
+                                        let mut node = node.scoped_active_session_claims(
+                                            session_claim_binding.as_ref().expect("subscriber claims").0,
+                                            session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                                        );
+                                        node.ensure_peer_maintained_subscription_view_supported(
                                             shape,
                                             &binding,
                                             opts.tier,
@@ -2822,7 +2867,8 @@ where
                                             &opts.read_view,
                                             QueryAuthorizationMode::TrustedServing,
                                         )
-                                        .await;
+                                        .await
+                                    };
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
                                     {
@@ -3043,9 +3089,15 @@ where
                                 );
                             }
                             let scope_purpose = if let Some(purpose) = scope_purpose {
-                                let expected_result =
-                                    self.node.borrow().authorization_support_scope(
+                                let expected_result = self
+                                    .node
+                                    .borrow()
+                                    .authorization_support_scope_for_session(
                                         ingest_context.identity,
+                                        Some(&session_claim_binding
+                                            .as_ref()
+                                            .expect("subscriber claims")
+                                            .1),
                                         &purpose.action,
                                     );
                                 let expected = match expected_result {
@@ -3095,11 +3147,13 @@ where
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
-                            let supported = self
-                                .node
-                                .lock()
-                                .await
-                                .ensure_peer_maintained_subscription_view_supported(
+                            let supported = {
+                                let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                                );
+                                node.ensure_peer_maintained_subscription_view_supported(
                                     &shape,
                                     &binding,
                                     opts.tier,
@@ -3107,7 +3161,8 @@ where
                                     &opts.read_view,
                                     QueryAuthorizationMode::TrustedServing,
                                 )
-                                .await;
+                                .await
+                            };
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
                                 queue_direct_control(&mut self.pending_control_responses,
                                     unsupported_shape_capability_rejection_message(
@@ -3695,6 +3750,10 @@ where
                         for subscription in pending_initial {
                             let update_result = {
                                 let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                                );
                                 if group.initialized
                                     || peer.has_maintained_subscription(group_subscription)
                                 {
@@ -3795,6 +3854,10 @@ where
                         }
                         let update_result = {
                             let mut node = self.node.lock().await;
+                            let mut node = node.scoped_active_session_claims(
+                                session_claim_binding.as_ref().expect("subscriber claims").0,
+                                session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                            );
                             if settled_handoff {
                                 peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
@@ -4257,6 +4320,7 @@ async fn serve_authorization_scope_intent<S>(
     peer: &mut PeerState,
     pending_control_responses: &mut VecDeque<PendingSubscriberControlResponse>,
     identity: AuthorSubject,
+    session_claims: BTreeMap<String, Value>,
     connection_epoch: u64,
     request_id: PermissionAdviceRequestId,
     action: PermissionAdviceAction,
@@ -4280,7 +4344,11 @@ where
         );
         return Ok(());
     }
-    let scope = match node.borrow().authorization_support_scope(identity, &action) {
+    let scope = match node.borrow().authorization_support_scope_for_session(
+        identity,
+        Some(&session_claims),
+        &action,
+    ) {
         Ok(scope) => scope,
         Err(_) => {
             queue_direct_control(
@@ -4305,6 +4373,7 @@ where
     if clause_count == 0 {
         let advice = {
             let mut node = node.lock().await;
+            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
             evaluate_authoritative_permission_advice(&mut node, identity, action).await
         };
         queue_direct_control(
@@ -4356,10 +4425,10 @@ where
             );
             return Ok(());
         }
-        let supported = node
-            .lock()
-            .await
-            .ensure_peer_maintained_subscription_view_supported(
+        let supported = {
+            let mut node = node.lock().await;
+            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
+            node.ensure_peer_maintained_subscription_view_supported(
                 shape,
                 binding,
                 scope.options.tier,
@@ -4367,7 +4436,8 @@ where
                 &scope.options.read_view,
                 QueryAuthorizationMode::TrustedServing,
             )
-            .await;
+            .await
+        };
         if supported.is_err() {
             queue_direct_control(
                 pending_control_responses,
@@ -4390,6 +4460,7 @@ where
         peer.declare_known_state(subscription, None);
         let update = {
             let mut node = node.lock().await;
+            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
             peer.rehydrate_query_for_subscription_with_opts_and_waker(
                 &mut node,
                 subscription,
@@ -4640,6 +4711,7 @@ pub(super) fn remove_scope_aggregate_member(
 fn refresh_authorized_scope_purpose<S>(
     node: &NodeState<S>,
     link_identity: AuthorSubject,
+    session_claims: &BTreeMap<String, Value>,
     subscription: SubscriptionKey,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -4649,7 +4721,7 @@ where
     S: OrderedKvStorage,
 {
     let expected = node
-        .authorization_support_scope(link_identity, &prior.action)
+        .authorization_support_scope_for_session(link_identity, Some(session_claims), &prior.action)
         .ok()?;
     let exact_support = subscription.shape_id == shape.shape_id()
         && subscription.binding_id == binding.binding_id()

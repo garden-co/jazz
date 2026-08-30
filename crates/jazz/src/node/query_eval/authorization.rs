@@ -371,7 +371,13 @@ where
             PolicyContext::System
         } else {
             let mut claims = default_policy_claim_values(identity);
-            if let Some(session_claims) = self.session_claims.get(&identity) {
+            if let Some((_, session_claims)) = self
+                .active_session_claims
+                .as_ref()
+                .filter(|(active_identity, _)| *active_identity == identity)
+            {
+                claims.extend(session_claims.clone());
+            } else if let Some(session_claims) = self.session_claims.get(&identity) {
                 claims.extend(session_claims.clone());
             }
             claims.insert(
@@ -1038,6 +1044,9 @@ where
             binding_source_shape: binding_source_shape.clone(),
             binding_user_params: binding_user_params_cache_key(&binding_user_params),
             binding_claim_params: binding_claim_params_cache_key(&binding_claim_params),
+            active_session_claims: self
+                .active_session_claim_scope_key(identity)
+                .unwrap_or_default(),
             include_deleted_root,
         };
         if let Some(request) = self
@@ -1308,6 +1317,21 @@ where
         writer: AuthorSubject,
         action: &PermissionAdviceAction,
     ) -> Result<AuthorizationSupportScope, Error> {
+        self.authorization_support_scope_for_session(
+            writer,
+            self.session_claims.get(&writer),
+            action,
+        )
+    }
+
+    /// Compile authorization support from the claims admitted by this exact
+    /// transport session, never the process-wide last session for its author.
+    pub(crate) fn authorization_support_scope_for_session(
+        &self,
+        writer: AuthorSubject,
+        claims: Option<&BTreeMap<String, Value>>,
+        action: &PermissionAdviceAction,
+    ) -> Result<AuthorizationSupportScope, Error> {
         let (operation, table_name) = authorization_scope_action(action);
         // `PermissionAdviceAction` is reconstructed after policy projection,
         // so its table belongs to the policy-owning schema, not necessarily
@@ -1328,7 +1352,6 @@ where
             &self.table_in_schema(table_name, policy_schema_version)?,
             operation,
         );
-        let claims = self.session_claims.get(&writer);
         let claim_values = permission_scope_claim_values(writer, claims);
         // Authorization support is authority-current: historic/branch views
         // and weaker durability tiers cannot vouch for the authoritative edge.
@@ -1572,6 +1595,26 @@ mod authorization_scope_compiler_tests {
             .authorization_support_scope(identity, &first_action)
             .unwrap();
         assert_ne!(first.key.claims_digest, changed_claims.key.claims_digest);
+
+        let editor_claims = BTreeMap::from([(
+            crate::query::provider_claim_key("role"),
+            Value::String("editor".to_owned()),
+        )]);
+        let viewer_claims = BTreeMap::from([(
+            crate::query::provider_claim_key("role"),
+            Value::String("viewer".to_owned()),
+        )]);
+        let explicit_editor = node
+            .authorization_support_scope_for_session(identity, Some(&editor_claims), &first_action)
+            .unwrap();
+        let explicit_viewer = node
+            .authorization_support_scope_for_session(identity, Some(&viewer_claims), &first_action)
+            .unwrap();
+        assert_ne!(
+            explicit_editor.key, explicit_viewer.key,
+            "same-author support scopes must follow the calling session, not the ambient claim map"
+        );
+        assert_eq!(explicit_viewer.key, changed_claims.key);
     }
 
     #[test]
