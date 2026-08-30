@@ -629,11 +629,6 @@ mod client_transport {
             .build()
     }
 
-    fn reserve_local_port() -> u16 {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve local port");
-        listener.local_addr().expect("reserved local addr").port()
-    }
-
     /// Waits for the initial settled reset of a fresh subscription and
     /// asserts it carries `expected_id`.
     async fn assert_initial_settled_row(
@@ -740,17 +735,19 @@ mod client_transport {
             .run_until(async {
                 let schema = document_schema();
                 let app_id = AppId::random();
-                let port = reserve_local_port();
                 let data_dir = TempDir::new().expect("server data dir");
 
+                // Let the first server retain the kernel-selected port rather
+                // than reserving and dropping one before it starts: nextest
+                // runs this topology alongside other server tests.
                 let first_server = JazzServer::builder()
                     .with_app_id(app_id)
-                    .with_port(port)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
                     .await;
+                let port = first_server.port();
                 let alice = TestingClient::builder()
                     .with_server(&first_server)
                     .with_schema(schema.clone())
