@@ -543,8 +543,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   schedulers.length = 0;
   ticks.fill(0);
   let splitOpened = 0;
-  let splitDrains = 0;
-  const splitInitialSettlement = {
+  let unsettledResetDrains = 0;
+  const unsettledInitialReset = {
     ...factory,
     openAttached(received: Uint8Array) {
       const foreground = factory.openAttached(received);
@@ -554,29 +554,25 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         execute(bytes: Uint8Array) {
           const request = command.decode(bytes) as { type?: string };
           if (peer === 1 && request.type === "drainSubscription") {
-            splitDrains += 1;
-            if (splitDrains === 1) {
-              // Consume the underlying reset, but split its settlement into a
-              // later ordinary delta as the native stream is allowed to do.
+            unsettledResetDrains += 1;
+            if (unsettledResetDrains === 1) {
+              // Consume the underlying reset but preserve only its reset
+              // semantics; durability settlement is orthogonal to proving
+              // that the later content delta was not the opening snapshot.
               foreground.execute(bytes);
               return command.encode({
                 type: "subscriptionEvents",
                 events: [{ type: "delta", reset: true, settled: false, tier: "local", delta: [] }],
               });
             }
-            if (splitDrains === 2)
-              return command.encode({
-                type: "subscriptionEvents",
-                events: [{ type: "delta", reset: false, settled: true, tier: "local", delta: [] }],
-              });
           }
           return foreground.execute(bytes);
         },
       };
     },
   };
-  await proveSameJsiRuntimeWriteSubscription(splitInitialSettlement, capability, command);
-  assert.equal(splitDrains, 3, "reset, settlement, and committed delta drain separately");
+  await proveSameJsiRuntimeWriteSubscription(unsettledInitialReset, capability, command);
+  assert.equal(unsettledResetDrains, 2, "unsettled reset and committed delta drain separately");
 
   committed = false;
   opened = 0;
@@ -611,7 +607,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   };
   await assert.rejects(
     async () => proveSameJsiRuntimeWriteSubscription(settlementBeforeReset, capability, command),
-    /initial subscription reset did not settle/,
+    /initial subscription reset did not materialize/,
   );
 
   committed = false;
@@ -670,7 +666,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   allowDelayedProgress = false;
   await assert.rejects(
     async () => proveSameJsiRuntimeWriteSubscription(delayedInitialReset, capability, command),
-    /initial subscription reset did not settle/,
+    /initial subscription reset did not materialize/,
   );
   assert.equal(delayedEmptyDrains, 96);
   assert.equal(delayedTurns, 0);
