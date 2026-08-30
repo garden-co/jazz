@@ -910,6 +910,10 @@ where
             }))
     }
 
+    pub(super) fn take_queued_mutation_failure(&self, tx_id: TxId) -> Option<Error> {
+        self.queued_mutation_failures.borrow_mut().remove(&tx_id)
+    }
+
     pub(super) fn wait_for_transaction_with(
         self: &Rc<Self>,
         tx_id: TxId,

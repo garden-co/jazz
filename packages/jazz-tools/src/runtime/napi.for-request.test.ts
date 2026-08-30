@@ -598,6 +598,20 @@ describe("forRequest concurrent session isolation", () => {
     expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
       'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
     );
+
+    // Upsert of an existing foreign row follows the same read-before-write
+    // admission boundary; it must not become an optimistic insert-shaped
+    // bypass merely because the caller supplies a complete replacement.
+    expect(() =>
+      aliceDb.upsert(todoApp.todos, bobRow.id, {
+        title: "alice-as-bob-upsert",
+        done: false,
+        description: scopeTag,
+        owner_id: bob.user,
+      }),
+    ).toThrow(
+      'Upsert failed: WriteError("read policy denied UPSERT on table todos: the operation requires read permission on the target row")',
+    );
   }, 30_000);
 
   /**

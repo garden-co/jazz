@@ -680,6 +680,16 @@ where
         })
     }
 
+    /// Consume a failure discovered by a binding-owned bounded admission turn.
+    ///
+    /// Normal writes retain their failure until `wait()` observes it. A
+    /// synchronous binding error has no write handle to wait on, so it must
+    /// explicitly retire that queued failure instead of retaining it forever.
+    #[doc(hidden)]
+    pub fn take_queued_mutation_failure(&self, tx_id: TxId) -> Option<Error> {
+        self.node.take_queued_mutation_failure(tx_id)
+    }
+
     /// Wait until `tx_id` reaches `tier` or is rejected.
     ///
     /// An explicit wait consumes a rejection, preventing the same failure from

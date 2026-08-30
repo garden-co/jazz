@@ -1709,13 +1709,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_update(table, row_id, patch, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_update(table, row_id, patch, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -1788,13 +1789,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_upsert(table, row_id, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_upsert(table, row_id, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -4161,6 +4163,22 @@ fn core_write_persistent(
         tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
+}
+
+/// Let a direct mutation complete one bounded resident turn before it crosses
+/// the synchronous NAPI boundary. This surfaces immediate admission failures
+/// (notably a trusted-serving session lacking read access to an UPDATE/UPSERT
+/// target) without waiting for storage: a genuinely async operation remains
+/// queued and is observed through the returned write's normal `wait()` path.
+fn core_drive_direct_mutation_once<S>(db: &CoreDb<S>, write: &WriteHandle<S>) -> napi::Result<()>
+where
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+{
+    db.drive_queued_mutation_once();
+    if let Some(error) = db.take_queued_mutation_failure(write.mergeable_tx_id()) {
+        return Err(napi_error(error));
+    }
+    Ok(())
 }
 
 fn core_claims_from_json(
