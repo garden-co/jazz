@@ -246,6 +246,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
       throw new Error("foreground A write did not commit");
 
     markFailure("same-runtime-delta-failed");
+    markFailure("same-runtime-postcommit-wake-failed");
     for (let attempt = 0; attempt < 96; attempt += 1) {
       // Both aliases get fair ordinary relay turns.  This is the same polling
       // progression used by the first native subscription slice, not a test
@@ -257,12 +258,14 @@ export async function proveSameJsiRuntimeWriteSubscription(
       // though both aliases are ticked fairly.
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       if (!openedB.consumeWake()) continue;
+      markFailure("same-runtime-delta-drain-failed");
       const events = await drainSubscription(
         b,
         subscribed.subscription,
         codec,
         openedB.consumeWake,
       );
+      if (events.length > 0) markFailure("same-runtime-delta-content-failed");
       if (
         events.some(
           (event) =>

@@ -569,6 +569,9 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     "same-runtime-mutation-stage-failed",
     "same-runtime-commit-failed",
     "same-runtime-delta-failed",
+    "same-runtime-postcommit-wake-failed",
+    "same-runtime-delta-drain-failed",
+    "same-runtime-delta-content-failed",
     "same-runtime-unsubscribe-failed",
   ]);
 
