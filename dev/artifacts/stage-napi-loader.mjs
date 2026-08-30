@@ -3,6 +3,22 @@ import { copyFileSync, existsSync, lstatSync, readFileSync, writeFileSync } from
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+function hostNapiTarget() {
+  const target = `${process.platform}-${process.arch}`;
+  switch (target) {
+    case "linux-x64":
+      return "linux-x64-gnu";
+    case "darwin-x64":
+      return "darwin-x64";
+    case "darwin-arm64":
+      return "darwin-arm64";
+    case "win32-x64":
+      return "win32-x64-msvc";
+    default:
+      throw new Error(`no Jazz NAPI package target for host ${target}`);
+  }
+}
+
 export function stageNapiLoader(root, platform) {
   if (!platform) throw new Error("usage: stage-napi-loader.mjs <platform>");
   const packageDir = join(root, "crates/jazz-napi");
@@ -46,7 +62,7 @@ export function stageNapiLoader(root, platform) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
   try {
-    stageNapiLoader(root, process.argv[2]);
+    stageNapiLoader(root, process.argv[2] ?? process.env.JAZZ_NAPI_PACK_TARGET ?? hostNapiTarget());
   } catch (error) {
     console.error(`stage NAPI loader: ${error.message}`);
     process.exitCode = 1;

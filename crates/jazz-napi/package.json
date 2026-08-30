@@ -14,10 +14,10 @@
     "index.d.ts",
     "close-pollable.cjs",
     "native-binding.cjs",
-    "native-binding.pointer.cjs",
     "native-loader.cjs",
     "native-artifact-fingerprint.cjs",
-    ".native-artifacts/**"
+    "jazz-napi.*.node",
+    "jazz-napi.*.manifest.json"
   ],
   "main": "index.cjs",
   "types": "index.d.ts",
@@ -38,6 +38,7 @@
     "build:debug": "node scripts/build.js --debug",
     "build:perf": "node scripts/build.js --profile perf",
     "build:perf:sccache": "RUSTC_WRAPPER=sccache node scripts/build.js --profile perf",
+    "prepack": "node ../../dev/artifacts/stage-napi-loader.mjs",
     "test": "node --test tests/*.test.cjs && pnpm typecheck:consumer",
     "typecheck:consumer": "tsc --project tests/types/tsconfig.json"
   },
