@@ -1346,10 +1346,13 @@ fn abandon_transaction_handle(
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<()> {
     match db {
-        NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
-        NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
+        NapiDbInnerStorage::Memory(db) => {
+            db.enqueue_abandon_transaction_handle(open_tx);
+            db.drive_queued_mutation_once();
+        }
+        NapiDbInnerStorage::Persistent(db) => db.enqueue_abandon_transaction_handle(open_tx),
     }
-    .map_err(|error| napi::Error::from_reason(error.to_string()))
+    Ok(())
 }
 
 #[napi(js_name = "NapiDb")]

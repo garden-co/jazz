@@ -910,7 +910,19 @@ impl WasmDbInner {
     }
 
     fn abandon_transaction(&self, tx_id: OpenTransactionId) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| db.abandon_transaction_handle(tx_id))
+        match self {
+            Self::Memory(db) => {
+                db.enqueue_abandon_transaction_handle(tx_id);
+                db.drive_queued_mutation_once();
+                Ok(())
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                db.enqueue_abandon_transaction_handle(tx_id);
+                Ok(())
+            }
+            Self::Closed => panic!("WasmDb is closed"),
+        }
     }
 
     fn commit_exclusive(&self, open_tx_id: OpenTransactionId) -> Result<WasmWrite, JsValue> {

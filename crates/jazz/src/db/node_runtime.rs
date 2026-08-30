@@ -211,6 +211,18 @@ where
         status
     }
 
+    pub(super) fn enqueue_transaction_cleanup(&self, future: QueuedMutationFuture) {
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: None,
+                future,
+                status: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
     pub(super) fn poll_queued_mutation_once(&self) {
         use std::task::{Context, Poll, Waker};
 
@@ -266,6 +278,13 @@ where
                             }
                         }
                     }
+                }
+                if operation.tx_id.is_some()
+                    && let Some(open_tx_id) = operation.open_tx_id
+                {
+                    self.queued_open_transaction_failures
+                        .borrow_mut()
+                        .remove(&open_tx_id);
                 }
                 if !self.queued_mutations.borrow().is_empty() {
                     self.schedule_tick(TickUrgency::Immediate);

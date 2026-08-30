@@ -590,3 +590,60 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     let rows = block_on(db.all(&query, ReadOpts::default())).expect("read committed row");
     assert_eq!(rows[0].cell_at(0), Some("after".into()));
 }
+
+#[test]
+fn queued_transaction_stage_failure_poison_prevents_partial_commit() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        jazz::groove::storage::MemoryStorage::new(&family_refs).expect("open memory storage");
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x59; 16]),
+            author: AuthorSubject::for_test_bytes([0x69; 16]),
+        },
+    )))
+    .expect("open database");
+    let open_tx = OpenTransactionId::new();
+    db.enqueue_begin_mergeable(open_tx, None, None)
+        .expect("queue begin");
+    db.enqueue_transaction_insert(
+        open_tx,
+        false,
+        "missing_table".to_owned(),
+        row! { title: "invalid" },
+        Default::default(),
+    );
+    db.enqueue_transaction_insert(
+        open_tx,
+        false,
+        "todos".to_owned(),
+        row! { title: "must not commit" },
+        Default::default(),
+    );
+    let commit = db
+        .enqueue_commit_mergeable_handle(open_tx)
+        .expect("reserve final identity");
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..32 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        if block_on(commit.write_state()).is_err() {
+            break;
+        }
+    }
+    let error = block_on(commit.write_state()).expect_err("stage error poisons the commit");
+    assert_eq!(error.code, ErrorCode::Schema);
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    assert!(
+        block_on(db.all(&query, ReadOpts::default()))
+            .expect("read rows")
+            .is_empty(),
+        "a later valid stage must not survive an earlier terminal stage error",
+    );
+}

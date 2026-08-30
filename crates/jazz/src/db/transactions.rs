@@ -642,6 +642,20 @@ where
             .map_err(Into::into)
     }
 
+    /// Queue rollback after all earlier admission/staging work. Missing state
+    /// is accepted because a failed queued begin is already terminal.
+    #[doc(hidden)]
+    pub fn enqueue_abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_cleanup(Box::pin(async move {
+            let mut node = db.node.node.lock().await;
+            match node.abandon_tx(open_tx_id) {
+                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }));
+    }
+
     /// Open an exclusive transaction over the current local snapshot.
     ///
     /// This is the owning, RAII flavour. It abandons an uncommitted transaction
