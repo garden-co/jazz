@@ -4024,7 +4024,36 @@ where
                                 session_claim_binding.as_ref().expect("subscriber claims").0,
                                 session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
                             );
-                            if settled_handoff {
+                            if settled_handoff && peer.has_maintained_subscription(group_subscription) {
+                                // A cold handoff opens the maintained view on
+                                // its first turn. Retrying that full rehydrate
+                                // would discard the just-opened receiver each
+                                // time, so resume the existing view's initial
+                                // delta and turn it into the authority reset.
+                                peer.query_update_for_subscription_with_opts_and_waker(
+                                    &mut node,
+                                    group_subscription,
+                                    &group.shape,
+                                    &group.binding,
+                                    coverage.opts.clone(),
+                                    progress_waker.as_ref(),
+                                )
+                                .await
+                                .map(|update| {
+                                    update.map(|mut update| {
+                                        if let SyncMessage::ViewUpdate(
+                                            crate::protocol::ViewUpdatePayload {
+                                                reset_result_set,
+                                                ..
+                                            },
+                                        ) = &mut update
+                                        {
+                                            *reset_result_set = true;
+                                        }
+                                        update
+                                    })
+                                })
+                            } else if settled_handoff {
                                 peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,

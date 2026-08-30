@@ -707,6 +707,96 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
     );
 }
 
+/// A Local structured read is served from the persistent worker's resident
+/// state even when that worker owns a separate authority-session identity.
+/// It must not wait for, or select, an upstream authority source.
+#[test]
+fn browser_client_hydrates_local_structured_subscription_without_authority() {
+    let schema = included_relation_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let worker = open_db(0x25, AuthorSubject::SYSTEM, &schema);
+    worker.set_relay_authority_session_owner();
+    let profile = worker
+        .insert(
+            "profiles",
+            BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("resident local sender".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("seed worker-local profile");
+    let message = worker
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("author".to_owned(), Value::Uuid(profile.row_uuid().0)),
+                ("body".to_owned(), Value::String("local message".to_owned())),
+                ("created".to_owned(), Value::U64(1)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed worker-local message");
+
+    let main_thread = open_db(0x14, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_connection = worker.accept_subscriber(worker_transport, alice);
+    let query = main_thread
+        .prepare_query(
+            &Query::from("messages")
+                .array_subquery(ArraySubquery::new("sender", "profiles", "id", "author")),
+        )
+        .expect("prepare Local structured query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe to Local structured worker state");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    for _ in 0..3 {
+        main_thread
+            .tick()
+            .expect("request Local structured worker view");
+        worker.tick().expect("serve Local structured worker view");
+        main_thread
+            .tick()
+            .expect("apply Local structured worker view");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    let Some(SubscriptionEvent::Delta { added, .. }) = events.iter().find(|event| {
+        matches!(event, SubscriptionEvent::Delta { added, .. }
+            if added.iter().any(|row| row.row.row_uuid() == message.row_uuid()))
+    }) else {
+        panic!("Local structured read must resolve from worker state, got {events:?}");
+    };
+    let root = added
+        .iter()
+        .find(|row| row.row.row_uuid() == message.row_uuid())
+        .expect("Local structured update contains seeded message");
+    let (descriptor, raw) = root.row.encoded_record();
+    let record = BorrowedRecord::new(raw, descriptor);
+    let Value::Array(sender) = record.get("sender").expect("nested sender field") else {
+        panic!("Local structured update must materialize sender")
+    };
+    assert!(matches!(
+        sender.as_slice(),
+        [Value::Record(sender)] if matches!(sender.get("name"), Ok(Value::String(name)) if name == "resident local sender")
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Rejected { .. })),
+        "Local structured read cannot require an authority receipt: {events:?}"
+    );
+}
+
 /// A main-thread Local subscription and a one-shot Edge read have distinct
 /// downstream serving options, but both canonicalize to the worker's Global
 /// upstream coverage. Retiring the one-shot usage site must not unsubscribe
@@ -1832,17 +1922,18 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
 }
 
 /// A cold browser foreground must finish one complete structured authority
-/// reset when the worker already has no local query runtime for the new Edge
+/// reset when the worker already has no local query runtime for the new remote
 /// usage site. Alice's main runtime opens a bounded ordered message relation;
 /// the worker relays Core's one reset, which contains both the root members and
 /// the profile facts required to materialize the nested `sender` records.
 ///
 /// ```text
-/// alice main ──Edge structured subscribe──► worker ──Global──► core
+/// alice main ──remote structured subscribe──► worker ──Global──► core
 /// alice main ◄──complete reset (roots + sender facts)── worker ◄── core
 /// ```
-#[test]
-fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
+fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
+    foreground_tier: DurabilityTier,
+) {
     let schema = included_relation_schema();
     let alice = AuthorSubject::for_test_bytes([0xb4; 16]);
     let main_thread = open_db(0x24, alice, &schema);
@@ -1906,11 +1997,11 @@ fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
                 .order_by("created", OrderDirection::Desc)
                 .limit(21),
         )
-        .expect("prepare cold structured Edge query");
+        .expect("prepare cold structured query");
     let mut subscription = block_on(main_thread.subscribe(
         &query,
         ReadOpts {
-            tier: DurabilityTier::Edge,
+            tier: foreground_tier,
             ..ReadOpts::default()
         },
     ))
@@ -1939,7 +2030,7 @@ fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
 
     assert!(
         authority_update_scheduled,
-        "the worker must schedule its post-reset Edge serve pass"
+        "the worker must schedule its post-reset remote serve pass"
     );
     let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
     let resets = events
@@ -2001,6 +2092,20 @@ fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
             Ok(Value::String(name)) if name == *expected_sender
         ));
     }
+}
+
+#[test]
+fn cold_browser_relay_structured_reset_materializes_ordered_sender_facts() {
+    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
+        DurabilityTier::Edge,
+    );
+}
+
+#[test]
+fn cold_browser_relay_global_structured_reset_materializes_ordered_sender_facts() {
+    assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
+        DurabilityTier::Global,
+    );
 }
 
 /// A reopened browser tab receives a new Edge receipt after the persistent

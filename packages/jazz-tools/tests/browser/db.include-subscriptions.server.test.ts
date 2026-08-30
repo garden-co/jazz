@@ -184,6 +184,7 @@ describe("websocket include subscriptions", () => {
       10_000,
       "client B subscribe did not produce an initial snapshot",
     );
+    expect(snapshots).toEqual([[]]);
 
     const org = await withTimeout(
       dbA.insert(app.orgs, { name: "Acme" }).wait({ tier: "global" }),
@@ -225,6 +226,13 @@ describe("websocket include subscriptions", () => {
         snapshots.slice(-3),
       )}`,
     );
+    expect(
+      snapshots.filter(
+        (rows) =>
+          includesNote(rows, org.id, todo.id, userCheck.id, note.id) &&
+          hasProjectedTodo(rows, org.id, todo.id, "ship it"),
+      ),
+    ).toHaveLength(1);
 
     await withTimeout(
       dbA.update(app.todos, todo.id, { title: "ship it again" }).wait({ tier: "global" }),
@@ -240,6 +248,9 @@ describe("websocket include subscriptions", () => {
         snapshots.slice(-3),
       )}`,
     );
+    expect(
+      snapshots.filter((rows) => hasProjectedTodo(rows, org.id, todo.id, "ship it again")),
+    ).toHaveLength(1);
 
     unsubscribe();
     expect(
