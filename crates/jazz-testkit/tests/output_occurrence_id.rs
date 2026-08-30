@@ -6,7 +6,7 @@ use std::time::Duration;
 use jazz::query::{Query, col, eq, lit, table};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, QueryResult, ResultKey, Schema, SchemaBuilder,
+    ColumnType, DurabilityTier, QueryResult, ReadTier, ResultKey, Schema, SchemaBuilder,
     SubscriptionStreamItem, TableSchema, Value,
 };
 use jazz_server::JazzServer;
@@ -84,6 +84,94 @@ fn joined_todos(sources: &[(&str, &str, &str)]) -> Query {
         Query::from(table("todos").alias("root")).filter(eq(col("root.done"), lit(false))),
         |query, (alias, left, right)| query.flat_join(table("todos").alias(*alias), *left, *right),
     )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_reads() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todos_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000026")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+            let (_root, _, tx) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "root", "bucket" => "shared", "done" => false),
+                )
+                .expect("insert root");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            let (_first_joined, _, tx) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "first", "bucket" => "shared", "done" => true),
+                )
+                .expect("insert first joined source");
+            support::wait_for_edge_txs(
+                &client,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+
+            // Both tuple positions deliberately use the same physical table.
+            // The forwarded reset still needs a distinct contributor role for
+            // each source position, even when both positions select one row.
+            let query = joined_todos(&[
+                ("joined", "root.bucket", "joined.bucket"),
+                ("third", "joined.bucket", "third.bucket"),
+            ]);
+            let mut stream = client.subscribe(query.clone()).await.expect("subscribe");
+            let reset = next_delta(&mut stream).await;
+            let root_occurrence = reset.added[0].id.clone();
+
+            let (_joined, _, tx) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "second", "bucket" => "shared", "done" => true),
+                )
+                .expect("insert joined source");
+            client
+                .wait_for_transaction(
+                    tx.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::Local,
+                )
+                .await
+                .expect("joined source settles locally");
+            let joined_occurrence = key_for_joined_title(
+                &client
+                    .query_results_with_read_tier(query, ReadTier::LocalFirst)
+                    .await
+                    .expect("one-shot flat join remains complete"),
+                "second",
+            );
+            for _ in 0..8 {
+                let delta = next_delta(&mut stream).await;
+                assert!(
+                    delta.removed.iter().all(|row| row.id != root_occurrence),
+                    "one authority generation must not transiently retract its existing occurrence"
+                );
+                assert!(
+                    delta.added.iter().all(|row| row.id != root_occurrence),
+                    "one authority generation must not re-add its existing occurrence"
+                );
+                if delta.added.iter().any(|row| row.id == joined_occurrence) {
+                    client.shutdown().await.expect("shutdown client");
+                    server.shutdown().await;
+                    return;
+                }
+            }
+            panic!("joined occurrence was not published");
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

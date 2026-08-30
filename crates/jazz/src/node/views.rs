@@ -216,6 +216,35 @@ fn relation_edge_version_rows_for_bundle(
         .collect()
 }
 
+/// Source vocabulary required to turn maintained flat-tuple membership into
+/// canonical contributor facts. Construct this from the validated query rather
+/// than independently from its result rows: an empty vocabulary on a flat join
+/// produces a payload that renders once but cannot be reconstructed afterward.
+pub(crate) struct FlatTupleSourceTables(Vec<String>);
+
+impl FlatTupleSourceTables {
+    pub(crate) fn for_query(shape: &ValidatedQuery) -> Self {
+        Self(
+            shape
+                .query()
+                .flat_join
+                .as_ref()
+                .map(|flat_join| {
+                    flat_join
+                        .sources
+                        .iter()
+                        .map(|source| source.table.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
 pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) subscription: SubscriptionKey,
     /// Peer inventory of transactions whose full row-version payload has
@@ -233,7 +262,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     /// a durable general-history grant.
     pub(crate) previous_program_facts: BTreeSet<ProgramFactEntry>,
     /// Declared flat-join source table for each contributor position.
-    pub(crate) flat_tuple_source_tables: Vec<String>,
+    pub(crate) flat_tuple_source_tables: FlatTupleSourceTables,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
@@ -681,7 +710,7 @@ where
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 previous_program_facts: BTreeSet::new(),
-                flat_tuple_source_tables: Vec::new(),
+                flat_tuple_source_tables: FlatTupleSourceTables::for_query(shape),
                 identity,
                 tier,
                 maintained_facts: &maintained,
@@ -724,7 +753,7 @@ where
         program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
         let tuple_source_versions = maintained_facts.tuple_source_versions_for_members(
             &maintained_facts.active_result_members(),
-            &flat_tuple_source_tables,
+            flat_tuple_source_tables.as_slice(),
         );
         let mut desired_tuple_source_facts = BTreeMap::new();
         for (result, source_index, maintained_version) in &tuple_source_versions {

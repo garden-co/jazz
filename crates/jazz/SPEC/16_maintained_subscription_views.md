@@ -44,6 +44,14 @@ are coverage facts for the maintained subscription view only; they do not become
 complete transaction payload refs. The peer state machine MUST NOT answer a live
 subscription by running an independent semantic scan.
 
+Every reset or incremental publication of flat-tuple membership, including a
+reset forwarded from an already maintained upstream subscription, MUST carry a
+`ContributingMembers` fact for every declared source position. Repeated physical
+source tables still have distinct positional roles. A terminal payload is not a
+substitute for this canonical contributor closure: the receiver MUST be able to
+reconstruct the same tuple through its ordinary one-shot path after applying the
+publication, without a same-generation transient remove and re-add.
+
 A maintained peer publication MUST retain the complete semantic read view and
 tier resolved at admission. Initial hydration, suspended retries, incremental
 evaluation, authoritative reconciliation, settlement, and authorization

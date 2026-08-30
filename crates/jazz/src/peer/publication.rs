@@ -684,7 +684,8 @@ impl PeerState {
                         && self.role == PeerRole::Relay,
                     previous_result_set: previous_result_tx_ids,
                     previous_program_facts,
-                    flat_tuple_source_tables: flat_tuple_source_tables(shape),
+                    flat_tuple_source_tables:
+                        crate::node::FlatTupleSourceTables::for_query(shape),
                     result_member_adds,
                     result_member_removes,
                     program_fact_adds,
@@ -1157,7 +1158,7 @@ impl PeerState {
                 } else {
                     previous_program_facts
                 },
-                flat_tuple_source_tables: flat_tuple_source_tables(shape),
+                flat_tuple_source_tables: crate::node::FlatTupleSourceTables::for_query(shape),
                 result_member_adds,
                 result_member_removes,
                 program_fact_adds,
@@ -1649,7 +1650,15 @@ impl PeerState {
                         && self.role == PeerRole::Relay,
                     previous_result_set: BTreeSet::new(),
                     previous_program_facts: BTreeSet::new(),
-                    flat_tuple_source_tables: Vec::new(),
+                    // Rehydration forwards the canonical membership through a
+                    // new downstream subscription, but its fact vocabulary is
+                    // still the validated query's vocabulary. Flat tuples need
+                    // one contributor role per joined source so the receiver's
+                    // ordinary one-shot path can rebuild the same tuple from
+                    // immutable source versions instead of depending only on
+                    // the reset payload.
+                    flat_tuple_source_tables:
+                        crate::node::FlatTupleSourceTables::for_query(shape),
                     result_member_adds,
                     result_member_removes: target_result_member_removes,
                     program_fact_adds: Vec::new(),

@@ -13,6 +13,7 @@ use crate::protocol::{
 };
 use crate::query::{
     Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
+    table,
 };
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
@@ -39,6 +40,38 @@ fn row_from_u64(value: u64) -> RowUuid {
     let mut bytes = [0; 16];
     bytes[..8].copy_from_slice(&value.to_be_bytes());
     RowUuid::from_bytes(bytes)
+}
+
+#[test]
+fn flat_tuple_source_vocabulary_is_derived_positionally_from_the_validated_query() {
+    let ordinary = Query::from("todos")
+        .validate(&schema())
+        .expect("validate ordinary query");
+    assert!(
+        crate::node::FlatTupleSourceTables::for_query(&ordinary)
+            .as_slice()
+            .is_empty(),
+        "a non-flat query has no tuple-source roles"
+    );
+
+    let shared_source_table = Query::from(table("todos").alias("root"))
+        .flat_join(
+            table("todos").alias("first"),
+            "root.title",
+            "first.title",
+        )
+        .flat_join(
+            table("todos").alias("second"),
+            "first.title",
+            "second.title",
+        )
+        .validate(&schema())
+        .expect("validate two-source flat query");
+    assert_eq!(
+        crate::node::FlatTupleSourceTables::for_query(&shared_source_table).as_slice(),
+        &["todos".to_owned(), "todos".to_owned()],
+        "shared physical tables retain one contributor role per source position"
+    );
 }
 
 fn settled_member(row_uuid: RowUuid, position: u64) -> ResultMemberEntry {
