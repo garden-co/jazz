@@ -2481,10 +2481,18 @@ where
                     }
                 }
             }
-            let root_occurrence_ids = if shape.query().aggregate.is_some() {
+            let root_occurrence_ids = if shape.query().aggregate.is_some()
+                || !shape.query().array_subqueries.is_empty()
+            {
+                // A fresh structured subscription has not necessarily rebuilt
+                // its local terminal collector when its first authoritative
+                // reset arrives. Structured roots are always their own public
+                // occurrence, so pair that reset directly with its snapshot
+                // roots instead of the still-cold collector sidecar.
                 snapshot
                     .rows
                     .iter()
+                    .take(snapshot.root_count)
                     .map(|row| {
                         crate::tools::OutputOccurrenceId::single_source(
                             crate::tools::ObjectId::from_uuid(row.row_uuid().0),
