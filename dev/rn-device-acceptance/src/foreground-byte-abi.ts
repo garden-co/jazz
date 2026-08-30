@@ -285,6 +285,15 @@ export async function proveSameJsiRuntimeWriteSubscription(
           throw new Error("foreground B subscription did not close");
         return;
       }
+      const hasReset = deltas.some((event) => event.reset);
+      const hasIncremental = deltas.some((event) => !event.reset);
+      markFailure(
+        hasReset && hasIncremental
+          ? "same-runtime-delta-mixed-row-id-failed"
+          : hasReset
+            ? "same-runtime-delta-reset-row-id-failed"
+            : "same-runtime-delta-incremental-row-id-failed",
+      );
     }
     throw new Error(
       "foreground B did not observe foreground A's committed row after bounded ticks",

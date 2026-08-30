@@ -948,6 +948,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   opened = 0;
   schedulers.length = 0;
   ticks.fill(0);
+  let wrongDeltaKind: "incremental" | "reset" | "mixed" = "incremental";
   const wrongObservation = {
     ...factory,
     openAttached(received: Uint8Array) {
@@ -960,27 +961,28 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
           if (request.type === "drainSubscription" && initialResetDrained)
             return command.encode({
               type: "subscriptionEvents",
-              events: [
-                {
-                  type: "delta",
-                  reset: false,
-                  settled: true,
-                  tier: "local",
-                  // The title alone is not authoritative: binding envelopes
-                  // may carry unrelated text, while the inserted run-bound
-                  // RowUuid is the identity this receipt must observe.
-                  delta: Array.from(
-                    encodeSubscriptionDelta({
-                      added: [
-                        {
-                          rowId: new Uint8Array(16).fill(0xee),
-                          raw: new TextEncoder().encode("foreground-a-subscription-row"),
-                        },
-                      ],
-                    }),
-                  ),
-                },
-              ],
+              events: (wrongDeltaKind === "mixed"
+                ? [true, false]
+                : [wrongDeltaKind === "reset"]
+              ).map((reset) => ({
+                type: "delta",
+                reset,
+                settled: true,
+                tier: "local",
+                // The title alone is not authoritative: binding envelopes
+                // may carry unrelated text, while the inserted run-bound
+                // RowUuid is the identity this receipt must observe.
+                delta: Array.from(
+                  encodeSubscriptionDelta({
+                    added: [
+                      {
+                        rowId: new Uint8Array(16).fill(0xee),
+                        raw: new TextEncoder().encode("foreground-a-subscription-row"),
+                      },
+                    ],
+                  }),
+                ),
+              })),
             });
           if (request.type === "drainSubscription") initialResetDrained = true;
           return foreground.execute(bytes);
@@ -1003,8 +1005,57 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   assert.ok(wrongObservationStages.includes("same-runtime-delta-drain-failed"));
   assert.ok(
     wrongObservationStages.includes("same-runtime-delta-content-failed") &&
-      wrongObservationStages.includes("same-runtime-delta-row-id-failed"),
+      wrongObservationStages.includes("same-runtime-delta-row-id-failed") &&
+      wrongObservationStages.includes("same-runtime-delta-incremental-row-id-failed") &&
+      !wrongObservationStages.includes("same-runtime-delta-reset-row-id-failed"),
     "a title-only payload reaches content diagnostics without satisfying row-id observation",
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  wrongDeltaKind = "reset";
+  const wrongResetStages: string[] = [];
+  await assert.rejects(
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        wrongObservation,
+        capability,
+        command,
+        subscriptionRowId,
+        (stage) => wrongResetStages.push(stage),
+      ),
+    /did not observe foreground A's committed row/,
+  );
+  assert.ok(
+    wrongResetStages.includes("same-runtime-delta-reset-row-id-failed") &&
+      !wrongResetStages.includes("same-runtime-delta-incremental-row-id-failed"),
+    "a reset carrying only other rows remains distinct from an incremental wrong-row delta",
+  );
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  wrongDeltaKind = "mixed";
+  const wrongMixedStages: string[] = [];
+  await assert.rejects(
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        wrongObservation,
+        capability,
+        command,
+        subscriptionRowId,
+        (stage) => wrongMixedStages.push(stage),
+      ),
+    /did not observe foreground A's committed row/,
+  );
+  assert.ok(
+    wrongMixedStages.includes("same-runtime-delta-mixed-row-id-failed") &&
+      !wrongMixedStages.includes("same-runtime-delta-reset-row-id-failed") &&
+      !wrongMixedStages.includes("same-runtime-delta-incremental-row-id-failed"),
+    "a mixed reset/incremental drain cannot be mislabeled as either single event kind",
   );
 });
 
