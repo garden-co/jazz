@@ -296,3 +296,84 @@ fn queued_update_retains_cold_preparation_and_its_definitive_identity() {
     let rows = block_on(db.all(&query, ReadOpts::default())).expect("read updated row");
     assert_eq!(rows[0].cell_at(0), Some("after".into()));
 }
+
+#[test]
+fn queued_mutations_are_fifo_owned_and_surface_preparation_failures() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let storage_control = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x55; 16]),
+            author: AuthorSubject::for_test_bytes([0x65; 16]),
+        },
+    )))
+    .expect("open yielding database");
+
+    storage_control.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let missing = jazz::ids::RowUuid::from_bytes([0x75; 16]);
+    let rejected = db
+        .enqueue_update(
+            "todos".to_owned(),
+            missing,
+            row! { title: "cannot update missing row" },
+            Default::default(),
+        )
+        .expect("first operation reserves an identity");
+    let accepted = db
+        .enqueue_insert(
+            "todos".to_owned(),
+            row! { title: "second" },
+            Default::default(),
+        )
+        .expect("second operation reserves an identity");
+    let accepted_row = accepted.row_uuid();
+    let accepted_tx = accepted.mergeable_tx_id();
+    drop(accepted);
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut first_turn = Box::pin(db.tick());
+    assert!(matches!(
+        first_turn.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(first_turn);
+    assert_eq!(
+        db.write_state(accepted_tx)
+            .expect("the second reservation remains observable")
+            .durability,
+        DurabilityTier::None,
+        "the FIFO owner must not overtake a cold first operation",
+    );
+
+    control.resume();
+    for _ in 0..4_096 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        if db
+            .write_state(accepted_tx)
+            .is_ok_and(|state| state.durability >= DurabilityTier::Local)
+        {
+            break;
+        }
+    }
+    let error = block_on(rejected.write_state()).expect_err("missing-row update must fail");
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(
+        db.write_state(accepted_tx)
+            .is_ok_and(|state| state.durability >= DurabilityTier::Local),
+        "the owner must continue with the next operation after a terminal preparation error",
+    );
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    let rows = block_on(db.all(&query, ReadOpts::default())).expect("read inserted row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), accepted_row);
+}

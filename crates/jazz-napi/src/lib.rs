@@ -1749,17 +1749,25 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let options = jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.insert_with_id_attributed(author, &table, row, cells))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.insert_with_id_attributed(author, &table, row, cells))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let write = db
+                    .enqueue_insert(table, cells, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                core_write_memory(Rc::clone(db), write)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let write = db
+                    .enqueue_insert(table, cells, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_write_persistent(Rc::clone(db), write)
+            }
         }
     }
 
@@ -1779,17 +1787,24 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let options = jazz::db::UpdateOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.update_attributed(author, &table, row, patch))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.update_attributed(author, &table, row, patch))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let write = db
+                    .enqueue_update(table, row, patch, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                core_write_memory(Rc::clone(db), write)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let write = db
+                    .enqueue_update(table, row, patch, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_write_persistent(Rc::clone(db), write)
+            }
         }
     }
 
@@ -1809,17 +1824,24 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let options = jazz::db::UpsertOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.upsert_attributed(author, &table, row, cells))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.upsert_attributed(author, &table, row, cells))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let write = db
+                    .enqueue_upsert(table, row, cells, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                core_write_memory(Rc::clone(db), write)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let write = db
+                    .enqueue_upsert(table, row, cells, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_write_persistent(Rc::clone(db), write)
+            }
         }
     }
 
@@ -1837,17 +1859,24 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let options = jazz::db::DeleteOptions {
+            identity: jazz::db::WriteIdentity::Attribution(author),
+            ..Default::default()
+        };
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.delete_attributed(author, &table, row))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.delete_attributed(author, &table, row))
-                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let write = db
+                    .enqueue_delete(table, row, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                db.drive_queued_mutation_once();
+                core_write_memory(Rc::clone(db), write)
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let write = db
+                    .enqueue_delete(table, row, options)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_write_persistent(Rc::clone(db), write)
+            }
         }
     }
 
