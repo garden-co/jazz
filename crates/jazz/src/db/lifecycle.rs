@@ -655,11 +655,11 @@ where
         tier: DurabilityTier,
     ) -> Result<TxId, Error> {
         loop {
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier).await {
                 return outcome;
             }
             let state_change = self.node.register_write_state_waiter(tx_id);
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier).await {
                 drop(state_change);
                 return outcome;
             }
@@ -831,17 +831,23 @@ where
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
         self.node.poll_queued_mutation_once();
+        self.node.poll_transaction_wait_observers();
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
-        self.node.tick().await.map(|_| ())
+        self.node.tick().await?;
+        self.node.poll_transaction_wait_observers();
+        Ok(())
     }
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
         self.node.poll_queued_mutation_once();
+        self.node.poll_transaction_wait_observers();
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
-        self.node.tick().await
+        let stats = self.node.tick().await?;
+        self.node.poll_transaction_wait_observers();
+        Ok(stats)
     }
 
     #[allow(dead_code)]

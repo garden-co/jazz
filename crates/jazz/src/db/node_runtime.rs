@@ -23,6 +23,7 @@ where
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
     queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
+    transaction_wait_observers: RefCell<Vec<TransactionWaitObserver>>,
     queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
     queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
     reserved_mutations: RefCell<BTreeSet<TxId>>,
@@ -101,6 +102,7 @@ where
             outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             queued_mutations: RefCell::new(VecDeque::new()),
+            transaction_wait_observers: RefCell::new(Vec::new()),
             queued_mutation_failures: RefCell::new(BTreeMap::new()),
             queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
             reserved_mutations: RefCell::new(BTreeSet::new()),
@@ -275,7 +277,6 @@ where
                                 WriteStateWaiterNotify::Future(sender) => {
                                     let _ = sender.send(());
                                 }
-                                WriteStateWaiterNotify::Callback(callback) => callback(),
                             }
                         }
                     }
@@ -753,16 +754,16 @@ where
         }
     }
 
-    fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
+    async fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
         let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
-            crate::db::block_on(self.node.borrow_mut().discard_rejection(tx_id))?;
+            self.node.lock().await.discard_rejection(tx_id).await?;
         }
         Ok(pending.is_some() || retained)
     }
 
-    pub(super) fn transaction_wait_outcome(
+    pub(super) async fn transaction_wait_outcome(
         &self,
         tx_id: TxId,
         tier: DurabilityTier,
@@ -773,7 +774,7 @@ where
         if self.reserved_mutations.borrow().contains(&tx_id) {
             return None;
         }
-        let state = crate::db::block_on(self.node.borrow_mut().transaction_state(tx_id));
+        let state = self.node.lock().await.transaction_state(tx_id).await;
         let Some((fate, global_time, durability)) = state else {
             return Some(Err(Error::new(
                 ErrorCode::NotObserved,
@@ -783,7 +784,7 @@ where
         let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
         match fate {
             Fate::Rejected(reason) => {
-                if let Err(error) = self.consume_mutation_error(tx_id) {
+                if let Err(error) = self.consume_mutation_error(tx_id).await {
                     tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
                 }
                 Some(Err(write_rejected(tx_id, reason)))
@@ -816,15 +817,40 @@ where
         tier: DurabilityTier,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
-        if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier) {
-            callback(outcome);
-            return;
-        }
         let node = Rc::clone(self);
-        self.register_write_state_callback(
-            tx_id,
-            Box::new(move || node.wait_for_transaction_with(tx_id, tier, callback)),
-        );
+        self.transaction_wait_observers
+            .borrow_mut()
+            .push(Box::pin(async move {
+                callback(node.wait_for_transaction(tx_id, tier).await);
+            }));
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    async fn wait_for_transaction(&self, tx_id: TxId, tier: DurabilityTier) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                return outcome;
+            }
+            let state_change = self.register_write_state_waiter(tx_id);
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    pub(super) fn poll_transaction_wait_observers(&self) {
+        use std::task::{Context, Poll, Waker};
+
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        let mut observers = std::mem::take(&mut *self.transaction_wait_observers.borrow_mut());
+        observers.retain_mut(|observer| observer.as_mut().poll(&mut context) == Poll::Pending);
+        self.transaction_wait_observers
+            .borrow_mut()
+            .splice(0..0, observers);
     }
 
     fn deliver_pending_mutation_errors(&self) {
@@ -906,20 +932,6 @@ where
             waiter_id,
             receiver,
         }
-    }
-
-    fn register_write_state_callback(&self, tx_id: TxId, callback: Box<dyn FnOnce()>) {
-        let waiter_id = self.next_write_state_waiter_id.get();
-        self.next_write_state_waiter_id
-            .set(waiter_id.wrapping_add(1).max(1));
-        self.write_state_waiters
-            .borrow_mut()
-            .entry(tx_id)
-            .or_default()
-            .push(WriteStateWaiter {
-                id: waiter_id,
-                notify: WriteStateWaiterNotify::Callback(callback),
-            });
     }
 
     #[allow(dead_code)]

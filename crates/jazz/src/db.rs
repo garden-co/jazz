@@ -1507,6 +1507,7 @@ type PendingRelaySubscriptionRejections =
     Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type QueuedMutationFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
+type TransactionWaitObserver = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 struct QueuedMutationOperation {
     tx_id: Option<TxId>,
@@ -1989,7 +1990,6 @@ struct WriteStateWaiter {
 
 enum WriteStateWaiterNotify {
     Future(oneshot::Sender<()>),
-    Callback(Box<dyn FnOnce()>),
 }
 
 #[derive(Default)]

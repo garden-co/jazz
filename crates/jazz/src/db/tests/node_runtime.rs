@@ -1,6 +1,81 @@
 //! Shared node scheduling, dirty-generation cascades, and connection servicing tests.
 
 use super::*;
+use groove::storage::{TestStorage, TestStorageOperation};
+
+#[test]
+fn reopened_wait_observer_yields_instead_of_sync_polling_cold_storage() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc9; 16]);
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (storage, _) = TestStorage::controlled(&column_family_refs);
+    let reopen_handle = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc9; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc9))),
+    }))
+    .unwrap();
+    let tx_id = db
+        .insert(
+            "todos",
+            cells("cold reopened wait", false, author),
+            Default::default(),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    block_on(db.close()).unwrap();
+    drop(db);
+
+    let reopened_storage = block_on(reopen_handle.reopen(column_families)).unwrap();
+    let control = reopened_storage.control();
+    let eviction_handle = reopened_storage.clone();
+    let reopened = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage: reopened_storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc9; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xca))),
+    }))
+    .unwrap();
+    eviction_handle.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+
+    let observed = Rc::new(RefCell::new(None));
+    let callback_observed = Rc::clone(&observed);
+    reopened.wait_for_transaction_with(
+        tx_id,
+        DurabilityTier::Local,
+        move |result: Result<TxId, Error>| {
+            *callback_observed.borrow_mut() = Some(result);
+        },
+    );
+    reopened.node.poll_transaction_wait_observers();
+    assert!(
+        observed.borrow().is_none(),
+        "a cold wait observation must yield to the owner instead of completing from reservation or synchronously polling storage"
+    );
+
+    control.resume();
+    for _ in 0..4 {
+        reopened.node.poll_transaction_wait_observers();
+        if observed.borrow().is_some() {
+            break;
+        }
+    }
+    assert_eq!(observed.borrow_mut().take().unwrap().unwrap(), tx_id);
+}
 
 #[test]
 fn large_write_pushes_staging_before_syncing_its_referencing_row() {
@@ -807,18 +882,22 @@ fn pending_global_state_does_not_complete_remote_wait_or_prune_upload() {
     assert_eq!(state.fate, Fate::Pending);
     assert_eq!(state.durability, DurabilityTier::Global);
     assert!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
-            .is_none(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+        )
+        .is_none(),
         "a hydration-only durability claim must not complete a remote transaction wait"
     );
     assert_eq!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Local)
-            .expect("local persistence completes independently of authority fate")
-            .unwrap(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Local)
+        )
+        .expect("local persistence completes independently of authority fate")
+        .unwrap(),
         tx_id
     );
 
@@ -864,18 +943,22 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
     assert_eq!(state.global_time, None);
     assert_eq!(state.durability, DurabilityTier::Global);
     assert!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
-            .is_none(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+        )
+        .is_none(),
         "Accepted+Global without an authority timestamp cannot complete Global wait"
     );
     assert_eq!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
-            .expect("Accepted Edge durability does not require a Global timestamp")
-            .unwrap(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+        )
+        .expect("Accepted Edge durability does not require a Global timestamp")
+        .unwrap(),
         tx_id
     );
 
@@ -895,11 +978,13 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
         Some(GlobalTime(7))
     );
     assert_eq!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
-            .expect("authority timestamp completes Global wait")
-            .unwrap(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+        )
+        .expect("authority timestamp completes Global wait")
+        .unwrap(),
         tx_id
     );
 }

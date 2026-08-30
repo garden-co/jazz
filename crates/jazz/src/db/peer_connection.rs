@@ -5144,10 +5144,6 @@ fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool 
                     handled_mutation_error = true;
                 }
             }
-            WriteStateWaiterNotify::Callback(callback) => {
-                callback();
-                handled_mutation_error = true;
-            }
         }
     }
     handled_mutation_error
