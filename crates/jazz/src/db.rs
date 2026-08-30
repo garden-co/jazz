@@ -1509,9 +1509,10 @@ type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type QueuedMutationFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
 
 struct QueuedMutationOperation {
-    tx_id: TxId,
+    tx_id: Option<TxId>,
+    open_tx_id: Option<OpenTransactionId>,
     future: QueuedMutationFuture,
-    status: Rc<RefCell<QueuedMutationStatus>>,
+    status: Option<Rc<RefCell<QueuedMutationStatus>>>,
 }
 
 enum QueuedMutationStatus {

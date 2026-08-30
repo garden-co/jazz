@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ExclusiveTxOps, MergeableTxOps, ReadOpts};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
@@ -469,12 +469,19 @@ fn queued_mergeable_commit_retains_cold_parent_refresh_and_exact_identity() {
 
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    let mut first_turn = Box::pin(db.tick());
-    assert!(matches!(
-        first_turn.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
-    drop(first_turn);
+    let mut reached_cold_commit = false;
+    for _ in 0..3 {
+        let mut turn = Box::pin(db.tick());
+        reached_cold_commit |= matches!(turn.as_mut().poll(&mut context), Poll::Pending);
+        drop(turn);
+        if reached_cold_commit {
+            break;
+        }
+    }
+    assert!(
+        reached_cold_commit,
+        "bounded owner turns must reach the planted cold mergeable parent refresh",
+    );
     assert_eq!(queued.mergeable_tx_id(), reserved);
     assert_eq!(
         block_on(queued.write_state())
@@ -524,17 +531,18 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     block_on(seed.wait(DurabilityTier::Local)).expect("seed is durable");
 
     let open_tx = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open_tx)).expect("begin exclusive transaction");
-    block_on(db.exclusive_tx_ref(open_tx).update(
-        "todos",
-        seed.row_uuid(),
-        row! { title: "after" },
-        Default::default(),
-    ))
-    .expect("stage exclusive update");
     storage_control.evict_all();
     control.pause_on(TestStorageOperation::Get);
     control.pause_on(TestStorageOperation::ScanOpen);
+    db.enqueue_begin_exclusive(open_tx, None);
+    db.enqueue_transaction_update(
+        open_tx,
+        true,
+        "todos".to_owned(),
+        seed.row_uuid(),
+        row! { title: "after" },
+        Default::default(),
+    );
     let queued = db
         .enqueue_commit_exclusive_handle(open_tx)
         .expect("reserve final transaction identity");
@@ -542,12 +550,19 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
 
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    let mut first_turn = Box::pin(db.tick());
-    assert!(matches!(
-        first_turn.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
-    drop(first_turn);
+    let mut reached_cold_stage = false;
+    for _ in 0..3 {
+        let mut turn = Box::pin(db.tick());
+        reached_cold_stage |= matches!(turn.as_mut().poll(&mut context), Poll::Pending);
+        drop(turn);
+        if reached_cold_stage {
+            break;
+        }
+    }
+    assert!(
+        reached_cold_stage,
+        "bounded owner turns must reach the planted cold exclusive staging read",
+    );
     assert_eq!(queued.mergeable_tx_id(), reserved);
     assert_eq!(
         block_on(queued.write_state())

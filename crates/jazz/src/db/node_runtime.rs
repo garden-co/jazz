@@ -24,6 +24,7 @@ where
     pub(super) pending_local_publications: PendingLocalPublications,
     queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
     queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
+    queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
     reserved_mutations: RefCell<BTreeSet<TxId>>,
     pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
@@ -101,6 +102,7 @@ where
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             queued_mutations: RefCell::new(VecDeque::new()),
             queued_mutation_failures: RefCell::new(BTreeMap::new()),
+            queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
             reserved_mutations: RefCell::new(BTreeSet::new()),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -164,9 +166,46 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id,
+                tx_id: Some(tx_id),
+                open_tx_id: None,
                 future,
-                status: Rc::clone(&status),
+                status: Some(Rc::clone(&status)),
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        status
+    }
+
+    pub(super) fn enqueue_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+        future: QueuedMutationFuture,
+    ) {
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: None,
+                open_tx_id: Some(open_tx_id),
+                future,
+                status: None,
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    pub(super) fn enqueue_transaction_commit(
+        &self,
+        open_tx_id: OpenTransactionId,
+        tx_id: TxId,
+        future: QueuedMutationFuture,
+    ) -> Rc<RefCell<QueuedMutationStatus>> {
+        let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
+        self.reserved_mutations.borrow_mut().insert(tx_id);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id: Some(tx_id),
+                open_tx_id: Some(open_tx_id),
+                future,
+                status: Some(Rc::clone(&status)),
             });
         self.schedule_tick(TickUrgency::Immediate);
         status
@@ -181,35 +220,50 @@ where
         let owned_waker = self.query_runtime_waker();
         let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
         let mut context = Context::from_waker(waker);
-        match operation.future.as_mut().poll(&mut context) {
+        let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+            self.queued_open_transaction_failures
+                .borrow()
+                .get(&open_tx_id)
+                .cloned()
+        });
+        let outcome = match poisoned {
+            Some(error) => Poll::Ready(Err(error)),
+            None => operation.future.as_mut().poll(&mut context),
+        };
+        match outcome {
             Poll::Pending => {
                 self.queued_mutations.borrow_mut().push_front(operation);
             }
             Poll::Ready(result) => {
-                self.reserved_mutations
-                    .borrow_mut()
-                    .remove(&operation.tx_id);
-                match result {
-                    Ok(()) => *operation.status.borrow_mut() = QueuedMutationStatus::Published,
-                    Err(error) => {
-                        *operation.status.borrow_mut() =
-                            QueuedMutationStatus::Failed(error.clone());
-                        self.queued_mutation_failures
-                            .borrow_mut()
-                            .insert(operation.tx_id, error);
-                    }
+                if let Some(tx_id) = operation.tx_id {
+                    self.reserved_mutations.borrow_mut().remove(&tx_id);
                 }
-                if let Some(waiters) = self
-                    .write_state_waiters
-                    .borrow_mut()
-                    .remove(&operation.tx_id)
+                if let Err(error) = &result
+                    && let Some(open_tx_id) = operation.open_tx_id
                 {
-                    for waiter in waiters {
-                        match waiter.notify {
-                            WriteStateWaiterNotify::Future(sender) => {
-                                let _ = sender.send(());
+                    self.queued_open_transaction_failures
+                        .borrow_mut()
+                        .entry(open_tx_id)
+                        .or_insert_with(|| error.clone());
+                }
+                if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
+                    match result {
+                        Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
+                        Err(error) => {
+                            *status.borrow_mut() = QueuedMutationStatus::Failed(error.clone());
+                            self.queued_mutation_failures
+                                .borrow_mut()
+                                .insert(tx_id, error);
+                        }
+                    }
+                    if let Some(waiters) = self.write_state_waiters.borrow_mut().remove(&tx_id) {
+                        for waiter in waiters {
+                            match waiter.notify {
+                                WriteStateWaiterNotify::Future(sender) => {
+                                    let _ = sender.send(());
+                                }
+                                WriteStateWaiterNotify::Callback(callback) => callback(),
                             }
-                            WriteStateWaiterNotify::Callback(callback) => callback(),
                         }
                     }
                 }

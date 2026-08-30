@@ -498,6 +498,22 @@ where
         }
     }
 
+    pub(super) fn clone_for_owner_operation(&self) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            schema_version_id: self.schema_version_id,
+            schema_view_is_fixed: self.schema_view_is_fixed,
+            schema_views: Rc::clone(&self.schema_views),
+            identity: self.identity,
+            node: Rc::clone(&self.node),
+            row_id_source: Rc::clone(&self.row_id_source),
+            row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
+            next_now_ms: Rc::clone(&self.next_now_ms),
+            reserved_tx_id: None,
+            backend_attribution: self.backend_attribution,
+        }
+    }
+
     /// Configure this durable process as the internal browser relay that owns
     /// fresh upstream authority sessions for client Edge reads.
     #[doc(hidden)]

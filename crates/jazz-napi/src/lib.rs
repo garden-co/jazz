@@ -783,48 +783,6 @@ enum NapiTxKind {
     Exclusive,
 }
 
-macro_rules! with_napi_mergeable_tx {
-    ($transaction:expr, |$tx:ident| $operation:expr) => {{
-        let open_tx = $transaction.open_tx()?;
-        let db = $transaction
-            .db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                let $tx = db.mergeable_tx_ref(open_tx);
-                core_block_on($operation)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let $tx = db.mergeable_tx_ref(open_tx);
-                core_block_on($operation)
-            }
-        }
-        .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
-    }};
-}
-
-macro_rules! with_napi_exclusive_tx {
-    ($transaction:expr, |$tx:ident| $operation:expr) => {{
-        let open_tx = $transaction.open_tx()?;
-        let db = $transaction
-            .db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                let $tx = db.exclusive_tx_ref(open_tx);
-                core_block_on($operation)
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                let $tx = db.exclusive_tx_ref(open_tx);
-                core_block_on($operation)
-            }
-        }
-        .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
-    }};
-}
-
 impl Write {
     fn wait_promise(
         &self,
@@ -1158,14 +1116,20 @@ impl Tx {
         )?;
         let cells = decode_core_cells(&cells)?;
         let options = core_insert_options(options)?;
-        let row_id = match self.kind {
-            NapiTxKind::Mergeable => {
-                with_napi_mergeable_tx!(self, |tx| tx.insert(&table, cells, options))
+        let open_tx = self.open_tx()?;
+        let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("transaction is closed"))?;
+        let row_id = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                db.enqueue_transaction_insert(open_tx, exclusive, table, cells, options)
             }
-            NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.insert(&table, cells, options))
+            NapiDbInnerStorage::Persistent(db) => {
+                db.enqueue_transaction_insert(open_tx, exclusive, table, cells, options)
             }
-        }?;
+        };
         Ok(Uint8Array::new(row_id.to_bytes()))
     }
 
@@ -1185,15 +1149,18 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
         let options = core_update_options(options)?;
-        match self.kind {
-            NapiTxKind::Mergeable => {
-                with_napi_mergeable_tx!(self, |tx| tx.update(&table, row_id, patch, options))
+        let open_tx = self.open_tx()?;
+        let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
+        match self.db.as_ref() {
+            Some(NapiDbInnerStorage::Memory(db)) => {
+                db.enqueue_transaction_update(open_tx, exclusive, table, row_id, patch, options)
             }
-            NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch, options))
+            Some(NapiDbInnerStorage::Persistent(db)) => {
+                db.enqueue_transaction_update(open_tx, exclusive, table, row_id, patch, options)
             }
+            None => return Err(napi::Error::from_reason("transaction is closed")),
         }
-        .map(|_| ())
+        Ok(())
     }
 
     #[napi(js_name = "upsertEncoded")]
@@ -1213,14 +1180,18 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let options = core_upsert_options(options)?;
-        match self.kind {
-            NapiTxKind::Mergeable => {
-                with_napi_mergeable_tx!(self, |tx| tx.upsert(&table, row_id, cells, options))
+        let open_tx = self.open_tx()?;
+        let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
+        match self.db.as_ref() {
+            Some(NapiDbInnerStorage::Memory(db)) => {
+                db.enqueue_transaction_upsert(open_tx, exclusive, table, row_id, cells, options)
             }
-            NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.upsert(&table, row_id, cells, options))
+            Some(NapiDbInnerStorage::Persistent(db)) => {
+                db.enqueue_transaction_upsert(open_tx, exclusive, table, row_id, cells, options)
             }
+            None => return Err(napi::Error::from_reason("transaction is closed")),
         }
+        Ok(())
     }
 
     #[napi(js_name = "deleteEncoded")]
@@ -1237,14 +1208,18 @@ impl Tx {
         )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let options = core_delete_options(options)?;
-        match self.kind {
-            NapiTxKind::Mergeable => {
-                with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id, options))
+        let open_tx = self.open_tx()?;
+        let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
+        match self.db.as_ref() {
+            Some(NapiDbInnerStorage::Memory(db)) => {
+                db.enqueue_transaction_delete(open_tx, exclusive, table, row_id, options)
             }
-            NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.delete(&table, row_id, options))
+            Some(NapiDbInnerStorage::Persistent(db)) => {
+                db.enqueue_transaction_delete(open_tx, exclusive, table, row_id, options)
             }
+            None => return Err(napi::Error::from_reason("transaction is closed")),
         }
+        Ok(())
     }
 
     #[napi(js_name = "restoreEncoded")]
@@ -1264,14 +1239,18 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
         let options = core_restore_options(options)?;
-        match self.kind {
-            NapiTxKind::Mergeable => {
-                with_napi_mergeable_tx!(self, |tx| tx.restore(&table, row_id, cells, options))
+        let open_tx = self.open_tx()?;
+        let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
+        match self.db.as_ref() {
+            Some(NapiDbInnerStorage::Memory(db)) => {
+                db.enqueue_transaction_restore(open_tx, exclusive, table, row_id, cells, options)
             }
-            NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells, options))
+            Some(NapiDbInnerStorage::Persistent(db)) => {
+                db.enqueue_transaction_restore(open_tx, exclusive, table, row_id, cells, options)
             }
+            None => return Err(napi::Error::from_reason("transaction is closed")),
         }
+        Ok(())
     }
 
     #[napi]
@@ -2297,37 +2276,22 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         macro_rules! begin {
-            ($db:expr) => {
-                core_block_on(async {
-                    if kind == "mergeable" {
-                        match attribution {
-                            Some(attribution) => {
-                                $db.begin_mergeable_attributed(open_transaction_id, attribution)
-                                    .await
-                            }
-                            None => match author {
-                                Some(author) => {
-                                    $db.begin_mergeable_for_identity(open_transaction_id, author)
-                                        .await
-                                }
-                                None => $db.begin_mergeable(open_transaction_id).await,
-                            },
-                        }
-                    } else {
-                        match author {
-                            Some(author) => {
-                                $db.begin_exclusive_for_identity(open_transaction_id, author)
-                                    .await
-                            }
-                            None => $db.begin_exclusive(open_transaction_id).await,
-                        }
-                    }
-                })
-            };
+            ($db:expr, $drive:expr) => {{
+                let result = if kind == "mergeable" {
+                    $db.enqueue_begin_mergeable(open_transaction_id, author, attribution)
+                } else {
+                    $db.enqueue_begin_exclusive(open_transaction_id, author);
+                    Ok(())
+                };
+                if result.is_ok() && $drive {
+                    $db.drive_queued_mutation_once();
+                }
+                result
+            }};
         }
         let result = match db {
-            NapiDbInnerStorage::Memory(db) => begin!(db),
-            NapiDbInnerStorage::Persistent(db) => begin!(db),
+            NapiDbInnerStorage::Memory(db) => begin!(db, true),
+            NapiDbInnerStorage::Persistent(db) => begin!(db, false),
         };
         result.map_err(|error| napi::Error::from_reason(error.to_string()))?;
         if attribution.is_some() {

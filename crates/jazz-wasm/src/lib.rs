@@ -827,10 +827,19 @@ impl WasmDbInner {
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| match author {
-            Some(author) => block_on(db.begin_exclusive_for_identity(id, author)),
-            None => block_on(db.begin_exclusive(id)),
-        })
+        match self {
+            Self::Memory(db) => {
+                db.enqueue_begin_exclusive(id, author);
+                db.drive_queued_mutation_once();
+                Ok(())
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                db.enqueue_begin_exclusive(id, author);
+                Ok(())
+            }
+            Self::Closed => panic!("WasmDb is closed"),
+        }
     }
 
     fn begin_mergeable(
@@ -838,10 +847,16 @@ impl WasmDbInner {
         id: OpenTransactionId,
         author: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| match author {
-            Some(author) => block_on(db.begin_mergeable_for_identity(id, author)),
-            None => block_on(db.begin_mergeable(id)),
-        })
+        match self {
+            Self::Memory(db) => {
+                db.enqueue_begin_mergeable(id, author, None)?;
+                db.drive_queued_mutation_once();
+                Ok(())
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.enqueue_begin_mergeable(id, author, None),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
     }
 
     fn exclusive_all_for_identity(
@@ -1691,11 +1706,16 @@ impl WasmDb {
         let attribution = author_id_from_bytes(&attribution)?;
         match &self.inner {
             WasmDbInner::Memory(db) => {
-                block_on(db.begin_mergeable_attributed(open_transaction_id, attribution))
+                let result =
+                    db.enqueue_begin_mergeable(open_transaction_id, None, Some(attribution));
+                if result.is_ok() {
+                    db.drive_queued_mutation_once();
+                }
+                result
             }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => {
-                block_on(db.begin_mergeable_attributed(open_transaction_id, attribution))
+                db.enqueue_begin_mergeable(open_transaction_id, None, Some(attribution))
             }
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -3032,13 +3052,13 @@ impl WasmTx {
         let cells = decode_cells(&cells)?;
         let options = insert_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        let row = with_wasm_db!(&self.db, |db| match self.kind {
-            WasmTxKind::Mergeable =>
-                block_on(db.mergeable_tx_ref(open_tx).insert(&table, cells, options,)),
-            WasmTxKind::Exclusive =>
-                block_on(db.exclusive_tx_ref(open_tx).insert(&table, cells, options,)),
-        })
-        .map_err(to_js_error)?;
+        let row = with_wasm_db!(&self.db, |db| db.enqueue_transaction_insert(
+            open_tx,
+            matches!(self.kind, WasmTxKind::Exclusive),
+            table,
+            cells,
+            options,
+        ));
         Ok(row.to_bytes())
     }
 
@@ -3054,17 +3074,15 @@ impl WasmTx {
         let patch = decode_cells(&patch)?;
         let options = update_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| match self.kind {
-            WasmTxKind::Mergeable => block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .update(&table, row_id, patch, options,)
-            ),
-            WasmTxKind::Exclusive => block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .update(&table, row_id, patch, options,)
-            ),
-        })
-        .map_err(to_js_error)
+        with_wasm_db!(&self.db, |db| db.enqueue_transaction_update(
+            open_tx,
+            matches!(self.kind, WasmTxKind::Exclusive),
+            table,
+            row_id,
+            patch,
+            options,
+        ));
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = upsertEncoded)]
@@ -3079,17 +3097,15 @@ impl WasmTx {
         let cells = decode_cells(&cells)?;
         let options = upsert_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| match self.kind {
-            WasmTxKind::Mergeable => block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .upsert(&table, row_id, cells, options,)
-            ),
-            WasmTxKind::Exclusive => block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .upsert(&table, row_id, cells, options,)
-            ),
-        })
-        .map_err(to_js_error)
+        with_wasm_db!(&self.db, |db| db.enqueue_transaction_upsert(
+            open_tx,
+            matches!(self.kind, WasmTxKind::Exclusive),
+            table,
+            row_id,
+            cells,
+            options,
+        ));
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = deleteEncoded)]
@@ -3102,15 +3118,14 @@ impl WasmTx {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let options = delete_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| match self.kind {
-            WasmTxKind::Mergeable => {
-                block_on(db.mergeable_tx_ref(open_tx).delete(&table, row_id, options))
-            }
-            WasmTxKind::Exclusive => {
-                block_on(db.exclusive_tx_ref(open_tx).delete(&table, row_id, options))
-            }
-        })
-        .map_err(to_js_error)
+        with_wasm_db!(&self.db, |db| db.enqueue_transaction_delete(
+            open_tx,
+            matches!(self.kind, WasmTxKind::Exclusive),
+            table,
+            row_id,
+            options,
+        ));
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = restoreEncoded)]
@@ -3125,19 +3140,15 @@ impl WasmTx {
         let cells = decode_cells(&cells)?;
         let options = restore_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        with_wasm_db!(&self.db, |db| match self.kind {
-            WasmTxKind::Mergeable =>
-                block_on(
-                    db.mergeable_tx_ref(open_tx)
-                        .restore(&table, row_id, Some(cells), options,)
-                ),
-            WasmTxKind::Exclusive =>
-                block_on(
-                    db.exclusive_tx_ref(open_tx)
-                        .restore(&table, row_id, Some(cells), options,)
-                ),
-        })
-        .map_err(to_js_error)
+        with_wasm_db!(&self.db, |db| db.enqueue_transaction_restore(
+            open_tx,
+            matches!(self.kind, WasmTxKind::Exclusive),
+            table,
+            row_id,
+            Some(cells),
+            options,
+        ));
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = commit)]
