@@ -53,6 +53,56 @@ fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
     assert_eq!(updated[0].row_uuid(), target);
 }
 
+/// A deferred local write refreshes a projected current-view subscription on
+/// its owning tick, even when the stream opened before that tick.
+///
+/// alice ──open projected view──► local current-view collector
+/// alice ──deferred insert──────► owner tick ──reset/delta──► subscription
+#[test]
+fn deferred_local_publication_refreshes_projected_current_view() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let db = open_db(0xc2, author, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let query = Query::from("todos")
+        .select(["title", "$createdBy"])
+        .order_by("title", OrderDirection::Asc);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default())
+        .expect("open projected local subscription");
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected empty opening projected-subscription delta");
+    };
+    assert!(added.is_empty());
+
+    let inserted = row(0x73);
+    db.insert(
+        "todos",
+        cells("settles after opening", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
+    )
+    .expect("queue deferred local insert");
+    db.tick()
+        .expect("settle deferred publication and refresh subscription");
+
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        panic!("expected projected delta after deferred local insert");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [inserted]
+    );
+    db.tick()
+        .expect("quiet owner tick after projected publication");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the settlement refresh publishes the queued local write once"
+    );
+}
+
 #[test]
 fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     let schema = schema();
