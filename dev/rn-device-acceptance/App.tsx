@@ -60,7 +60,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
       decode: decodeNativeForegroundResponse,
     };
     markFailure("scope-isolation-failed");
-    proveForegroundScopeIsolation(
+    await proveForegroundScopeIsolation(
       foregroundFactory,
       reopened.capability,
       foregroundCodec,
@@ -73,7 +73,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
     markFailure("auth-switch-failed");
     const scopeB = await switchNativeRelayAuthScope();
     markFailure("scope-isolation-failed");
-    proveForegroundScopeIsolation(
+    await proveForegroundScopeIsolation(
       foregroundFactory,
       scopeB.capability,
       foregroundCodec,
@@ -116,7 +116,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("public-client-seed-failed");
   await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce, markFailure);
   markFailure("scope-isolation-failed");
-  proveForegroundScopeIsolation(
+  await proveForegroundScopeIsolation(
     foregroundFactory,
     scopeA.capability,
     foregroundCodec,
@@ -134,7 +134,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
   proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec, markFailure);
   markFailure("scope-isolation-failed");
-  proveForegroundScopeIsolation(
+  await proveForegroundScopeIsolation(
     foregroundFactory,
     scopeB.capability,
     foregroundCodec,
@@ -161,7 +161,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("scope-reopen-failed");
   await logoutNativeRelay();
   const reopenedScopeA = await admittedNativeRelay();
-  proveForegroundScopeIsolation(
+  await proveForegroundScopeIsolation(
     foregroundFactory,
     reopenedScopeA.capability,
     foregroundCodec,

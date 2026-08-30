@@ -75,7 +75,7 @@ test("foreground receipt treats a native revocation as an execution error", () =
   proveForegroundRevoked(revokedForeground, codec.encode);
 });
 
-test("scope-isolation receipt keeps both native-selected scope stores disjoint", () => {
+test("scope-isolation receipt keeps both native-selected scope stores disjoint", async () => {
   const scopeA = Uint8Array.from({ length: 32 }, () => 1);
   const scopeB = Uint8Array.from({ length: 32 }, () => 2);
   const scopeCodec: ForegroundByteCodec = {
@@ -137,11 +137,13 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     aLeaksB: boolean,
     delayedAReads = 0,
     writerMustProgress = false,
+    writerMustYield = false,
   ) => ({
     abiVersion: NATIVE_RELAY_ABI_VERSION,
     openAttached(capability: Uint8Array) {
       const isA = capability[0] === 1;
       let stagedWrite = false;
+      let scheduler: ((urgency: string) => void) | undefined;
       return {
         execute(command: Uint8Array) {
           switch (command[0]) {
@@ -170,9 +172,22 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
         },
         tick() {
           if (!stagedWrite) return;
+          if (writerMustYield) {
+            stagedWrite = false;
+            setTimeout(() => {
+              if (!scheduler) return;
+              scheduler("immediate");
+              if (isA) aWasWritten = true;
+              else bWasWritten = true;
+            }, 0);
+            return;
+          }
           if (isA) aWasWritten = true;
           else bWasWritten = true;
           stagedWrite = false;
+        },
+        setTickScheduler(callback: (urgency: string) => void) {
+          scheduler = callback;
         },
         close: () => true,
       };
@@ -181,7 +196,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
 
   const passing = scopeFactory(false, false);
   const stages: string[] = [];
-  proveForegroundScopeIsolation(
+  await proveForegroundScopeIsolation(
     passing,
     scopeA,
     scopeCodec,
@@ -199,18 +214,18 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     "scope-isolation-read-failed",
     "scope-isolation-assert-failed",
   ]);
-  proveForegroundScopeIsolation(passing, scopeB, scopeCodec, {
+  await proveForegroundScopeIsolation(passing, scopeB, scopeCodec, {
     write: "b",
     contains: ["b"],
     excludes: ["a"],
   });
-  proveForegroundScopeIsolation(passing, scopeA, scopeCodec, {
+  await proveForegroundScopeIsolation(passing, scopeA, scopeCodec, {
     contains: ["a"],
     excludes: ["b"],
   });
 
   const eventuallyVisible = scopeFactory(false, false, 2);
-  proveForegroundScopeIsolation(eventuallyVisible, scopeA, scopeCodec, {
+  await proveForegroundScopeIsolation(eventuallyVisible, scopeA, scopeCodec, {
     write: "a",
     contains: ["a"],
     excludes: ["b"],
@@ -219,7 +234,16 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   aWasWritten = false;
   bWasWritten = false;
   const writerProgressRequired = scopeFactory(false, false, 0, true);
-  proveForegroundScopeIsolation(writerProgressRequired, scopeA, scopeCodec, {
+  await proveForegroundScopeIsolation(writerProgressRequired, scopeA, scopeCodec, {
+    write: "a",
+    contains: ["a"],
+    excludes: ["b"],
+  });
+
+  aWasWritten = false;
+  bWasWritten = false;
+  const nativeWakeRequiresEventLoop = scopeFactory(false, false, 0, true, true);
+  await proveForegroundScopeIsolation(nativeWakeRequiresEventLoop, scopeA, scopeCodec, {
     write: "a",
     contains: ["a"],
     excludes: ["b"],
@@ -251,6 +275,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
             throw new Error(`unexpected ${role} lifecycle command ${command[0]}`);
           },
           tick() {},
+          setTickScheduler() {},
           close() {
             closes.push(role);
             if (role === "reader" && failure === "reader-close")
@@ -264,7 +289,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   };
 
   const cleanLifecycle = lifecycleReceipt();
-  proveForegroundScopeIsolation(cleanLifecycle.factory, scopeA, scopeCodec, {
+  await proveForegroundScopeIsolation(cleanLifecycle.factory, scopeA, scopeCodec, {
     write: "a",
     contains: ["a"],
     excludes: ["b"],
@@ -273,8 +298,8 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
 
   for (const failure of ["reader-open", "reader-read", "reader-close"] as const) {
     const failedLifecycle = lifecycleReceipt(failure);
-    assert.throws(
-      () =>
+    await assert.rejects(
+      async () =>
         proveForegroundScopeIsolation(failedLifecycle.factory, scopeA, scopeCodec, {
           write: "a",
           contains: ["a"],
@@ -288,8 +313,21 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
     );
   }
 
-  const pendingReceipt = (settles: boolean) => {
+  const pendingReceipt = (settles: boolean, emitsWake = true) => {
     const metrics = { all: 0, poll: 0, tick: 0, close: 0 };
+    let scheduler: ((urgency: string) => void) | undefined;
+    const scheduleWake = () => {
+      if (!emitsWake) return;
+      setTimeout(() => {
+        const ticksBeforeCallback = metrics.tick;
+        scheduler?.("immediate");
+        assert.equal(
+          metrics.tick,
+          ticksBeforeCallback,
+          "native wake callback must not re-enter foreground.tick",
+        );
+      }, 0);
+    };
     const factory = {
       abiVersion: NATIVE_RELAY_ABI_VERSION,
       openAttached() {
@@ -302,11 +340,14 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
                 metrics.all += 1;
                 if (metrics.all > 1)
                   throw new Error("scope receipt reissued all instead of polling");
+                scheduleWake();
                 return Uint8Array.of(15, 42);
               case 8:
                 metrics.poll += 1;
                 assert.equal(command[1], 42);
-                return settles && metrics.poll === 2 ? rows(true, false) : Uint8Array.of(15, 42);
+                if (settles && metrics.poll === 2) return rows(true, false);
+                scheduleWake();
+                return Uint8Array.of(15, 42);
               case 7:
                 return Uint8Array.of(7, 1);
               default:
@@ -315,6 +356,9 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
           },
           tick() {
             metrics.tick += 1;
+          },
+          setTickScheduler(callback: (urgency: string) => void) {
+            scheduler = callback;
           },
           close() {
             metrics.close += 1;
@@ -327,15 +371,15 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   };
 
   const pendingThenVisible = pendingReceipt(true);
-  proveForegroundScopeIsolation(pendingThenVisible.factory, scopeA, scopeCodec, {
+  await proveForegroundScopeIsolation(pendingThenVisible.factory, scopeA, scopeCodec, {
     contains: ["a"],
     excludes: ["b"],
   });
   assert.deepEqual(pendingThenVisible.metrics, { all: 1, poll: 2, tick: 3, close: 1 });
 
   const pendingForever = pendingReceipt(false);
-  assert.throws(
-    () =>
+  await assert.rejects(
+    async () =>
       proveForegroundScopeIsolation(pendingForever.factory, scopeA, scopeCodec, {
         contains: ["a"],
         excludes: ["b"],
@@ -344,11 +388,22 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   );
   assert.deepEqual(pendingForever.metrics, { all: 1, poll: 95, tick: 96, close: 1 });
 
+  const missingNativeWake = pendingReceipt(true, false);
+  await assert.rejects(
+    async () =>
+      proveForegroundScopeIsolation(missingNativeWake.factory, scopeA, scopeCodec, {
+        contains: ["a"],
+        excludes: ["b"],
+      }),
+    /did not settle after bounded ticks/,
+  );
+  assert.deepEqual(missingNativeWake.metrics, { all: 1, poll: 0, tick: 96, close: 1 });
+
   aWasWritten = false;
   bWasWritten = false;
   const leaking = scopeFactory(true, false);
-  assert.throws(
-    () =>
+  await assert.rejects(
+    async () =>
       proveForegroundScopeIsolation(leaking, scopeB, scopeCodec, {
         contains: [],
         excludes: ["a"],
@@ -359,8 +414,8 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
   aWasWritten = false;
   bWasWritten = false;
   const reverseLeaking = scopeFactory(false, true);
-  assert.throws(
-    () =>
+  await assert.rejects(
+    async () =>
       proveForegroundScopeIsolation(reverseLeaking, scopeA, scopeCodec, {
         contains: [],
         excludes: ["b"],

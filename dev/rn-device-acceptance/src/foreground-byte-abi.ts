@@ -266,14 +266,14 @@ export type ScopeIsolationReceipt = {
  * a caller-selected query, path, or payload.  Native platform code remains
  * the sole selector of the app/storage/auth scope behind `capability`.
  */
-export function proveForegroundScopeIsolation(
+export async function proveForegroundScopeIsolation(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
   receipt: ScopeIsolationReceipt,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
-): void {
-  let writer: NativeForegroundRuntime | undefined;
+): Promise<void> {
+  let writer: ScopeForeground | undefined;
   try {
     if (receipt.write) {
       // The writer and reader are deliberately separate foreground handles. A
@@ -282,10 +282,10 @@ export function proveForegroundScopeIsolation(
       // and progressing until the reader observes the committed row: closing a
       // foreground is cancellation, not a flush primitive.
       markFailure("scope-isolation-open-failed");
-      const openedWriter = factory.openAttached(capability);
+      const openedWriter = openScopeForeground(factory, capability);
       writer = openedWriter;
       const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
-        codec.decode(openedWriter.execute(codec.encode(command)));
+        codec.decode(openedWriter.runtime.execute(codec.encode(command)));
       markFailure("scope-isolation-write-failed");
       const transaction = execute({
         type: "beginTransaction",
@@ -312,15 +312,16 @@ export function proveForegroundScopeIsolation(
     }
 
     markFailure("scope-isolation-open-failed");
-    const foreground = factory.openAttached(capability);
+    const foreground = openScopeForeground(factory, capability);
     try {
       markFailure("scope-isolation-read-failed");
-      const rows = readTodos(
-        foreground,
+      const rows = await readTodos(
+        foreground.runtime,
         codec,
         (candidate) =>
           receipt.contains.every((scope) => containsUtf8(candidate, scopeFixtureTitle(scope))),
-        () => writer?.tick(),
+        () => writer?.runtime.tick(),
+        foreground.consumeWake,
       );
       markFailure("scope-isolation-assert-failed");
       for (const scope of receipt.contains) {
@@ -336,11 +337,42 @@ export function proveForegroundScopeIsolation(
           );
       }
     } finally {
-      foreground.close();
+      foreground.runtime.close();
     }
   } finally {
-    writer?.close();
+    writer?.runtime.close();
   }
+}
+
+type ScopeForeground = {
+  runtime: NativeForegroundRuntime;
+  consumeWake: () => boolean;
+};
+
+function openScopeForeground(
+  factory: NativeForegroundRuntimeFactory,
+  capability: Uint8Array,
+): ScopeForeground {
+  const foreground = factory.openAttached(capability);
+  if (typeof foreground.setTickScheduler !== "function") {
+    foreground.close();
+    throw new Error("scope isolation foreground cannot install its native wake scheduler");
+  }
+  // Register the actual ForegroundWakeRegistration/CallInvoker path. The
+  // callback only records delivery; the bounded read loop consumes that wake
+  // before polling and performs the tick on a later event-loop turn.
+  let pendingWakes = 0;
+  foreground.setTickScheduler(() => {
+    pendingWakes += 1;
+  });
+  return {
+    runtime: foreground,
+    consumeWake() {
+      if (pendingWakes === 0) return false;
+      pendingWakes -= 1;
+      return true;
+    },
+  };
 }
 
 function scopeFixtureTitle(scope: "a" | "b") {
@@ -372,12 +404,13 @@ const TODOS_QUERY = Uint8Array.of(
   0,
 );
 
-function readTodos(
+async function readTodos(
   foreground: NativeForegroundRuntime,
   codec: ForegroundByteCodec,
   ready: (rows: Uint8Array) => boolean = () => true,
   progressWriter: () => void = () => {},
-): Uint8Array {
+  consumeWake: () => boolean = () => true,
+): Promise<Uint8Array> {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
   const prepared = execute({ type: "prepareQuery", query: TODOS_QUERY });
@@ -387,6 +420,11 @@ function readTodos(
   for (let attempts = 0; attempts < 96; attempts += 1) {
     progressWriter();
     foreground.tick();
+    // Async storage completion wakes the installed foreground through React
+    // Native's CallInvoker. A synchronous tick loop starves that callback, so
+    // each bounded attempt must hand control back to the app event loop.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (pendingOperation !== undefined && !consumeWake()) continue;
     const response =
       pendingOperation === undefined
         ? execute({ type: "all", query: prepared.query })
