@@ -50,7 +50,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("../runtime/db.js", () => ({
   Db: class {},
-  createDb: mocks.createDb,
   getDbSubscriptionSource: (db: unknown) => db,
   resolveDefaultPersistentDbName: (config: DbConfig) => {
     const driver = config.driver;
@@ -59,6 +58,14 @@ vi.mock("../runtime/db.js", () => ({
     }
     return config.dbName?.trim() || config.appId;
   },
+}));
+
+// Browser/Node construction lives behind this wrapper so the React Native
+// entrypoint cannot statically reach the WASM runtime. Keep the client tests
+// at that public factory boundary rather than accidentally exercising its
+// native runtime implementation.
+vi.mock("../runtime/default-create-db.js", () => ({
+  createDb: mocks.createDb,
 }));
 
 vi.mock("../subscriptions-orchestrator.js", () => ({

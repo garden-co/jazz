@@ -4,7 +4,7 @@ import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { loadWasmModule } from "../../src/runtime/client.js";
+import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { schema as s } from "../../src/index.js";
 import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
 
