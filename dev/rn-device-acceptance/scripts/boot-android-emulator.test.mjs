@@ -178,7 +178,11 @@ test("Perl fallback bounds a wedged adb probe and cleans up the portable child",
         portableNoTimeout: true,
       },
     );
-    assert.equal(existsSync(perlMarker), true, "a wedged probe must be killed by the Perl fallback");
+    assert.equal(
+      existsSync(perlMarker),
+      true,
+      "a wedged probe must be killed by the Perl fallback",
+    );
     const emulatorPid = Number(readFileSync(emulatorPidFile, "utf8").trim());
     assert.throws(() => process.kill(emulatorPid, 0), { code: "ESRCH" });
   } finally {

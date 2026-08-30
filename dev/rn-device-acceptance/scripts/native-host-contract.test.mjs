@@ -298,20 +298,30 @@ test("protocol receipt builds its workspace API prerequisites from clean outputs
   // must create it itself rather than accidentally relying on artifacts left
   // by another root Turbo task or an earlier CI step. The RN public entry is
   // TypeScript-only: it must not pull in the browser worker/WASM bundle.
-  assert.match(protocol, new RegExp(`^${prerequisites.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} && `));
+  assert.match(
+    protocol,
+    new RegExp(`^${prerequisites.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} && `),
+  );
   assert.equal(
     workspacePrerequisites,
     "pnpm --filter jazz-tools build:react-native && pnpm --filter jazz-rn build",
     "the receipt must stage the narrow RN public entrypoint, not Jazz Tools' browser/WASM build",
   );
   assert.equal(jazzToolsPackage.scripts["build:react-native"], "tsc --project tsconfig.json");
-  assert.doesNotMatch(jazzToolsPackage.scripts["build:react-native"], /bundle-broker-worker|jazz-wasm/);
+  assert.doesNotMatch(
+    jazzToolsPackage.scripts["build:react-native"],
+    /bundle-broker-worker|jazz-wasm/,
+  );
 
   // Plant the former stale-artifact shortcut: skipping the prerequisite stage
   // must not satisfy the receipt, even though a developer's checkout may
   // happen to retain `dist/react-native` from an earlier build.
   assert.throws(
-    () => assert.match(protocol.replace("pnpm build:workspace-prerequisites && ", ""), /workspace-prerequisites/),
+    () =>
+      assert.match(
+        protocol.replace("pnpm build:workspace-prerequisites && ", ""),
+        /workspace-prerequisites/,
+      ),
     /workspace-prerequisites/,
   );
   assert.throws(
@@ -351,7 +361,10 @@ test("the React Native public entrypoint cannot reach the browser WASM loader", 
   // Plant the historical fallback. The receipt must fail rather than relying
   // on a successful TypeScript build to notice Metro's transitive resolution.
   assert.throws(
-    () => assertNoBrowserRuntime(`${runtimeSource}\nimport { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";`),
+    () =>
+      assertNoBrowserRuntime(
+        `${runtimeSource}\nimport { DefaultRuntimeSource } from "../runtime/default-runtime-source.js";`,
+      ),
     /DefaultRuntimeSource/,
   );
 });
@@ -359,7 +372,8 @@ test("the React Native public entrypoint cannot reach the browser WASM loader", 
 function emittedRelativeModuleGraph(entry, sourceOverrides = new Map()) {
   const pending = [entry];
   const visited = new Map();
-  const staticSpecifiers = /(?:^|\n)\s*(?:import|export)\s+(?:[^"'\n]*?\s+from\s+)?["']([^"']+)["']/g;
+  const staticSpecifiers =
+    /(?:^|\n)\s*(?:import|export)\s+(?:[^"'\n]*?\s+from\s+)?["']([^"']+)["']/g;
   const dynamicSpecifiers = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
 
   while (pending.length > 0) {
@@ -432,7 +446,10 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   // after re-admission only proves the host transport; it does not prove a
   // fresh application can start, select its foreground runtime, and decode a
   // persisted row through `createJazzClient`.
-  assert.match(app, /await proveHighLevelForegroundRestart\(reopened\.capability, receipt\.runNonce\)/);
+  assert.match(
+    app,
+    /await proveHighLevelForegroundRestart\(reopened\.capability, receipt\.runNonce\)/,
+  );
   assert.match(app, /seedHighLevelForegroundRuntime\(scopeA\.capability, receipt\.runNonce\)/);
   assert.match(highLevelForeground, /createJazzClient\(clientConfig\(capability\)\)/);
   assert.match(highLevelForeground, /client\.db\.all\(app\.todos\)/);
@@ -481,7 +498,10 @@ test("device acceptance is a registered, narrowly scoped pnpm workspace package"
     const acceptanceTask = graph.tasks.find(
       (candidate) => candidate.taskId === `rn-device-acceptance#${task}`,
     );
-    assert.ok(acceptanceTask, `root Turbo graph must resolve the registered acceptance ${task} task`);
+    assert.ok(
+      acceptanceTask,
+      `root Turbo graph must resolve the registered acceptance ${task} task`,
+    );
     assert.deepEqual(
       acceptanceTask.dependencies,
       [],
