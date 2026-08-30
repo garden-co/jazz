@@ -1020,9 +1020,13 @@ where
         self.permission_advice_waiters
             .borrow_mut()
             .insert(request_id, sender);
-        self.upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action });
+        self.upstream_subscriptions.borrow_mut().push(
+            PendingUpstreamCommand::AuthorizationScopeIntent {
+                request_id,
+                action,
+                session_claim_binding: None,
+            },
+        );
         self.schedule_tick(TickUrgency::Immediate);
         PermissionAdviceFuture {
             waiters: Rc::clone(&self.permission_advice_waiters),
@@ -1658,6 +1662,8 @@ where
         let connection_epoch = connection_ref.connection_epoch;
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
         let mut reconnect_permission_advice = Vec::new();
+        let mut terminal_permission_advice = Vec::new();
+        let current_session_claims = self.node.borrow().session_claims_with_revisions();
         let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
             match &mut connection_ref.link {
                 ConnectionLink::Upstream(UpstreamConnectionState {
@@ -1674,21 +1680,67 @@ where
                     // coalesce under its fresh authority context and wire id.
                     let live_waiters = self.permission_advice_waiters.borrow();
                     let mut queued = BTreeSet::new();
+                    // The lease manager becomes authoritative as soon as it
+                    // captures a session binding, even if the matching
+                    // command is still retained after a backpressured send.
+                    // Visit it first so a command's initial `None` cannot
+                    // erase the request-owned snapshot during detach.
+                    for request in scope_lease_manager.requests.values() {
+                        for request_id in &request.waiters {
+                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
+                                let (identity, claims) = &request.session_claim_binding;
+                                let current_claims = current_session_claims
+                                    .iter()
+                                    .find_map(|(current_identity, current_claims, _)| {
+                                        (current_identity == identity).then_some(current_claims)
+                                    })
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if current_claims == *claims {
+                                    reconnect_permission_advice.push((
+                                        *request_id,
+                                        request.action.clone(),
+                                        Some(request.session_claim_binding.clone()),
+                                    ));
+                                } else {
+                                    // A successor can only prove its currently
+                                    // admitted session. Never send a B-scoped
+                                    // hydration to settle this A-owned request.
+                                    terminal_permission_advice.push(*request_id);
+                                }
+                            }
+                        }
+                    }
                     for command in pending.iter() {
-                        let PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } =
-                            command
+                        let PendingUpstreamCommand::AuthorizationScopeIntent {
+                            request_id,
+                            action,
+                            session_claim_binding,
+                        } = command
                         else {
                             continue;
                         };
                         if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                            reconnect_permission_advice.push((*request_id, action.clone()));
-                        }
-                    }
-                    for request in scope_lease_manager.requests.values() {
-                        for request_id in &request.waiters {
-                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
-                                reconnect_permission_advice
-                                    .push((*request_id, request.action.clone()));
+                            if session_claim_binding
+                                .as_ref()
+                                .is_none_or(|(identity, claims)| {
+                                    current_session_claims
+                                        .iter()
+                                        .find_map(|(current_identity, current_claims, _)| {
+                                            (current_identity == identity).then_some(current_claims)
+                                        })
+                                        .cloned()
+                                        .unwrap_or_default()
+                                        == *claims
+                                })
+                            {
+                                reconnect_permission_advice.push((
+                                    *request_id,
+                                    action.clone(),
+                                    session_claim_binding.clone(),
+                                ));
+                            } else {
+                                terminal_permission_advice.push(*request_id);
                             }
                         }
                     }
@@ -1756,6 +1808,15 @@ where
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         drop(connections);
         let detached = true;
+        for request_id in terminal_permission_advice {
+            if let Some(waiter) = self
+                .permission_advice_waiters
+                .borrow_mut()
+                .remove(&request_id)
+            {
+                let _ = waiter.send(PermissionAdvice::Unknown);
+            }
+        }
         if !retired_relay_subscriptions.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
                 retired_relay_subscriptions
@@ -1766,14 +1827,15 @@ where
         }
         if !reconnect_permission_advice.is_empty() {
             self.upstream_subscriptions.borrow_mut().extend(
-                reconnect_permission_advice
-                    .into_iter()
-                    .map(
-                        |(request_id, action)| PendingUpstreamCommand::AuthorizationScopeIntent {
+                reconnect_permission_advice.into_iter().map(
+                    |(request_id, action, session_claim_binding)| {
+                        PendingUpstreamCommand::AuthorizationScopeIntent {
                             request_id,
                             action,
-                        },
-                    ),
+                            session_claim_binding,
+                        }
+                    },
+                ),
             );
             self.schedule_tick(TickUrgency::Immediate);
         }

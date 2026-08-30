@@ -1261,7 +1261,7 @@ where
                         }
                         let pending_index = 0;
                         while pending_index < pending.len() {
-                            match &pending[pending_index] {
+                            match &mut pending[pending_index] {
                                 PendingUpstreamCommand::Subscribe(pending_subscription) => {
                                     let shape = &pending_subscription.shape;
                                     let binding = &pending_subscription.binding;
@@ -1381,6 +1381,7 @@ where
                                 PendingUpstreamCommand::AuthorizationScopeIntent {
                                     request_id,
                                     action,
+                                    session_claim_binding: pending_session_claim_binding,
                                 } => {
                                     // An old or unauthenticated upstream must never receive a
                                     // downgraded preflight.  Resolve conservatively instead.
@@ -1418,10 +1419,83 @@ where
                                             pending.remove(pending_index);
                                             continue;
                                         }
+                                        let Some(expected) = expected_scope_authority else {
+                                            continue;
+                                        };
+                                        let session_claim_binding = pending_session_claim_binding
+                                            .clone()
+                                            .or_else(|| {
+                                                scope_lease_manager
+                                                    .requests
+                                                    .get(request_id)
+                                                    .map(|request| {
+                                                        request.session_claim_binding.clone()
+                                                    })
+                                            })
+                                            .unwrap_or_else(|| {
+                                                let identity = expected.link;
+                                                let claims = self
+                                                    .node
+                                                    .borrow()
+                                                    .session_claims_with_revisions()
+                                                    .into_iter()
+                                                    .find_map(|(subject, claims, _)| {
+                                                        (subject == identity).then_some(claims)
+                                                    })
+                                                    .unwrap_or_default();
+                                                (identity, claims)
+                                            });
+                                        // Allocation establishes the immutable
+                                        // request binding before the first wire
+                                        // send. A backpressured command remains
+                                        // in this queue, so it must carry the
+                                        // same binding on a later turn.
+                                        *pending_session_claim_binding =
+                                            Some(session_claim_binding.clone());
+                                        let claims_still_bound = self
+                                            .node
+                                            .borrow()
+                                            .session_claims_with_revisions()
+                                            .into_iter()
+                                            .find_map(|(identity, claims, _)| {
+                                                (identity == session_claim_binding.0)
+                                                    .then_some(claims)
+                                            });
+                                        let claims_still_bound = claims_still_bound
+                                            .unwrap_or_default()
+                                            == session_claim_binding.1;
+                                        if !claims_still_bound {
+                                            if let Some(request) =
+                                                scope_lease_manager.requests.remove(request_id)
+                                            {
+                                                for waiter_id in request.waiters {
+                                                    if let Some(waiter) = self
+                                                        .permission_advice_waiters
+                                                        .borrow_mut()
+                                                        .remove(&waiter_id)
+                                                    {
+                                                        let _ =
+                                                            waiter.send(PermissionAdvice::Unknown);
+                                                    }
+                                                }
+                                            } else if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(request_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                            pending.remove(pending_index);
+                                            continue;
+                                        }
                                         let existing = scope_lease_manager
                                             .requests
                                             .iter()
-                                            .find(|(_, request)| request.action == *action)
+                                            .find(|(_, request)| {
+                                                request.action == *action
+                                                    && request.session_claim_binding
+                                                        == session_claim_binding
+                                            })
                                             .map(|(wire_request_id, request)| {
                                                 (*wire_request_id, request.intent_sent)
                                             });
@@ -1450,24 +1524,11 @@ where
                                                 request.intent_sent = true;
                                             }
                                         } else {
-                                            let Some(expected) = expected_scope_authority else {
-                                                continue;
-                                            };
-                                            let identity = expected.link;
-                                            let claims = self
-                                                .node
-                                                .borrow()
-                                                .session_claims_with_revisions()
-                                                .into_iter()
-                                                .find_map(|(subject, claims, _)| {
-                                                    (subject == identity).then_some(claims)
-                                                })
-                                                .unwrap_or_default();
                                             scope_lease_manager.requests.insert(
                                                 *request_id,
                                                 AuthorizationScopeLeaseRequest {
                                                     action: action.clone(),
-                                                    session_claim_binding: (identity, claims),
+                                                    session_claim_binding,
                                                     waiters: BTreeSet::from([*request_id]),
                                                     intent_sent: false,
                                                     key: None,
@@ -2011,17 +2072,51 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                let Some(prior) = scope_lease_manager.requests.get(&request_id)
+                                let Some((session_claim_binding, key_mismatch, needs_acquire)) = scope_lease_manager
+                                    .requests
+                                    .get(&request_id)
+                                    .map(|prior| {
+                                        (
+                                            prior.session_claim_binding.clone(),
+                                            prior.key.as_ref().is_some_and(|known| known != &key)
+                                                || prior
+                                                    .clause_count
+                                                    .is_some_and(|known| known != clause_count),
+                                            prior.lease.is_none(),
+                                        )
+                                    })
                                 else {
                                     // A cancelled intent cannot be revived by a
                                     // late/replayed authority view.
                                     continue;
                                 };
-                                if prior.key.as_ref().is_some_and(|known| known != &key)
-                                    || prior
-                                        .clause_count
-                                        .is_some_and(|known| known != clause_count)
-                                {
+                                let claims_still_bound = self
+                                    .node
+                                    .borrow()
+                                    .session_claims_with_revisions()
+                                    .into_iter()
+                                    .find_map(|(identity, claims, _)| {
+                                        (identity == session_claim_binding.0).then_some(claims)
+                                    })
+                                    .unwrap_or_default()
+                                    == session_claim_binding.1;
+                                if !claims_still_bound {
+                                    if let Some(request) =
+                                        scope_lease_manager.requests.remove(&request_id)
+                                    {
+                                        for waiter_id in request.waiters {
+                                            if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(&waiter_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if key_mismatch {
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
@@ -2031,7 +2126,7 @@ where
                                 // that compile to this same support scope share
                                 // one registry lifecycle rather than racing after
                                 // hydration has already completed.
-                                let acquired = if prior.lease.is_none() {
+                                let acquired = if needs_acquire {
                                     scope_lease_manager.registry.acquire(key.clone())
                                 } else {
                                     None
@@ -2084,6 +2179,41 @@ where
                                 request_id,
                                 receipt,
                             } => {
+                                // Reject a receipt before applying any queued
+                                // scope views when this request's admitted
+                                // claims have changed. A B-scoped proof must
+                                // never materialize support for an A request.
+                                let claims_still_bound = scope_lease_manager
+                                    .requests
+                                    .get(&request_id)
+                                    .is_none_or(|request| {
+                                        self.node
+                                            .borrow()
+                                            .session_claims_with_revisions()
+                                            .into_iter()
+                                            .find_map(|(identity, claims, _)| {
+                                                (identity == request.session_claim_binding.0)
+                                                    .then_some(claims)
+                                            })
+                                            .unwrap_or_default()
+                                            == request.session_claim_binding.1
+                                    });
+                                if !claims_still_bound {
+                                    if let Some(request) =
+                                        scope_lease_manager.requests.remove(&request_id)
+                                    {
+                                        for waiter_id in request.waiters {
+                                            if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(&waiter_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 // The authority's FIFO ordering says this receipt
                                 // follows the views, but apply the queued views now
                                 // so receipt admission is never merely queued.
@@ -2177,6 +2307,31 @@ where
                                             applied_cut,
                                         );
                                 if !receipt_current {
+                                    let claims_still_bound = self
+                                        .node
+                                        .borrow()
+                                        .session_claims_with_revisions()
+                                        .into_iter()
+                                        .find_map(|(identity, claims, _)| {
+                                            (identity == request.session_claim_binding.0)
+                                                .then_some(claims)
+                                        })
+                                        .unwrap_or_default()
+                                        == request.session_claim_binding.1;
+                                    if !claims_still_bound {
+                                        let waiter_ids = request.waiters.clone();
+                                        scope_lease_manager.requests.remove(&request_id);
+                                        for waiter_id in waiter_ids {
+                                            if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(&waiter_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     // A claim/catalogue/progress transition can
                                     // race a just-completed hydration.  Retire its
                                     // lease and allocate a new opaque wire id so
@@ -2193,7 +2348,7 @@ where
                                         retry_id,
                                         AuthorizationScopeLeaseRequest {
                                             action: action.clone(),
-                                            session_claim_binding,
+                                            session_claim_binding: session_claim_binding.clone(),
                                             waiters,
                                             intent_sent: false,
                                             key: None,
@@ -2207,6 +2362,7 @@ where
                                         PendingUpstreamCommand::AuthorizationScopeIntent {
                                             request_id: retry_id,
                                             action,
+                                            session_claim_binding: Some(session_claim_binding),
                                         },
                                     );
                                     drop_peer_request(&self.node);

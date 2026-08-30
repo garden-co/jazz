@@ -2016,6 +2016,10 @@ enum PendingUpstreamCommand {
     AuthorizationScopeIntent {
         request_id: PermissionAdviceRequestId,
         action: PermissionAdviceAction,
+        /// Present only when an existing request crosses an upstream boundary.
+        /// A fresh request binds its claims when its selected authority admits
+        /// it; a reconnect must preserve the original immutable binding.
+        session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     },
 }
 
