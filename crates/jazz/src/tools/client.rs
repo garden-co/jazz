@@ -1697,11 +1697,6 @@ impl ClientDbInner {
             let _completion = completion;
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
-            // A fresh subscription may be hydrated by consecutive reset
-            // frames. They replace the still-initial result set until core
-            // sends a delta-shaped update for a tracked occurrence. That is
-            // attach framing, not a replacement snapshot.
-            let mut initial_hydration = true;
             loop {
                 let Some(event) = (tokio::select! {
                     biased;
@@ -1720,19 +1715,41 @@ impl ClientDbInner {
                         settled,
                         ..
                     } => {
-                        let previous_rows: Vec<OutputOccurrenceId> = current_rows
-                            .iter()
-                            .map(|row| row.occurrence_id.clone())
-                            .collect();
-                        let reset_updates_tracked_row = added.iter().chain(&updated).any(|row| {
-                            current_rows
+                        // A reset carries the complete replacement snapshot.
+                        // Core may omit explicit removals because the reset bit
+                        // already makes absence authoritative, but the public
+                        // facade exposes semantic deltas. Recover those absent
+                        // occurrences before classifying retained snapshot rows
+                        // as updates.
+                        let mut removed = removed;
+                        if reset {
+                            let replacement_ids = added
                                 .iter()
-                                .any(|current| current.occurrence_id == row.occurrence_id)
-                        });
-                        let reset_replaces_initial_view =
-                            initial_hydration && reset && !reset_updates_tracked_row;
-                        if reset_replaces_initial_view {
-                            current_rows.clear();
+                                .chain(&updated)
+                                .map(|row| row.occurrence_id.clone())
+                                .collect::<std::collections::BTreeSet<_>>();
+                            let explicitly_removed = removed
+                                .iter()
+                                .map(|row| row.occurrence_id.clone())
+                                .collect::<std::collections::BTreeSet<_>>();
+                            removed.extend(
+                                reset_absent_row_indices(
+                                    &current_rows,
+                                    &replacement_ids,
+                                    &explicitly_removed,
+                                    |row| &row.occurrence_id,
+                                )
+                                .into_iter()
+                                .map(|index| {
+                                    let row = &current_rows[index];
+                                    crate::db::RemovedRow {
+                                        table: table.clone(),
+                                        row_uuid: row.row.row_uuid(),
+                                        occurrence_id: row.occurrence_id.clone(),
+                                        index: row.index,
+                                    }
+                                }),
+                            );
                         }
                         // A local aggregate snapshot may retract while the
                         // relay concurrently publishes its replacement.  The
@@ -1759,22 +1776,16 @@ impl ClientDbInner {
                                 row.previous_index.get_or_insert(previous_index);
                             },
                         );
-                        let change_delta = if reset_replaces_initial_view {
-                            None
-                        } else {
-                            Some(
-                                query_decoder
-                                    .core_subscription_change_delta(
-                                        &db,
-                                        &query,
-                                        &current_rows,
-                                        &effective_added,
-                                        &effective_updated,
-                                        &removed,
-                                    )
-                                    .await,
+                        let change_delta = query_decoder
+                            .core_subscription_change_delta(
+                                &db,
+                                &query,
+                                &current_rows,
+                                &effective_added,
+                                &effective_updated,
+                                &removed,
                             )
-                        };
+                            .await;
                         PublicQueryDecoder::apply_core_subscription_rows(
                             &mut current_rows,
                             &effective_added,
@@ -1786,21 +1797,7 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = if reset_replaces_initial_view {
-                            query_decoder
-                                .core_subscription_reset_delta(
-                                    &db,
-                                    &query,
-                                    &previous_rows,
-                                    &current_rows,
-                                )
-                                .await
-                        } else {
-                            change_delta.expect("non-reset subscription frame has a change delta")
-                        };
-                        if !reset_replaces_initial_view {
-                            initial_hydration = false;
-                        }
+                        let delta = change_delta;
                         let Ok(delta) = delta else {
                             break;
                         };
@@ -1955,6 +1952,22 @@ fn normalize_subscription_updates<T>(
         }
     }
     (effective_added, effective_updated)
+}
+
+fn reset_absent_row_indices<T, K: Ord>(
+    current: &[T],
+    replacement_ids: &std::collections::BTreeSet<K>,
+    explicitly_removed: &std::collections::BTreeSet<K>,
+    occurrence_id: impl Fn(&T) -> &K,
+) -> Vec<usize> {
+    current
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let id = occurrence_id(row);
+            (!replacement_ids.contains(id) && !explicitly_removed.contains(id)).then_some(index)
+        })
+        .collect()
 }
 
 /// Transaction-scoped Jazz client handle.
@@ -2865,50 +2878,6 @@ impl PublicQueryDecoder {
             public.with_fields(fields)
         };
         Ok(public)
-    }
-
-    async fn core_subscription_snapshot_delta(
-        &self,
-        db: &Backend,
-        query: &Query,
-        rows: &[CoreSubscriptionOutputRow],
-    ) -> Result<OrderedRowDelta> {
-        let mut added = Vec::with_capacity(rows.len());
-        for (index, row) in rows.iter().enumerate() {
-            let public = self.core_subscription_row_to_public(db, query, row).await?;
-            added.push(OrderedAdded {
-                id: public.id.clone(),
-                index,
-                row: public,
-            });
-        }
-        Ok(OrderedRowDelta {
-            added,
-            ..OrderedRowDelta::default()
-        })
-    }
-
-    async fn core_subscription_reset_delta(
-        &self,
-        db: &Backend,
-        query: &Query,
-        previous_rows: &[OutputOccurrenceId],
-        rows: &[CoreSubscriptionOutputRow],
-    ) -> Result<OrderedRowDelta> {
-        let removed = previous_rows
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, id)| OrderedRemoved {
-                id: ResultKey::from_occurrence(id),
-                index,
-            })
-            .collect();
-        let mut delta = self
-            .core_subscription_snapshot_delta(db, query, rows)
-            .await?;
-        delta.removed = removed;
-        Ok(delta)
     }
 
     fn apply_core_subscription_rows(
@@ -3832,6 +3801,84 @@ mod tests {
         );
         assert!(added.is_empty());
         assert_eq!(updated, vec![(held, Some(7))]);
+    }
+
+    #[test]
+    fn reset_snapshot_preserves_retained_updates_and_recovers_absent_removals() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct SnapshotRow {
+            id: OutputOccurrenceId,
+            payload: &'static str,
+            index: usize,
+            previous_index: Option<usize>,
+        }
+
+        let a = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(1)));
+        let b = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(2)));
+        let c = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(3)));
+        let current = vec![
+            SnapshotRow {
+                id: a.clone(),
+                payload: "old A",
+                index: 0,
+                previous_index: None,
+            },
+            SnapshotRow {
+                id: b.clone(),
+                payload: "old B",
+                index: 1,
+                previous_index: None,
+            },
+        ];
+        let replacement = vec![
+            SnapshotRow {
+                id: c.clone(),
+                payload: "new C",
+                index: 0,
+                previous_index: None,
+            },
+            SnapshotRow {
+                id: a.clone(),
+                payload: "new A",
+                index: 1,
+                previous_index: None,
+            },
+        ];
+        let replacement_ids = replacement.iter().map(|row| row.id.clone()).collect();
+        let removed_indices = reset_absent_row_indices(
+            &current,
+            &replacement_ids,
+            &std::collections::BTreeSet::new(),
+            |row| &row.id,
+        );
+        assert_eq!(removed_indices, vec![1]);
+        assert_eq!(current[removed_indices[0]].id, b);
+        assert_eq!(current[removed_indices[0]].payload, "old B");
+
+        let surviving = std::collections::BTreeMap::from([(a.clone(), 0)]);
+        let (added, updated) = normalize_subscription_updates(
+            surviving,
+            replacement,
+            Vec::new(),
+            |row| &row.id,
+            |row, previous_index| row.previous_index = Some(previous_index),
+        );
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            (&added[0].id, added[0].payload, added[0].index),
+            (&c, "new C", 0)
+        );
+        assert_eq!(updated.len(), 1);
+        assert_eq!(
+            (
+                &updated[0].id,
+                updated[0].payload,
+                updated[0].previous_index,
+                updated[0].index,
+            ),
+            (&a, "new A", Some(0), 1)
+        );
+        assert_eq!(added.len() + updated.len() + removed_indices.len(), 3);
     }
 
     #[test]
