@@ -703,6 +703,7 @@ test("checksum pin rejects a planted corrupt cache archive", () => {
 
 test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", () => {
   const fixture = read("native/ios/JazzDeviceFixture.mm");
+  const checkedInFixture = read("ios/JazzDeviceFixture.mm");
   assert.match(fixture, /JazzRelayTrustedAdmission admitScopeJSON/);
   assert.match(fixture, /replaceCapability:self\.capability withScopeJSON/);
   assert.match(fixture, /JazzDeviceScopeFixture\(NSString \*authScope\)/);
@@ -727,7 +728,11 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   assert.match(fixture, /RCT_REMAP_METHOD\(recordDiagnostic/);
   assert.match(fixture, /jazz-device-diagnostic\.txt/);
   assert.match(fixture, /JazzDeviceDiagnosticCodes\(\) containsObject:detail/);
-  for (const code of DEVICE_DIAGNOSTIC_CODES) assert.match(fixture, new RegExp(`@"${code}"`));
+  for (const code of DEVICE_DIAGNOSTIC_CODES) {
+    const literal = new RegExp(`@"${code}"`);
+    assert.match(fixture, literal);
+    assert.match(checkedInFixture, literal);
+  }
   assert.match(fixture, /JAZZ_DEVICE_RESULT/);
   assert.match(fixture, /NSDataWritingAtomic/);
   assert.doesNotMatch(fixture, /recordReceipt[\s\S]*JazzRelayTrustedAdmission/);
@@ -772,10 +777,14 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   assert.match(app, /switchNativeRelayAuthScope/);
   assert.match(app, /logoutNativeRelay/);
   assert.match(app, /oldScopeForeground = foregroundFactory\.openAttached\(scopeA\.capability\)/);
+  assert.match(
+    app,
+    /markFailure\("foreground-open-failed"\);\s+const revocableForeground = foregroundFactory\.openAttached\(capability\)/,
+  );
   assert.match(app, /proveForegroundRevoked\(oldScopeForeground, foregroundCodec\.encode\)/);
   assert.match(
     app,
-    /proveForegroundByteAbi\(foregroundFactory, scopeB\.capability, foregroundCodec\)/,
+    /proveForegroundByteAbi\(foregroundFactory, scopeB\.capability, foregroundCodec, markFailure\)/,
   );
   assert.match(app, /await recordDeviceReceipt\(results\.join\("\\n"\)\)/);
   assert.match(app, /recordDeviceDiagnostic\(diagnosticCode\)/);

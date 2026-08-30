@@ -26,6 +26,7 @@ const codec = {
 test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () => {
   let closed = false;
   const commands: number[] = [];
+  const stages: string[] = [];
   const foreground = {
     execute(command: Uint8Array) {
       commands.push(command[0]!);
@@ -52,8 +53,15 @@ test("foreground receipt sends the v1 Probe, Tick, and Close byte commands", () 
     },
     capability,
     codec,
+    (stage) => stages.push(stage),
   );
   assert.deepEqual(commands, [0, 1, 2, 0]);
+  assert.deepEqual(stages, [
+    "foreground-open-failed",
+    "foreground-probe-failed",
+    "foreground-tick-failed",
+    "foreground-close-failed",
+  ]);
 });
 
 test("foreground receipt treats a native revocation as an execution error", () => {

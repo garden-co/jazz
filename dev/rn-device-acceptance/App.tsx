@@ -79,12 +79,14 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   markFailure("relay-command-abi-failed");
   await proveAdmittedRelay(executor, capability, markFailure);
   markFailure("foreground-byte-abi-failed");
+  markFailure("foreground-install-failed");
   const foregroundFactory = installNativeForegroundRuntime();
   const foregroundCodec = {
     encode: encodeNativeForegroundCommand,
     decode: decodeNativeForegroundResponse,
   };
-  proveForegroundByteAbi(foregroundFactory, capability, foregroundCodec);
+  proveForegroundByteAbi(foregroundFactory, capability, foregroundCodec, markFailure);
+  markFailure("foreground-open-failed");
   const revocableForeground = foregroundFactory.openAttached(capability);
   markFailure("logout-revocation-failed");
   await proveLogoutRevocation(
@@ -110,7 +112,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   const scopeB = await proveAuthScopeSwitch(scopeA, switchNativeRelayAuthScope);
   markFailure("foreground-byte-abi-failed");
   proveForegroundRevoked(oldScopeForeground, foregroundCodec.encode);
-  proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec);
+  proveForegroundByteAbi(foregroundFactory, scopeB.capability, foregroundCodec, markFailure);
   markFailure("scope-isolation-failed");
   proveForegroundScopeIsolation(foregroundFactory, scopeB.capability, foregroundCodec, {
     write: "b",

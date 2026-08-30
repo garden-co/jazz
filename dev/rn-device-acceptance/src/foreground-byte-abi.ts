@@ -20,15 +20,26 @@ export function proveForegroundByteAbi(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
+  markFailure?: (
+    stage:
+      | "foreground-open-failed"
+      | "foreground-probe-failed"
+      | "foreground-tick-failed"
+      | "foreground-close-failed",
+  ) => void,
 ): NativeForegroundRuntime {
   if (factory.abiVersion !== NATIVE_RELAY_ABI_VERSION)
     throw new Error(`installed foreground factory has unexpected ABI ${factory.abiVersion}`);
+  markFailure?.("foreground-open-failed");
   const foreground = factory.openAttached(capability);
+  markFailure?.("foreground-probe-failed");
   const probe = codec.decode(foreground.execute(codec.encode("probe")));
   if (probe.type !== "probe" || probe.abiVersion !== NATIVE_RELAY_ABI_VERSION)
     throw new Error("installed foreground returned an unexpected Probe response");
+  markFailure?.("foreground-tick-failed");
   const tick = codec.decode(foreground.execute(codec.encode("tick")));
   if (tick.type !== "ticked") throw new Error("installed foreground did not acknowledge Tick");
+  markFailure?.("foreground-close-failed");
   const close = codec.decode(foreground.execute(codec.encode("close")));
   if (close.type !== "closed" || !close.closed)
     throw new Error("installed foreground did not acknowledge its first Close");
