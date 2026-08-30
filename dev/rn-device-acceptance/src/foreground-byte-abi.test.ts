@@ -461,16 +461,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
             request.type === "prepareQuery"
               ? { type: "preparedQuery", query: 1 }
               : request.type === "subscribe"
-                ? (setTimeout(
-                    () =>
-                      setTimeout(() => {
-                        const ticksBeforeWake = ticks[peer];
-                        schedulers[peer]?.("immediate");
-                        assert.equal(ticks[peer], ticksBeforeWake);
-                      }, 0),
-                    0,
-                  ),
-                  { type: "subscribed", subscription: 2 })
+                ? { type: "subscribed", subscription: 2 }
                 : request.type === "beginTransaction"
                   ? { type: "transactionOpened", transaction: 3 }
                   : request.type === "upsert"
@@ -670,7 +661,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   };
   await assert.rejects(
     async () => proveSameJsiRuntimeWriteSubscription(missingNativeWake, capability, command),
-    /initial subscription reset did not settle/,
+    /did not observe foreground A's committed row/,
   );
 
   committed = false;

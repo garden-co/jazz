@@ -186,28 +186,18 @@ export async function proveSameJsiRuntimeWriteSubscription(
     if (subscribed.type !== "subscribed")
       throw new Error("foreground B could not subscribe to the todos query");
 
-    // Settle and acknowledge B's initial reset before A writes. A timer is not
-    // a CallInvoker barrier: the reset wake may arrive several turns later.
-    // Observing the wake-driven settled reset establishes the new notification
-    // epoch, so that reset cannot masquerade as evidence for A's later commit.
+    // Settle and acknowledge B's initial reset before A writes. Subscribe may
+    // make the reset immediately ready without scheduling a wake, so Drain must
+    // be attempted first. If hydration makes Drain pending, the helper below
+    // requires a fresh native wake before every Poll.
     markFailure("same-runtime-initial-reset-failed");
-    let initialResetSettled = false;
-    for (let attempt = 0; attempt < 96; attempt += 1) {
-      b.tick();
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      if (!openedB.consumeWake()) continue;
-      const events = await drainSubscription(
-        b,
-        subscribed.subscription,
-        codec,
-        openedB.consumeWake,
-      );
-      if (events.some((event) => event.type === "delta" && event.reset && event.settled)) {
-        initialResetSettled = true;
-        break;
-      }
-    }
-    if (!initialResetSettled)
+    const initialEvents = await drainSubscription(
+      b,
+      subscribed.subscription,
+      codec,
+      openedB.consumeWake,
+    );
+    if (!initialEvents.some((event) => event.type === "delta" && event.reset && event.settled))
       throw new Error("foreground B initial subscription reset did not settle");
 
     markFailure("same-runtime-write-failed");
