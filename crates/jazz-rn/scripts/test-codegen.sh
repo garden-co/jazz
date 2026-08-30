@@ -49,6 +49,7 @@ done
 # method cannot safely rediscover the current JSI runtime after JavaScript has
 # discarded the bindings-installed factory.
 android_module="$root/android/src/main/java/com/jazzrn/JazzRelayModule.java"
+android_bridge="$root/android/src/main/java/com/jazzrn/JazzRelayBridge.kt"
 android_package_source="$root/android/src/main/java/com/jazzrn/JazzRelayPackage.kt"
 ios_module="$root/ios/JazzRelayModule.h"
 ios_implementation="$root/ios/JazzRelay.mm"
@@ -56,7 +57,12 @@ if ! rg -q 'implements TurboModuleWithJSIBindings' "$android_module" \
   || ! rg -q 'getBindingsInstaller\(\)' "$android_module" \
   || ! rg -q 'nativeForegroundBindingsInstaller' "$root/android/cpp-relay.cpp" \
   || rg -q -- 'installation->runtime' "$root/android/cpp-relay.cpp" \
-  || rg -q 'installForegroundRuntime' "$android_module" "$android_package_source" "$root/src/NativeJazzRelay.ts"; then
+  || rg -q 'nativeInstallForegroundRuntime' \
+    "$android_module" "$android_bridge" "$android_package_source" \
+    "$root/android/cpp-relay.cpp" "$root/src/NativeJazzRelay.ts" \
+  || rg -q '\binstallForegroundRuntime' \
+    "$android_module" "$android_bridge" "$android_package_source" \
+    "$root/src/NativeJazzRelay.ts"; then
   echo "Android foreground factory no longer uses React Native's JSI bindings lifecycle exclusively" >&2
   exit 1
 fi

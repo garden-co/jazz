@@ -112,7 +112,6 @@ internal object JazzRelayBridge {
     host: Long,
     runtimeToken: Long,
   ): BindingsInstallerHolder
-  @JvmStatic private external fun nativeInstallForegroundRuntime(host: Long, runtimeToken: Long)
   @JvmStatic private external fun nativeInvalidateForegroundRuntime(host: Long, runtimeToken: Long)
 }
 
