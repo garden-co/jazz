@@ -150,6 +150,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     const rawBeforeReadOnlyInspection = await rawRecords(physicalDbName);
 
     db = await openPersistentDb(config);
+    const rawWhileReopened = await rawRecords(physicalDbName);
     // Reopen must materialize the durable local replica without depending on
     // a fresh remote-coverage round trip. The earlier edge read proves the
     // synced fixture; this is specifically the offline persistence boundary.
@@ -181,7 +182,11 @@ describe("browser Jazz storage compatibility corpus", () => {
     openDbs.splice(openDbs.indexOf(db), 1);
     await sleep(100);
     const rawAfterReadOnlyInspection = await rawRecords(physicalDbName);
-    expectCleanForegroundLeaseHandoff(rawBeforeReadOnlyInspection, rawAfterReadOnlyInspection);
+    expectForegroundLeaseLifecycle(
+      rawBeforeReadOnlyInspection,
+      rawWhileReopened,
+      rawAfterReadOnlyInspection,
+    );
     expect(normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)).toEqual(
       normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
     );
@@ -395,20 +400,29 @@ function normalizeForegroundNodeLeasePool(value: unknown): RawForegroundNodeLeas
   };
 }
 
-function expectCleanForegroundLeaseHandoff(
+function expectForegroundLeaseLifecycle(
   beforeRecords: Record<string, string>,
+  activeRecords: Record<string, string>,
   afterRecords: Record<string, string>,
 ): void {
   const before = foregroundNodeLeasePool(beforeRecords);
+  const active = foregroundNodeLeasePool(activeRecords);
   const after = foregroundNodeLeasePool(afterRecords);
   expect(before.active).toEqual([]);
-  expect(after.active).toEqual([]);
   expect(before.reusable).toHaveLength(1);
+  expect(active.active).toHaveLength(1);
+  expect(active.reusable).toEqual([]);
+  expect(active.active[0]!.leaseId).not.toBe(before.reusable[0]!.leaseId);
+  expect(active.active[0]!.node).toEqual(before.reusable[0]!.node);
+  expect(active.active[0]!.confirmedTxTime).toBe(before.reusable[0]!.confirmedTxTime);
+  expect(active.retired).toEqual(before.retired);
+
+  expect(after.active).toEqual([]);
   expect(after.reusable).toHaveLength(1);
-  expect(after.reusable[0]!.leaseId).not.toBe(before.reusable[0]!.leaseId);
-  expect(after.reusable[0]!.node).toEqual(before.reusable[0]!.node);
-  expect(after.reusable[0]!.confirmedTxTime).toBe(before.reusable[0]!.confirmedTxTime);
-  expect(after.retired).toEqual(before.retired);
+  expect(after.reusable[0]!.leaseId).toBe(active.active[0]!.leaseId);
+  expect(after.reusable[0]!.node).toEqual(active.active[0]!.node);
+  expect(after.reusable[0]!.confirmedTxTime).toBe(active.active[0]!.confirmedTxTime);
+  expect(after.retired).toEqual(active.retired);
 }
 
 function corruptReusableLeaseHighWater(records: Record<string, string>): Record<string, string> {
