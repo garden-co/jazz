@@ -542,6 +542,68 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   opened = 0;
   schedulers.length = 0;
   ticks.fill(0);
+  let delayedOpened = 0;
+  let delayedEmptyDrains = 0;
+  let delayedTicks = 0;
+  let delayedTurns = 0;
+  let allowDelayedProgress = true;
+  const delayedInitialReset = {
+    ...factory,
+    openAttached(received: Uint8Array) {
+      const foreground = factory.openAttached(received);
+      const peer = delayedOpened++;
+      let resetReady = false;
+      let progressionCycles = 0;
+      return {
+        ...foreground,
+        execute(bytes: Uint8Array) {
+          const request = command.decode(bytes) as { type?: string };
+          if (peer === 1 && request.type === "drainSubscription" && !resetReady) {
+            delayedEmptyDrains += 1;
+            return command.encode({ type: "subscriptionEvents", events: [] });
+          }
+          return foreground.execute(bytes);
+        },
+        tick() {
+          foreground.tick();
+          if (peer !== 1) return;
+          delayedTicks += 1;
+          if (allowDelayedProgress)
+            setTimeout(() => {
+              progressionCycles += 1;
+              resetReady = progressionCycles >= 2;
+              delayedTurns += 1;
+            }, 0);
+        },
+      };
+    },
+  };
+  await proveSameJsiRuntimeWriteSubscription(delayedInitialReset, capability, command);
+  assert.equal(delayedEmptyDrains, 2, "two successive reset drains are ready but empty");
+  assert.ok(delayedTicks >= 2, "each empty drain receives an ordinary B tick");
+  assert.ok(delayedTurns >= 2, "two yielded turns are required before the reset is ready");
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
+  delayedOpened = 0;
+  delayedEmptyDrains = 0;
+  delayedTicks = 0;
+  delayedTurns = 0;
+  allowDelayedProgress = false;
+  await assert.rejects(
+    async () => proveSameJsiRuntimeWriteSubscription(delayedInitialReset, capability, command),
+    /initial subscription reset did not settle/,
+  );
+  assert.equal(delayedEmptyDrains, 96);
+  assert.equal(delayedTurns, 0);
+  allowDelayedProgress = true;
+
+  committed = false;
+  opened = 0;
+  schedulers.length = 0;
+  ticks.fill(0);
   let pendingPolls = 0;
   let pendingDrains = 0;
   let emitPendingWake = true;
