@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  applyNapiPackageDeclarationOverlay,
   publishExpectedFingerprint,
   publishNapiGeneration,
   validateNapiBindingRuntimeSurface,
@@ -28,6 +29,7 @@ const packageRoot = new URL("../../crates/jazz-napi/", import.meta.url);
 const indexCjs = readFileSync(new URL("index.cjs", packageRoot), "utf8");
 const indexMjs = readFileSync(new URL("index.mjs", packageRoot), "utf8");
 const bootstrap = readFileSync(new URL("native-binding.cjs", packageRoot), "utf8");
+const closePollable = readFileSync(new URL("close-pollable.cjs", packageRoot), "utf8");
 
 function fixture() {
   const root = join(tmpdir(), `jazz-napi-artifact-${process.pid}-${Date.now()}-${Math.random()}`);
@@ -36,6 +38,7 @@ function fixture() {
   writeFileSync(join(root, "index.cjs"), indexCjs);
   writeFileSync(join(root, "index.mjs"), indexMjs);
   writeFileSync(join(root, "native-binding.cjs"), bootstrap);
+  writeFileSync(join(root, "close-pollable.cjs"), closePollable);
   return root;
 }
 function stage(root, name, fingerprint, { complete = true, actual = fingerprint } = {}) {
@@ -47,7 +50,7 @@ function stage(root, name, fingerprint, { complete = true, actual = fingerprint 
     writeFileSync(join(path, "index.d.ts"), "export declare class NapiDb { tick(): void }\n");
     writeFileSync(
       join(path, "index.js"),
-      `class NapiDb { tick() {} } module.exports={ NapiDb, nativeArtifactFingerprint: () => ${JSON.stringify(actual)} };\n`,
+      `class NapiDb { tick() {} __closePollable() { return new Uint8Array() } } module.exports={ NapiDb, nativeArtifactFingerprint: () => ${JSON.stringify(actual)} };\n`,
     );
   }
   return path;
@@ -367,6 +370,33 @@ test("a newly generated public export absent from the stable package declaration
     assert.match(error.message, /--- checked-in/);
     assert.match(error.message, /\+\s*2 \| export declare function newlyGeneratedExport/);
     assert.equal(existsSync(join(root, "native-binding.pointer.cjs")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the package declaration overlay exposes Promise close without leaking the raw pollable ABI", () => {
+  const root = fixture();
+  try {
+    const staged = stage(root, ".napi-stage-close-overlay", "next");
+    writeFileSync(
+      join(staged, "index.d.ts"),
+      [
+        "export declare class NapiDb {",
+        "  tick(): void",
+        "}",
+        "export declare class PendingNativeRead { poll(): Uint8Array | null }",
+        "",
+      ].join("\n"),
+    );
+    applyNapiPackageDeclarationOverlay(staged);
+    const declarations = readFileSync(join(staged, "index.d.ts"), "utf8");
+    assert.match(declarations, /close\(\): Promise<undefined>/);
+    assert.doesNotMatch(declarations, /__closePollable/);
+    assert.throws(
+      () => applyNapiPackageDeclarationOverlay(staged),
+      /raw NAPI declarations unexpectedly expose close/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

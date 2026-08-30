@@ -420,6 +420,23 @@ export function validateNapiStage(
     );
 }
 
+/// Add package-wrapper APIs which deliberately do not exist in the raw native
+/// declaration surface. The raw `__closePollable` ABI is hidden from generated
+/// TypeScript; `index.cjs` owns it and exposes this Promise contract instead.
+export function applyNapiPackageDeclarationOverlay(stagePath) {
+  const declarationsPath = join(stagePath, "index.d.ts");
+  const declarations = readFileSync(declarationsPath, "utf8");
+  const lines = declarations.split("\n");
+  const classStart = lines.indexOf("export declare class NapiDb {");
+  if (classStart === -1) throw new Error("generated NAPI declarations are missing NapiDb");
+  const classEnd = lines.findIndex((line, index) => index > classStart && line === "}");
+  if (classEnd === -1) throw new Error("generated NAPI declarations have an unterminated NapiDb");
+  if (lines.slice(classStart, classEnd).some((line) => /\bclose\s*\(/.test(line)))
+    throw new Error("raw NAPI declarations unexpectedly expose close; wrapper overlay refused");
+  lines.splice(classEnd, 0, "  close(): Promise<undefined>");
+  writeFileSync(declarationsPath, lines.join("\n"));
+}
+
 /**
  * Runtime methods used by jazz-tools before a staged NAPI generation can
  * become the active package binding. Keep this separate from declaration
@@ -500,6 +517,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       if (process.env.JAZZ_NAPI_BUILD_FAULT === "missing") rmSync(napiPath, { force: true });
       if (process.env.JAZZ_NAPI_BUILD_FAULT === "unloadable")
         writeFileSync(napiPath, "not a native module");
+      applyNapiPackageDeclarationOverlay(napiStage);
       validateNapiStage(napiStage, expectedNapiBinding, fingerprint, resolvedNapiTarget);
       // Seal a manifest inside the generation before it can become active.
       if (process.env.JAZZ_NAPI_BUILD_FAULT === "manifest-write")
