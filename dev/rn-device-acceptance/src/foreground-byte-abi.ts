@@ -576,11 +576,18 @@ function fixtureCells(
       118, 97, 116, 101, 45, 114, 111, 119,
     ],
     "subscription from foreground A": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 29, 2, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 30, 2, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
       45, 97, 45, 115, 117, 98, 115, 99, 114, 105, 112, 116, 105, 111, 110, 45, 114, 111, 119,
     ],
   } as const;
-  return Uint8Array.from(bytes[title]);
+  const encoded = Uint8Array.from(bytes[title]);
+  // This is a fixed Rust-generated one-column record fixture, not a JS row
+  // codec. Its final length prefix includes the primitive-string variant byte;
+  // fail locally if a hand-updated payload no longer matches that envelope.
+  if (encoded[9] !== encoded.byteLength - 10) {
+    throw new Error("foreground text fixture has a stale record-envelope length");
+  }
+  return encoded;
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

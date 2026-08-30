@@ -430,6 +430,7 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
 
 test("two aliases in one installed JSI runtime require B to observe A's committed subscription delta", async () => {
   let insertedRowId: Uint8Array | undefined;
+  let insertedCells: Uint8Array | undefined;
   const command = {
     encode(value: unknown) {
       if (
@@ -441,6 +442,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
         value.rowId instanceof Uint8Array
       ) {
         insertedRowId = value.rowId;
+        if ("cells" in value && value.cells instanceof Uint8Array) insertedCells = value.cells;
       }
       return new TextEncoder().encode(JSON.stringify(value));
     },
@@ -552,6 +554,11 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     insertedRowId,
     subscriptionRowId,
     "the receipt inserts the host-run row instead of upserting a retained fixed id",
+  );
+  assert.equal(
+    insertedCells?.[9],
+    insertedCells ? insertedCells.byteLength - 10 : undefined,
+    "the fixed Rust record envelope includes its primitive-string variant byte",
   );
   assert.deepEqual(subscriptionStages, [
     "same-runtime-open-failed",
