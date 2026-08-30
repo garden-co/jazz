@@ -2319,6 +2319,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.handleServerTransportError(error);
   }
 
+  /** Clear a terminal remote-peer error after its replacement transport is ready. */
+  clearRemoteServerTransportError(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
+    this.serverTransportError = null;
+    this.clearServerTransportErrorWaiters();
+  }
+
   reportRemoteMutationError(event: MutationErrorEvent): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
     this.deliverMutationError(event);

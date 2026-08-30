@@ -74,7 +74,22 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           copies.map((frame) => frame.buffer),
         );
       },
-      (error) => this.fail(asError(error)),
+      (error) => {
+        const failure = asError(error);
+        // `pump.close()` retires its transport asynchronously. A retirement
+        // failure can re-enter this callback after the original protocol
+        // failure, but must not overwrite or duplicate the causal error that
+        // already woke remote subscribers.
+        if (this.failed || this.closed) return;
+        // This foreground peer is the tab's sole path to the durable worker.
+        // A protocol/tick failure is therefore terminal for this runtime's
+        // remote reads and waits, even though the worker's own websocket may
+        // still be healthy. Record it before port teardown so active remote
+        // subscriptions receive the exact causal error rather than waiting
+        // for their caller-owned timeout.
+        runtime.reportRemoteServerTransportError(failure);
+        this.fail(failure);
+      },
       traceRelay
         ? (entries) => {
             // Vitest forwards page-console diagnostics, unlike SharedWorker
@@ -140,6 +155,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
     await this.ready();
     await this.request({ type: "reconnect", authJson, sessionClaims });
+    // `reconnect` acknowledges that the worker started a new upstream attempt;
+    // it does not establish that attempt. Keep the original remote failure
+    // latched until the worker confirms an actual negotiated server connection.
+    await this.request({ type: "wait-server" });
+    this.runtime.clearRemoteServerTransportError();
   }
 
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {

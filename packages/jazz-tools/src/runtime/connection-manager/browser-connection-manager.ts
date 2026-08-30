@@ -30,6 +30,9 @@ export class BrowserConnectionManager extends ConnectionManager {
   private transportTransition: Promise<void> = Promise.resolve();
   private storageReset: Promise<void> | null = null;
   private unregisterInspectorControl: (() => void) | null = null;
+  private browserConnectionInput: ConnectionManagerClientInput | null = null;
+  /** A failed follower owns no recoverable port; reconnect must mint a new one. */
+  private recoverableConnectionFailure = false;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -44,19 +47,27 @@ export class BrowserConnectionManager extends ConnectionManager {
     );
   }
 
-  protected override onClientCreated({ schema, client }: ConnectionManagerClientInput): void {
+  protected override onClientCreated(input: ConnectionManagerClientInput): void {
+    this.browserConnectionInput = input;
+    this.openBrowserWorkerConnection();
+  }
+
+  private openBrowserWorkerConnection(): BrowserWorkerConnection {
+    const input = this.browserConnectionInput;
+    if (!input) throw new Error("Browser worker connection requires an initialized client");
     const workerConfig = { ...this.host.config };
     setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
       config: workerConfig,
-      schema,
-      client,
+      schema: input.schema,
+      client: input.client,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
       onFailure: (error) => {
         if (this.connection !== connection) return;
         this.connectionError = asError(error);
+        this.recoverableConnectionFailure = true;
       },
       onStorageReset: () => this.beginStorageReset(connection),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
@@ -69,13 +80,18 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.initialExplicitOfflineStateKnown = false;
     this.connectionReady = connection.ready().then(
       () => {
+        if (this.connection !== connection) return;
         // The worker sends an initial transport-state event before resolving
         // follower init. Once this resolves, this manager has an authoritative
         // namespace-wide explicit-offline snapshot.
         this.initialExplicitOfflineStateKnown = true;
+        this.connectionError = null;
+        this.recoverableConnectionFailure = false;
       },
       (error: unknown) => {
+        if (this.connection !== connection) return;
         this.connectionError = asError(error);
+        this.recoverableConnectionFailure = true;
         // `connectionReady` is also observed by passive readiness consumers
         // (for example the initial offline-state probe). Keep it a settled
         // notification, not a detached rejected promise. Public operations
@@ -89,6 +105,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         await connection.disconnect();
       }).catch(() => undefined);
     }
+    return connection;
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
@@ -157,8 +174,12 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
     await this.enqueueTransportTransition(async () => {
+      if (this.recoverableConnectionFailure) this.reopenFailedFollower();
       await this.connectionReady;
-      await this.connection?.reconnect(
+      if (this.connectionError) throw this.connectionError;
+      const connection = this.connection;
+      if (!connection) throw new Error("Browser worker connection is unavailable");
+      await connection.reconnect(
         JSON.stringify(runtimeAuth(this.host.config)),
         runtimeSessionClaims(this.host.config),
       );
@@ -216,6 +237,21 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.connectionError = null;
         this.storageReset = null;
       });
+  }
+
+  /**
+   * A follower transport failure closes its MessagePort by design. Reusing the
+   * old wrapper would only repeat its stored failure, so explicit reconnect
+   * acquires a new follower against the same durable SharedWorker namespace.
+   */
+  private reopenFailedFollower(): void {
+    if (!this.recoverableConnectionFailure) return;
+    this.connection = null;
+    this.connectionReady = null;
+    this.connectionError = null;
+    this.initialExplicitOfflineStateKnown = false;
+    this.recoverableConnectionFailure = false;
+    this.openBrowserWorkerConnection();
   }
 
   private reloadAfterStorageInvalidation(connection: BrowserWorkerConnection): void {

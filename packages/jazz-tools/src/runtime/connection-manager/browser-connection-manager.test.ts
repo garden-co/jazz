@@ -110,6 +110,57 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(manager.isExplicitlyOffline()).toBe(false);
   });
 
+  it("reacquires a fresh follower after a terminal follower failure", async () => {
+    const first = {
+      ready: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+    } as unknown as BrowserWorkerConnection;
+    const second = {
+      ready: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+    } as unknown as BrowserWorkerConnection;
+    const callbacks: Array<{ onFailure(error: unknown): void }> = [];
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn((input) => {
+          callbacks.push(input);
+          return callbacks.length === 1 ? first : second;
+        }),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+    await Promise.resolve();
+
+    const failure = new Error(
+      "Protocol: maintained root occurrence sidecar length does not match root rows",
+    );
+    callbacks[0]?.onFailure(failure);
+
+    await manager.reconnect();
+
+    expect(host.runtimeSource.createBrowserWorkerConnection).toHaveBeenCalledTimes(2);
+    expect(first.reconnect).not.toHaveBeenCalled();
+    expect(second.reconnect).toHaveBeenCalledOnce();
+    await expect(manager.ensureReady("edge")).resolves.toBeUndefined();
+  });
+
   it("disconnects a worker created while offline before an immediate reconnect", async () => {
     const disconnectGate = deferred();
     const connection = {
