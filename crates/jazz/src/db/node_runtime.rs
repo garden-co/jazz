@@ -259,6 +259,7 @@ where
                         .or_insert_with(|| error.clone());
                 }
                 if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
+                    let terminal_failed = result.is_err();
                     match result {
                         Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
                         Err(error) => {
@@ -277,6 +278,16 @@ where
                                 WriteStateWaiterNotify::Callback(callback) => callback(),
                             }
                         }
+                    }
+                    if terminal_failed && let Some(open_tx_id) = operation.open_tx_id {
+                        let node = Rc::clone(&self.node);
+                        self.enqueue_transaction_cleanup(Box::pin(async move {
+                            let mut node = node.lock().await;
+                            match node.abandon_tx(open_tx_id) {
+                                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+                                Err(error) => Err(error.into()),
+                            }
+                        }));
                     }
                 }
                 if operation.tx_id.is_some()
