@@ -1438,6 +1438,51 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+/// Complete an operation only when every dependency is already resident.
+///
+/// This is the compatibility boundary for synchronous host facades. Unlike
+/// [`block_on`], it never spins a thread-affine future after that future has
+/// reported `Pending`: persistent hosts must retain and drive the equivalent
+/// async operation from their owner turn instead.
+pub fn try_ready<F, T>(future: F) -> Result<T, Error>
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = pin!(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(result) => result,
+        Poll::Pending => Err(Error::new(
+            ErrorCode::ColdMutationRequiresAsync,
+            "mutation requires non-resident state; retry through the asynchronous mutation API",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod synchronous_facade_tests {
+    use super::{ErrorCode, try_ready};
+    use std::cell::Cell;
+    use std::future::poll_fn;
+    use std::rc::Rc;
+    use std::task::Poll;
+
+    #[test]
+    fn synchronous_facade_does_not_spin_or_repoll_cold_work() {
+        let polls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&polls);
+        let error = try_ready(poll_fn(move |_| {
+            observed.set(observed.get() + 1);
+            Poll::<Result<(), super::Error>>::Pending
+        }))
+        .expect_err("cold work must be rejected by the synchronous facade");
+
+        assert_eq!(error.code, ErrorCode::ColdMutationRequiresAsync);
+        assert_eq!(polls.get(), 1, "the cold future must not be spun");
+    }
+}
+
 /// Thread-affine high-level database handle.
 pub struct Db<S>
 where
@@ -2504,6 +2549,9 @@ pub enum ErrorCode {
     Backpressure,
     /// Requested observation is not locally available in this slice.
     NotObserved,
+    /// A synchronous mutation reached non-resident state and must be retried
+    /// through an owner-driven asynchronous host operation.
+    ColdMutationRequiresAsync,
     /// Historical read must be evaluated by a complete-history server.
     HistoricalReadRequiresServer,
 }
