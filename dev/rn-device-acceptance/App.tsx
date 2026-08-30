@@ -16,6 +16,7 @@ import {
 } from "./src/high-level-foreground";
 import {
   admittedNativeRelay,
+  clearDeviceDiagnostic,
   deviceReceiptContext,
   logoutNativeRelay,
   nativeAcceptancePhase,
@@ -33,6 +34,7 @@ import {
   proveAuthScopeSwitch,
   proveLogoutRevocation,
 } from "./src/relay-admission";
+import { createDeviceDiagnosticTracker } from "./src/diagnostic-lifecycle";
 
 async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagnosticCode) => void) {
   // The native fixture returns the same host-issued nonce from both launches.
@@ -148,11 +150,10 @@ export default function App() {
   const [shown, setShown] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
-    let diagnosticCode: DeviceDiagnosticCode = "fixture-metadata-failed";
+    const diagnostic = createDeviceDiagnosticTracker(recordDeviceDiagnostic, clearDeviceDiagnostic);
     void (async () => {
-      const observed = await observeTrustedAdmissionLifecycle((code) => {
-        diagnosticCode = code;
-      });
+      const observed = await observeTrustedAdmissionLifecycle(diagnostic.mark);
+      await diagnostic.clear();
       const results = scenariosForAcceptancePhase(observed.phase)
         .filter((scenario) => scenario.state === "passed")
         .map((scenario, index) =>
@@ -168,7 +169,7 @@ export default function App() {
       // The host validates this independently. Persisting it is necessary on
       // iOS release builds, where console output is not a dependable receipt
       // transport; it must happen after the JS-side relay proof.
-      diagnosticCode = "receipt-write-failed";
+      diagnostic.mark("receipt-write-failed");
       await recordDeviceReceipt(results.join("\n"));
       for (const result of results) console.log(result);
       return observed;
@@ -180,7 +181,7 @@ export default function App() {
         // This is deliberately a fixed code, not an exception message: both
         // the app-private file and a failing CI job may expose it. The native
         // fixtures accept only this small allowlist, too.
-        void recordDeviceDiagnostic(diagnosticCode).catch(() => {});
+        diagnostic.retry();
         setError("The device acceptance proof failed.");
       });
   }, []);

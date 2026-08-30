@@ -157,6 +157,14 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
   }
 
+  @ReactMethod fun clearDiagnostic(promise: Promise) {
+    try {
+      val target = reactApplicationContext.cacheDir.resolve("jazz-device-diagnostic.txt")
+      check(!target.exists() || target.delete()) { "failed to clear device diagnostic" }
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
   /**
    * A receipt timeout can race process teardown. Never leave a partially
    * written diagnostic for the host to inspect: flush the private temporary

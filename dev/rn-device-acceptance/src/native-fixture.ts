@@ -19,6 +19,7 @@ type FixtureModule = {
   receiptContext(): Promise<DeviceReceiptContext>;
   recordReceipt(receipt: string): Promise<void>;
   recordDiagnostic(code: DeviceDiagnosticCode): Promise<void>;
+  clearDiagnostic(): Promise<void>;
   acceptancePhase(): Promise<"seed" | "verify">;
 };
 
@@ -106,4 +107,9 @@ export async function recordDeviceReceipt(receipt: string): Promise<void> {
 /** Persist only an allowlisted, non-secret pre-receipt failure for the host driver. */
 export async function recordDeviceDiagnostic(code: DeviceDiagnosticCode): Promise<void> {
   await fixtureModule().recordDiagnostic(code);
+}
+
+/** Clear the pending stage only after the complete native lifecycle succeeds. */
+export async function clearDeviceDiagnostic(): Promise<void> {
+  await fixtureModule().clearDiagnostic();
 }

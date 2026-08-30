@@ -168,4 +168,15 @@ RCT_REMAP_METHOD(recordDiagnostic, recordDiagnostic:(NSString *)detail resolver:
   }
   resolve(nil);
 }
+
+RCT_REMAP_METHOD(clearDiagnostic, clearDiagnosticWithResolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  NSError *error = nil;
+  NSURL *url = JazzDeviceDiagnosticURL();
+  if ([[NSFileManager defaultManager] fileExistsAtPath:url.path] &&
+      ![[NSFileManager defaultManager] removeItemAtURL:url error:&error]) {
+    reject(@"E_JAZZ_DEVICE_DIAGNOSTIC", @"Failed to clear device diagnostic", nil);
+    return;
+  }
+  resolve(nil);
+}
 @end

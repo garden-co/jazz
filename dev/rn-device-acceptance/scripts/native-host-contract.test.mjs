@@ -726,6 +726,7 @@ test("iOS fixture owns launch-bound metadata and trusted ABI/admission probes", 
   assert.doesNotMatch(fixture, /JazzDeviceBuildFingerprint/);
   assert.match(fixture, /RCT_REMAP_METHOD\(recordReceipt/);
   assert.match(fixture, /RCT_REMAP_METHOD\(recordDiagnostic/);
+  assert.match(fixture, /RCT_REMAP_METHOD\(clearDiagnostic/);
   assert.match(fixture, /jazz-device-diagnostic\.txt/);
   assert.match(fixture, /JazzDeviceDiagnosticCodes\(\) containsObject:detail/);
   for (const code of DEVICE_DIAGNOSTIC_CODES) {
@@ -787,10 +788,16 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
     /proveForegroundByteAbi\(foregroundFactory, scopeB\.capability, foregroundCodec, markFailure\)/,
   );
   assert.match(app, /await recordDeviceReceipt\(results\.join\("\\n"\)\)/);
-  assert.match(app, /recordDeviceDiagnostic\(diagnosticCode\)/);
+  assert.match(app, /createDeviceDiagnosticTracker/);
+  assert.match(app, /observeTrustedAdmissionLifecycle\(diagnostic\.mark\)/);
+  assert.match(app, /await diagnostic\.clear\(\)/);
+  assert.match(app, /diagnostic\.mark\("receipt-write-failed"\)/);
+  assert.match(app, /diagnostic\.retry\(\)/);
   assert.doesNotMatch(app, /reason instanceof Error|String\(reason\)|\.message/);
   assert.ok(
-    app.indexOf("await observeTrustedAdmissionLifecycle()") <
+    app.indexOf("await observeTrustedAdmissionLifecycle(diagnostic.mark)") <
+      app.indexOf("await diagnostic.clear()") &&
+      app.indexOf("await diagnostic.clear()") <
       app.indexOf("await recordDeviceReceipt"),
     "the native receipt sink must run only after the complete JS relay lifecycle proof",
   );
