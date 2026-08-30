@@ -168,8 +168,10 @@ export async function proveSameJsiRuntimeWriteSubscription(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
+  rowId: Uint8Array,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
 ): Promise<void> {
+  if (rowId.byteLength !== 16) throw new Error("subscription fixture row id must be 16 bytes");
   markFailure("same-runtime-open-failed");
   const openedA = openScopeForeground(factory, capability);
   const openedB = openScopeForeground(factory, capability);
@@ -225,16 +227,16 @@ export async function proveSameJsiRuntimeWriteSubscription(
     });
     if (transaction.type !== "transactionOpened")
       throw new Error("foreground A write transaction did not open");
-    const rowId = Uint8Array.from({ length: 16 }, () => 0x74);
     markFailure("same-runtime-mutation-stage-failed");
     const staged = execute(a, {
-      type: "upsert",
+      type: "insert",
       transaction: transaction.transaction,
       table: "todos",
       rowId,
       cells: fixtureCells("subscription from foreground A"),
     });
-    if (staged.type !== "mutationStaged") throw new Error("foreground A write was not staged");
+    if (staged.type !== "inserted" || !sameBytes(staged.rowId, rowId))
+      throw new Error("foreground A insert was not staged with its run-bound row id");
     markFailure("same-runtime-commit-failed");
     const committed = execute(a, {
       type: "commitTransaction",

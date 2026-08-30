@@ -35,6 +35,7 @@ import {
   proveLogoutRevocation,
 } from "./src/relay-admission";
 import { createDeviceDiagnosticTracker } from "./src/diagnostic-lifecycle";
+import { rowIdForRun } from "./src/run-marker";
 
 async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagnosticCode) => void) {
   // The native fixture returns the same host-issued nonce from both launches.
@@ -158,6 +159,7 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
     foregroundFactory,
     scopeB.capability,
     foregroundCodec,
+    rowIdForRun(receipt.runNonce),
     markFailure,
   );
   // Closing B's trusted relay before re-admitting A forces its scope owner and

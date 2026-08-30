@@ -4,6 +4,7 @@ import { decodeBase64 } from "./base64.ts";
 import type { DeviceDiagnosticCode } from "./device-diagnostics.ts";
 import type { Platform } from "./protocol";
 import type { AdmittedRelay } from "./relay-admission";
+import { isDeviceRunNonce } from "./run-marker";
 
 export type DeviceReceiptContext = {
   platform: Platform;
@@ -87,7 +88,7 @@ export async function deviceReceiptContext(): Promise<DeviceReceiptContext> {
     !(["android", "ios"] as const).includes(context.platform) ||
     !context.deviceIdentifier ||
     !/^[0-9a-f]{64}$/.test(context.buildFingerprint) ||
-    !context.runNonce
+    !isDeviceRunNonce(context.runNonce)
   ) {
     throw new Error("JazzDeviceFixture returned an invalid trusted receipt context");
   }

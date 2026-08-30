@@ -10,6 +10,7 @@ import {
 import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 
 const capability = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+const subscriptionRowId = Uint8Array.from({ length: 16 }, (_, index) => index + 17);
 const codec = {
   encode(command: "probe" | "tick" | "close") {
     return Uint8Array.of(command === "probe" ? 0 : command === "tick" ? 1 : 2);
@@ -428,8 +429,19 @@ test("scope-isolation receipt keeps both native-selected scope stores disjoint",
 });
 
 test("two aliases in one installed JSI runtime require B to observe A's committed subscription delta", async () => {
+  let insertedRowId: Uint8Array | undefined;
   const command = {
     encode(value: unknown) {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "type" in value &&
+        value.type === "insert" &&
+        "rowId" in value &&
+        value.rowId instanceof Uint8Array
+      ) {
+        insertedRowId = value.rowId;
+      }
       return new TextEncoder().encode(JSON.stringify(value));
     },
     decode(bytes: Uint8Array) {
@@ -439,6 +451,9 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
           if (event?.type === "delta" && Array.isArray(event.delta))
             event.delta = Uint8Array.from(event.delta);
         }
+      }
+      if (decoded.type === "inserted" && Array.isArray(decoded.rowId)) {
+        decoded.rowId = Uint8Array.from(decoded.rowId);
       }
       return decoded;
     },
@@ -464,8 +479,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                 ? { type: "subscribed", subscription: 2 }
                 : request.type === "beginTransaction"
                   ? { type: "transactionOpened", transaction: 3 }
-                  : request.type === "upsert"
-                    ? { type: "mutationStaged" }
+                  : request.type === "insert"
+                    ? { type: "inserted", rowId: Array.from(subscriptionRowId) }
                     : request.type === "commitTransaction"
                       ? (setTimeout(() => {
                           committed = true;
@@ -526,8 +541,17 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     },
   };
   const subscriptionStages: string[] = [];
-  await proveSameJsiRuntimeWriteSubscription(factory, capability, command, (stage) =>
-    subscriptionStages.push(stage),
+  await proveSameJsiRuntimeWriteSubscription(
+    factory,
+    capability,
+    command,
+    subscriptionRowId,
+    (stage) => subscriptionStages.push(stage),
+  );
+  assert.deepEqual(
+    insertedRowId,
+    subscriptionRowId,
+    "the receipt inserts the host-run row instead of upserting a retained fixed id",
   );
   assert.deepEqual(subscriptionStages, [
     "same-runtime-open-failed",
@@ -574,7 +598,12 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
       };
     },
   };
-  await proveSameJsiRuntimeWriteSubscription(unsettledInitialReset, capability, command);
+  await proveSameJsiRuntimeWriteSubscription(
+    unsettledInitialReset,
+    capability,
+    command,
+    subscriptionRowId,
+  );
   assert.equal(unsettledResetDrains, 2, "unsettled reset and committed delta drain separately");
 
   committed = false;
@@ -609,7 +638,13 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     },
   };
   await assert.rejects(
-    async () => proveSameJsiRuntimeWriteSubscription(settlementBeforeReset, capability, command),
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        settlementBeforeReset,
+        capability,
+        command,
+        subscriptionRowId,
+      ),
     /initial subscription reset did not materialize/,
   );
 
@@ -653,7 +688,12 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
       };
     },
   };
-  await proveSameJsiRuntimeWriteSubscription(delayedInitialReset, capability, command);
+  await proveSameJsiRuntimeWriteSubscription(
+    delayedInitialReset,
+    capability,
+    command,
+    subscriptionRowId,
+  );
   assert.equal(delayedEmptyDrains, 2, "two successive reset drains are ready but empty");
   assert.ok(delayedTicks >= 2, "each empty drain receives an ordinary B tick");
   assert.ok(delayedTurns >= 2, "two yielded turns are required before the reset is ready");
@@ -668,7 +708,13 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   delayedTurns = 0;
   allowDelayedProgress = false;
   await assert.rejects(
-    async () => proveSameJsiRuntimeWriteSubscription(delayedInitialReset, capability, command),
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        delayedInitialReset,
+        capability,
+        command,
+        subscriptionRowId,
+      ),
     /initial subscription reset did not materialize/,
   );
   assert.equal(delayedEmptyDrains, 96);
@@ -723,7 +769,12 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
       };
     },
   };
-  await proveSameJsiRuntimeWriteSubscription(pendingHydration, capability, command);
+  await proveSameJsiRuntimeWriteSubscription(
+    pendingHydration,
+    capability,
+    command,
+    subscriptionRowId,
+  );
   assert.equal(pendingDrains, 2, "a retained operation must not reissue DrainSubscription");
   assert.equal(pendingPolls, 4, "both drains preserve one operation across repeated Polls");
 
@@ -735,7 +786,13 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   pendingPolls = 0;
   emitPendingWake = false;
   await assert.rejects(
-    async () => proveSameJsiRuntimeWriteSubscription(pendingHydration, capability, command),
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        pendingHydration,
+        capability,
+        command,
+        subscriptionRowId,
+      ),
     /subscription drain did not settle after bounded ticks/,
   );
   assert.equal(pendingDrains, 1);
@@ -769,7 +826,13 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     },
   };
   await assert.rejects(
-    async () => proveSameJsiRuntimeWriteSubscription(terminalOperation, capability, command),
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        terminalOperation,
+        capability,
+        command,
+        subscriptionRowId,
+      ),
     /unexpected response/,
   );
   assert.deepEqual(terminalCloses, [0, 1], "both foregrounds close after terminal operation error");
@@ -780,7 +843,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   ticks.fill(0);
   emitCommitWake = false;
   await assert.rejects(
-    async () => proveSameJsiRuntimeWriteSubscription(factory, capability, command),
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(factory, capability, command, subscriptionRowId),
     /did not observe foreground A's committed row/,
   );
 
@@ -797,7 +861,13 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     },
   };
   await assert.rejects(
-    async () => proveSameJsiRuntimeWriteSubscription(missingNativeWake, capability, command),
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(
+        missingNativeWake,
+        capability,
+        command,
+        subscriptionRowId,
+      ),
     /did not observe foreground A's committed row/,
   );
 
@@ -823,7 +893,8 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
     },
   };
   await assert.rejects(
-    async () => proveSameJsiRuntimeWriteSubscription(noObservation, capability, command),
+    async () =>
+      proveSameJsiRuntimeWriteSubscription(noObservation, capability, command, subscriptionRowId),
     /did not observe foreground A's committed row/,
   );
 });
