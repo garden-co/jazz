@@ -916,6 +916,15 @@ where
         let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
         let mut emitted_versions = BTreeSet::new();
+        // A current result member names its content version, but its visible
+        // existence can also depend on a deletion-register `Restored` event.
+        // Remember the winner while assembling its content bundle so that a
+        // content and restore event committed in the *same* transaction are
+        // shipped together.  The later replacement pass only emits a
+        // different transaction; once this transaction is marked emitted it
+        // cannot repair a missing same-transaction register witness.
+        let mut result_add_deletion_winners =
+            BTreeMap::<(String, RowUuid), Option<VersionRow>>::new();
         for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
@@ -964,9 +973,55 @@ where
                     };
                 tx_versions_cache.insert(*tx_id, fallback_versions);
             }
+            let mut same_transaction_deletion_winners = Vec::new();
+            for (entry_table, row_uuid) in wanted_rows {
+                if !row_result_adds
+                    .iter()
+                    .any(|(table, result_row_uuid, content_tx_id)| {
+                        table.as_str() == entry_table
+                            && result_row_uuid == row_uuid
+                            && content_tx_id == tx_id
+                    })
+                {
+                    continue;
+                }
+                let winner_key = (entry_table.clone(), *row_uuid);
+                let deletion_winner =
+                    if let Some(winner) = result_add_deletion_winners.get(&winner_key) {
+                        winner.clone()
+                    } else {
+                        let (_, retained_deletion_winner) =
+                            maintained_facts.replacement_for(entry_table, *row_uuid);
+                        let winner = match retained_deletion_winner {
+                            Some(winner) => Some(winner),
+                            None if allow_storage_witness_fallback => {
+                                self.storage_backed_maintained_deletion_winner(
+                                    entry_table,
+                                    *row_uuid,
+                                    tier,
+                                    &mut context,
+                                )
+                                .await?
+                            }
+                            None => None,
+                        };
+                        result_add_deletion_winners.insert(winner_key, winner.clone());
+                        winner
+                    };
+                if let Some(winner) = deletion_winner
+                    && self.version_tx_id(&winner)? == *tx_id
+                {
+                    same_transaction_deletion_winners.push(winner);
+                }
+            }
             let tx_versions = tx_versions_cache
                 .get_mut(tx_id)
                 .expect("tx versions cache entry must exist after fallback");
+            for winner in same_transaction_deletion_winners {
+                if !maintained_view_tx_versions_contain_winner(tx_versions, &winner) {
+                    tx_versions.push(winner);
+                }
+            }
             if tx_versions.iter().any(|version| {
                 version.deletion().is_none()
                     && wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
@@ -1036,20 +1091,26 @@ where
             ));
         }
         for (entry_table, row_uuid, content_tx_id) in &row_result_adds {
-            let (_, retained_deletion_winner) =
-                maintained_facts.replacement_for(entry_table, *row_uuid);
-            let deletion_winner = match retained_deletion_winner {
-                Some(winner) => Some(winner),
-                None if allow_storage_witness_fallback => {
-                    self.storage_backed_maintained_deletion_winner(
-                        entry_table,
-                        *row_uuid,
-                        tier,
-                        &mut context,
-                    )
-                    .await?
+            let deletion_winner = if let Some(winner) =
+                result_add_deletion_winners.get(&(entry_table.as_str().to_owned(), *row_uuid))
+            {
+                winner.clone()
+            } else {
+                let (_, retained_deletion_winner) =
+                    maintained_facts.replacement_for(entry_table, *row_uuid);
+                match retained_deletion_winner {
+                    Some(winner) => Some(winner),
+                    None if allow_storage_witness_fallback => {
+                        self.storage_backed_maintained_deletion_winner(
+                            entry_table,
+                            *row_uuid,
+                            tier,
+                            &mut context,
+                        )
+                        .await?
+                    }
+                    None => None,
                 }
-                None => None,
             };
             let Some(version) = deletion_winner.as_ref() else {
                 continue;
