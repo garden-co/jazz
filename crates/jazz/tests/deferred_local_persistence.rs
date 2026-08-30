@@ -4,10 +4,12 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts, StreamingMutationKind,
+    SubscriptionEvent,
 };
 use jazz::groove::storage::{ReopenableStorage, TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -70,6 +72,57 @@ fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
         ))
         .is_err(),
         "a second synchronous write must observe the resident first write",
+    );
+}
+
+/// Deferred browser-style persistence must publish maintained local writes at
+/// admission, before a paused storage owner turn can persist either mutation.
+#[test]
+fn deferred_local_persistence_publishes_insert_then_delete_before_persistence() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x53; 16]),
+            author: AuthorSubject::for_test_bytes([0x63; 16]),
+        },
+    )))
+    .expect("open deferred subscription database");
+    db.set_deferred_local_persistence(true);
+    let query = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare todos query");
+    let mut subscription = block_on(db.subscribe(&query, ReadOpts::default()))
+        .expect("open local maintained subscription");
+    assert!(matches!(
+        block_on(subscription.next()),
+        Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.is_empty()
+    ));
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::WriteMany);
+    let write = block_on(db.insert("todos", row! { title: "transient" }, Default::default()))
+        .expect("admit deferred insert");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Delta { added, removed, .. }) if added.len() == 1 && removed.is_empty()
+    ));
+
+    block_on(db.delete("todos", write.row_uuid(), Default::default()))
+        .expect("admit deferred deletion");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Delta { added, removed, .. }) if added.is_empty() && removed.len() == 1
+    ));
+    assert!(
+        !control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany),
+        "both maintained deltas publish before the paused persistence owner turn starts"
     );
 }
 
