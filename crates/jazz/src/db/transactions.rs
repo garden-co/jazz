@@ -158,8 +158,7 @@ where
                     (None, None) => db.begin_mergeable(id).await,
                 }
             }),
-        );
-        Ok(())
+        )
     }
 
     /// Return a non-owning operations handle for an already-open mergeable transaction.
@@ -697,7 +696,11 @@ where
 
     /// Queue exclusive snapshot admission behind earlier owner operations.
     #[doc(hidden)]
-    pub fn enqueue_begin_exclusive(&self, id: OpenTransactionId, author: Option<AuthorSubject>) {
+    pub fn enqueue_begin_exclusive(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
@@ -707,7 +710,7 @@ where
                     None => db.begin_exclusive(id).await,
                 }
             }),
-        );
+        )
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -728,7 +731,7 @@ where
         table: String,
         cells: RowCells,
         mut options: InsertOptions,
-    ) -> RowUuid {
+    ) -> Result<RowUuid, Error> {
         let row = options
             .row_id
             .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
@@ -748,8 +751,8 @@ where
                 }
                 Ok(())
             }),
-        );
-        row
+        )?;
+        Ok(row)
     }
 
     #[doc(hidden)]
@@ -761,7 +764,7 @@ where
         row: RowUuid,
         patch: RowCells,
         options: UpdateOptions,
-    ) {
+    ) -> Result<(), Error> {
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
@@ -776,7 +779,7 @@ where
                         .await
                 }
             }),
-        );
+        )
     }
 
     #[doc(hidden)]
@@ -788,7 +791,7 @@ where
         row: RowUuid,
         cells: RowCells,
         options: UpsertOptions,
-    ) {
+    ) -> Result<(), Error> {
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
@@ -803,7 +806,7 @@ where
                         .await
                 }
             }),
-        );
+        )
     }
 
     #[doc(hidden)]
@@ -814,7 +817,7 @@ where
         table: String,
         row: RowUuid,
         options: DeleteOptions,
-    ) {
+    ) -> Result<(), Error> {
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
@@ -825,7 +828,7 @@ where
                     db.mergeable_tx_ref(id).delete(&table, row, options).await
                 }
             }),
-        );
+        )
     }
 
     #[doc(hidden)]
@@ -837,7 +840,7 @@ where
         row: RowUuid,
         cells: Option<RowCells>,
         options: RestoreOptions,
-    ) {
+    ) -> Result<(), Error> {
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_operation(
             id,
@@ -852,7 +855,7 @@ where
                         .await
                 }
             }),
-        );
+        )
     }
 
     pub(super) async fn transaction_read(

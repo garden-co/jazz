@@ -1509,6 +1509,12 @@ type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type QueuedMutationFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
 type TransactionWaitObserver = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MutationOwnerLifecycle {
+    Open,
+    Closing,
+}
+
 struct QueuedMutationOperation {
     tx_id: Option<TxId>,
     open_tx_id: Option<OpenTransactionId>,

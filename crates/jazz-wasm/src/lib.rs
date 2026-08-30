@@ -829,13 +829,13 @@ impl WasmDbInner {
     ) -> Result<(), jazz::db::Error> {
         match self {
             Self::Memory(db) => {
-                db.enqueue_begin_exclusive(id, author);
+                db.enqueue_begin_exclusive(id, author)?;
                 db.drive_queued_mutation_once();
                 Ok(())
             }
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => {
-                db.enqueue_begin_exclusive(id, author);
+                db.enqueue_begin_exclusive(id, author)?;
                 Ok(())
             }
             Self::Closed => panic!("WasmDb is closed"),
@@ -3070,7 +3070,8 @@ impl WasmTx {
             table,
             cells,
             options,
-        ));
+        ))
+        .map_err(to_js_error)?;
         if let WasmDbInner::Memory(db) = &self.db {
             db.drive_queued_mutation_once();
         }
@@ -3096,7 +3097,8 @@ impl WasmTx {
             row_id,
             patch,
             options,
-        ));
+        ))
+        .map_err(to_js_error)?;
         if let WasmDbInner::Memory(db) = &self.db {
             db.drive_queued_mutation_once();
         }
@@ -3122,7 +3124,8 @@ impl WasmTx {
             row_id,
             cells,
             options,
-        ));
+        ))
+        .map_err(to_js_error)?;
         if let WasmDbInner::Memory(db) = &self.db {
             db.drive_queued_mutation_once();
         }
@@ -3145,7 +3148,8 @@ impl WasmTx {
             table,
             row_id,
             options,
-        ));
+        ))
+        .map_err(to_js_error)?;
         if let WasmDbInner::Memory(db) = &self.db {
             db.drive_queued_mutation_once();
         }
@@ -3171,7 +3175,8 @@ impl WasmTx {
             row_id,
             Some(cells),
             options,
-        ));
+        ))
+        .map_err(to_js_error)?;
         if let WasmDbInner::Memory(db) = &self.db {
             db.drive_queued_mutation_once();
         }

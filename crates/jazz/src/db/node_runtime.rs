@@ -16,6 +16,7 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
     tx_time_reservation_clock: Rc<Cell<TxTime>>,
     node_uuid: NodeUuid,
     receives_commits_as_local: bool,
@@ -95,6 +96,7 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
             tx_time_reservation_clock,
             node_uuid,
             receives_commits_as_local,
@@ -151,11 +153,40 @@ where
     /// async storage-owning node. The shared high-water mirror is advanced by
     /// every ordinary mint and remote observation as well.
     pub(super) fn reserve_transaction_id(&self, now_ms: u64) -> Result<TxId, Error> {
+        self.ensure_mutation_admission_open()?;
         let made_at = TxTime::tick(self.tx_time_reservation_clock.get(), now_ms)
             .map_err(crate::node::Error::from)
             .map_err(Error::from)?;
         self.tx_time_reservation_clock.set(made_at);
         Ok(TxId::new(made_at, self.node_uuid))
+    }
+
+    pub(super) fn begin_mutation_shutdown(&self) {
+        self.mutation_owner_lifecycle
+            .set(MutationOwnerLifecycle::Closing);
+        // Wait observers may be parked on a state-change channel even when
+        // there is no queued mutation left to wake them. Closing is itself a
+        // terminal observation boundary, so wake every waiter to let it
+        // either observe its requested tier or report that the runtime closed
+        // first.
+        let waiters = std::mem::take(&mut *self.write_state_waiters.borrow_mut());
+        for (_, waiters) in waiters {
+            for waiter in waiters {
+                let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    pub(super) fn ensure_mutation_admission_open(&self) -> Result<(), Error> {
+        if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Open {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::WriteRejected,
+                "database mutation owner is closing",
+            ))
+        }
     }
 
     pub(super) fn enqueue_mutation(
@@ -181,7 +212,8 @@ where
         &self,
         open_tx_id: OpenTransactionId,
         future: QueuedMutationFuture,
-    ) {
+    ) -> Result<(), Error> {
+        self.ensure_mutation_admission_open()?;
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
@@ -191,6 +223,7 @@ where
                 status: None,
             });
         self.schedule_tick(TickUrgency::Immediate);
+        Ok(())
     }
 
     pub(super) fn enqueue_transaction_commit(
@@ -848,15 +881,36 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
-    async fn wait_for_transaction(&self, tx_id: TxId, tier: DurabilityTier) -> Result<TxId, Error> {
+    pub(super) async fn wait_for_transaction(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
         loop {
             if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
                 return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
             }
             let state_change = self.register_write_state_waiter(tx_id);
             if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
                 drop(state_change);
                 return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                drop(state_change);
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
             }
             state_change.await;
         }
@@ -873,6 +927,23 @@ where
         self.transaction_wait_observers
             .borrow_mut()
             .splice(0..0, observers);
+    }
+
+    pub(super) async fn drain_transaction_wait_observers(&self) {
+        std::future::poll_fn(|context| {
+            let mut observers = std::mem::take(&mut *self.transaction_wait_observers.borrow_mut());
+            observers.retain_mut(|observer| observer.as_mut().poll(context) == Poll::Pending);
+            let empty = observers.is_empty();
+            self.transaction_wait_observers
+                .borrow_mut()
+                .splice(0..0, observers);
+            if empty {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     fn deliver_pending_mutation_errors(&self) {

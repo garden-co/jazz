@@ -430,10 +430,16 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
+        self.node.begin_mutation_shutdown();
         // Mutation admission belongs to the binding-facing owner. Once that
         // owner enters Closing it retains this Db and awaits every operation
         // it already accepted, in FIFO order, before storage is retired.
         self.node.drain_queued_mutations().await;
+        // Local waits that became satisfied during the drain complete
+        // normally. Higher-tier waits cannot make further progress after
+        // retirement, so the shared Closing state terminalizes them instead
+        // of leaving binding promises parked forever.
+        self.node.drain_transaction_wait_observers().await;
         // Close finalization admission before the first await. This makes the
         // queued retirement set and durable close one lifecycle transition:
         // a stream dropped while storage is shutting down is either in this
@@ -658,17 +664,7 @@ where
         tx_id: TxId,
         tier: DurabilityTier,
     ) -> Result<TxId, Error> {
-        loop {
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier).await {
-                return outcome;
-            }
-            let state_change = self.node.register_write_state_waiter(tx_id);
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier).await {
-                drop(state_change);
-                return outcome;
-            }
-            state_change.await;
-        }
+        self.node.wait_for_transaction(tx_id, tier).await
     }
 
     /// Callback form of [`Db::wait_for_transaction`] for bindings that cannot

@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use futures::executor::block_on;
@@ -430,12 +432,14 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
             Default::default(),
         )
         .expect("reserve failing head");
-    db.enqueue_insert(
-        "todos".to_owned(),
-        row! { title: "second" },
-        Default::default(),
-    )
-    .expect("reserve second");
+    let second = db
+        .enqueue_insert(
+            "todos".to_owned(),
+            row! { title: "second" },
+            Default::default(),
+        )
+        .expect("reserve second");
+    let second_tx = second.mergeable_tx_id();
     db.enqueue_insert(
         "todos".to_owned(),
         row! { title: "third" },
@@ -443,10 +447,50 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
     )
     .expect("reserve third");
 
+    let local_waits = Rc::new(RefCell::new(Vec::new()));
+    let local_wait_results = Rc::clone(&local_waits);
+    db.wait_for_transaction_with(second_tx, DurabilityTier::Local, move |result| {
+        local_wait_results.borrow_mut().push(result);
+    });
+    let edge_waits = Rc::new(RefCell::new(Vec::new()));
+    let edge_wait_results = Rc::clone(&edge_waits);
+    db.wait_for_transaction_with(second_tx, DurabilityTier::Edge, move |result| {
+        edge_wait_results.borrow_mut().push(result);
+    });
+
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     let mut close = Box::pin(db.close());
     assert!(matches!(close.as_mut().poll(&mut context), Poll::Pending));
+
+    let after_closing = match db.enqueue_insert(
+        "todos".to_owned(),
+        row! { title: "must not be accepted after close starts" },
+        Default::default(),
+    ) {
+        Ok(_) => panic!("close must synchronously close shared mutation admission"),
+        Err(error) => error,
+    };
+    assert_eq!(after_closing.code, ErrorCode::WriteRejected);
+    let late_open_tx = OpenTransactionId::new();
+    assert_eq!(
+        db.enqueue_begin_mergeable(late_open_tx, None, None)
+            .expect_err("transaction entry after close starts must be rejected")
+            .code,
+        ErrorCode::WriteRejected,
+    );
+    assert_eq!(
+        db.enqueue_transaction_insert(
+            late_open_tx,
+            false,
+            "todos".to_owned(),
+            row! { title: "must not stage after close starts" },
+            Default::default(),
+        )
+        .expect_err("transaction staging after close starts must be rejected")
+        .code,
+        ErrorCode::WriteRejected,
+    );
     control.resume();
     let close_result = loop {
         if let Poll::Ready(result) = close.as_mut().poll(&mut context) {
@@ -454,6 +498,13 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
         }
     };
     close_result.expect("close drains every accepted operation before storage retirement");
+    assert_eq!(local_waits.borrow().len(), 1);
+    assert_eq!(local_waits.borrow()[0].as_ref().unwrap(), &second_tx);
+    assert_eq!(edge_waits.borrow().len(), 1);
+    assert_eq!(
+        edge_waits.borrow()[0].as_ref().unwrap_err().code,
+        ErrorCode::NotObserved,
+    );
     assert_eq!(
         block_on(failed.write_state())
             .expect_err("failed queued operation remains terminally observable")
@@ -637,7 +688,7 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     storage_control.evict_all();
     control.pause_on(TestStorageOperation::Get);
     control.pause_on(TestStorageOperation::ScanOpen);
-    db.enqueue_begin_exclusive(open_tx, None);
+    db.enqueue_begin_exclusive(open_tx, None).unwrap();
     db.enqueue_transaction_update(
         open_tx,
         true,
@@ -645,7 +696,8 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
         seed.row_uuid(),
         row! { title: "after" },
         Default::default(),
-    );
+    )
+    .unwrap();
     let queued = db
         .enqueue_commit_exclusive_handle(open_tx)
         .expect("reserve final transaction identity");
@@ -719,14 +771,16 @@ fn queued_transaction_stage_failure_poison_prevents_partial_commit() {
         "missing_table".to_owned(),
         row! { title: "invalid" },
         Default::default(),
-    );
+    )
+    .unwrap();
     db.enqueue_transaction_insert(
         open_tx,
         false,
         "todos".to_owned(),
         row! { title: "must not commit" },
         Default::default(),
-    );
+    )
+    .unwrap();
     let commit = db
         .enqueue_commit_mergeable_handle(open_tx)
         .expect("reserve final identity");
