@@ -1758,22 +1758,37 @@ impl ClientDbInner {
                         // retracted snapshot. Normalize at this boundary so a
                         // public stream never emits an update for an unknown
                         // row.
-                        let surviving_rows = current_rows
+                        let removed_occurrences = removed
                             .iter()
-                            .filter(|row| {
-                                !removed
-                                    .iter()
-                                    .any(|removed| removed.occurrence_id == row.occurrence_id)
-                            })
-                            .map(|row| (row.occurrence_id.clone(), row.index))
-                            .collect::<std::collections::BTreeMap<_, _>>();
-                        let (effective_added, effective_updated) = normalize_subscription_updates(
-                            surviving_rows,
-                            added,
-                            updated,
+                            .map(|row| row.occurrence_id.clone())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let surviving_rows = surviving_subscription_rows(
+                            &current_rows,
+                            &removed_occurrences,
                             |row| &row.occurrence_id,
-                            |row, previous_index| {
-                                row.previous_index.get_or_insert(previous_index);
+                            |row| row.index,
+                        );
+                        let previous_rows_by_occurrence = current_rows
+                            .iter()
+                            .map(|row| (row.occurrence_id.clone(), row))
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        let (effective_added, mut effective_updated) =
+                            normalize_subscription_updates(
+                                surviving_rows,
+                                added,
+                                updated,
+                                |row| &row.occurrence_id,
+                                |row, previous_index| {
+                                    row.previous_index.get_or_insert(previous_index);
+                                },
+                            );
+                        retain_changed_subscription_updates(
+                            &mut effective_updated,
+                            &previous_rows_by_occurrence,
+                            |row| &row.occurrence_id,
+                            |current, row| {
+                                current.index == row.index
+                                    && current.row.subscription_equivalent(&row.row)
                             },
                         );
                         let change_delta = query_decoder
@@ -1967,6 +1982,32 @@ fn reset_absent_row_indices<T, K: Ord>(
             let id = occurrence_id(row);
             (!replacement_ids.contains(id) && !explicitly_removed.contains(id)).then_some(index)
         })
+        .collect()
+}
+
+fn retain_changed_subscription_updates<T, K: Ord, P>(
+    updates: &mut Vec<T>,
+    previous_by_occurrence: &std::collections::BTreeMap<K, P>,
+    occurrence_id: impl Fn(&T) -> &K,
+    unchanged: impl Fn(&P, &T) -> bool,
+) {
+    updates.retain(|row| {
+        previous_by_occurrence
+            .get(occurrence_id(row))
+            .is_none_or(|previous| !unchanged(previous, row))
+    });
+}
+
+fn surviving_subscription_rows<T, K: Ord + Clone>(
+    current: &[T],
+    removed_occurrences: &std::collections::BTreeSet<K>,
+    occurrence_id: impl Fn(&T) -> &K,
+    index: impl Fn(&T) -> usize,
+) -> std::collections::BTreeMap<K, usize> {
+    current
+        .iter()
+        .filter(|row| !removed_occurrences.contains(occurrence_id(row)))
+        .map(|row| (occurrence_id(row).clone(), index(row)))
         .collect()
 }
 
@@ -3879,6 +3920,118 @@ mod tests {
             (&a, "new A", Some(0), 1)
         );
         assert_eq!(added.len() + updated.len() + removed_indices.len(), 3);
+    }
+
+    #[test]
+    fn semantic_update_filter_is_indexed_and_preserves_real_changes() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct TestRow {
+            id: u8,
+            index: usize,
+            payload: &'static str,
+            provenance: u8,
+        }
+
+        let previous = TestRow {
+            id: b'A',
+            index: 0,
+            payload: "same",
+            provenance: 1,
+        };
+        let previous_by_occurrence = std::collections::BTreeMap::from([(b'A', &previous)]);
+        let exact = previous.clone();
+        let moved = TestRow {
+            index: 1,
+            ..previous.clone()
+        };
+        let content_changed = TestRow {
+            payload: "changed",
+            ..previous.clone()
+        };
+        let provenance_changed = TestRow {
+            provenance: 2,
+            ..previous.clone()
+        };
+        let unknown_first = TestRow {
+            id: b'B',
+            ..previous.clone()
+        };
+        let unknown_second = unknown_first.clone();
+        let mut updates = vec![
+            exact,
+            moved.clone(),
+            content_changed.clone(),
+            provenance_changed.clone(),
+            unknown_first.clone(),
+            unknown_second.clone(),
+        ];
+
+        retain_changed_subscription_updates(
+            &mut updates,
+            &previous_by_occurrence,
+            |row| &row.id,
+            |old, new| {
+                old.index == new.index
+                    && old.payload == new.payload
+                    && old.provenance == new.provenance
+            },
+        );
+
+        assert_eq!(
+            updates,
+            vec![
+                moved,
+                content_changed,
+                provenance_changed,
+                unknown_first,
+                unknown_second,
+            ]
+        );
+        assert_eq!(
+            updates.iter().filter(|row| row.id == b'B').count(),
+            2,
+            "filtering semantic no-ops must not deduplicate distinct update entries"
+        );
+    }
+
+    #[test]
+    fn reset_survivor_classification_scales_by_index_lookup() {
+        static COMPARISONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct CountingKey(u32);
+
+        impl PartialOrd for CountingKey {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for CountingKey {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.0.cmp(&other.0)
+            }
+        }
+
+        const ROWS: usize = 1_024;
+        let current = (0..ROWS)
+            .map(|index| (CountingKey(index as u32), index))
+            .collect::<Vec<_>>();
+        let removed = current
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let surviving = surviving_subscription_rows(&current, &removed, |row| &row.0, |row| row.1);
+        let comparisons = COMPARISONS.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert!(surviving.is_empty());
+        assert!(
+            comparisons < ROWS * 64,
+            "reset survivor classification regressed from indexed lookup: {comparisons} comparisons for {ROWS} rows"
+        );
     }
 
     #[test]
