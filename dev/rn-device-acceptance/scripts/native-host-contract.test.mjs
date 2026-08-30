@@ -108,7 +108,7 @@ function assertPublicClientSeedStages(source) {
     /markFailure\("public-client-subscribe-failed"\);\s*unsubscribe = client\.db\.subscribe/,
     /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
-    /markFailure\("public-client-publish-failed"\);\s*for \(let attempt = 0; attempt < 8 && !observed;/,
+    /markFailure\("public-client-publish-failed"\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
     /if \(completed && !failed\) markFailure\("public-client-shutdown-failed"\);\s*await finishSeedClient/,
   ]) {
     assert.match(source, pattern, "public client seed stage moved away from its native boundary");

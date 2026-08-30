@@ -2,6 +2,7 @@ import { createJazzClient, schema as s, type JazzClientConfig } from "jazz-tools
 import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import { finishSeedClient } from "./seed-teardown";
+import { waitForPublication } from "./publication-wait";
 
 const app = s.defineApp({
   todos: s.table({ title: s.string() }),
@@ -57,16 +58,11 @@ export async function seedHighLevelForegroundRuntime(
     if (!rows.some((row) => row.title === title)) {
       throw new Error("high-level React Native foreground did not materialize its local write");
     }
-    // The normal subscription orchestrator is asynchronous even for a local
-    // commit. Give its owner wake a small, bounded number of microtasks; no
-    // raw foreground `tick` or byte command is used here. The bound makes a
-    // missing owner wake a receipt failure rather than an unbounded device
-    // test hang.
+    // Native wakes arrive through React Native's CallInvoker, which needs an
+    // event-loop turn rather than another Promise microtask. Keep the wait
+    // bounded and use no raw foreground `tick` or byte command here.
     markFailure("public-client-publish-failed");
-    for (let attempt = 0; attempt < 8 && !observed; attempt += 1) {
-      await Promise.resolve();
-    }
-    if (!observed) {
+    if (!(await waitForPublication(() => observed))) {
       throw new Error("high-level React Native foreground did not publish its local write");
     }
     completed = true;
