@@ -282,9 +282,11 @@ fn write_during_cold_subscription_hydration_is_delivered_exactly_once() {
         "albums",
         vec![Value::U64(2), Value::String("Blue Train".into())],
     );
-    let publication = block_on(database.apply_batch(write)).unwrap();
+    let mut apply = Box::pin(database.apply_batch(write));
+    assert!(matches!(apply.as_mut().poll(&mut context), Poll::Pending));
 
     control.resume_operation(TestStorageOperation::ScanOpen);
+    let publication = block_on(apply).unwrap();
     block_on(database.drive_progress()).unwrap();
 
     let mut cardinality: Vec<(Vec<Value>, i64)> = Vec::new();

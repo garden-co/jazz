@@ -266,6 +266,82 @@ async fn cold_hydration_yields_before_later_subscription_work() {
     );
 }
 
+/// A cancelled cold hydration must release every graph node it reserved for
+/// temporal ordering. Some interior nodes may already have completed before
+/// the storage request went cold; retaining only the incomplete nodes leaves
+/// a later subscription permanently blocked behind the cancelled snapshot.
+#[futures_test::test]
+async fn cancelling_cold_hydration_releases_completed_barriers() {
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("cancelled hydration album".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![
+            Value::U64(1),
+            Value::String("later hydration artist".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    // Prime only `albums`: the first subscription will complete this shared
+    // source before its `artists` sibling reaches the deliberately cold scan.
+    // A later albums-only subscriber therefore waits on a *completed* node
+    // retained by the first hydration's temporal barrier.
+    database
+        .query_graph(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    storage.evict_column_family("artists");
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let first = database
+        .subscribe([
+            ("albums", GraphBuilder::table("albums")),
+            ("artists", GraphBuilder::table("artists")),
+        ])
+        .unwrap();
+    let later = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert!(database.unsubscribe(first.id()));
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    for _ in 0..32 {
+        database.drive_ready_progress().await.unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+    }
+    assert!(
+        !database.has_pending_progress(),
+        "the later hydration is not left behind completed barriers from the cancelled one"
+    );
+    assert_eq!(
+        expect_try_recv_vals(&later),
+        vec![(
+            vec![
+                Value::U64(1),
+                Value::U64(1),
+                Value::String("cancelled hydration album".to_owned()),
+            ],
+            1,
+        )],
+    );
+}
+
 /// A large entirely resident graph is CPU work, not a storage wait. The direct
 /// async API owns and drains that resident continuation chain before returning;
 /// the owner-loop API instead yields bounded turns and wakes its owner. Both
@@ -456,14 +532,18 @@ async fn direct_cold_self_wake_waits_for_a_later_owner_turn() {
 /// to poll an earlier cold subscription past its self-wake.
 #[futures_test::test]
 async fn direct_write_does_not_consume_an_earlier_cold_subscription() {
-    let (storage, control) = TestStorage::controlled(&["albums"]);
-    let mut database = Database::new(albums_schema(), storage.clone())
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
         .await
         .unwrap();
     let mut seed = database.open_batch();
     seed.insert(
         "albums",
-        vec![Value::U64(1), Value::String("seed".to_owned())],
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("seed".to_owned()),
+        ],
     );
     database.commit_batch(seed).await.unwrap();
     storage.evict_all();
@@ -478,7 +558,7 @@ async fn direct_write_does_not_consume_an_earlier_cold_subscription() {
 
     let mut write = database.open_batch();
     write.insert(
-        "albums",
+        "artists",
         vec![Value::U64(2), Value::String("later write".to_owned())],
     );
     let applied = database.apply_batch(write).await.unwrap();
@@ -497,6 +577,179 @@ async fn direct_write_does_not_consume_an_earlier_cold_subscription() {
         "the cold subscription cannot publish as a side effect of an unrelated direct write"
     );
     drop(applied);
+}
+
+/// Admission of a write waits for the hydration whose graph slice it changes,
+/// but must not inherit an older cold wait from an independent subscription.
+#[futures_test::test]
+async fn direct_write_advances_its_overlapping_hydration_past_an_unrelated_cold_one() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("album".to_owned()),
+        ],
+    );
+    seed.insert(
+        "artists",
+        vec![Value::U64(1), Value::String("artist".to_owned())],
+    );
+    database.commit_batch(seed).await.unwrap();
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let albums = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    let artists = database
+        .subscribe_one_sink(GraphBuilder::table("artists"))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    // One scan may advance. Selecting by the write's graph slice must spend
+    // this permit on artists rather than the older unrelated albums scan.
+    control.release_one();
+
+    let mut write = database.open_batch();
+    write.insert(
+        "artists",
+        vec![Value::U64(2), Value::String("later artist".to_owned())],
+    );
+    let mut apply = Box::pin(database.apply_batch(write));
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut completed = false;
+    for _ in 0..32 {
+        match Pin::new(&mut apply).poll(&mut cx) {
+            Poll::Ready(Ok(_)) => {
+                completed = true;
+                break;
+            }
+            Poll::Ready(Err(error)) => panic!("artist write failed: {error}"),
+            Poll::Pending => {}
+        }
+    }
+    assert!(
+        completed,
+        "artist write must not wait for the unrelated cold albums hydration"
+    );
+
+    drop(apply);
+    drop(artists);
+    drop(albums);
+}
+
+/// Selecting a hydration for write admission must also select every temporal
+/// predecessor it needs, even when that predecessor is outside the write's
+/// directly affected graph slice.
+#[futures_test::test]
+async fn direct_write_advances_transitive_hydration_predecessors_without_failing_join() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    let (storage, control) = TestStorage::controlled(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::String("album".to_owned()),
+        ],
+    );
+    seed.insert(
+        "artists",
+        vec![Value::U64(1), Value::String("artist".to_owned())],
+    );
+    database.commit_batch(seed).await.unwrap();
+
+    // Retain a fully hydrated albums source, then make later storage reads
+    // cold. H1 owns artists; H2 joins the warm albums source to H1's cold
+    // artists source and is therefore temporally behind H1 on artists.
+    let warm_albums = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    database.flush().await.unwrap();
+    assert_eq!(expect_try_recv_vals(&warm_albums).len(), 1);
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let artists = database
+        .subscribe_one_sink(GraphBuilder::table("artists"))
+        .await
+        .unwrap();
+    let joined = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .await
+        .unwrap();
+    control.release_one();
+
+    let mut write = database.open_batch();
+    write.insert(
+        "albums",
+        vec![
+            Value::U64(2),
+            Value::U64(1),
+            Value::String("later album".to_owned()),
+        ],
+    );
+    let mut apply = Box::pin(database.apply_batch(write));
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..16 {
+        assert!(
+            Pin::new(&mut apply).poll(&mut cx).is_pending(),
+            "the write cannot bypass its still-cold join hydration"
+        );
+    }
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let mut completed = false;
+    for _ in 0..64 {
+        match Pin::new(&mut apply).poll(&mut cx) {
+            Poll::Ready(Ok(_)) => {
+                completed = true;
+                break;
+            }
+            Poll::Ready(Err(error)) => panic!("album write failed: {error}"),
+            Poll::Pending => {}
+        }
+    }
+    assert!(
+        completed,
+        "album write must advance the join's cold artists predecessor"
+    );
+    drop(apply);
+
+    assert_eq!(
+        expect_try_recv_vals(&joined).len(),
+        1,
+        "the join hydration remains live and publishes its seeded snapshot"
+    );
+    drop(joined);
+    drop(artists);
+    drop(warm_albums);
 }
 
 #[futures_test::test]

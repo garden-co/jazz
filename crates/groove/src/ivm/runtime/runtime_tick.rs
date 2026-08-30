@@ -119,6 +119,67 @@ struct PendingIncrementalState {
     next_id: u64,
 }
 
+impl PendingIncrementalState {
+    /// Select each hydration whose snapshot overlaps `nodes`, plus every
+    /// evaluation which is temporally ahead of it on any registered node.
+    /// Repeat to closure because one predecessor may itself wait behind an
+    /// evaluation on a different node.
+    fn hydration_admission_evaluations(&self, nodes: &HashSet<NodeId>) -> HashSet<u64> {
+        let mut selected = self
+            .evaluations
+            .iter()
+            .filter_map(|(evaluation_id, evaluation)| {
+                (matches!(evaluation, PendingEvaluation::SubscriptionHydration(_))
+                    && evaluation.work_queue().overlaps(nodes))
+                .then_some(*evaluation_id)
+            })
+            .collect::<HashSet<_>>();
+        loop {
+            let mut changed = false;
+            for waiters in self.waiters_by_node.values() {
+                let Some(last_selected) = waiters
+                    .iter()
+                    .rposition(|evaluation_id| selected.contains(evaluation_id))
+                else {
+                    continue;
+                };
+                for predecessor in waiters.iter().take(last_selected + 1) {
+                    changed |= selected.insert(*predecessor);
+                }
+            }
+            if !changed {
+                return selected;
+            }
+        }
+    }
+
+    /// Release evaluations queued behind `evaluation_id` at completed graph
+    /// nodes. Snapshot hydration calls this only after its isolated state is
+    /// installed; incremental evaluations can release nodes as they complete.
+    fn release_temporal_successors(
+        &mut self,
+        evaluation_id: u64,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) {
+        for node in nodes {
+            let Some(waiters) = self.waiters_by_node.get_mut(&node) else {
+                continue;
+            };
+            debug_assert_eq!(waiters.front(), Some(&evaluation_id));
+            waiters.pop_front();
+            let successor = waiters.front().copied();
+            if waiters.is_empty() {
+                self.waiters_by_node.remove(&node);
+            }
+            if let Some(successor) = successor
+                && let Some(later) = self.evaluations.get_mut(&successor)
+            {
+                later.work_queue_mut().temporal_ready(node);
+            }
+        }
+    }
+}
+
 enum PendingEvaluation {
     Incremental(IncrementalEvaluation<'static>),
     SubscriptionHydration(PendingSubscriptionHydration),
@@ -420,6 +481,16 @@ impl EvaluationWorkQueue {
         self.entries
             .iter()
             .filter_map(|(node, entry)| (*entry != EvaluationEntry::Complete).then_some(*node))
+    }
+
+    /// Every node registered with a snapshot hydration is a single temporal
+    /// barrier: successors may use none of its isolated state until install.
+    fn registered_nodes(&self) -> Vec<NodeId> {
+        self.entries.keys().copied().collect()
+    }
+
+    fn overlaps(&self, nodes: &HashSet<NodeId>) -> bool {
+        self.entries.keys().any(|node| nodes.contains(node))
     }
 
     fn downstream_closure(&self, roots: impl IntoIterator<Item = NodeId>) -> HashSet<NodeId> {
@@ -1241,7 +1312,7 @@ impl<'a> EvaluationSession<'a> {
             .values()
             .map(|entry| entry.payload_bytes)
             .sum();
-        runtime.memo_use_clock = self.memo_use_clock;
+        runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         for node in &self.relevant_nodes {
             runtime.node_meta.remove(node);
         }
@@ -1418,6 +1489,47 @@ impl IvmRuntime {
                     .with_install_observer(observer, failures)
             }),
         };
+        let changed_tables = table_deltas
+            .iter()
+            .map(|delta| delta.table.as_str())
+            .collect::<HashSet<_>>();
+        let affected_nodes = self
+            .graph
+            .affected_nodes(changed_tables.iter().copied(), std::iter::empty());
+
+        // Hydration evaluates an isolated snapshot and installs that snapshot
+        // atomically. Do not begin a resident tick which overlaps its graph
+        // slice: beginning mutates durable evaluator state and input
+        // generations before the work queue can attach temporal blockers, so
+        // a later hydration install would otherwise roll those mutations back.
+        std::future::poll_fn(|cx| {
+            let selected = self
+                .pending_incremental
+                .0
+                .borrow()
+                .hydration_admission_evaluations(&affected_nodes);
+            if selected.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            match self.poll_incremental(cx, false, Some(&selected)) {
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) | Poll::Pending => {
+                    if self
+                        .pending_incremental
+                        .0
+                        .borrow()
+                        .hydration_admission_evaluations(&affected_nodes)
+                        .is_empty()
+                    {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Pending
+                    }
+                }
+            }
+        })
+        .await?;
+
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
             pending
@@ -1560,7 +1672,7 @@ impl IvmRuntime {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
-        self.poll_incremental(cx, false)
+        self.poll_incremental(cx, false, None)
     }
 
     /// Poll only evaluations that have retained an explicit in-memory
@@ -1571,13 +1683,14 @@ impl IvmRuntime {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
-        self.poll_incremental(cx, true)
+        self.poll_incremental(cx, true, None)
     }
 
     fn poll_incremental(
         &mut self,
         cx: &mut Context<'_>,
         resident_only: bool,
+        selected_evaluations: Option<&HashSet<u64>>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
@@ -1590,6 +1703,11 @@ impl IvmRuntime {
                 .evaluations
                 .remove(&evaluation_id)
                 .expect("pending evaluation order references a live session");
+            if selected_evaluations.is_some_and(|selected| !selected.contains(&evaluation_id)) {
+                state.evaluations.insert(evaluation_id, evaluation);
+                retained_order.push_back(evaluation_id);
+                continue;
+            }
             if resident_only && !evaluation.has_resident_continuation() {
                 state.evaluations.insert(evaluation_id, evaluation);
                 retained_order.push_back(evaluation_id);
@@ -1612,22 +1730,14 @@ impl IvmRuntime {
                         error: Arc::new(error),
                     }),
             };
-            let completed = evaluation.work_queue_mut().drain_completed_events();
-            for node in &completed {
-                let Some(waiters) = state.waiters_by_node.get_mut(node) else {
-                    continue;
-                };
-                debug_assert_eq!(waiters.front(), Some(&evaluation_id));
-                waiters.pop_front();
-                let successor = waiters.front().copied();
-                if waiters.is_empty() {
-                    state.waiters_by_node.remove(node);
-                }
-                if let Some(successor) = successor
-                    && let Some(later) = state.evaluations.get_mut(&successor)
-                {
-                    later.work_queue_mut().temporal_ready(*node);
-                }
+            // A hydration session owns a private snapshot of all reachable
+            // state. Its completed interior nodes are not safe handoff points:
+            // a later incremental evaluation would run against the old live
+            // runtime, then lose its changes when hydration installs. Treat
+            // the whole session as one temporal barrier instead.
+            if matches!(evaluation, PendingEvaluation::Incremental(_)) {
+                let completed = evaluation.work_queue_mut().drain_completed_events();
+                state.release_temporal_successors(evaluation_id, completed);
             }
             match progress {
                 Poll::Ready(Ok(())) => {
@@ -1636,7 +1746,9 @@ impl IvmRuntime {
                             &hydration.outputs,
                             &hydration.session.outputs,
                         );
+                        let completed = hydration.session.work_queue.registered_nodes();
                         hydration.session.install(self);
+                        state.release_temporal_successors(evaluation_id, completed);
                         self.record_hydration_memo_metrics(&hydration.metrics);
                         self.evict_eval_memo();
                         match snapshot {
@@ -1683,11 +1795,16 @@ impl IvmRuntime {
                         return Poll::Ready(Err(failure.into_error()));
                     }
                     self.fail_evaluation_nodes(&failure);
-                    let incomplete = evaluation
-                        .work_queue()
-                        .incomplete_nodes()
-                        .collect::<Vec<_>>();
-                    for node in incomplete {
+                    let released_nodes =
+                        if matches!(&evaluation, PendingEvaluation::SubscriptionHydration(_)) {
+                            evaluation.work_queue().registered_nodes()
+                        } else {
+                            evaluation
+                                .work_queue()
+                                .incomplete_nodes()
+                                .collect::<Vec<_>>()
+                        };
+                    for node in released_nodes {
                         let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                             continue;
                         };
@@ -1782,7 +1899,7 @@ impl IvmRuntime {
                 continue;
             };
             state.order.retain(|candidate| *candidate != evaluation_id);
-            for node in evaluation.work_queue().incomplete_nodes() {
+            for node in evaluation.work_queue().registered_nodes() {
                 let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                     continue;
                 };
