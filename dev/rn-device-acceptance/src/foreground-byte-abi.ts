@@ -6,6 +6,10 @@ import type {
 } from "jazz-rn";
 import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
+import {
+  nativeSubscriptionDeltaHasRowId,
+  nativeSubscriptionDeltaHasRows,
+} from "./native-subscription-observation.ts";
 
 export type ForegroundByteCodec = {
   encode(command: NativeForegroundCommand): Uint8Array;
@@ -265,13 +269,16 @@ export async function proveSameJsiRuntimeWriteSubscription(
         codec,
         openedB.consumeWake,
       );
-      if (events.some((event) => event.type === "delta" && event.delta.byteLength > 0)) {
+      if (
+        events.some(
+          (event) => event.type === "delta" && nativeSubscriptionDeltaHasRows(event.delta),
+        )
+      ) {
         markFailure("same-runtime-delta-content-failed");
       }
       if (
         events.some(
-          (event) =>
-            event.type === "delta" && containsUtf8(event.delta, "foreground-a-subscription-row"),
+          (event) => event.type === "delta" && nativeSubscriptionDeltaHasRowId(event.delta, rowId),
         )
       ) {
         markFailure("same-runtime-unsubscribe-failed");

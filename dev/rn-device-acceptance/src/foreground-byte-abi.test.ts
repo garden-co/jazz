@@ -8,6 +8,7 @@ import {
   type ForegroundByteCodec,
 } from "./foreground-byte-abi.ts";
 import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
+import { PostcardWriter, writeDescriptor } from "jazz-tools/_dev/native-binding-codec";
 
 const capability = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const subscriptionRowId = Uint8Array.from({ length: 16 }, (_, index) => index + 17);
@@ -521,7 +522,16 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                                         settled: true,
                                         tier: "local",
                                         delta: Array.from(
-                                          new TextEncoder().encode("foreground-a-subscription-row"),
+                                          encodeSubscriptionDelta({
+                                            added: [
+                                              {
+                                                rowId: subscriptionRowId,
+                                                raw: new TextEncoder().encode(
+                                                  "foreground-a-subscription-row",
+                                                ),
+                                              },
+                                            ],
+                                          }),
                                         ),
                                       },
                                     ]
@@ -903,7 +913,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                   reset: false,
                   settled: true,
                   tier: "local",
-                  delta: [],
+                  delta: Array.from(encodeSubscriptionDelta({})),
                 },
               ],
             });
@@ -953,7 +963,19 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                   reset: false,
                   settled: true,
                   tier: "local",
-                  delta: Array.from(new TextEncoder().encode("wrong-row")),
+                  // The title alone is not authoritative: binding envelopes
+                  // may carry unrelated text, while the inserted run-bound
+                  // RowUuid is the identity this receipt must observe.
+                  delta: Array.from(
+                    encodeSubscriptionDelta({
+                      added: [
+                        {
+                          rowId: new Uint8Array(16).fill(0xee),
+                          raw: new TextEncoder().encode("foreground-a-subscription-row"),
+                        },
+                      ],
+                    }),
+                  ),
                 },
               ],
             });
@@ -978,10 +1000,51 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
   assert.ok(wrongObservationStages.includes("same-runtime-delta-drain-failed"));
   assert.ok(
     wrongObservationStages.includes("same-runtime-delta-content-failed"),
-    "a non-empty wrong-row payload reaches content diagnostics without satisfying observation",
+    "a title-only payload reaches content diagnostics without satisfying row-id observation",
   );
 });
 
 function utf8(value: string): number[] {
   return Array.from(new TextEncoder().encode(value));
+}
+
+function encodeSubscriptionDelta({
+  added = [],
+  updated = [],
+}: {
+  added?: Array<{ rowId: Uint8Array; raw: Uint8Array }>;
+  updated?: Array<{ rowId: Uint8Array; raw: Uint8Array }>;
+}): Uint8Array {
+  const writer = new PostcardWriter();
+  const writeBatches = (
+    target: PostcardWriter,
+    rows: Array<{ rowId: Uint8Array; raw: Uint8Array }>,
+  ) => {
+    target.vec(
+      (batch) => {
+        batch.string("todos");
+        writeDescriptor(batch, []);
+        batch.vec((row, index) => {
+          row.bytes(rows[index]!.rowId);
+          row.bool(false);
+          row.bytes(rows[index]!.raw);
+        }, rows.length);
+      },
+      rows.length === 0 ? 0 : 1,
+    );
+  };
+  writeBatches(writer, added);
+  writeBatches(writer, updated);
+  writer.vec(() => undefined, 0);
+  for (const rows of [added, updated]) {
+    writer.vec((key, index) => {
+      key.bytes(Uint8Array.from([1, ...rows[index]!.rowId]));
+    }, rows.length);
+  }
+  writer.vec(() => undefined, 0);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), added.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
+  writer.vec(() => undefined, 0);
+  return writer.finish();
 }

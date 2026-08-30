@@ -74,6 +74,10 @@
       "types": "./dist/_dev/schema-hash.d.ts",
       "default": "./dist/_dev/schema-hash.js"
     },
+    "./_dev/native-binding-codec": {
+      "types": "./dist/_dev/native-binding-codec.d.ts",
+      "default": "./dist/_dev/native-binding-codec.js"
+    },
     "./dev/next": {
       "types": "./dist/dev/next.d.ts",
       "default": "./dist/dev/next.js"
