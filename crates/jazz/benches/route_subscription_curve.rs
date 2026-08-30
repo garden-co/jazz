@@ -55,7 +55,13 @@ struct Receipt {
     matching_write_us: u64,
     unrelated_write_us: u64,
     below_boundary_write_us: u64,
-    storage_backed_witness_free: bool,
+    /// Storage-backed root materialization must not retain the ordinary
+    /// source-version witness stream for every bound route.
+    storage_backed_source_witness_free: bool,
+    /// Replacement witnesses deliberately remain resident: a deletion or
+    /// restore can promote a different current winner and its transaction
+    /// still has to be delivered correctly.
+    replacement_witnesses_retained: bool,
     exact_initial: bool,
     exact_matching_delta: bool,
     unrelated_quiet: bool,
@@ -210,10 +216,16 @@ impl RouteFixture {
         let retained = retained_receipt(&self.db);
         assert_eq!(runtime.active_subscriptions, self.routes);
         assert_eq!(retained.subscriptions, self.routes);
-        assert_eq!(retained.version_identities, 0);
-        assert_eq!(retained.replacement_entries, 0);
-        assert_eq!(retained.versions_bytes, 0);
-        assert_eq!(retained.replacements_bytes, 0);
+        let (source_witness_free, replacement_witnesses_retained) =
+            storage_backed_witness_contract(&retained);
+        assert!(
+            source_witness_free,
+            "storage-backed routes retain source witnesses"
+        );
+        assert!(
+            replacement_witnesses_retained,
+            "storage-backed routes must retain replacement witnesses"
+        );
         AttachedRoutes {
             fixture: self,
             streams,
@@ -314,16 +326,21 @@ fn run(routes: usize) -> Receipt {
     insert_document(&db, document_row(0, HOT_TEAM_DOCUMENTS + 2), 0, 0);
     let below_boundary_write_us = micros(below_boundary_started.elapsed());
     let below_boundary_quiet = drain_events(&mut streams).iter().all(Delta::is_quiet);
-    let storage_backed_witness_free = retained.version_identities == 0
-        && retained.replacement_entries == 0
-        && retained.versions_bytes == 0
-        && retained.replacements_bytes == 0;
+    // Storage-backed current materialization removes the source-wide Version
+    // witnesses, not replacement witnesses. The latter were briefly removed
+    // too, which made delete/restore winner delivery fall back to an
+    // incomplete cache. Keep this receipt planted-sensitive to both halves of
+    // that contract: source versions must stay absent while replacement
+    // witnesses remain available for winner changes.
+    let (storage_backed_source_witness_free, replacement_witnesses_retained) =
+        storage_backed_witness_contract(&retained);
 
     let ok = exact_initial
         && exact_matching_delta
         && unrelated_quiet
         && below_boundary_quiet
-        && storage_backed_witness_free
+        && storage_backed_source_witness_free
+        && replacement_witnesses_retained
         && runtime.active_subscriptions == routes
         && retained.subscriptions == routes;
 
@@ -346,7 +363,8 @@ fn run(routes: usize) -> Receipt {
         matching_write_us,
         unrelated_write_us,
         below_boundary_write_us,
-        storage_backed_witness_free,
+        storage_backed_source_witness_free,
+        replacement_witnesses_retained,
         exact_initial,
         exact_matching_delta,
         unrelated_quiet,
@@ -529,6 +547,15 @@ fn runtime_receipt(db: &BenchDb) -> RuntimeReceipt {
         logical_nodes_requested: stats.logical_nodes_requested,
         deduped_graph_nodes: stats.deduped_graph_nodes,
     }
+}
+
+/// The simple-root storage-backed path omits source-version bodies but retains
+/// replacement candidates for delete/restore winner delivery.
+fn storage_backed_witness_contract(retained: &RetainedReceipt) -> (bool, bool) {
+    (
+        retained.version_identities == 0 && retained.versions_bytes == 0,
+        retained.replacement_entries > 0 && retained.replacements_bytes > 0,
+    )
 }
 
 fn retained_receipt(db: &BenchDb) -> RetainedReceipt {
