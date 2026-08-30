@@ -1453,10 +1453,7 @@ where
     let mut future = pin!(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(result) => result,
-        Poll::Pending => Err(Error::new(
-            ErrorCode::ColdMutationRequiresAsync,
-            "internal resident-only mutation boundary reached non-resident state",
-        )),
+        Poll::Pending => Err(Error::cold_mutation_requires_async()),
     }
 }
 
@@ -2511,6 +2508,16 @@ impl Error {
             code,
             message: message.into(),
         }
+    }
+
+    /// Internal binding assertion used when a cold-capable database is wired
+    /// through a resident-only synchronous mutation surface.
+    #[doc(hidden)]
+    pub fn cold_mutation_requires_async() -> Self {
+        Self::new(
+            ErrorCode::ColdMutationRequiresAsync,
+            "internal resident-only mutation boundary reached non-resident state",
+        )
     }
 }
 

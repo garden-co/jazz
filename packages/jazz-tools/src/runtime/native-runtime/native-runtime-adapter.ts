@@ -160,8 +160,14 @@ type NativeDb = {
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openTransactionId: string, kind: TransactionKind, author?: Uint8Array): void;
+  beginTransactionAsync?(
+    openTransactionId: string,
+    kind: TransactionKind,
+    author?: Uint8Array,
+  ): Promise<void>;
   beginTransactionAttributed?(openTransactionId: string, attribution: Uint8Array): void;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
+  commitExclusiveTransactionAsync?(openTransactionId: string): Promise<Write>;
   rollbackTransaction(openTransactionId: string): void;
   attachMergeableTx(openTransactionId: string): Tx;
   attachExclusiveTx?(openTransactionId: string): Tx;
@@ -425,19 +431,41 @@ type Tx = {
   /** Release the native transaction view after its owner batch has completed. */
   close?(): boolean;
   insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
+  insertEncodedAsync?(
+    table: string,
+    cells: Uint8Array,
+    options?: NativeInsertOptions,
+  ): Promise<Uint8Array>;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
     options?: NativeUpdateOptions,
   ): void;
+  updateEncodedAsync?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    options?: NativeUpdateOptions,
+  ): Promise<void>;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     options?: NativeUpsertOptions,
   ): void;
+  upsertEncodedAsync?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: NativeUpsertOptions,
+  ): Promise<void>;
   deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
+  deleteEncodedAsync?(
+    table: string,
+    rowId: Uint8Array,
+    options?: NativeDeleteOptions,
+  ): Promise<void>;
   restoreEncoded(
     table: string,
     rowId: Uint8Array,
