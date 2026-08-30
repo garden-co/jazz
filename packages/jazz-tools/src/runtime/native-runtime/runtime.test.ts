@@ -7202,6 +7202,10 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    // A real native binding always advertises the wire features compiled into
+    // it. Individual tests can still explicitly set this to `undefined` when
+    // exercising the missing-binding diagnostic.
+    wireFeatures: () => CLIENT_WIRE_FEATURES,
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (
