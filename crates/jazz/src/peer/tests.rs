@@ -1635,7 +1635,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
             .table(
                 PublicTableSchemaBuilder::new("todos")
                     .column("title", PublicColumnType::Text)
-                    .column("owner_id", PublicColumnType::Uuid),
+                    .fk_column("owner_id", "users"),
             ),
     );
     let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
@@ -1671,7 +1671,47 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
         )
         .unwrap();
     accept_global(&mut core, child_tx, 2);
-    peer.query_update(&mut core, &shape, &binding).unwrap();
+    let child_update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds: child_fact_adds,
+        ..
+    }) = child_update
+    else {
+        panic!("expected child view update")
+    };
+    assert!(
+        child_fact_adds
+            .iter()
+            .any(|fact| matches!(fact, ProgramFactEntry::RelationEdge(_))),
+        "child insertion should establish its relation fact"
+    );
+    let canonical = subscription_key(&shape, &binding);
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0xa11a)),
+        ..canonical
+    };
+    let duplicate = peer
+        .rehydrate_query_for_subscription_from_maintained_subscription(
+            &mut core, canonical, target, &shape,
+        )
+        .unwrap()
+        .expect("duplicate structured usage receives a reset");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        program_fact_adds,
+        ..
+    }) = duplicate
+    else {
+        panic!("expected duplicate structured view update")
+    };
+    assert!(reset_result_set);
+    assert!(
+        program_fact_adds
+            .iter()
+            .any(|fact| matches!(fact, ProgramFactEntry::RelationEdge(_))),
+        "a duplicate structured usage needs the canonical relation facts, not only future deltas"
+    );
+
     let child_update_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xb1), 1_002).cells(BTreeMap::from([(
@@ -1704,6 +1744,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
         &[],
     ));
     let _ = (program_fact_adds, program_fact_removes);
+
 }
 
 #[test]

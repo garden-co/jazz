@@ -1579,6 +1579,7 @@ impl PeerState {
                 "coverage group subscription is missing peer state",
             ))?;
         let current_result_member_set = &canonical_state.result_member_set;
+        let current_program_fact_set = canonical_state.program_fact_set.clone();
         let can_forward_flat_removals = client_link
             && ordinary_flat_row_duplicate_view(
                 shape,
@@ -1661,7 +1662,13 @@ impl PeerState {
                         crate::node::FlatTupleSourceTables::for_query(shape),
                     result_member_adds,
                     result_member_removes: target_result_member_removes,
-                    program_fact_adds: Vec::new(),
+                    // A newly attached usage site starts with no
+                    // subscription-scoped facts even when it shares the
+                    // canonical evaluator. Rehydrate the evaluator's complete
+                    // current fact closure; forwarding only future deltas
+                    // leaves array/join dependencies absent after a one-shot
+                    // attachment races their first update.
+                    program_fact_adds: current_program_fact_set.iter().cloned().collect(),
                     program_fact_removes: Vec::new(),
                     identity: self.identity(),
                     tier,
