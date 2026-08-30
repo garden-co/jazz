@@ -1,5 +1,13 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +24,24 @@ function hostNapiTarget() {
       return "win32-x64-msvc";
     default:
       throw new Error(`no Jazz NAPI package target for host ${target}`);
+  }
+}
+
+const stagedRootNapiArtifact =
+  /^jazz-napi\.(?:linux-x64-gnu|darwin-x64|darwin-arm64|win32-x64-msvc)\.(?:node|manifest\.json)$/;
+
+function pruneStaleRootNapiArtifacts(packageDir, selectedPlatform) {
+  const selected = new Set([
+    "native-loader.cjs",
+    `jazz-napi.${selectedPlatform}.node`,
+    `jazz-napi.${selectedPlatform}.manifest.json`,
+  ]);
+  for (const entry of readdirSync(packageDir, { withFileTypes: true })) {
+    if (entry.name !== "native-loader.cjs" && !stagedRootNapiArtifact.test(entry.name)) continue;
+    const path = join(packageDir, entry.name);
+    if (!entry.isFile() || entry.isSymbolicLink())
+      throw new Error(`staged NAPI package artifact must be a real regular file: ${path}`);
+    if (!selected.has(entry.name)) unlinkSync(path);
   }
 }
 
@@ -47,6 +73,10 @@ export function stageNapiLoader(root, platform) {
     throw new Error("active NAPI generation manifest has the wrong kind/profile");
   if (manifest.nativeArtifactFingerprint !== fingerprint)
     throw new Error("active NAPI pointer fingerprint does not match its sealed manifest");
+  // A working tree can retain root-level outputs from another platform build.
+  // Only remove the fixed generated names above; leave every user/package file
+  // untouched, and fail closed rather than following a symlink.
+  pruneStaleRootNapiArtifacts(packageDir, platform);
   copyFileSync(binding, join(packageDir, `jazz-napi.${platform}.node`));
   copyFileSync(join(stage, "index.js"), join(packageDir, "native-loader.cjs"));
   copyFileSync(

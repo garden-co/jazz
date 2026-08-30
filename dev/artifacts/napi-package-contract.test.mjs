@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -30,6 +37,13 @@ function fixture({ profile = "release" } = {}) {
     join(generation, ".jazz-artifact-manifest.json"),
     JSON.stringify({ kind: "napi", profile, nativeArtifactFingerprint: fingerprint }),
   );
+  // A prior platform assembly can leave these ignored root-level outputs next
+  // to the selected platform. They must be pruned before npm evaluates files.
+  writeFileSync(join(packageDir, "jazz-napi.darwin-x64.node"), "stale darwin native bytes\n");
+  writeFileSync(
+    join(packageDir, "jazz-napi.darwin-x64.manifest.json"),
+    JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: "b".repeat(64) }),
+  );
   // This is deliberately an ignored historical output. A package glob must
   // never make it into the final inventory.
   mkdirSync(join(packageDir, ".native-artifacts", "generation-stale"));
@@ -42,6 +56,11 @@ test("NAPI packing stages one sealed release generation and excludes historical 
   try {
     assert.equal(packageSource.scripts.prepack, "node ../../dev/artifacts/stage-napi-loader.mjs");
     stageNapiLoader(fixtureRoot.root, target);
+    assert.equal(existsSync(join(fixtureRoot.packageDir, "jazz-napi.darwin-x64.node")), false);
+    assert.equal(
+      existsSync(join(fixtureRoot.packageDir, "jazz-napi.darwin-x64.manifest.json")),
+      false,
+    );
     const output = execFileSync("npm", ["pack", "--dry-run", "--json"], {
       cwd: fixtureRoot.packageDir,
       encoding: "utf8",
@@ -52,10 +71,16 @@ test("NAPI packing stages one sealed release generation and excludes historical 
   assert.ok(receipt, "npm pack did not report a package receipt");
   const files = new Set(receipt.files.map((file) => file.path));
 
-  assert.ok(files.has("native-loader.cjs"));
-  assert.ok(files.has("native-artifact-fingerprint.cjs"));
-  assert.ok([...files].some((file) => /^jazz-napi\.[^.]+\.node$/.test(file)));
-  assert.ok([...files].some((file) => /^jazz-napi\.[^.]+\.manifest\.json$/.test(file)));
+    assert.ok(files.has("native-loader.cjs"));
+    assert.ok(files.has("native-artifact-fingerprint.cjs"));
+    assert.deepEqual(
+      [...files].filter((file) => /^jazz-napi\.[^.]+\.node$/.test(file)),
+      [`jazz-napi.${target}.node`],
+    );
+    assert.deepEqual(
+      [...files].filter((file) => /^jazz-napi\.[^.]+\.manifest\.json$/.test(file)),
+      [`jazz-napi.${target}.manifest.json`],
+    );
   assert.ok(
     [...files].every((file) => !file.startsWith(".native-artifacts/")),
     `packed historical native generation: ${[...files].find((file) => file.startsWith(".native-artifacts/"))}`,
