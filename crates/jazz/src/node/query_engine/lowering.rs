@@ -319,99 +319,108 @@ fn terminal_schema_routing_fields(
 }
 
 pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTreeSet<String>> {
-    match graph {
-        GraphBuilder::InlineRecords { output, .. }
-        | GraphBuilder::FrontierSource { output, .. }
-        | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
-        GraphBuilder::Project { fields, .. } => Some(
-            fields
-                .iter()
-                .map(|field| field.output_name.clone())
-                .collect(),
-        ),
-        GraphBuilder::StreamingChecksum {
-            input,
-            field,
-            output_field,
-            ..
-        } => {
-            let mut fields = graph_declared_output_fields(input)?;
-            let groove::ivm::FieldRef::Name(field) = field else {
-                return None;
-            };
-            fields.remove(field);
-            fields.insert(output_field.clone());
-            Some(fields)
-        }
-        GraphBuilder::Aggregate {
-            group_cols,
-            aggregates,
-            ..
-        } => Some(
-            group_cols
-                .iter()
-                .map(|field| field.display_name())
-                .chain(aggregates.iter().enumerate().map(|(index, aggregate)| {
-                    aggregate
-                        .output_name
-                        .clone()
-                        .unwrap_or_else(|| format!("aggregate_{index}"))
-                }))
-                .collect(),
-        ),
-        GraphBuilder::CollectBy { collect, .. } => Some(
-            collect
-                .parent_fields
-                .iter()
-                .map(|field| field.output_name.clone())
-                .chain(std::iter::once(collect.collection_field.clone()))
-                .collect(),
-        ),
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::SemiJoin { left: input, .. }
-        | GraphBuilder::AntiJoin { left: input, .. } => graph_declared_output_fields(input),
-        GraphBuilder::Unnest {
-            input,
-            element_field,
-            ..
-        } => {
-            let mut fields = graph_declared_output_fields(input)?;
-            fields.insert(element_field.clone());
-            Some(fields)
-        }
-        GraphBuilder::Recursive { seed, .. } => graph_declared_output_fields(seed),
-        GraphBuilder::Union { inputs } => {
-            let mut iter = inputs.iter();
-            let mut fields = graph_declared_output_fields(iter.next()?)?;
-            for input in iter {
-                fields = fields
-                    .intersection(&graph_declared_output_fields(input)?)
-                    .cloned()
-                    .collect();
-            }
-            Some(fields)
-        }
-        GraphBuilder::Join { left, right, .. } => {
-            let mut fields = BTreeSet::new();
-            fields.extend(
-                graph_declared_output_fields(left)?
-                    .into_iter()
-                    .map(|field| left_field(&field)),
-            );
-            fields.extend(
-                graph_declared_output_fields(right)?
-                    .into_iter()
-                    .map(|field| right_field(&field)),
-            );
-            Some(fields)
-        }
-        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
+    // Policy lowering can build deeply nested finite graphs on the server
+    // shell's ordinary thread stack. Keep this structural analysis iterative:
+    // it is used while installing those policies, before Groove compiles its
+    // own graph representation.
+    let mut outputs =
+        std::collections::HashMap::<*const GraphBuilder, Option<BTreeSet<String>>>::new();
+    for node in graph_builder_postorder(graph) {
+        let child_output = |child: &GraphBuilder| {
+            outputs
+                .get(&std::ptr::from_ref(child))
+                .expect("postorder visits graph children before their parent")
+                .clone()
+        };
+        let fields = match node {
+            GraphBuilder::InlineRecords { output, .. }
+            | GraphBuilder::FrontierSource { output, .. }
+            | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
+            GraphBuilder::Project { fields, .. } => Some(
+                fields
+                    .iter()
+                    .map(|field| field.output_name.clone())
+                    .collect(),
+            ),
+            GraphBuilder::StreamingChecksum {
+                input,
+                field,
+                output_field,
+                ..
+            } => child_output(input).and_then(|mut fields| match field {
+                FieldRef::Name(field) => {
+                    fields.remove(field);
+                    fields.insert(output_field.clone());
+                    Some(fields)
+                }
+                FieldRef::Resolved(_) => None,
+            }),
+            GraphBuilder::Aggregate {
+                group_cols,
+                aggregates,
+                ..
+            } => Some(
+                group_cols
+                    .iter()
+                    .map(|field| field.display_name())
+                    .chain(aggregates.iter().enumerate().map(|(index, aggregate)| {
+                        aggregate
+                            .output_name
+                            .clone()
+                            .unwrap_or_else(|| format!("aggregate_{index}"))
+                    }))
+                    .collect(),
+            ),
+            GraphBuilder::CollectBy { collect, .. } => Some(
+                collect
+                    .parent_fields
+                    .iter()
+                    .map(|field| field.output_name.clone())
+                    .chain(std::iter::once(collect.collection_field.clone()))
+                    .collect(),
+            ),
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::VariantProject { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. }
+            | GraphBuilder::SemiJoin { left: input, .. }
+            | GraphBuilder::AntiJoin { left: input, .. } => child_output(input),
+            GraphBuilder::Unnest {
+                input,
+                element_field,
+                ..
+            } => child_output(input).map(|mut fields| {
+                fields.insert(element_field.clone());
+                fields
+            }),
+            GraphBuilder::Recursive { seed, .. } => child_output(seed),
+            GraphBuilder::Union { inputs } => inputs.split_first().and_then(|(first, rest)| {
+                let mut fields = child_output(first)?;
+                for input in rest {
+                    fields = fields
+                        .intersection(&child_output(input)?)
+                        .cloned()
+                        .collect();
+                }
+                Some(fields)
+            }),
+            GraphBuilder::Join { left, right, .. } => child_output(left)
+                .zip(child_output(right))
+                .map(|(left_fields, right_fields)| {
+                    let mut fields = BTreeSet::new();
+                    fields.extend(left_fields.into_iter().map(|field| left_field(&field)));
+                    fields.extend(right_fields.into_iter().map(|field| right_field(&field)));
+                    fields
+                }),
+            GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
+        };
+        outputs.insert(std::ptr::from_ref(node), fields);
     }
+    outputs
+        .remove(&std::ptr::from_ref(graph))
+        .expect("postorder includes the graph root")
 }
 
 fn descriptor_named_fields(descriptor: &RecordDescriptor) -> Option<BTreeSet<String>> {
@@ -651,62 +660,116 @@ fn source_value_ref(value: &NormalizedValueRef) -> bool {
 }
 
 fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {
-    match graph {
-        GraphBuilder::BindingSource { output, .. } => {
-            for field in output.fields() {
-                let Some(name) = field.name.as_deref() else {
-                    continue;
-                };
-                if let Some(path) = claim_path_from_param_field(name) {
-                    domain
-                        .claim_params
-                        .entry(name.to_owned())
-                        .or_insert_with(|| ClaimParameter {
-                            path,
-                            ty: field.value_type.clone(),
-                        });
-                    if claim_route_is_ordered_scalar(&field.value_type) {
-                        domain.routing_params.insert(name.to_owned());
-                    }
-                } else {
-                    domain
-                        .user_params
-                        .entry(name.to_owned())
-                        .or_insert_with(|| field.value_type.clone());
-                    domain.routing_params.insert(route_param_field(name));
+    for node in graph_builder_postorder(graph) {
+        let GraphBuilder::BindingSource { output, .. } = node else {
+            continue;
+        };
+        for field in output.fields() {
+            let Some(name) = field.name.as_deref() else {
+                continue;
+            };
+            if let Some(path) = claim_path_from_param_field(name) {
+                domain
+                    .claim_params
+                    .entry(name.to_owned())
+                    .or_insert_with(|| ClaimParameter {
+                        path,
+                        ty: field.value_type.clone(),
+                    });
+                if claim_route_is_ordered_scalar(&field.value_type) {
+                    domain.routing_params.insert(name.to_owned());
                 }
+            } else {
+                domain
+                    .user_params
+                    .entry(name.to_owned())
+                    .or_insert_with(|| field.value_type.clone());
+                domain.routing_params.insert(route_param_field(name));
             }
         }
-        GraphBuilder::Recursive { seed, step, .. } => {
-            collect_binding_source_params(seed, domain);
-            collect_binding_source_params(step, domain);
+    }
+}
+
+/// Return builder nodes in child-before-parent order without consuming the
+/// calling thread's stack. Builder graphs are finite by construction; shared
+/// children are intentionally visited once per structural occurrence, matching
+/// the previous recursive walkers.
+fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
+    let mut pending = vec![(graph, false)];
+    let mut ordered = Vec::new();
+    while let Some((node, visited)) = pending.pop() {
+        if visited {
+            ordered.push(node);
+            continue;
         }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => collect_binding_source_params(input, domain),
-        GraphBuilder::Union { inputs } => {
-            for input in inputs {
-                collect_binding_source_params(input, domain);
+        pending.push((node, true));
+        match node {
+            GraphBuilder::Recursive { seed, step, .. } => {
+                pending.push((step, false));
+                pending.push((seed, false));
             }
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::VariantProject { input, .. }
+            | GraphBuilder::Project { input, .. }
+            | GraphBuilder::StreamingChecksum { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. }
+            | GraphBuilder::CollectBy { input, .. }
+            | GraphBuilder::Aggregate { input, .. } => pending.push((input, false)),
+            GraphBuilder::Union { inputs } => {
+                pending.extend(inputs.iter().rev().map(|input| (input.as_ref(), false)));
+            }
+            GraphBuilder::Join { left, right, .. }
+            | GraphBuilder::SemiJoin { left, right, .. }
+            | GraphBuilder::AntiJoin { left, right, .. } => {
+                pending.push((right, false));
+                pending.push((left, false));
+            }
+            GraphBuilder::Table { .. }
+            | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::FrontierSource { .. }
+            | GraphBuilder::BindingSource { .. } => {}
         }
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            collect_binding_source_params(left, domain);
-            collect_binding_source_params(right, domain);
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. } => {}
+    }
+    ordered
+}
+
+#[cfg(test)]
+mod stack_receipts {
+    use super::*;
+
+    #[test]
+    fn deep_declared_field_discovery_stays_on_a_server_sized_stack() {
+        // This is an internal receipt because it exercises the compiler's
+        // structural walk directly. Production reaches it while installing a
+        // policy graph on the server shell, whose default thread stack is 2
+        // MiB; the public policy scenario that exposed the bug cannot isolate
+        // this walk from transport and subscription work.
+        let completed = std::thread::Builder::new()
+            .name("deep-query-engine-graph-receipt".to_owned())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut graph = GraphBuilder::table("records");
+                for _ in 0..8_192 {
+                    graph = graph.filter(GroovePredicateExpr::gt("id", Value::U64(0)));
+                }
+                assert_eq!(graph_declared_output_fields(&graph), None);
+                // The receipt targets the lowering walk. Dropping this
+                // deliberately deep Arc chain remains independently recursive
+                // in GraphBuilder itself.
+                std::mem::forget(graph);
+            })
+            .expect("spawn server-sized stack receipt")
+            .join();
+
+        assert!(
+            completed.is_ok(),
+            "declared-field discovery must not recurse through deep policy graphs"
+        );
     }
 }
 

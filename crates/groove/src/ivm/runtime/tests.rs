@@ -1638,6 +1638,72 @@ fn deeply_nested_recursive_graph_compiles_on_a_server_sized_stack() {
     );
 }
 
+#[test]
+fn deeply_nested_retained_graph_ticks_on_a_server_sized_stack() {
+    // The server shell polls retained graphs directly. This receipt keeps that
+    // evaluator path separate from compilation: a valid, deeply nested policy
+    // carrier must not recursively poll one future per graph node.
+    let completed = std::thread::Builder::new()
+        .name("ivm-deep-tick-receipt".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            futures::executor::block_on(async {
+                let schema = albums_schema();
+                let albums = schema
+                    .table("albums")
+                    .expect("albums table")
+                    .record_schema();
+                let mut runtime = IvmRuntime::new(schema).expect("build runtime");
+                let storage =
+                    MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+                let mut seed = GraphBuilder::table("albums");
+                for _ in 0..1_024 {
+                    seed = seed.filter(PredicateExpr::gt("id", Value::U64(0)));
+                }
+                let graph = GraphBuilder::recursive(
+                    seed,
+                    GraphBuilder::frontier_source("frontier", albums.clone()),
+                    "frontier",
+                    1,
+                );
+                let output = runtime
+                    .add_dedup_graph(&graph)
+                    .expect("compile deeply nested graph")
+                    .node;
+                runtime.add_retainer(output, Retainer::PreparedShape("deep-tick".to_owned()));
+                let row = albums
+                    .create(&[Value::U64(1), Value::String("Blue Train".to_owned())])
+                    .expect("create album row");
+                runtime
+                    .tick(
+                        vec![TableDelta {
+                            variant_tag: 0,
+                            table: "albums".to_owned(),
+                            descriptor: albums,
+                            deltas: vec![RecordDelta {
+                                record: row.into(),
+                                weight: 1,
+                            }],
+                        }],
+                        &storage,
+                    )
+                    .await
+                    .expect("evaluate deeply nested graph");
+                assert!(runtime.retained_node_ids().contains(&output));
+                // This receipt exercises evaluation; derived GraphBuilder
+                // destruction is an unrelated recursive path.
+                std::mem::forget(graph);
+            });
+        })
+        .expect("spawn server-sized stack receipt")
+        .join();
+
+    assert!(
+        completed.is_ok(),
+        "retained deep graph evaluation must not recurse through the owner stack"
+    );
+}
+
 #[futures_test::test]
 async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();

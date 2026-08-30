@@ -451,19 +451,24 @@ impl TickEvaluator<'_> {
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
             pending.push((node, true));
-            pending.extend(
-                graph_node
-                    .descriptor
-                    .inputs
-                    .iter()
-                    .rev()
-                    .map(|input| (*input, false)),
-            );
+            // Recursive seed and step graphs run under a frontier-scoped
+            // evaluator in `update_recursive`; evaluating them here would
+            // incorrectly populate root-scoped memo and operator state.
+            if !matches!(graph_node.descriptor.operator, OpType::Recursive(_)) {
+                pending.extend(
+                    graph_node
+                        .descriptor
+                        .inputs
+                        .iter()
+                        .rev()
+                        .map(|input| (*input, false)),
+                );
+            }
         }
 
         let mut result = None;
         for node in order {
-            let records = self.update_node(node).await?;
+            let records = self.update_one_node(node).await?;
             if node == root {
                 result = Some(records);
             }
@@ -648,6 +653,13 @@ impl TickEvaluator<'_> {
     }
 
     pub(super) fn update_node(
+        &mut self,
+        node: NodeId,
+    ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        Box::pin(self.update_subgraph(node))
+    }
+
+    fn update_one_node(
         &mut self,
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
