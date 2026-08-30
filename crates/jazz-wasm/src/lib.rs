@@ -1103,14 +1103,18 @@ impl WasmDb {
         let cells = decode_cells(&cells)?;
         let options = insert_options_from_js(options)?;
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_insert(table, cells, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
+                db.enqueue_insert(table, cells, options)
+                    .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1128,14 +1132,18 @@ impl WasmDb {
         let patch = decode_cells(&patch)?;
         let options = update_options_from_js(options)?;
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_update(table, row_id, patch, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
+                db.enqueue_update(table, row_id, patch, options)
+                    .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1204,14 +1212,18 @@ impl WasmDb {
         let cells = decode_cells(&cells)?;
         let options = upsert_options_from_js(options)?;
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_upsert(table, row_id, cells, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
+                db.enqueue_upsert(table, row_id, cells, options)
+                    .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
@@ -1227,14 +1239,18 @@ impl WasmDb {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let options = delete_options_from_js(options)?;
         match &self.inner {
-            WasmDbInner::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
-            ),
+            WasmDbInner::Memory(db) => {
+                let write = db
+                    .enqueue_delete(table, row_id, options)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
+                db.enqueue_delete(table, row_id, options)
+                    .map_err(to_js_error)?,
             ),
             WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }

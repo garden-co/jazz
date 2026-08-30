@@ -476,6 +476,12 @@ where
         self.node.reserve_transaction_id(now_ms)
     }
 
+    /// Drive one bounded resident mutation turn without awaiting cold work.
+    #[doc(hidden)]
+    pub fn drive_queued_mutation_once(&self) {
+        self.node.poll_queued_mutation_once();
+    }
+
     pub(super) fn clone_for_reserved_transaction(&self, tx_id: TxId) -> Self {
         Self {
             schema: self.schema.clone(),
