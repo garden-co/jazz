@@ -377,3 +377,55 @@ fn queued_mutations_are_fifo_owned_and_surface_preparation_failures() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), accepted_row);
 }
+
+#[test]
+fn reopened_reservation_clock_dominates_durable_local_history() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let directory = tempfile::tempdir().expect("temporary RocksDB directory");
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x56; 16]),
+        author: AuthorSubject::for_test_bytes([0x66; 16]),
+    };
+    let storage = RocksDbStorage::open(directory.path(), &family_refs).expect("open RocksDB");
+    let first = block_on(Db::open(DbConfig::new(
+        schema.clone(),
+        storage,
+        identity.clone(),
+    )))
+    .expect("open first database");
+    let first_write = first
+        .enqueue_insert(
+            "todos".to_owned(),
+            row! { title: "before restart" },
+            jazz::db::InsertOptions {
+                updated_at_ms: Some(7),
+                ..Default::default()
+            },
+        )
+        .expect("reserve first identity");
+    let first_tx = first_write.mergeable_tx_id();
+    first.drive_queued_mutation_once();
+    block_on(first_write.wait(DurabilityTier::Local)).expect("first write is durable");
+    block_on(first.close()).expect("close first database");
+    drop(first);
+
+    let storage = RocksDbStorage::open(directory.path(), &family_refs).expect("reopen RocksDB");
+    let reopened =
+        block_on(Db::open(DbConfig::new(schema, storage, identity))).expect("reopen database");
+    let second_write = reopened
+        .enqueue_insert(
+            "todos".to_owned(),
+            row! { title: "after restart" },
+            jazz::db::InsertOptions {
+                updated_at_ms: Some(7),
+                ..Default::default()
+            },
+        )
+        .expect("reserve identity after reopen");
+    assert!(
+        second_write.mergeable_tx_id().time > first_tx.time,
+        "the synchronously returned identity must dominate durable history for the reused node",
+    );
+}
