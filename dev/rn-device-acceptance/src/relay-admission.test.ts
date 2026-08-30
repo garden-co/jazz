@@ -6,8 +6,11 @@ import {
   proveLogoutRevocation,
 } from "./relay-admission.ts";
 import { decodeBase64 as bytes, encodeBase64 } from "./base64.ts";
+import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 
 const admitted = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+const abiVarint = postcardVarint(BigInt(NATIVE_RELAY_ABI_VERSION));
+const probeResponse = encodeBase64(Uint8Array.of(0, ...abiVarint));
 
 test("Probe follows a successful Open carrying the exact admitted capability", async () => {
   const commands: Uint8Array[] = [];
@@ -18,7 +21,7 @@ test("Probe follows a successful Open carrying the exact admitted capability", a
         commands.push(decoded);
         if (decoded[0] === 1) return "AQk="; // Opened { relay: 9 }
         if (decoded[0] === 2 && decoded[1] === 9) return "Agc="; // Attached { client: 7 }
-        if (decoded[0] === 0) return "AAM="; // Probe { abi: 3 }
+        if (decoded[0] === 0) return probeResponse;
         if (decoded[0] === 3 && decoded[1] === 7) return "AwE="; // Closed { true }
         if (decoded[0] === 4 && decoded[1] === 9) return "AwE="; // Closed { true }
         throw new Error("unexpected command");
@@ -30,7 +33,11 @@ test("Probe follows a successful Open carrying the exact admitted capability", a
     commands.map((command) => command[0]),
     [1, 2, 0, 3, 4],
   );
-  assert.deepEqual(commands[0]!.slice(3), admitted);
+  assert.deepEqual(Array.from(commands[0]!.slice(1, 1 + abiVarint.length * 2)), [
+    ...abiVarint,
+    ...abiVarint,
+  ]);
+  assert.deepEqual(commands[0]!.slice(1 + abiVarint.length * 2), admitted);
 });
 
 test("a substituted admitted relay handle is rejected by the strict executor", async () => {
@@ -38,7 +45,7 @@ test("a substituted admitted relay handle is rejected by the strict executor", a
     const decoded = bytes(command);
     if (decoded[0] === 1) return "AQk=";
     if (decoded[0] === 2 && decoded[1] === 9) return "Agc=";
-    if (decoded[0] === 0) return "AAM=";
+    if (decoded[0] === 0) return probeResponse;
     if ((decoded[0] === 3 && decoded[1] === 7) || (decoded[0] === 4 && decoded[1] === 9))
       return "AwE=";
     throw new Error("native relay rejected an unknown client or relay handle");
@@ -63,7 +70,7 @@ test("a capability that native admission did not install cannot reach Probe", as
           const decoded = bytes(command);
           commands.push(decoded);
           if (decoded[0] === 1) throw new Error("native relay rejected uninstalled capability");
-          return "AAM=";
+          return probeResponse;
         },
       },
       new Uint8Array(32),
@@ -123,7 +130,7 @@ test("trusted logout removes old capability and aliases before a fresh admission
     async execute(command: string) {
       const decoded = bytes(command);
       if (decoded[0] === 1) {
-        if (revoked && decoded.slice(3).every((byte, index) => byte === original[index]))
+        if (revoked && openCapability(decoded).every((byte, index) => byte === original[index]))
           throw new Error("revoked capability");
         return revoked ? "AQo=" : "AQk="; // Opened { relay: 9|10 }
       }
@@ -133,7 +140,7 @@ test("trusted logout removes old capability and aliases before a fresh admission
       }
       if (decoded[0] === 3 && decoded[1] === 7) return revoked ? "AwA=" : "AwE="; // Closed { false|true }
       if (decoded[0] === 3 && decoded[1] === 8) return "AwE=";
-      if (decoded[0] === 0) return "AAM="; // Probe { abi: 3 }
+      if (decoded[0] === 0) return probeResponse;
       if (decoded[0] === 4 && decoded[1] === 9) return "AwE=";
       if (decoded[0] === 4 && decoded[1] === 10) return "AwE=";
       throw new Error("unexpected command");
@@ -156,7 +163,7 @@ test("trusted auth switching rejects scope A before scope B can attach", async (
     async execute(command: string) {
       const decoded = bytes(command);
       if (decoded[0] === 1) {
-        if (switched && decoded.slice(3).every((byte, index) => byte === scopeA[index]))
+        if (switched && openCapability(decoded).every((byte, index) => byte === scopeA[index]))
           throw new Error("scope A was revoked");
         return switched ? "AQo=" : "AQk=";
       }
@@ -166,7 +173,7 @@ test("trusted auth switching rejects scope A before scope B can attach", async (
       }
       if (decoded[0] === 3 && decoded[1] === 7) return switched ? "AwA=" : "AwE=";
       if (decoded[0] === 3 && decoded[1] === 8) return "AwE=";
-      if (decoded[0] === 0) return "AAM=";
+      if (decoded[0] === 0) return probeResponse;
       if (decoded[0] === 4 && (decoded[1] === 9 || decoded[1] === 10)) return "AwE=";
       throw new Error("unexpected command");
     },
@@ -178,3 +185,17 @@ test("trusted auth switching rejects scope A before scope B can attach", async (
   assert.equal(switched, true);
   assert.deepEqual(replacement.capability, scopeB);
 });
+
+function postcardVarint(value: bigint): number[] {
+  const encoded: number[] = [];
+  while (value >= 0x80n) {
+    encoded.push(Number((value & 0x7fn) | 0x80n));
+    value >>= 7n;
+  }
+  encoded.push(Number(value));
+  return encoded;
+}
+
+function openCapability(command: Uint8Array): Uint8Array {
+  return command.slice(1 + abiVarint.length * 2);
+}

@@ -1,4 +1,5 @@
 import { decodeBase64, encodeBase64 } from "./base64.ts";
+import { NATIVE_RELAY_ABI_VERSION } from "jazz-rn/native-relay-abi";
 
 type NativeRelayCapability = Uint8Array;
 type NativeRelayExecutor = { execute(commandBase64: string): Promise<string> };
@@ -33,7 +34,12 @@ export async function proveAdmittedRelay(
     attachedClient = decodeAttached(await executor.execute(encodeAttach(openedRelay)));
     markFailure?.("relay-probe-failed");
     const response = decodeBase64(await executor.execute("AA=="));
-    if (response.length !== 2 || response[0] !== 0 || response[1] !== 3)
+    const [abiVersion, abiOffset] = readVarint(response, 1);
+    if (
+      response[0] !== 0 ||
+      abiOffset !== response.length ||
+      abiVersion !== BigInt(NATIVE_RELAY_ABI_VERSION)
+    )
       throw new Error("installed Jazz relay returned an unexpected ABI probe response");
   } catch (error) {
     primaryFailure = error;
@@ -129,7 +135,8 @@ async function proveRevocationAndReplacement(
 function encodeOpen(capability: Uint8Array): string {
   if (capability.byteLength !== 32)
     throw new Error("admission capability must be exactly 32 bytes");
-  return encode([1, 3, 3, ...capability]); // postcard Open, ABI min/max, opaque capability
+  const abi = varint(BigInt(NATIVE_RELAY_ABI_VERSION));
+  return encode([1, ...abi, ...abi, ...capability]);
 }
 function encodeCloseRelay(relay: bigint): string {
   return encode([4, ...varint(relay)]);
