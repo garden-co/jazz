@@ -85,6 +85,7 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
             backend_attribution: false,
         })
     }
@@ -134,6 +135,7 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
             backend_attribution: false,
         };
         Ok((db, receipt))
@@ -170,6 +172,7 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
             backend_attribution: false,
         })
     }
@@ -222,6 +225,7 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
             backend_attribution: false,
         })
     }
@@ -333,6 +337,7 @@ where
             row_id_source: Rc::clone(&self.row_id_source),
             row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
             next_now_ms: Rc::clone(&self.next_now_ms),
+            reserved_tx_id: None,
             backend_attribution: self.backend_attribution,
         })
     }
@@ -471,6 +476,22 @@ where
         self.node.reserve_transaction_id(now_ms)
     }
 
+    pub(super) fn clone_for_reserved_transaction(&self, tx_id: TxId) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            schema_version_id: self.schema_version_id,
+            schema_view_is_fixed: self.schema_view_is_fixed,
+            schema_views: Rc::clone(&self.schema_views),
+            identity: self.identity,
+            node: Rc::clone(&self.node),
+            row_id_source: Rc::clone(&self.row_id_source),
+            row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
+            next_now_ms: Rc::clone(&self.next_now_ms),
+            reserved_tx_id: Some(tx_id),
+            backend_attribution: self.backend_attribution,
+        }
+    }
+
     /// Configure this durable process as the internal browser relay that owns
     /// fresh upstream authority sessions for client Edge reads.
     #[doc(hidden)]
@@ -582,6 +603,9 @@ where
 
     /// Return the locally observed fate and durability for a write transaction.
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
+        if let Some(state) = self.node.queued_mutation_write_state(tx_id) {
+            return state;
+        }
         let Some((fate, global_time, durability)) =
             crate::db::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
         else {
@@ -784,6 +808,7 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
+        self.node.poll_queued_mutation_once();
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         self.node.tick().await.map(|_| ())
@@ -791,6 +816,7 @@ where
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.poll_queued_mutation_once();
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         self.node.tick().await

@@ -217,3 +217,82 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
     );
     assert!(rows.iter().any(|row| row.row_uuid() == fresh.row_uuid()));
 }
+
+#[test]
+fn queued_update_retains_cold_preparation_and_its_definitive_identity() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let storage_control = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x54; 16]),
+            author: AuthorSubject::for_test_bytes([0x64; 16]),
+        },
+    )))
+    .expect("open yielding database");
+    let seeded = block_on(db.insert("todos", row! { title: "before" }, Default::default()))
+        .expect("seed row");
+    block_on(seeded.wait(DurabilityTier::Local)).expect("seed is durable");
+
+    storage_control.evict_all();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let queued = db
+        .enqueue_update(
+            "todos".to_owned(),
+            seeded.row_uuid(),
+            row! { title: "after" },
+            Default::default(),
+        )
+        .expect("synchronous facade reserves and queues");
+    let reserved = queued.mergeable_tx_id();
+    let state = block_on(queued.write_state()).expect("reserved state is observable");
+    assert_eq!(state.durability, DurabilityTier::None);
+
+    let mut first_turn = Box::pin(db.tick());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        first_turn.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(first_turn);
+    assert!(
+        control.observed().iter().any(|operation| matches!(
+            operation,
+            TestStorageOperation::Get | TestStorageOperation::ScanOpen
+        )),
+        "the queued owner future must reach the planted cold read",
+    );
+    assert_eq!(queued.mergeable_tx_id(), reserved);
+
+    control.resume();
+    for _ in 0..4_096 {
+        let mut turn = Box::pin(db.tick());
+        let _ = turn.as_mut().poll(&mut context);
+        drop(turn);
+        if block_on(queued.write_state())
+            .is_ok_and(|state| state.durability >= DurabilityTier::Local)
+        {
+            break;
+        }
+    }
+    let resumed_state = block_on(queued.write_state());
+    assert!(
+        resumed_state
+            .as_ref()
+            .is_ok_and(|state| state.durability >= DurabilityTier::Local),
+        "bounded owner turns must finish the resumed queued mutation: {resumed_state:?}",
+    );
+    assert_eq!(
+        block_on(queued.wait(DurabilityTier::Local)).expect("queued write settles"),
+        reserved,
+    );
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    let rows = block_on(db.all(&query, ReadOpts::default())).expect("read updated row");
+    assert_eq!(rows[0].cell_at(0), Some("after".into()));
+}

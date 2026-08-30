@@ -22,6 +22,9 @@ where
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
+    queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
+    queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
+    reserved_mutations: RefCell<BTreeSet<TxId>>,
     pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
@@ -96,6 +99,9 @@ where
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
+            queued_mutations: RefCell::new(VecDeque::new()),
+            queued_mutation_failures: RefCell::new(BTreeMap::new()),
+            reserved_mutations: RefCell::new(BTreeSet::new()),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
@@ -146,6 +152,72 @@ where
             .map_err(Error::from)?;
         self.tx_time_reservation_clock.set(made_at);
         Ok(TxId::new(made_at, self.node_uuid))
+    }
+
+    pub(super) fn enqueue_mutation(
+        &self,
+        tx_id: TxId,
+        future: QueuedMutationFuture,
+    ) -> Rc<RefCell<QueuedMutationStatus>> {
+        let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
+        self.reserved_mutations.borrow_mut().insert(tx_id);
+        self.queued_mutations
+            .borrow_mut()
+            .push_back(QueuedMutationOperation {
+                tx_id,
+                future,
+                status: Rc::clone(&status),
+            });
+        self.schedule_tick(TickUrgency::Immediate);
+        status
+    }
+
+    pub(super) fn poll_queued_mutation_once(&self) {
+        use std::task::{Context, Poll, Waker};
+
+        let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+            return;
+        };
+        let owned_waker = self.query_runtime_waker();
+        let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
+        let mut context = Context::from_waker(waker);
+        match operation.future.as_mut().poll(&mut context) {
+            Poll::Pending => {
+                self.queued_mutations.borrow_mut().push_front(operation);
+            }
+            Poll::Ready(result) => {
+                self.reserved_mutations
+                    .borrow_mut()
+                    .remove(&operation.tx_id);
+                match result {
+                    Ok(()) => *operation.status.borrow_mut() = QueuedMutationStatus::Published,
+                    Err(error) => {
+                        *operation.status.borrow_mut() =
+                            QueuedMutationStatus::Failed(error.clone());
+                        self.queued_mutation_failures
+                            .borrow_mut()
+                            .insert(operation.tx_id, error);
+                    }
+                }
+                if let Some(waiters) = self
+                    .write_state_waiters
+                    .borrow_mut()
+                    .remove(&operation.tx_id)
+                {
+                    for waiter in waiters {
+                        match waiter.notify {
+                            WriteStateWaiterNotify::Future(sender) => {
+                                let _ = sender.send(());
+                            }
+                            WriteStateWaiterNotify::Callback(callback) => callback(),
+                        }
+                    }
+                }
+                if !self.queued_mutations.borrow().is_empty() {
+                    self.schedule_tick(TickUrgency::Immediate);
+                }
+            }
+        }
     }
 
     pub(super) fn upstream_register_shape_options(
@@ -611,6 +683,12 @@ where
         tx_id: TxId,
         tier: DurabilityTier,
     ) -> Option<Result<TxId, Error>> {
+        if let Some(error) = self.queued_mutation_failures.borrow().get(&tx_id) {
+            return Some(Err(error.clone()));
+        }
+        if self.reserved_mutations.borrow().contains(&tx_id) {
+            return (tier <= DurabilityTier::None).then_some(Ok(tx_id));
+        }
         let state = crate::db::block_on(self.node.borrow_mut().transaction_state(tx_id));
         let Some((fate, global_time, durability)) = state else {
             return Some(Err(Error::new(
@@ -629,6 +707,23 @@ where
             Fate::Pending | Fate::Accepted if satisfied => Some(Ok(tx_id)),
             Fate::Pending | Fate::Accepted => None,
         }
+    }
+
+    pub(super) fn queued_mutation_write_state(
+        &self,
+        tx_id: TxId,
+    ) -> Option<Result<WriteState, Error>> {
+        if let Some(error) = self.queued_mutation_failures.borrow().get(&tx_id) {
+            return Some(Err(error.clone()));
+        }
+        self.reserved_mutations
+            .borrow()
+            .contains(&tx_id)
+            .then_some(Ok(WriteState {
+                fate: Fate::Pending,
+                global_time: None,
+                durability: DurabilityTier::None,
+            }))
     }
 
     pub(super) fn wait_for_transaction_with(

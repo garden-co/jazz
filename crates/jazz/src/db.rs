@@ -1452,6 +1452,8 @@ where
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
     row_id_source_guarantees_fresh: bool,
     next_now_ms: Rc<Cell<u64>>,
+    /// Set only on the private clone owned by one queued mutation operation.
+    reserved_tx_id: Option<TxId>,
     // Minted only by the explicitly unsafe trusted-backend open path. SYSTEM
     // itself is an admission identity, not proof that a Db may forge external
     // row provenance.
@@ -1504,6 +1506,19 @@ type RelayUpstreamSubscriptionOwners =
 type PendingRelaySubscriptionRejections =
     Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
+type QueuedMutationFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
+
+struct QueuedMutationOperation {
+    tx_id: TxId,
+    future: QueuedMutationFuture,
+    status: Rc<RefCell<QueuedMutationStatus>>,
+}
+
+enum QueuedMutationStatus {
+    Pending,
+    Published,
+    Failed(Error),
+}
 
 /// Authenticated logical destination for an upstream upload retry.
 ///
@@ -2439,7 +2454,7 @@ pub enum Propagation {
 }
 
 /// Public API error with stable machine-readable codes.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Error {
     /// Stable error code.
     pub code: ErrorCode,
@@ -3645,6 +3660,7 @@ where
     row_uuid: RowUuid,
     tx_id: TxId,
     local_tier: DurabilityTier,
+    queued_status: Option<Rc<RefCell<QueuedMutationStatus>>>,
 }
 
 impl<S> WriteHandle<S>
@@ -3721,6 +3737,19 @@ where
 
     /// Return the locally observed fate and durability for this write.
     pub async fn write_state(&self) -> Result<WriteState, Error> {
+        if let Some(status) = &self.queued_status {
+            match &*status.borrow() {
+                QueuedMutationStatus::Pending => {
+                    return Ok(WriteState {
+                        fate: Fate::Pending,
+                        global_time: None,
+                        durability: DurabilityTier::None,
+                    });
+                }
+                QueuedMutationStatus::Failed(error) => return Err(error.clone()),
+                QueuedMutationStatus::Published => {}
+            }
+        }
         let Some(node) = self.node.upgrade() else {
             return Err(Error::new(
                 ErrorCode::NotObserved,

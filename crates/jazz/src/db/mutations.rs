@@ -473,6 +473,119 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    fn queued_write_handle(
+        &self,
+        row: RowUuid,
+        tx_id: TxId,
+        queued_status: Rc<RefCell<QueuedMutationStatus>>,
+    ) -> WriteHandle<S> {
+        WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier: DurabilityTier::None,
+            queued_status: Some(queued_status),
+        }
+    }
+
+    /// Synchronously reserve identity and enqueue an owner-retained insert.
+    #[doc(hidden)]
+    pub fn enqueue_insert(
+        &self,
+        table: String,
+        cells: RowCells,
+        mut options: InsertOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.row_id = Some(row);
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.insert(&table, cells, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_update(
+        &self,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        mut options: UpdateOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.update(&table, row, patch, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_upsert(
+        &self,
+        table: String,
+        row: RowUuid,
+        cells: RowCells,
+        mut options: UpsertOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.upsert(&table, row, cells, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status))
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_delete(
+        &self,
+        table: String,
+        row: RowUuid,
+        mut options: DeleteOptions,
+    ) -> Result<WriteHandle<S>, Error> {
+        validate_updated_at_ms(options.updated_at_ms)?;
+        let now_ms = options.updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        options.updated_at_ms = Some(now_ms);
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let write = db.delete(&table, row, options).await?;
+                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(row, tx_id, status))
+    }
     /// Read a byte range from an ordinary bytes or string cell without
     /// exposing its physical representation. Inline and indirect cells share
     /// this API; only the intersecting chunk paths are requested.
@@ -1144,8 +1257,17 @@ where
                     self.schema_version_id,
                 )
                 .await?;
-            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(
+                    self.schema_version_id,
+                    vec![commit],
+                    reserved,
+                )
                 .await?
+            } else {
+                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                    .await?
+            }
         };
         self.finish_published_write(row, published).await
     }
@@ -1904,8 +2026,17 @@ where
                 .seal_inherited_large_values(commit, self.schema_version_id, true)
                 .await?
                 .staged_large_cell(column, staged, nullable);
-            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(
+                    self.schema_version_id,
+                    vec![commit],
+                    reserved,
+                )
                 .await?
+            } else {
+                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                    .await?
+            }
         };
         self.finish_published_write(row, published).await
     }
@@ -2506,13 +2637,16 @@ where
                 .cells(BTreeMap::<String, Value>::new())
                 .deletion(DeletionEvent::Restored),
         ));
-        let published = self
-            .node
-            .node
-            .lock()
-            .await
-            .commit_mergeable_many_in_schema(self.schema_version_id, commits)
-            .await?;
+        let published = {
+            let mut node = self.node.node.lock().await;
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
+                    .await?
+            } else {
+                node.commit_mergeable_many_in_schema(self.schema_version_id, commits)
+                    .await?
+            }
+        };
         self.finish_published_write(row, published).await
     }
 
@@ -2622,8 +2756,17 @@ where
                     allow_inherited_descriptors,
                 )
                 .await?;
-            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+            if let Some(reserved) = self.reserved_tx_id {
+                node.commit_mergeable_many_in_schema_at(
+                    self.schema_version_id,
+                    vec![commit],
+                    reserved,
+                )
                 .await?
+            } else {
+                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                    .await?
+            }
         };
         self.finish_published_write(row, published).await
     }
@@ -2650,6 +2793,7 @@ where
             row_uuid: row,
             tx_id,
             local_tier,
+            queued_status: None,
         })
     }
 
@@ -3106,6 +3250,7 @@ where
             row_uuid: row,
             tx_id,
             local_tier,
+            queued_status: None,
         })
     }
 
@@ -3134,6 +3279,7 @@ where
             row_uuid: row,
             tx_id,
             local_tier,
+            queued_status: None,
         })
     }
 

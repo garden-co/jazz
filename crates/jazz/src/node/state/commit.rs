@@ -212,6 +212,54 @@ where
         .await
     }
 
+    /// Commit prepared local writes under a transaction identity reserved by
+    /// the host before asynchronous preparation began.
+    pub(crate) async fn commit_mergeable_many_in_schema_at(
+        &mut self,
+        schema_version: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+        reserved: TxId,
+    ) -> Result<PublishedTransaction, Error> {
+        if reserved.node != self.node_uuid {
+            return Err(Error::InvalidMergeableCommit(
+                "reserved transaction belongs to another node",
+            ));
+        }
+        self.require_catalogue_ready()?;
+        if !self.catalogue.catalogue_schemas.contains_key(&schema_version) {
+            return Err(Error::InvalidMergeableCommit(
+                "authored schema version is not admitted",
+            ));
+        }
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "mergeable transaction permission subjects must match",
+                ));
+            }
+            if commit.parents.iter().any(|parent| parent.time >= reserved.time) {
+                return Err(Error::InvalidMergeableCommit(
+                    "reserved transaction does not dominate its prepared parents",
+                ));
+            }
+        }
+        self.merge_tx_time(reserved.time);
+        self.commit_mergeable_many_at_with_schema_versions(
+            commits
+                .into_iter()
+                .map(|commit| (schema_version, commit))
+                .collect(),
+            reserved.time,
+        )
+        .await
+    }
+
     fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
         for commit in commits {
             if !commit.parents.is_empty() {

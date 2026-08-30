@@ -1882,6 +1882,7 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
         row_uuid: row(0xf1),
         tx_id,
         local_tier: DurabilityTier::Local,
+        queued_status: None,
     };
     let err = block_on(handle.wait(DurabilityTier::Global)).unwrap_err();
     assert_eq!(err.code, ErrorCode::WriteRejected);
