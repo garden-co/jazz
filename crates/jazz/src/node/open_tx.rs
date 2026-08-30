@@ -768,12 +768,45 @@ where
         self.commit_exclusive(open_batch_id, author, now_ms).await
     }
 
+    /// Commit a bound exclusive transaction at a synchronously reserved local
+    /// identity after all cold serializability and large-value checks finish.
+    pub(crate) async fn commit_exclusive_bound_at(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        reserved: TxId,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let OpenTransactionKind::Exclusive {
+            bound_author: Some(author),
+        } = self.open_tx(open_batch_id)?.kind
+        else {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        };
+        self.commit_exclusive_inner(
+            open_batch_id,
+            author,
+            reserved.time.physical_ms(),
+            Some(reserved),
+        )
+        .await
+    }
+
     /// Commit an exclusive transaction and return its sync commit unit.
     pub async fn commit_exclusive(
         &mut self,
         open_batch_id: OpenTransactionId,
         made_by: AuthorSubject,
         now_ms: u64,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        self.commit_exclusive_inner(open_batch_id, made_by, now_ms, None)
+            .await
+    }
+
+    async fn commit_exclusive_inner(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        made_by: AuthorSubject,
+        now_ms: u64,
+        reserved: Option<TxId>,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
         let made_by = match self.open_tx(open_batch_id)?.kind {
             OpenTransactionKind::Exclusive {
@@ -813,8 +846,28 @@ where
         for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
-        let made_at = self.mint_tx_time(now_ms)?;
-        let tx_id = TxId::new(made_at, self.node_uuid);
+        let tx_id = match reserved {
+            Some(reserved) => {
+                if reserved.node != self.node_uuid {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity belongs to another node",
+                    ));
+                }
+                if open_tx
+                    .writes
+                    .iter()
+                    .flat_map(|write| write.parents.iter())
+                    .any(|parent| parent.time >= reserved.time)
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity must dominate every parent",
+                    ));
+                }
+                self.merge_tx_time(reserved.time);
+                reserved
+            }
+            None => TxId::new(self.mint_tx_time(now_ms)?, self.node_uuid),
+        };
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
         for write in open_tx.writes {

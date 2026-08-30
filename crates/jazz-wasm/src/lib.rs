@@ -898,8 +898,23 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db.abandon_transaction_handle(tx_id))
     }
 
-    fn commit_exclusive(&self, tx_id: OpenTransactionId) -> Result<TxId, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.commit_exclusive_handle(tx_id)))
+    fn commit_exclusive(&self, open_tx_id: OpenTransactionId) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => {
+                let write = db
+                    .enqueue_commit_exclusive_handle(open_tx_id)
+                    .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+                wasm_write_memory(Rc::clone(db), write)
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                db.enqueue_commit_exclusive_handle(open_tx_id)
+                    .map_err(to_js_error)?,
+            ),
+            Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
     }
 
     fn commit_mergeable(&self, open_tx_id: OpenTransactionId) -> Result<WasmWrite, JsValue> {
@@ -1697,31 +1712,10 @@ impl WasmDb {
         let open_transaction_id = open_transaction_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
-        if kind.as_deref().unwrap_or("mergeable") == "mergeable" {
-            return self.inner.commit_mergeable(open_transaction_id);
-        }
-        let tx_id = match kind.as_deref().unwrap_or("mergeable") {
+        match kind.as_deref().unwrap_or("mergeable") {
+            "mergeable" => self.inner.commit_mergeable(open_transaction_id),
             "exclusive" => self.inner.commit_exclusive(open_transaction_id),
-            kind => return Err(JsValue::from_str(&unknown_transaction_kind_message(kind))),
-        }
-        .map_err(to_js_error)?;
-        match &self.inner {
-            WasmDbInner::Memory(db) => wasm_tx_write(
-                tx_id,
-                Some(WasmWriteInner::MemoryTx {
-                    db: Rc::clone(db),
-                    tx_id,
-                }),
-            ),
-            #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => wasm_tx_write(
-                tx_id,
-                Some(WasmWriteInner::BrowserTx {
-                    db: Rc::clone(db),
-                    tx_id,
-                }),
-            ),
-            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+            kind => Err(JsValue::from_str(&unknown_transaction_kind_message(kind))),
         }
     }
 
@@ -3155,14 +3149,8 @@ impl WasmTx {
                 self.db.commit_mergeable(open_tx)
             }
             (WasmDbInner::Memory(db), WasmTxKind::Exclusive) => {
-                let tx_id = self.db.commit_exclusive(open_tx).map_err(to_js_error)?;
-                wasm_tx_write(
-                    tx_id,
-                    Some(WasmWriteInner::MemoryTx {
-                        db: Rc::clone(db),
-                        tx_id,
-                    }),
-                )
+                let _ = db;
+                self.db.commit_exclusive(open_tx)
             }
             #[cfg(target_arch = "wasm32")]
             (WasmDbInner::Browser(db), WasmTxKind::Mergeable) => {
@@ -3171,14 +3159,8 @@ impl WasmTx {
             }
             #[cfg(target_arch = "wasm32")]
             (WasmDbInner::Browser(db), WasmTxKind::Exclusive) => {
-                let tx_id = self.db.commit_exclusive(open_tx).map_err(to_js_error)?;
-                wasm_tx_write(
-                    tx_id,
-                    Some(WasmWriteInner::BrowserTx {
-                        db: Rc::clone(db),
-                        tx_id,
-                    }),
-                )
+                let _ = db;
+                self.db.commit_exclusive(open_tx)
             }
             (WasmDbInner::Closed, _) => Err(JsValue::from_str("WasmDb is closed")),
         }?;
@@ -3696,19 +3678,6 @@ fn wasm_write_browser(
         row_id: result.row_id,
         tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::BrowserTx { db, tx_id }),
-    })
-}
-
-fn wasm_tx_write(tx_id: TxId, inner: Option<WasmWriteInner>) -> Result<WasmWrite, JsValue> {
-    let result = WasmWriteResult {
-        row_id: RowUuid::from_bytes([0; 16]),
-        tx_id,
-    };
-    Ok(WasmWrite {
-        payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
-        row_id: result.row_id,
-        tx_id: TransactionId::from_committed_tx(tx_id),
-        inner,
     })
 }
 

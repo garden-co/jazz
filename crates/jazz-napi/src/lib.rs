@@ -3994,20 +3994,6 @@ fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
     })
 }
 
-fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
-    let result = WriteResult {
-        row_id: CoreRowUuid::from_bytes([0; 16]),
-        tx_id,
-    };
-    Ok(Write {
-        payload: postcard::to_allocvec(&result)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        row_id: result.row_id,
-        tx_id: TransactionId::from_committed_tx(tx_id),
-        inner,
-    })
-}
-
 fn core_tick_connection<S>(
     connection: &Option<Rc<LocalMutex<CorePeerConnection<S>>>>,
 ) -> napi::Result<u32>
@@ -4128,30 +4114,21 @@ fn core_commit_exclusive_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
-    let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
+    let write = db
+        .enqueue_commit_exclusive_handle(open_tx)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-    core_tx_write(
-        tx_id,
-        Some(NapiWrite::Memory {
-            db: Rc::clone(db),
-            tx_id,
-        }),
-    )
+    db.drive_queued_mutation_once();
+    core_write_memory(Rc::clone(db), write)
 }
 
 fn core_commit_exclusive_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
-    let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
+    let write = db
+        .enqueue_commit_exclusive_handle(open_tx)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-    core_tx_write(
-        tx_id,
-        Some(NapiWrite::Persistent {
-            db: Rc::clone(db),
-            tx_id,
-        }),
-    )
+    core_write_persistent(Rc::clone(db), write)
 }
 
 fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOpts> {

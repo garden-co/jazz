@@ -981,6 +981,35 @@ where
         self.finish_exclusive_publication(published, unit).await
     }
 
+    /// Reserve the final identity and retain exclusive serializability,
+    /// publication, and finalization on the node owner.
+    #[doc(hidden)]
+    pub fn enqueue_commit_exclusive_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<WriteHandle<S>, Error> {
+        let now_ms = self.next_now_ms();
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_mutation(
+            tx_id,
+            Box::pin(async move {
+                let (published, unit) = db
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .commit_exclusive_bound_at(open_tx_id, tx_id)
+                    .await?;
+                debug_assert_eq!(published.tx_id, tx_id);
+                let committed = db.finish_exclusive_publication(published, unit).await?;
+                debug_assert_eq!(committed, tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status))
+    }
+
     /// Commit an owned exclusive transaction as an explicit policy identity.
     ///
     /// Bindings that expose session-scoped transactions use this rather than
