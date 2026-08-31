@@ -79,6 +79,22 @@ Combine conditions with `allOf` (all must match) or `anyOf` (any can match).
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
 </include>
 
+Plain objects in a condition are row predicates. This includes tables with columns such as `type`,
+`column`, or `operation` that also appear in Jazz's policy representation. Results from helpers such
+as `isCreator`, `allowedTo.*`, `allOf`, and `anyOf` remain directly composable with those row
+predicates.
+
+An object such as `{ type: "True" }` is row data only when the table schema declares a `type` column.
+On a table without that column, Jazz rejects the unbranded policy-shaped value rather than silently
+interpreting it as either row data or policy IR. For advanced cases that need manually-authored
+policy IR, use `raw(...)` to opt in explicitly:
+
+```ts
+definePermissions(app, ({ policy, raw }) => {
+  policy.documents.allowRead.where(raw({ type: "True" }));
+});
+```
+
 ### JWT session claims
 
 When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
