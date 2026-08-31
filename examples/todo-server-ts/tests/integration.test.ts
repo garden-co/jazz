@@ -306,6 +306,53 @@ describe("Todo Server Integration", () => {
 
       await stopServer(server2);
     });
+
+    it("returns the current value after dense update history and a restart", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "jazz-dense-history-"));
+      const dbPath = join(dataDir, "jazz.db");
+      const server1 = await startServer(
+        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+
+      let todoId: string | undefined;
+      try {
+        const create = await authenticatedFetch(`${server1.baseUrl}/todos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "revision 0" }),
+        });
+        expect(create.status).toBe(201);
+        todoId = ((await create.json()) as Todo).id;
+
+        for (let revision = 1; revision <= 256; revision++) {
+          const update = await authenticatedFetch(`${server1.baseUrl}/todos/${todoId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: `revision ${revision}` }),
+          });
+          expect(update.status).toBe(200);
+        }
+        server1.flush();
+      } finally {
+        await stopServer(server1);
+      }
+
+      const server2 = await startServer(
+        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
+      try {
+        const response = await authenticatedFetch(`${server2.baseUrl}/todos/${todoId}`);
+        expect(response.status).toBe(200);
+        expect((await response.json()) as Todo).toMatchObject({
+          id: todoId,
+          title: "revision 256",
+        });
+      } finally {
+        await stopServer(server2);
+      }
+    });
   });
 
   describe("SSE Live Endpoint", () => {
