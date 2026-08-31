@@ -805,7 +805,10 @@ describe("broker worker context initialization", () => {
     });
     await expect(permanentFailure.outcome).resolves.toEqual({
       type: "foreground-node-lease-error",
-      message: "bad storage",
+      error: expect.objectContaining({
+        name: "Error",
+        message: "bad storage",
+      }),
     });
     expect(permanentFailure.port.close).toHaveBeenCalledOnce();
   });
