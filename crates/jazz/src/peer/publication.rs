@@ -977,6 +977,13 @@ impl PeerState {
             loop {
                 match maintained_subscription_view.subscription.try_recv() {
                     Ok(deltas) => {
+                        // A completed cold hydration delivers its complete
+                        // snapshot through this same receiver. That snapshot
+                        // already establishes the current member set below;
+                        // a static deletion witness in it is not an
+                        // incremental membership transition and must not
+                        // recursively reopen this subscription.
+                        let initial_snapshot = !maintained_subscription_view.initial_received;
                         maintained_subscription_view.initial_received = true;
                         self.metrics.maintained_subscription_view.delta_batches_in += 1;
                         let transitions = maintained_subscription_view
@@ -987,9 +994,12 @@ impl PeerState {
                                 &maintained_subscription_view.tables,
                                 &node.node_aliases,
                             )?;
-                        observed_result_delta_batches += transitions.observed_result_delta_batches;
-                        requires_authoritative_membership_reconcile |=
-                            transitions.requires_authoritative_membership_reconcile;
+                        if !initial_snapshot {
+                            observed_result_delta_batches +=
+                                transitions.observed_result_delta_batches;
+                            requires_authoritative_membership_reconcile |=
+                                transitions.requires_authoritative_membership_reconcile;
+                        }
                         terminal_operations.extend(transitions.terminal_operations);
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
