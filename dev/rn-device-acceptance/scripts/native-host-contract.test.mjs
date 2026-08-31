@@ -101,9 +101,10 @@ function extractAndroidDiagnosticCodes(fixture) {
 }
 
 function extractIosDiagnosticCodes(fixture) {
-  const body = /static NSSet<NSString \*> \*JazzDeviceDiagnosticCodes\(void\) \{[\s\S]*?setWithArray:@\[([\s\S]*?)\n  \]\];/.exec(
-    fixture,
-  )?.[1];
+  const body =
+    /static NSSet<NSString \*> \*JazzDeviceDiagnosticCodes\(void\) \{[\s\S]*?setWithArray:@\[([\s\S]*?)\n  \]\];/.exec(
+      fixture,
+    )?.[1];
   assert.ok(body, "iOS fixture must declare its diagnostic allowlist");
   return [...body.matchAll(/^\s*@"([^"]+)",?$/gm)].map((match) => match[1]);
 }
@@ -163,14 +164,23 @@ function isPropertyAccess(node, object, property) {
 }
 
 function relayReadbackFunction(source) {
-  const file = ts.createSourceFile("high-level-foreground.ts", source, ts.ScriptTarget.Latest, true);
+  const file = ts.createSourceFile(
+    "high-level-foreground.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+  );
   assert.deepEqual(file.parseDiagnostics, [], "high-level foreground source must parse");
   const matches = file.statements.filter(
     (statement) =>
       ts.isFunctionDeclaration(statement) &&
       statement.name?.text === "proveHighLevelForegroundRelayReadback",
   );
-  assert.equal(matches.length, 1, "relay readback must have exactly one named function declaration");
+  assert.equal(
+    matches.length,
+    1,
+    "relay readback must have exactly one named function declaration",
+  );
   const fn = matches[0];
   assert.ok(fn.body, "relay readback must have a function body");
   return { file, fn };
@@ -189,8 +199,8 @@ function awaitCall(expression) {
 
 function variableDeclaration(statement, name) {
   if (!ts.isVariableStatement(statement)) return undefined;
-  return statement.declarationList.declarations.find(
-    (declaration) => isIdentifier(declaration.name, name),
+  return statement.declarationList.declarations.find((declaration) =>
+    isIdentifier(declaration.name, name),
   );
 }
 
@@ -228,8 +238,15 @@ function assertPublicClientRelayReadback(source) {
     "relay readback must await createJazzClient(clientConfig(capability))",
   );
 
-  assert.ok(ts.isTryStatement(lifecycle), "relay readback must use try/finally after client creation");
-  assert.equal(lifecycle.catchClause, undefined, "relay readback must not swallow lifecycle failures");
+  assert.ok(
+    ts.isTryStatement(lifecycle),
+    "relay readback must use try/finally after client creation",
+  );
+  assert.equal(
+    lifecycle.catchClause,
+    undefined,
+    "relay readback must not swallow lifecycle failures",
+  );
   assert.ok(lifecycle.finallyBlock, "relay readback must shut down in finally");
   const tryStatements = lifecycle.tryBlock.statements;
   assert.equal(
@@ -265,7 +282,11 @@ function assertPublicClientRelayReadback(source) {
   );
   const assertion = assertionStatement;
   const call = assertion.expression;
-  assert.equal(call.arguments.length, 2, "persisted-title assertion must receive rows and run nonce");
+  assert.equal(
+    call.arguments.length,
+    2,
+    "persisted-title assertion must receive rows and run nonce",
+  );
   const [titles, nonce] = call.arguments;
   assert.ok(
     ts.isCallExpression(titles) &&
@@ -336,10 +357,7 @@ test("Android fixture BuildConfig fields and package registration remain compile
   assert.match(fixture, /jazz-device-receipt\.ndjson/);
   assert.match(fixture, /@ReactMethod fun recordDiagnostic/);
   assert.match(fixture, /require\(code in diagnosticCodes\)/);
-  for (const candidate of [
-    fixture,
-    read("native/android/JazzDeviceFixtureModule.kt"),
-  ]) {
+  for (const candidate of [fixture, read("native/android/JazzDeviceFixtureModule.kt")]) {
     assertOrderedDiagnosticCodes(candidate, "android");
     assert.throws(
       () => assertOrderedDiagnosticCodes(swapSubscriptionWriteStages(candidate), "android"),
@@ -686,10 +704,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
       "const rows = [{ title: persistedTitleForRun(runNonce) }];",
     ),
   );
-  assert.throws(
-    () => assertPublicClientRelayReadback(plantedRelayReadback),
-    /client\.db\.all/,
-  );
+  assert.throws(() => assertPublicClientRelayReadback(plantedRelayReadback), /client\.db\.all/);
   for (const decoy of [
     "// const rows = await client.db.all(app.todos);",
     "/* const rows = await client.db.all(app.todos); */",
@@ -769,9 +784,18 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     );
   }
   const misorderedStages = highLevelForeground
-    .replace('markFailure("public-client-write-failed")', 'markFailure("public-client-TEMP-failed")')
-    .replace('markFailure("public-client-read-failed")', 'markFailure("public-client-write-failed")')
-    .replace('markFailure("public-client-TEMP-failed")', 'markFailure("public-client-read-failed")');
+    .replace(
+      'markFailure("public-client-write-failed")',
+      'markFailure("public-client-TEMP-failed")',
+    )
+    .replace(
+      'markFailure("public-client-read-failed")',
+      'markFailure("public-client-write-failed")',
+    )
+    .replace(
+      'markFailure("public-client-TEMP-failed")',
+      'markFailure("public-client-read-failed")',
+    );
   assert.throws(() => assertPublicClientSeedStages(misorderedStages), /stage read is out of order/);
   assert.match(app, /\{\s*contains: \["a"\],\s*excludes: \["b"\],?\s*\}/);
   assert.match(app, /\{\s*contains: \["b"\],\s*excludes: \["a"\],?\s*\}/);
@@ -1119,8 +1143,7 @@ test("iOS acceptance embeds JavaScript and reports launch diagnostics on receipt
   assert.ok(
     app.indexOf("await observeTrustedAdmissionLifecycle(diagnostic.mark)") <
       app.indexOf("await diagnostic.clear()") &&
-      app.indexOf("await diagnostic.clear()") <
-      app.indexOf("await recordDeviceReceipt"),
+      app.indexOf("await diagnostic.clear()") < app.indexOf("await recordDeviceReceipt"),
     "the native receipt sink must run only after the complete JS relay lifecycle proof",
   );
 });
