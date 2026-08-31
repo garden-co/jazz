@@ -1332,6 +1332,16 @@ where
         Ok(())
     }
 
+    /// Terminalize every transaction still owned by this runtime.
+    ///
+    /// Database shutdown closes transaction admission before calling this, so
+    /// moving the live ids into `closed_batches` is the final ownership pass.
+    pub(crate) fn abandon_all_open_transactions(&mut self) {
+        self.open_tx
+            .closed_batches
+            .extend(std::mem::take(&mut self.open_tx.open_transactions).into_keys());
+    }
+
     /// Return whether local transaction time advanced after this transaction opened.
     pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenTransactionId) -> Result<bool, Error> {
         Ok(self.tx_time_high_water() > self.open_tx(tx_id)?.base_snapshot.local_base)
