@@ -1068,6 +1068,34 @@ mod variant_case_tests {
         JazzSchema::new(&public).expect("wide scalar schema compiles")
     }
 
+    fn wide_scalar_sibling_publication(
+        base: &JazzSchema,
+        source_identities: &PhysicalIdentityManifest,
+        target: SchemaVersion,
+    ) -> SchemaLineagePublication {
+        SchemaLineagePublication::author_from_prior(
+            base,
+            source_identities,
+            target.clone(),
+            MigrationLens::new(
+                base.version_id(),
+                target.id,
+                vec![TableLens {
+                    source_table: "events".to_owned(),
+                    target_table: "events".to_owned(),
+                    ops: vec![LensOp::TransformColumn {
+                        column: "status".to_owned(),
+                        transform: "jazz.identity".to_owned(),
+                    }],
+                }],
+            )
+            .expect("valid wide scalar lens"),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .expect("author wide scalar lineage")
+    }
+
     fn open_receipt_node(
         path: &Path,
         node_uuid: NodeUuid,
@@ -1264,28 +1292,8 @@ mod variant_case_tests {
         let source_identities = node.catalogue.physical_mappings[&base.version_id()]
             .identities
             .clone();
-        let publication = |target: SchemaVersion| {
-            SchemaLineagePublication::author_from_prior(
-                &base,
-                &source_identities,
-                target.clone(),
-                MigrationLens::new(
-                    base.version_id(),
-                    target.id,
-                    vec![TableLens {
-                        source_table: "events".to_owned(),
-                        target_table: "events".to_owned(),
-                        ops: vec![LensOp::TransformColumn {
-                            column: "status".to_owned(),
-                            transform: "jazz.identity".to_owned(),
-                        }],
-                    }],
-                )
-                .expect("valid wide scalar lens"),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )
-            .expect("author wide scalar lineage")
+        let publication = |target| {
+            wide_scalar_sibling_publication(&base, &source_identities, target)
         };
 
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
@@ -1327,5 +1335,79 @@ mod variant_case_tests {
         assert_eq!(reopened.catalogue.next_physical_table_id, next_table);
         assert_eq!(reopened.catalogue.next_physical_column_id, next_column);
         crate::db::block_on(reopened.close()).expect("close reopened scalar receipt storage");
+    }
+
+    #[test]
+    fn parked_scalar_sibling_is_revalidated_and_durably_removed_at_active_sequence() {
+        let base = public_wide_scalar_schema(None);
+        let sibling_a = SchemaVersion::new(public_wide_scalar_schema(Some("sibling-a")));
+        let sibling_b = SchemaVersion::new(public_wide_scalar_schema(Some("sibling-b")));
+        let node_uuid = NodeUuid::from_bytes([0x94; 16]);
+        let dir = tempfile::tempdir().expect("create parked scalar receipt directory");
+        let mut node = open_receipt_node(dir.path(), node_uuid, &base);
+        let source_identities = node.catalogue.physical_mappings[&base.version_id()]
+            .identities
+            .clone();
+        let publication_a =
+            wide_scalar_sibling_publication(&base, &source_identities, sibling_a.clone());
+        let publication_b =
+            wide_scalar_sibling_publication(&base, &source_identities, sibling_b.clone());
+        let initial_next_table = node.catalogue.next_physical_table_id;
+        let initial_next_column = node.catalogue.next_physical_column_id;
+
+        let parked = node
+            .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+                author: AuthorSubject::SYSTEM,
+                catalogue_seq: 2,
+                publication: Box::new(publication_b),
+            })
+            .expect("park out-of-order scalar sibling");
+        assert!(parked.is_empty());
+        assert_eq!(node.active_catalogue_seq(), 0);
+        assert!(node.catalogue.pending_lineages.contains_key(&2));
+        assert_eq!(node.catalogue.next_physical_table_id, initial_next_table);
+        assert_eq!(node.catalogue.next_physical_column_id, initial_next_column);
+
+        crate::db::block_on(node.close()).expect("close parked scalar receipt storage");
+        drop(node);
+        let mut node = open_receipt_node(dir.path(), node_uuid, &base);
+        assert!(node.catalogue.pending_lineages.contains_key(&2));
+
+        let drained = node
+            .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+                author: AuthorSubject::SYSTEM,
+                catalogue_seq: 1,
+                publication: Box::new(publication_a),
+            })
+            .expect("activate first sibling and reject parked overflow");
+        assert_eq!(
+            drained
+                .iter()
+                .filter(|message| matches!(message, SyncMessage::CatalogueAck(_)))
+                .count(),
+            1
+        );
+        assert_eq!(node.active_catalogue_seq(), 1);
+        assert!(node.catalogue.catalogue_schemas.contains_key(&sibling_a.id));
+        assert!(!node.catalogue.catalogue_schemas.contains_key(&sibling_b.id));
+        assert!(node.catalogue.pending_lineages.is_empty());
+        assert!(node.catalogue.staged_lineages.is_empty());
+        let next_table = node.catalogue.next_physical_table_id;
+        let next_column = node.catalogue.next_physical_column_id;
+        assert_eq!(next_table, initial_next_table);
+        assert_eq!(next_column, initial_next_column);
+
+        crate::db::block_on(node.close()).expect("close cleaned scalar receipt storage");
+        drop(node);
+        let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
+        assert_eq!(reopened.active_catalogue_seq(), 1);
+        assert!(reopened.catalogue.catalogue_schemas.contains_key(&sibling_a.id));
+        assert!(!reopened.catalogue.catalogue_schemas.contains_key(&sibling_b.id));
+        assert!(reopened.catalogue.pending_lineages.is_empty());
+        assert!(reopened.catalogue.staged_lineages.is_empty());
+        assert_eq!(reopened.catalogue.next_physical_table_id, next_table);
+        assert_eq!(reopened.catalogue.next_physical_column_id, next_column);
+        crate::db::block_on(reopened.close())
+            .expect("close reopened cleaned scalar receipt storage");
     }
 }

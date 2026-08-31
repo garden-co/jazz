@@ -577,7 +577,7 @@ where
             let Some(pending) = self.catalogue.pending_lineages.get(&next).cloned() else {
                 break;
             };
-            let publication = pending.publication;
+            let publication = &pending.publication;
             let Some(source) = self
                 .catalogue
                 .catalogue_schemas
@@ -620,12 +620,18 @@ where
                         identity_history,
                     )
                     .map_err(Error::InvalidCatalogueUpdate)
-            });
+            })
+            // A parked sibling was admitted against the catalogue prefix that
+            // existed when it arrived. Reconcile it again only when its
+            // sequence becomes active: an earlier sibling may have widened a
+            // shared scalar registry to the u8 limit in the meantime.
+            .and_then(|()| self.validate_pending_schema_lineage_physical_mapping(&pending));
             if validation.is_err() {
                 self.remove_pending_schema_lineage(next, publication.id)
                     .await?;
                 break;
             }
+            let publication = pending.publication;
             if self
                 .catalogue
                 .active_lineages_by_target

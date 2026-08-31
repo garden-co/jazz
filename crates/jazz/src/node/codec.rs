@@ -1407,9 +1407,11 @@ mod catalogue_payload_tests {
             introducing_schema: SchemaVersionId(uuid::Uuid::from_bytes([byte; 16])),
             introducing_ordinal: ordinal,
         };
-        let payload_case = |byte, ordinal| GlobalEnumCaseId {
-            id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_bytes([byte; 16])),
-            introducing_schema: SchemaVersionId(uuid::Uuid::from_bytes([byte; 16])),
+        let payload_case = |identity_byte, schema_byte, ordinal| GlobalEnumCaseId {
+            id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_bytes(
+                [identity_byte; 16],
+            )),
+            introducing_schema: SchemaVersionId(uuid::Uuid::from_bytes([schema_byte; 16])),
             introducing_ordinal: ordinal,
         };
         SchemaPhysicalMapping {
@@ -1445,7 +1447,7 @@ mod catalogue_payload_tests {
                     )]),
                     payload_enum_cases: BTreeMap::from([(
                         PhysicalColumnId(11),
-                        vec![payload_case(0x22, 1)],
+                        vec![payload_case(0x22, 0xa2, 1)],
                     )]),
                     nested_scalar_enum_cases: BTreeMap::from([(
                         PhysicalColumnId(11),
@@ -1455,11 +1457,53 @@ mod catalogue_payload_tests {
                         PhysicalColumnId(11),
                         BTreeMap::from([(
                             "root/case/canonical".to_owned(),
-                            vec![payload_case(0x44, 3)],
+                            vec![payload_case(0x44, 0xc4, 3)],
                         )]),
                     )]),
                 },
             )]),
+        }
+    }
+
+    fn assert_global_enum_case_metadata(
+        actual: &[GlobalEnumCaseId],
+        expected: &[GlobalEnumCaseId],
+    ) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.introducing_schema, expected.introducing_schema);
+            assert_eq!(actual.introducing_ordinal, expected.introducing_ordinal);
+        }
+    }
+
+    fn assert_payload_case_metadata(
+        actual: &SchemaPhysicalMapping,
+        expected: &SchemaPhysicalMapping,
+    ) {
+        for (table_name, expected_table) in &expected.tables {
+            let actual_table = &actual.tables[table_name];
+            assert_eq!(
+                actual_table.payload_enum_cases.len(),
+                expected_table.payload_enum_cases.len()
+            );
+            for (column, expected_cases) in &expected_table.payload_enum_cases {
+                assert_global_enum_case_metadata(
+                    &actual_table.payload_enum_cases[column],
+                    expected_cases,
+                );
+            }
+            assert_eq!(
+                actual_table.nested_payload_enum_cases.len(),
+                expected_table.nested_payload_enum_cases.len()
+            );
+            for (column, expected_paths) in &expected_table.nested_payload_enum_cases {
+                let actual_paths = &actual_table.nested_payload_enum_cases[column];
+                assert_eq!(actual_paths.len(), expected_paths.len());
+                for (path, expected_cases) in expected_paths {
+                    assert_global_enum_case_metadata(&actual_paths[path], expected_cases);
+                }
+            }
         }
     }
 
@@ -1567,7 +1611,7 @@ mod catalogue_payload_tests {
             &[2],
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
             &[0x22; 16],
-            &[0x22; 16],
+            &[0xa2; 16],
             &[1],
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 10, 0, 0, 0][..],
             b"root/array",
@@ -1579,7 +1623,7 @@ mod catalogue_payload_tests {
             b"root/case/canonical",
             &[1, 0, 0, 0][..],
             &[0x44; 16],
-            &[0x44; 16],
+            &[0xc4; 16],
             &[3],
         ]
         .concat();
@@ -1594,12 +1638,15 @@ mod catalogue_payload_tests {
         ]
         .concat();
         expected.splice(1..1, identity_prefix);
-        assert_eq!(decode_physical_mapping(&expected).unwrap(), mapping);
+        let decoded_v1 = decode_physical_mapping(&expected).unwrap();
+        assert_eq!(decoded_v1, mapping);
+        assert_payload_case_metadata(&decoded_v1, &mapping);
 
         let mut expected_v2 = expected;
         expected_v2[0] = PHYSICAL_MAPPING_VERSION;
-        for (identity_byte, ordinal) in [(0x22, 1), (0x44, 3)] {
-            let mut marker = vec![identity_byte; 32];
+        for (identity_byte, schema_byte, ordinal) in [(0x22, 0xa2, 1), (0x44, 0xc4, 3)] {
+            let mut marker = vec![identity_byte; 16];
+            marker.extend_from_slice(&[schema_byte; 16]);
             marker.push(ordinal);
             let end = expected_v2
                 .windows(marker.len())
@@ -1610,7 +1657,9 @@ mod catalogue_payload_tests {
         }
         let encoded = encode_physical_mapping(&mapping).unwrap();
         assert_eq!(encoded, expected_v2);
-        assert_eq!(decode_physical_mapping(&encoded).unwrap(), mapping);
+        let decoded_v2 = decode_physical_mapping(&encoded).unwrap();
+        assert_eq!(decoded_v2, mapping);
+        assert_payload_case_metadata(&decoded_v2, &mapping);
     }
 
     #[test]
