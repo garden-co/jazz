@@ -103,6 +103,62 @@ describe("jazzPlugin", () => {
     );
   });
 
+  it("uses the resolved development mode when loading env files", async () => {
+    const appId = "00000000-0000-0000-0000-000000000121";
+    const root = await tempRoots.create("jazz-vite-mode-env-test-");
+    await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(
+      join(root, ".env.development.local"),
+      [
+        `VITE_JAZZ_APP_ID=${appId}`,
+        "VITE_JAZZ_SERVER_URL=http://development.example",
+        "JAZZ_ADMIN_SECRET=development-admin",
+        "",
+      ].join("\n"),
+    );
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId,
+      port: 19879,
+      url: "http://127.0.0.1:19879",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const plugin = jazzPlugin({ schemaDir: root });
+    const config = plugin.config as (
+      config: Record<string, unknown>,
+      env: { command: string; mode: string },
+    ) => unknown;
+    await config({ root }, { command: "serve", mode: "development" });
+
+    const closeHandlers: (() => Promise<void> | void)[] = [];
+    const viteServer = {
+      config: {
+        root,
+        command: "serve" as const,
+        mode: "development",
+        env: {} as Record<string, string>,
+      },
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          closeHandlers.push(cb);
+        },
+      },
+      ws: { send() {} },
+    };
+    await (plugin.configureServer as (server: typeof viteServer) => Promise<void>)(viteServer);
+
+    expect(startSpy).not.toHaveBeenCalled();
+    expect(viteServer.config.env.VITE_JAZZ_APP_ID).toBe(appId);
+    expect(viteServer.config.env.VITE_JAZZ_SERVER_URL).toBe("http://development.example");
+
+    for (const handler of closeHandlers) await handler();
+  });
+
   // Without this alias, a Vite consumer installed via pnpm hits
   // "Failed to resolve import 'jazz-wasm'" at runtime — the bare specifier
   // in jazz-tools' chunk can't be found unless jazz-wasm is hoisted or a

@@ -1,42 +1,25 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
 /**
- * Load .env from the given directory into process.env.
+ * Load Vite's standard mode-aware env files from the given directory into
+ * process.env.
  *
- * Next.js does this itself before invoking next.config.ts, so its plugin
- * sees env vars through process.env for free. Vite and SvelteKit only load
- * Vite-prefixed vars via import.meta.env and never populate process.env —
- * so the plugin has to backfill before reading cloud-mode env keys.
+ * Next.js does this itself before invoking next.config.ts, so its plugin sees
+ * env vars through process.env for free. Vite and SvelteKit only expose
+ * prefixed vars through import.meta.env and never populate process.env, so the
+ * plugin has to backfill before reading server-side cloud-mode keys.
  *
- * Only reads .env, not .env. Jazz writes a sibling .env file for
- * internal dev-server app-id persistence (see managed-runtime.ts), and we
- * don't want that leaking back through this loader.
- *
- * Does not overwrite values that are already in process.env; real shell
- * exports and CI env wins over .env.
+ * Vite owns dotenv parsing, expansion, and the standard precedence order:
+ * .env, .env.local, .env.[mode], then .env.[mode].local. Passing an empty
+ * prefix asks it to return every key; only previously unset process values are
+ * copied back, so shell and CI environment variables remain authoritative.
  */
-export function loadEnvFileIntoProcessEnv(root: string): void {
-  const path = join(root, ".env");
-  if (existsSync(path)) {
-    const content = readFileSync(path, "utf8");
-    for (let line of content.split("\n")) {
-      if (line.endsWith("\r")) line = line.slice(0, -1);
-      line = line.trim();
-      if (!line || line.startsWith("#")) continue;
-      const eq = line.indexOf("=");
-      if (eq === -1) continue;
-      const key = line.slice(0, eq).trim();
-      let value = line.slice(eq + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      if (process.env[key] === undefined) {
-        process.env[key] = value;
-      }
+export async function loadEnvFileIntoProcessEnv(root: string, mode: string): Promise<void> {
+  // Vite is intentionally not a jazz-tools runtime dependency: resolve it
+  // only when a Vite or SvelteKit integration actually loads framework env.
+  const { loadEnv } = await import("vite");
+  const loaded = loadEnv(mode, root, "");
+  for (const [key, value] of Object.entries(loaded)) {
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
     }
   }
 }
