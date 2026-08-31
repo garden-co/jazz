@@ -10,7 +10,6 @@ const BINARIES = {
   "darwin-x64": "jazz-tools-darwin-x64",
   "linux-arm64": "jazz-tools-linux-arm64",
   "linux-x64": "jazz-tools-linux-x64",
-  "win32-x64": "jazz-tools-windows-x64.exe",
 };
 
 function fail(message) {
@@ -165,9 +164,7 @@ if (!command || command === "--help" || command === "-h") {
   if (!binaryPath) {
     const lines = [];
     if (!binaryName) {
-      lines.push(
-        `jazz-tools does not include a bundled binary for ${process.platform}/${process.arch}.`,
-      );
+      lines.push(`jazz-tools CLI is not supported on ${process.platform}/${process.arch}.`);
     } else {
       lines.push(`Bundled binary missing: ${binaryName}`);
       lines.push("This package may be corrupted or published without target artifacts.");
