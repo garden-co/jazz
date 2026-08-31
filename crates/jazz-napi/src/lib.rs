@@ -188,10 +188,29 @@ pub struct UpsertOptions {
     pub author: Option<Uint8Array>,
     pub head: Option<JsonValue>,
     pub base: Option<JsonValue>,
-    /// Legacy alias for `head` when `base` is omitted. It must not be combined
-    /// with either branch-view field.
+    /// Parsed only to reject the removed JavaScript `{ branch }` upsert shape.
+    ///
+    /// This is deliberately omitted from the public TypeScript declaration:
+    /// callers must use `head` (and optionally `base`) for a branch view.
+    #[napi(skip_typescript)]
     pub branch: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
+}
+
+/// The runtime representation of JavaScript upsert options.
+///
+/// `#[napi(object)]` intentionally maps an absent, `undefined`, and `null`
+/// optional field to the same Rust `None`.  That is appropriate for supported
+/// optional fields, but not for the removed `branch` option: its *presence*
+/// must be rejected so an untyped caller cannot silently fall back to Root.
+/// Keep the generated [`UpsertOptions`] interface for TypeScript consumers,
+/// and parse this private representation from the raw JS object instead.
+struct ParsedUpsertOptions {
+    author: Option<Uint8Array>,
+    head: Option<JsonValue>,
+    base: Option<JsonValue>,
+    branch_present: bool,
+    updated_at_ms: Option<f64>,
 }
 
 #[napi(object)]
@@ -1253,16 +1272,15 @@ impl Tx {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
-        options: Option<UpsertOptions>,
+        #[napi(ts_arg_type = "UpsertOptions | undefined | null")] options: Option<Unknown<'_>>,
     ) -> napi::Result<()> {
-        self.reject_attributed_branch(
-            options
-                .as_ref()
-                .is_some_and(|options| options.head.is_some() || options.base.is_some()),
-        )?;
+        let options = core_upsert_options(parse_upsert_options(options)?)?;
+        self.reject_attributed_branch(matches!(
+            &options.target,
+            jazz::db::WriteTarget::BranchView { .. }
+        ))?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
-        let options = core_upsert_options(options)?;
         let open_tx = self.open_tx()?;
         let exclusive = matches!(self.kind, NapiTxKind::Exclusive);
         match self.db.as_ref() {
@@ -1780,11 +1798,14 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
-        options: Option<UpsertOptions>,
+        #[napi(ts_arg_type = "UpsertOptions | undefined | null")] options: Option<Unknown<'_>>,
     ) -> napi::Result<Write> {
+        // Reject an obsolete JavaScript shape before inspecting mutation bytes:
+        // callers should get the actionable API error, and no malformed row
+        // payload can mask a Root-target compatibility violation.
+        let options = core_upsert_options(parse_upsert_options(options)?)?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
-        let options = core_upsert_options(options)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -4626,38 +4647,6 @@ fn core_branch_selector_from_json(value: JsonValue) -> napi::Result<CoreBranchSe
         .map_err(|error| napi::Error::from_reason(format!("invalid branch selector: {error}")))
 }
 
-fn core_legacy_upsert_branch_selector_from_json(
-    value: JsonValue,
-) -> napi::Result<CoreBranchSelector> {
-    if let Ok(selector) = serde_json::from_value(value.clone()) {
-        return Ok(selector);
-    }
-    let JsonValue::Object(values) = value else {
-        return Err(napi::Error::from_reason(
-            "legacy upsert branch selector must be an object",
-        ));
-    };
-    if values.is_empty() {
-        return Err(napi::Error::from_reason(
-            "legacy upsert branch selector must contain at least one column",
-        ));
-    }
-    let values = values
-        .into_iter()
-        .map(|(column, value)| {
-            core_claim_value_from_json(value)
-                .map(|value| (column.clone(), value))
-                .map_err(|error| {
-                    napi::Error::from_reason(format!(
-                        "invalid legacy upsert branch column {column}: {}",
-                        error.reason
-                    ))
-                })
-        })
-        .collect::<napi::Result<Vec<_>>>()?;
-    Ok(CoreBranchSelector::new(values))
-}
-
 fn core_branch_base_from_json(
     value: Option<JsonValue>,
 ) -> napi::Result<Option<CoreBranchViewBase>> {
@@ -4727,26 +4716,46 @@ fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db:
     })
 }
 
-fn core_upsert_options(options: Option<UpsertOptions>) -> napi::Result<jazz::db::UpsertOptions> {
+/// Parse upsert options without erasing whether the removed `branch` key was
+/// supplied. `has_named_property` follows JavaScript's normal prototype and
+/// Proxy `has` semantics, while deliberately avoiding a getter for the
+/// removed property. A throwing Proxy trap remains a binding error rather than
+/// selecting Root.
+fn parse_upsert_options(options: Option<Unknown<'_>>) -> napi::Result<Option<ParsedUpsertOptions>> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    if options.get_type()? != ValueType::Object {
+        return Err(napi::Error::from_reason("upsert options must be an object"));
+    }
+    let object = Object::from_raw(options.value().env, options.value().value);
+    Ok(Some(ParsedUpsertOptions {
+        author: object.get_named_property_unchecked("author")?,
+        head: object.get_named_property_unchecked("head")?,
+        base: object.get_named_property_unchecked("base")?,
+        branch_present: object.has_named_property("branch")?,
+        updated_at_ms: object.get_named_property_unchecked("updatedAtMs")?,
+    }))
+}
+
+fn core_upsert_options(
+    options: Option<ParsedUpsertOptions>,
+) -> napi::Result<jazz::db::UpsertOptions> {
     let Some(options) = options else {
         return Ok(Default::default());
     };
-    let target = match (options.branch, options.head, options.base) {
-        (Some(branch), None, None) => jazz::db::WriteTarget::BranchView {
-            head: core_legacy_upsert_branch_selector_from_json(branch)?,
-            base: None,
-        },
-        (Some(_), _, _) => {
-            return Err(napi::Error::from_reason(
-                "upsert options must not combine legacy branch with head or base",
-            ));
-        }
-        (None, Some(head), base) => jazz::db::WriteTarget::BranchView {
+    if options.branch_present {
+        return Err(napi::Error::from_reason(
+            "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view",
+        ));
+    }
+    let target = match (options.head, options.base) {
+        (Some(head), base) => jazz::db::WriteTarget::BranchView {
             head: core_branch_selector_from_json(head)?,
             base: core_branch_base_from_json(base)?,
         },
-        (None, None, None) => Default::default(),
-        (None, None, Some(_)) => {
+        (None, None) => Default::default(),
+        (None, Some(_)) => {
             return Err(napi::Error::from_reason(
                 "branch view base requires a head selector",
             ));
@@ -5495,16 +5504,16 @@ mod tests {
 
     use crate::{
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, JazzServer, JazzServerInner,
-        NapiDb, NapiDbInnerStorage, NapiTxKind, NapiWrite, PendingNativeRead,
+        NapiDb, NapiDbInnerStorage, NapiTxKind, NapiWrite, ParsedUpsertOptions, PendingNativeRead,
         PendingNativeSubscriptionBatch, PendingSubscriptionBatchOutcome,
         PendingSubscriptionBatchPoll, PreparedQuery, RestoreOptions, Tx, UpdateOptions,
-        UpsertOptions, authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes,
-        core_block_on, core_claim_value_from_json, core_drive_direct_mutation_once,
-        core_insert_options, core_open_backend_identity, core_open_identity,
-        core_read_opts_from_json, core_read_tier_from_str, core_restore_options,
-        core_subscription_event_to_napi, core_update_options, core_upsert_options,
-        core_write_memory, core_write_state_to_json, encode_core_subscription_delta,
-        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
+        authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes, core_block_on,
+        core_claim_value_from_json, core_drive_direct_mutation_once, core_insert_options,
+        core_open_backend_identity, core_open_identity, core_read_opts_from_json,
+        core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
+        core_update_options, core_upsert_options, core_write_memory, core_write_state_to_json,
+        encode_core_subscription_delta, requeue_retryable_subscription_batch,
+        unknown_transaction_kind_message,
     };
 
     #[test]
@@ -6738,11 +6747,11 @@ mod tests {
             .is_err()
         );
         assert!(
-            core_upsert_options(Some(UpsertOptions {
+            core_upsert_options(Some(ParsedUpsertOptions {
                 author: None,
                 head: None,
                 base: None,
-                branch: None,
+                branch_present: false,
                 updated_at_ms: Some(-1.0),
             }))
             .is_err()
@@ -6758,40 +6767,38 @@ mod tests {
     }
 
     #[test]
-    fn legacy_javascript_upsert_branch_is_a_safe_head_alias() {
-        let branch = json!({ "branch": "draft" });
-        let parsed = core_upsert_options(Some(UpsertOptions {
+    fn javascript_upsert_rejects_removed_branch_property_by_presence() {
+        let error = core_upsert_options(Some(ParsedUpsertOptions {
             author: None,
             head: None,
             base: None,
-            branch: Some(branch.clone()),
+            branch_present: true,
             updated_at_ms: None,
         }))
-        .expect("legacy branch option remains supported");
-        assert_eq!(
-            parsed.target,
-            jazz::db::WriteTarget::BranchView {
-                head: jazz::protocol::BranchSelector::new([(
-                    "branch",
-                    CoreValue::String("draft".to_owned()),
-                )]),
-                base: None,
-            }
-        );
-
-        let error = core_upsert_options(Some(UpsertOptions {
-            author: None,
-            head: Some(branch.clone()),
-            base: None,
-            branch: Some(branch),
-            updated_at_ms: None,
-        }))
-        .expect_err("legacy and branch-view options must not be ambiguous");
+        .expect_err("the removed branch selector must not be reinterpreted as a head");
         assert!(
             error
                 .reason
-                .contains("must not combine legacy branch with head or base")
+                .contains("option `branch` is not supported; use `head`")
         );
+
+        let canonical_head = serde_json::to_value(jazz::protocol::BranchSelector::new([(
+            "branch",
+            CoreValue::String("draft".to_owned()),
+        )]))
+        .expect("branch selector serializes for the binding boundary");
+        let parsed = core_upsert_options(Some(ParsedUpsertOptions {
+            author: None,
+            head: Some(canonical_head),
+            base: None,
+            branch_present: false,
+            updated_at_ms: None,
+        }))
+        .expect("the canonical head selector remains accepted");
+        assert!(matches!(
+            parsed.target,
+            jazz::db::WriteTarget::BranchView { .. }
+        ));
     }
 
     #[test]
