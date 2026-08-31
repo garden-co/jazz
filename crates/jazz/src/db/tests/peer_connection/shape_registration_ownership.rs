@@ -32,6 +32,7 @@ fn subscribe_message(shape: &ValidatedQuery, usage_seed: u8) -> (SyncMessage, Su
             subscription,
             values: vec![Value::String("shared".to_owned())],
             known_state: None,
+            delegated_session: None,
         }),
         subscription,
     )
