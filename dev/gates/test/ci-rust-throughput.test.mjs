@@ -1419,9 +1419,9 @@ test("CodSpeed builds the BandChat caught-up fast-resume receipt", () => {
 });
 
 test("jazz-tools advertises exactly the CLI artifacts its build matrix produces", () => {
-  const producedCliArtifacts = [
-    ...packageBuild.matchAll(/^\s+output: (jazz-tools-\S+)$/gm),
-  ].map((match) => match[1]);
+  const producedCliArtifacts = [...packageBuild.matchAll(/^\s+output: (jazz-tools-\S+)$/gm)].map(
+    (match) => match[1],
+  );
 
   assert.deepEqual(Object.values(jazzToolsTargets).sort(), producedCliArtifacts.sort());
   assert.equal(jazzToolsTargets["win32-x64"], undefined);
