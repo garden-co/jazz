@@ -1097,6 +1097,166 @@ fn cancelled_close_handoff_is_coherent_with_concurrent_and_repeated_close() {
     });
 }
 
+/// Internal because this fixes the exact owner-queue interleaving that public
+/// bindings cannot hold deterministically: close is cancelled while a cold
+/// predecessor is retained, then an ordinary tick runs before the accepted
+/// stage/commit sequence has acquired the node lock.
+#[test]
+fn cancelled_close_tick_does_not_tombstone_a_later_admitted_mergeable_commit() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let (release_head, cold_head) = futures::channel::oneshot::channel();
+        db.node
+            .enqueue_transaction_operation(
+                OpenTransactionId::new(),
+                Box::pin(async move {
+                    cold_head
+                        .await
+                        .expect("cancelled close retains its cold FIFO predecessor");
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        let transaction = db.mergeable_tx().await.unwrap();
+        let tx_id = transaction.tx_id;
+        db.enqueue_transaction_insert(
+            tx_id,
+            false,
+            "todos".to_owned(),
+            doctest_support::todo_cells("accepted before cancelled close", false),
+            InsertOptions {
+                row_id: Some(row(0xd9)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let commit = db.enqueue_commit_mergeable_handle(tx_id).unwrap();
+
+        let mut cancelled = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(cancelled);
+
+        // An ordinary tick while the cold predecessor is still retained must
+        // not consume shutdown's final transaction sweep.
+        db.tick().await.unwrap();
+        release_head
+            .send(())
+            .expect("the cold predecessor remains retained after cancellation");
+
+        // Complete the predecessor, then run the queued insert. The remaining
+        // commit proves that the already-open transaction was not swept between
+        // those FIFO entries.
+        db.tick().await.unwrap();
+        db.tick().await.unwrap();
+        db.close().await.unwrap();
+        assert_eq!(
+            commit.wait(DurabilityTier::Local).await.unwrap(),
+            commit.mergeable_tx_id(),
+            "shutdown must drain the accepted mergeable sequence rather than tombstoning it"
+        );
+        drop(transaction);
+    });
+}
+
+/// Internal because the accepted begin is intentionally queued behind a cold
+/// predecessor. If an intervening tick consumes the shutdown sweep early, a
+/// later close has no way to retire the transaction that this begin opens.
+#[test]
+fn completed_close_sweeps_begin_admitted_before_cancelled_close() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let (release_head, cold_head) = futures::channel::oneshot::channel();
+        db.node
+            .enqueue_transaction_operation(
+                OpenTransactionId::new(),
+                Box::pin(async move {
+                    cold_head
+                        .await
+                        .expect("cancelled close retains its cold FIFO predecessor");
+                    Ok(())
+                }),
+            )
+            .unwrap();
+        let queued_tx = OpenTransactionId::new();
+        db.enqueue_begin_mergeable(queued_tx, None, None).unwrap();
+
+        let mut cancelled = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(cancelled);
+
+        db.tick().await.unwrap();
+        release_head.send(()).unwrap();
+        db.tick().await.unwrap();
+        db.tick().await.unwrap();
+
+        db.close().await.unwrap();
+        let error = db
+            .abandon_transaction_handle(queued_tx)
+            .expect_err("completed close must retire the queued begin it admitted");
+        assert!(error.message.contains("missing open transaction"));
+    });
+}
+
+/// A live close owns the cold queue head in a [`QueuedMutationLease`], so the
+/// queue itself is temporarily empty. A concurrent maintenance turn must not
+/// mistake that gap for shutdown quiescence: the admitted begin still has to
+/// run before the final open-transaction sweep.
+#[test]
+fn live_close_does_not_sweep_a_cold_admitted_begin_before_its_lease_drops() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let queued_tx = OpenTransactionId::new();
+        let queued_db = db.clone_for_owner_operation();
+        let (release_begin, cold_begin) = futures::channel::oneshot::channel();
+        db.node
+            .enqueue_transaction_operation(
+                queued_tx,
+                Box::pin(async move {
+                    cold_begin
+                        .await
+                        .expect("live close retains the cold admitted begin");
+                    queued_db.begin_mergeable(queued_tx).await
+                }),
+            )
+            .unwrap();
+
+        let mut closing = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+
+        // This is the concurrent tick/maintenance interleaving. Before the
+        // active-lease guard, queue emptiness alone consumed shutdown here.
+        db.node
+            .finish_transaction_abandonment_shutdown()
+            .await
+            .unwrap();
+        assert!(db.node.transaction_abandonment_shutdown_is_pending());
+
+        release_begin.send(()).unwrap();
+        closing.await.unwrap();
+
+        let error = db
+            .abandon_transaction_handle(queued_tx)
+            .expect_err("the resumed close must sweep the begin it admitted");
+        assert!(error.message.contains("missing open transaction"));
+    });
+}
+
 #[test]
 fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();

@@ -14,16 +14,25 @@ use crate::time::TxTime;
 /// close future drops the lease, rather than the accepted operation.
 struct QueuedMutationLease<'a> {
     queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+    active_leases: &'a Cell<usize>,
     operation: Option<QueuedMutationOperation>,
 }
 
 impl<'a> QueuedMutationLease<'a> {
     fn new(
         queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+        active_leases: &'a Cell<usize>,
         operation: QueuedMutationOperation,
     ) -> Self {
+        active_leases.set(
+            active_leases
+                .get()
+                .checked_add(1)
+                .expect("queued mutation lease count overflow"),
+        );
         Self {
             queue,
+            active_leases,
             operation: Some(operation),
         }
     }
@@ -52,6 +61,12 @@ impl Drop for QueuedMutationLease<'_> {
         if let Some(operation) = self.operation.take() {
             self.queue.borrow_mut().push_front(operation);
         }
+        self.active_leases.set(
+            self.active_leases
+                .get()
+                .checked_sub(1)
+                .expect("queued mutation lease count underflow"),
+        );
     }
 }
 
@@ -70,6 +85,9 @@ where
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
     queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
+    /// Operations temporarily popped by an owner future. They remain part of
+    /// FIFO shutdown work even while a cold await leaves the queue empty.
+    queued_mutation_active_leases: Cell<usize>,
     transaction_wait_observers: RefCell<Vec<TransactionWaitObserver>>,
     queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
     /// Rejections claimed by a waiter during the current owner turn. They
@@ -159,6 +177,7 @@ where
             outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             queued_mutations: RefCell::new(VecDeque::new()),
+            queued_mutation_active_leases: Cell::new(0),
             transaction_wait_observers: RefCell::new(Vec::new()),
             queued_mutation_failures: RefCell::new(BTreeMap::new()),
             deferred_rejection_discards: RefCell::new(BTreeSet::new()),
@@ -474,7 +493,11 @@ where
             let Some(operation) = self.queued_mutations.borrow_mut().pop_front() else {
                 return;
             };
-            let mut lease = QueuedMutationLease::new(&self.queued_mutations, operation);
+            let mut lease = QueuedMutationLease::new(
+                &self.queued_mutations,
+                &self.queued_mutation_active_leases,
+                operation,
+            );
             let poisoned = lease.operation().open_tx_id.and_then(|open_tx_id| {
                 self.queued_open_transaction_failures
                     .borrow()
@@ -946,7 +969,18 @@ where
         node: &mut NodeState<S>,
     ) -> Result<usize, Error> {
         let drain_result = self.drain_transaction_abandonments_in(node);
-        if self.transaction_abandonment_shutdown_pending.replace(false) {
+        // Shutdown must not retire every open transaction until the FIFO owner
+        // has reached quiescence. A queued begin/stage/commit was admitted
+        // before close closed the gate, but may not have acquired the node
+        // lock yet. Sweeping it from an intervening ordinary tick would turn
+        // that accepted operation into a tombstoned transaction. Keep the
+        // shutdown sweep pending until its own queue has completely drained;
+        // a later owner turn or close will run this same idempotent sweep.
+        if self.transaction_abandonment_shutdown_pending.get()
+            && self.queued_mutations.borrow().is_empty()
+            && self.queued_mutation_active_leases.get() == 0
+        {
+            self.transaction_abandonment_shutdown_pending.set(false);
             node.abandon_all_open_transactions();
         }
         drain_result
