@@ -579,13 +579,44 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     /shadow execution changed the checked-out source after the baseline/,
   );
   assert.match(rustShadowWorkflow, /Seal clean checked-out source baseline/);
+  const preCheckout = shard.steps.find(
+    (step) => step.name === "Reject pre-checkout source residue",
+  );
+  const normalizeCheckout = shard.steps.find(
+    (step) => step.name === "Record checkout source state",
+  );
+  const sealBaseline = shard.steps.find(
+    (step) => step.name === "Seal clean checked-out source baseline",
+  );
+  const checkout = shard.steps.find(
+    (step) => step.uses?.startsWith("actions/checkout@"),
+  );
+  assert.equal(
+    checkout?.with?.clean,
+    false,
+    "shadow checkout must preserve residue for the source-baseline receipt",
+  );
+  assert.ok(preCheckout, "shadow must inspect its inherited workspace before checkout can mutate it");
+  assert.match(preCheckout.run, /git -C "\$workspace" status --short --untracked-files=all/);
+  assert.match(preCheckout.run, /pre-checkout workspace contains source residue/);
+  assert.ok(
+    shard.steps.indexOf(preCheckout) < shard.steps.indexOf(checkout),
+    "pre-checkout inspection must run before actions/checkout",
+  );
+  assert.ok(normalizeCheckout, "shadow must record checkout state before sealing source identity");
+  assert.match(normalizeCheckout.run, /git status --short --untracked-files=all/);
+  assert.doesNotMatch(normalizeCheckout.run, /git reset|git clean/);
+  assert.ok(
+    shard.steps.indexOf(normalizeCheckout) < shard.steps.indexOf(sealBaseline),
+    "checkout inspection must precede the sealed baseline",
+  );
   assert.equal(
     shard.env?.RUST_SHADOW_SOURCE_BASELINE,
     undefined,
     "runner context is not available in jobs.<job_id>.env before a runner is assigned",
   );
   assert.equal(
-    shard.steps[1].env.RUST_SHADOW_SOURCE_BASELINE,
+    sealBaseline.env.RUST_SHADOW_SOURCE_BASELINE,
     "${{ runner.temp }}/rust-shadow-source.json",
     "the source baseline must resolve runner.temp at step scope",
   );
@@ -798,6 +829,65 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       message,
       `planted ${name} mismatch must identify the violated binding`,
     );
+  }
+});
+
+test("the exact pre-checkout shadow receipt logs and rejects tracked and untracked residue", () => {
+  const shard = parse(rustShadowWorkflow).jobs.shard;
+  const preCheckout = shard.steps.find(
+    (step) => step.name === "Reject pre-checkout source residue",
+  );
+  assert.ok(preCheckout?.run, "missing executable pre-checkout receipt");
+  for (const [name, contaminate, expectedStatus] of [
+    [
+      "tracked",
+      (workspace) => fs.writeFileSync(path.join(workspace, "tracked.txt"), "residue\n"),
+      /^ M tracked\.txt$/m,
+    ],
+    [
+      "untracked",
+      (workspace) => fs.writeFileSync(path.join(workspace, "residue.txt"), "residue\n"),
+      /^\?\? residue\.txt$/m,
+    ],
+  ]) {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-shadow-pre-checkout-"));
+    try {
+      for (const args of [
+        ["init", "--quiet"],
+        ["config", "user.email", "test@example.invalid"],
+        ["config", "user.name", "Test"],
+      ]) {
+        const initialized = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
+        assert.equal(initialized.status, 0, initialized.stderr);
+      }
+      fs.writeFileSync(path.join(workspace, "tracked.txt"), "clean\n");
+      let result = spawnSync("git", ["add", "tracked.txt"], { cwd: workspace, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      result = spawnSync("git", ["commit", "--quiet", "-m", "fixture"], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 0, result.stderr);
+      contaminate(workspace);
+
+      const receipt = spawnSync("bash", ["-c", preCheckout.run], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_WORKSPACE: workspace },
+      });
+      assert.notEqual(receipt.status, 0, `${name} residue must fail before checkout`);
+      assert.match(receipt.stderr, /pre-checkout workspace contains source residue/);
+      assert.match(receipt.stderr, expectedStatus);
+
+      const after = spawnSync("git", ["status", "--short", "--untracked-files=all"], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
+      assert.equal(after.status, 0, after.stderr);
+      assert.match(after.stdout, expectedStatus, `${name} residue must survive to be logged`);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
   }
 });
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +10,7 @@ import { stageNapiLoader } from "./stage-napi-loader.mjs";
 const packageDir = resolve(import.meta.dirname, "../../crates/jazz-napi");
 const packageSource = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
 const target = "linux-x64-gnu";
+const rustTarget = "x86_64-unknown-linux-gnu";
 const fingerprint = "a".repeat(64);
 
 function fixture({ profile = "release" } = {}) {
@@ -24,11 +26,23 @@ function fixture({ profile = "release" } = {}) {
     join(packageDir, "native-binding.pointer.cjs"),
     `const nativeBinding = require("./.native-artifacts/generation-release/index.js");\nmodule.exports = { nativeBinding, expectedNativeArtifactFingerprint: "${fingerprint}" };\n`,
   );
-  writeFileSync(join(generation, `jazz-napi.${target}.node`), "fixture native bytes\n");
+  const nativeBytes = "fixture native bytes\n";
+  writeFileSync(join(generation, `jazz-napi.${target}.node`), nativeBytes);
   writeFileSync(join(generation, "index.js"), "module.exports = {};\n");
   writeFileSync(
     join(generation, ".jazz-artifact-manifest.json"),
-    JSON.stringify({ kind: "napi", profile, nativeArtifactFingerprint: fingerprint }),
+    JSON.stringify({
+      kind: "napi",
+      profile,
+      target: rustTarget,
+      nativeArtifactFingerprint: fingerprint,
+      artifacts: [
+        {
+          file: `jazz-napi.${target}.node`,
+          sha256: createHash("sha256").update(nativeBytes).digest("hex"),
+        },
+      ],
+    }),
   );
   // A prior platform assembly can leave these ignored root-level outputs next
   // to the selected platform. They must be pruned before npm evaluates files.
@@ -111,6 +125,66 @@ test("NAPI prepack refuses a debug generation before package inventory", () => {
         ".native-artifacts/generation-release",
       ),
       true,
+    );
+  } finally {
+    rmSync(fixtureRoot.root, { recursive: true, force: true });
+  }
+});
+
+test("NAPI prepack refuses a native binding that no longer matches its sealed manifest", () => {
+  const fixtureRoot = fixture();
+  try {
+    const binding = join(
+      fixtureRoot.packageDir,
+      ".native-artifacts",
+      "generation-release",
+      `jazz-napi.${target}.node`,
+    );
+    writeFileSync(binding, "planted post-seal native mutation\n");
+
+    assert.throws(
+      () => stageNapiLoader(fixtureRoot.root, target),
+      /manifest is invalid for linux-x64-gnu: manifest does not match/,
+    );
+    assert.equal(
+      existsSync(join(fixtureRoot.packageDir, `jazz-napi.${target}.node`)),
+      false,
+      "a rejected generation must not become package-visible",
+    );
+  } finally {
+    rmSync(fixtureRoot.root, { recursive: true, force: true });
+  }
+});
+
+test("NAPI prepack publishes the validated generation bytes despite source interposition", () => {
+  const fixtureRoot = fixture();
+  try {
+    const generation = join(fixtureRoot.packageDir, ".native-artifacts", "generation-release");
+    const binding = join(generation, `jazz-napi.${target}.node`);
+    const loader = join(generation, "index.js");
+    const manifest = join(generation, ".jazz-artifact-manifest.json");
+    const expected = {
+      binding: readFileSync(binding),
+      loader: readFileSync(loader),
+      manifest: readFileSync(manifest),
+    };
+
+    stageNapiLoader(fixtureRoot.root, target, {
+      beforePublish: () => {
+        writeFileSync(binding, "planted replacement native bytes\n");
+        writeFileSync(loader, "planted replacement loader\n");
+        writeFileSync(manifest, "{\"planted\":true}\n");
+      },
+    });
+
+    assert.deepEqual(
+      readFileSync(join(fixtureRoot.packageDir, `jazz-napi.${target}.node`)),
+      expected.binding,
+    );
+    assert.deepEqual(readFileSync(join(fixtureRoot.packageDir, "native-loader.cjs")), expected.loader);
+    assert.deepEqual(
+      readFileSync(join(fixtureRoot.packageDir, `jazz-napi.${target}.manifest.json`)),
+      expected.manifest,
     );
   } finally {
     rmSync(fixtureRoot.root, { recursive: true, force: true });
