@@ -697,6 +697,14 @@ where
                     alias: self.next_schema_version_alias()?,
                     mapping,
                 };
+                let mut candidate_mappings = self.catalogue.physical_mappings.clone();
+                candidate_mappings.insert(
+                    staged.publication.schema.id,
+                    staged.mapping.clone(),
+                );
+                let mut candidate_aliases = self.catalogue.schema_version_aliases.clone();
+                candidate_aliases.insert(staged.publication.schema.id, staged.alias);
+                validate_payload_enum_case_provenance(&candidate_mappings, &candidate_aliases)?;
                 self.persist_catalogue_schema_lineage(&staged).await?;
                 self.catalogue.next_physical_table_id = next_physical_table_id;
                 self.catalogue.next_physical_column_id = next_physical_column_id;

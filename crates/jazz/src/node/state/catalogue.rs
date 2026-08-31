@@ -407,12 +407,19 @@ self.database.finish_persistence(persisted)?;
             &mut next_table,
             &mut next_column,
         )?;
-        self.reconcile_physical_mapping_for_lens_payload(
+        let mapping = self.reconcile_physical_mapping_for_lens_payload(
             &pending.publication.lens,
             &pending.publication.schema,
             &provisional,
-        )
-        .map(|_| ())
+        )?;
+        let mut candidate_mappings = self.catalogue.physical_mappings.clone();
+        candidate_mappings.insert(pending.publication.schema.id, mapping);
+        let mut candidate_aliases = self.catalogue.schema_version_aliases.clone();
+        candidate_aliases.insert(
+            pending.publication.schema.id,
+            self.next_schema_version_alias()?,
+        );
+        validate_payload_enum_case_provenance(&candidate_mappings, &candidate_aliases)
     }
 
     fn validate_candidate_scalar_enum_capacity(

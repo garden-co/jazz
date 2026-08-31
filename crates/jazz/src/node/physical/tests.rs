@@ -212,6 +212,95 @@ mod variant_case_tests {
     }
 
     #[test]
+    fn payload_case_provenance_binds_direct_and_nested_registries_to_manifest_coordinates() {
+        // Internal recovery-boundary test: registry paths are lowering state,
+        // so the durable check must also bind a nested case through its shared
+        // physical column and authority manifest rather than trusting decoded
+        // GlobalEnumCaseId metadata.
+        let origin = schema(7);
+        let direct_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(71));
+        let nested_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(72));
+        let mut mapping = mapping(7, &[("payload", 1)]);
+        mapping.identities.tables.get_mut("entries").unwrap().columns
+            .get_mut("payload").unwrap().enum_variants = BTreeMap::from([
+            ("root".to_owned(), vec![direct_id]),
+            ("root/record/detail".to_owned(), vec![nested_id]),
+        ]);
+        let table = mapping.tables.get_mut("entries").unwrap();
+        table.payload_enum_cases.insert(
+            PhysicalColumnId(1),
+            vec![GlobalEnumCaseId {
+                id: direct_id,
+                introducing_schema: origin,
+                introducing_ordinal: 0,
+            }],
+        );
+        table.nested_payload_enum_cases.insert(
+            PhysicalColumnId(1),
+            BTreeMap::from([(
+                "root/record/detail".to_owned(),
+                vec![GlobalEnumCaseId {
+                    id: nested_id,
+                    introducing_schema: origin,
+                    introducing_ordinal: 0,
+                }],
+            )]),
+        );
+        let mut mappings = BTreeMap::from([(origin, mapping)]);
+        let aliases = BTreeMap::from([
+            (origin, SchemaVersionAlias(1)),
+            (schema(8), SchemaVersionAlias(2)),
+        ]);
+        validate_payload_enum_case_provenance(
+            &mappings,
+            &aliases,
+        )
+        .expect("canonical direct and nested provenance is accepted");
+
+        // A later manifest legitimately retains an inherited UUID at this
+        // coordinate, but it did not introduce the identity and may not move
+        // its physical tag after a restart.
+        let later = schema(8);
+        mappings.insert(later, mappings[&origin].clone());
+        mappings
+            .get_mut(&origin)
+            .unwrap()
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .payload_enum_cases
+            .get_mut(&PhysicalColumnId(1))
+            .unwrap()[0]
+            .introducing_schema = later;
+        assert!(matches!(
+            validate_payload_enum_case_provenance(&mappings, &aliases),
+            Err(Error::InvalidStoredValue(
+                "payload enum registry case provenance does not name its introduction"
+            ))
+        ));
+        mappings
+            .get_mut(&origin)
+            .unwrap()
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .payload_enum_cases
+            .get_mut(&PhysicalColumnId(1))
+            .unwrap()[0]
+            .introducing_schema = origin;
+
+        mappings.get_mut(&origin).unwrap().tables.get_mut("entries").unwrap()
+            .nested_payload_enum_cases.get_mut(&PhysicalColumnId(1)).unwrap()
+            .get_mut("root/record/detail").unwrap()[0].introducing_ordinal = 1;
+        assert!(matches!(
+            validate_payload_enum_case_provenance(&mappings, &aliases),
+            Err(Error::InvalidStoredValue(
+                "payload enum registry case provenance disagrees with authority identities"
+            ))
+        ));
+    }
+
+    #[test]
     fn nested_enum_epoch_accepts_only_append_only_case_growth() {
         let value_type = |variants: &[&str]| {
             records::ValueType::EnumTag(
@@ -1111,6 +1200,28 @@ mod variant_case_tests {
             .expect("open receipt node")
     }
 
+    fn overwrite_schema_mapping(
+        node: &mut NodeState<RocksDbStorage>,
+        schema: SchemaVersionId,
+        mapping: &SchemaPhysicalMapping,
+    ) {
+        let alias = node.catalogue.schema_version_aliases[&schema];
+        let mut batch = node.database.open_batch();
+        NodeState::<RocksDbStorage>::write_schema_version_mapping_to_batch(
+            &mut batch,
+            alias,
+            schema,
+            mapping,
+        )
+        .expect("encode corrupted mapping fixture");
+        let applied = crate::db::block_on(node.database.apply_batch(batch))
+            .expect("write corrupted mapping fixture");
+        let persisted = crate::db::block_on(applied.persist());
+        node.database
+            .finish_persistence(persisted)
+            .expect("finish corrupted mapping fixture");
+    }
+
     fn payload_case_256(schema: &JazzSchema) -> Value {
         let table = &schema.tables[0];
         let event = table
@@ -1279,6 +1390,47 @@ mod variant_case_tests {
             row_uuid,
         );
         crate::db::block_on(reopened.close()).expect("close reopened receipt storage");
+    }
+
+    #[test]
+    fn reopen_rejects_reordered_payload_case_uuids_with_forged_provenance() {
+        // Internal durable-boundary receipt: public catalogue admission never
+        // exposes raw mappings, so only a storage mutation can prove that a
+        // canonical codec payload cannot lie about the provenance which sorts
+        // physical payload tags during descriptor reconstruction.
+        let schema = public_wide_payload_schema(2);
+        let node_uuid = NodeUuid::from_bytes([0x9a; 16]);
+        let dir = tempfile::tempdir().expect("create provenance receipt directory");
+        let mut node = open_receipt_node(dir.path(), node_uuid, &schema);
+        let schema_id = schema.version_id();
+        let mut corrupt = node.catalogue.physical_mappings[&schema_id].clone();
+        let event = corrupt.tables["events"].columns["event"];
+        let cases = corrupt.tables.get_mut("events").unwrap()
+            .payload_enum_cases.get_mut(&event).unwrap();
+        assert_eq!(cases.len(), 2, "fixture has two canonical payload cases");
+        cases.swap(0, 1);
+        // Preserve canonical registry ordering while binding each UUID to the
+        // other case's authority coordinate.  The old validator accepted this
+        // and rebuilt the physical tag registry with swapped UUID meanings.
+        cases[0].introducing_ordinal = 0;
+        cases[1].introducing_ordinal = 1;
+        overwrite_schema_mapping(&mut node, schema_id, &corrupt);
+        crate::db::block_on(node.close()).expect("close corrupted receipt storage");
+        drop(node);
+
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(dir.path(), &refs).expect("reopen corrupted storage");
+        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
+            Ok(_) => panic!("forged payload provenance must fail before descriptor rebuild"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            Error::InvalidStoredValue(
+                "payload enum registry case provenance disagrees with authority identities"
+            )
+        ));
     }
 
     #[test]
