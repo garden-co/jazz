@@ -1333,8 +1333,16 @@ impl Database {
         &self,
         id: crate::large_values::StagedLargeValueId,
     ) -> Result<bool, Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
         let staged_key = staged_large_value_key(id);
+        if self
+            .resident_storage()
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let _lifecycle = self.large_value_lifecycle.lock().await;
         let Some(encoded) = self
             .storage
             .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
@@ -1387,11 +1395,15 @@ impl Database {
         Ok(true)
     }
 
-    /// Drain persisted orphan work without walking row history. Each entry was
-    /// produced by an atomic reference-count transition; deletion is exact and
-    /// idempotent, so a crash leaves the queue entry available for retry.
+    /// Drain work authorized by durable reference counts. Resident metadata is
+    /// a veto only: unpublished activation protects bytes immediately, while
+    /// unpublished deactivation cannot authorize physical deletion.
     pub async fn reclaim_orphaned_large_value_chunks(&self, limit: usize) -> Result<usize, Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
+        let _lifecycle = if self.large_value_lifecycle_held.get() {
+            None
+        } else {
+            Some(self.large_value_lifecycle.lock().await)
+        };
         // A request may have authenticated a branch but not yet fetched all of
         // its descendants. Treat the whole provider request/lease population
         // as one coarse ephemeral retainer: reclamation is maintenance work,
@@ -1402,6 +1414,7 @@ impl Database {
         else {
             return Ok(0);
         };
+        let resident = self.resident_storage();
         let mut scan = self
             .storage
             .scan(crate::storage::ScanRequest::prefix(
@@ -1430,22 +1443,31 @@ impl Database {
                 }
                 let node_ref = node_ref_from_key;
                 let node_key = large_value_node_key(&node_ref)?;
-                let Some(encoded_metadata) = self
+                let Some(resident_metadata) = resident
+                    .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+                    .await?
+                else {
+                    continue;
+                };
+                let resident_metadata = decode_large_value_node_references(&resident_metadata)?;
+                let Some(durable_metadata) = self
                     .storage
                     .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
                     .await?
                 else {
-                    self.storage
-                        .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
-                        .await?;
                     continue;
                 };
-                let metadata = decode_large_value_node_references(&encoded_metadata)?;
-                if metadata.references != 0 || metadata.upload_references != 0 {
-                    self.storage
-                        .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
-                        .await?;
-                    continue;
+                let durable_metadata = decode_large_value_node_references(&durable_metadata)?;
+                match large_value_reclaim_decision(&durable_metadata, &resident_metadata) {
+                    LargeValueReclaimDecision::ClearStaleQueue => {
+                        self.storage
+                            .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
+                            .await?;
+                        continue;
+                    }
+                    LargeValueReclaimDecision::WaitForDurableZero
+                    | LargeValueReclaimDecision::ResidentVeto => continue,
+                    LargeValueReclaimDecision::Delete => {}
                 }
                 self.chunk_storage
                     .delete(node_ref.locator, node_ref.object_hash)

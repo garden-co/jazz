@@ -166,6 +166,37 @@ struct LargeValueNodeReferences {
     children: Vec<crate::large_values::NodeRef>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LargeValueReclaimDecision {
+    /// Both durable and resident views still retain the node. Any queue entry
+    /// predates their activation and can be discarded.
+    ClearStaleQueue,
+    /// The latest resident publication deactivates a still-durable node. Keep
+    /// the queue entry for the publication's eventual durable-zero transition.
+    WaitForDurableZero,
+    /// Durable zero authorizes deletion, but a resident activation vetoes it.
+    ResidentVeto,
+    /// Durable zero authorizes deletion and the resident view does not veto it.
+    Delete,
+}
+
+/// Combine Groove's two reference views without creating another reclamation
+/// authority: durable zero is the sole authorization, and resident references
+/// can only veto it.
+fn large_value_reclaim_decision(
+    durable: &LargeValueNodeReferences,
+    resident: &LargeValueNodeReferences,
+) -> LargeValueReclaimDecision {
+    let durable_retained = durable.references != 0 || durable.upload_references != 0;
+    let resident_retained = resident.references != 0 || resident.upload_references != 0;
+    match (durable_retained, resident_retained) {
+        (true, true) => LargeValueReclaimDecision::ClearStaleQueue,
+        (true, false) => LargeValueReclaimDecision::WaitForDurableZero,
+        (false, true) => LargeValueReclaimDecision::ResidentVeto,
+        (false, false) => LargeValueReclaimDecision::Delete,
+    }
+}
+
 fn unique_large_value_children(
     node: &crate::large_values::ChunkNode,
 ) -> Vec<crate::large_values::NodeRef> {
