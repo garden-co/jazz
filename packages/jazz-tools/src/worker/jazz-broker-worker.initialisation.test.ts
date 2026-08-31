@@ -194,6 +194,25 @@ type ForegroundLeaseCancellation = Extract<
   { type: "foreground-node-lease-cancelled" }
 >;
 
+// A TestPort models the untyped MessagePort boundary used by both follower
+// connections and Inspector control connections. Keep the protocol union here
+// instead of narrowing control events away: an Inspector control port can emit
+// `contexts`, `lifecycle-trace`, and its own `result` acknowledgement.
+type TestPortEvent = BrowserFollowerPortEvent | BrowserInspectorControlEvent;
+type TestPortRequest =
+  | BrowserSharedWorkerConnectRequest
+  | BrowserForegroundNodeLeaseProbeRequest
+  | BrowserForegroundNodeLeaseAcquireRequest
+  | BrowserForegroundNodeLeaseCancelRequest
+  | BrowserForegroundNodeLeasePortRequest
+  | BrowserFollowerPortRequest
+  | BrowserInspectorControlRequest;
+type TestPortResponse =
+  | BrowserSharedWorkerConnectResponse
+  | BrowserFollowerPortEvent
+  | BrowserForegroundNodeLeaseAcquireResponse
+  | BrowserInspectorControlEvent;
+
 type WorkerGlobal = typeof globalThis & {
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
   close?: Mock;
@@ -213,10 +232,10 @@ class TestPort {
   private readonly leaseCancellations: ForegroundLeaseCancellation[] = [];
   private readonly leaseCancellationWaiters: Array<(outcome: ForegroundLeaseCancellation) => void> =
     [];
-  private readonly events: BrowserFollowerPortEvent[] = [];
+  private readonly events: TestPortEvent[] = [];
   private readonly eventWaiters: Array<{
-    predicate: (event: BrowserFollowerPortEvent) => boolean;
-    resolve: (event: BrowserFollowerPortEvent) => void;
+    predicate: (event: TestPortEvent) => boolean;
+    resolve: (event: TestPortEvent) => void;
   }> = [];
 
   addEventListener(type: string, listener: (event: MessageEvent) => void): void {
@@ -229,13 +248,7 @@ class TestPort {
     this.listeners.get(type)?.delete(listener);
   }
 
-  postMessage(
-    message:
-      | BrowserSharedWorkerConnectResponse
-      | BrowserFollowerPortEvent
-      | BrowserForegroundNodeLeaseAcquireResponse
-      | BrowserInspectorControlEvent,
-  ): void {
+  postMessage(message: TestPortResponse): void {
     if (
       message.type === "runtime-ready" ||
       message.type === "runtime-error" ||
@@ -283,16 +296,7 @@ class TestPort {
     } else this.events.push(message);
   }
 
-  emitMessage(
-    message:
-      | BrowserSharedWorkerConnectRequest
-      | BrowserForegroundNodeLeaseProbeRequest
-      | BrowserForegroundNodeLeaseAcquireRequest
-      | BrowserForegroundNodeLeaseCancelRequest
-      | BrowserForegroundNodeLeasePortRequest
-      | BrowserFollowerPortRequest
-      | BrowserInspectorControlRequest,
-  ): void {
+  emitMessage(message: TestPortRequest): void {
     for (const listener of this.listeners.get("message") ?? []) {
       listener({ data: message } as MessageEvent);
     }
@@ -338,17 +342,15 @@ class TestPort {
     return this.leaseProbeOutcomes.length > 0;
   }
 
-  waitForEvent(
-    predicate: (event: BrowserFollowerPortEvent) => boolean,
-  ): Promise<BrowserFollowerPortEvent> {
+  waitForEvent(predicate: (event: TestPortEvent) => boolean): Promise<TestPortEvent> {
     const index = this.events.findIndex(predicate);
     if (index >= 0) return Promise.resolve(this.events.splice(index, 1)[0]!);
-    const waiter = deferred<BrowserFollowerPortEvent>();
+    const waiter = deferred<TestPortEvent>();
     this.eventWaiters.push({ predicate, resolve: waiter.resolve });
     return waiter.promise;
   }
 
-  hasEvent(predicate: (event: BrowserFollowerPortEvent) => boolean): boolean {
+  hasEvent(predicate: (event: TestPortEvent) => boolean): boolean {
     return this.events.some(predicate);
   }
 }
