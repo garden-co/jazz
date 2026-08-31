@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,6 +11,10 @@ import { stageNativeFingerprints } from "./stage-native-fingerprints.mjs";
 const fingerprint = "a".repeat(64);
 const wasmFiles = ["jazz_wasm_bg.wasm", "jazz_wasm_bg.wasm.d.ts", "jazz_wasm.d.ts", "jazz_wasm.js"];
 const repositoryRoot = resolve(import.meta.dirname, "../..");
+
+test("NAPI staging script parses as the executable CI runs", () => {
+  execFileSync(process.execPath, ["--check", join(repositoryRoot, "dev/artifacts/stage-napi-loader.mjs")]);
+});
 
 test("release workflow uploads the sealed WASM provenance manifest", () => {
   const workflow = readFileSync(
