@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
@@ -43,6 +45,50 @@ describe("release config", () => {
     expect(step?.run).toContain("jazz-source-snapshot.json");
     expect(step?.run).toContain("schema:1");
   });
+
+  it("packs and loads the bundled preview source snapshot as an adopter would", () => {
+    const fixture = fs.mkdtempSync(path.join(tmpdir(), "create-jazz-preview-pack-"));
+    const packageDir = path.join(fixture, "create-jazz");
+    const packed = path.join(fixture, "packed");
+    const extracted = path.join(fixture, "extracted");
+    try {
+      fs.cpSync(path.join(repoRoot, "packages", "create-jazz"), packageDir, {
+        recursive: true,
+        filter: (source) => !source.includes(`${path.sep}node_modules`),
+      });
+      fs.copyFileSync(
+        path.join(repoRoot, "pnpm-workspace.yaml"),
+        path.join(fixture, "pnpm-workspace.yaml"),
+      );
+      const version = JSON.parse(
+        fs.readFileSync(path.join(packageDir, "package.json"), "utf8"),
+      ).version;
+      fs.writeFileSync(
+        path.join(packageDir, "jazz-source-snapshot.json"),
+        `${JSON.stringify({ schema: 1, packageVersion: version, commit: "a".repeat(40) })}\n`,
+      );
+      fs.mkdirSync(packed);
+      fs.mkdirSync(extracted);
+      execFileSync("pnpm", ["pack", "--pack-destination", packed], { cwd: packageDir });
+      const tarball = fs.readdirSync(packed).find((file) => file.endsWith(".tgz"));
+      expect(tarball).toBeDefined();
+      if (!tarball) throw new Error("create-jazz pack did not produce a tarball");
+      execFileSync("tar", ["-xzf", path.join(packed, tarball!), "-C", extracted]);
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(extracted, "package/jazz-source-snapshot.json"), "utf8"),
+        ),
+      ).toEqual({ schema: 1, packageVersion: version, commit: "a".repeat(40) });
+      execFileSync("npm", ["install", "--ignore-scripts", "--no-package-lock", "--omit=dev"], {
+        cwd: path.join(extracted, "package"),
+      });
+      execFileSync(process.execPath, ["--input-type=module", "-e", 'import("./dist/index.js")'], {
+        cwd: path.join(extracted, "package"),
+      });
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("establishes the exact source tag before publishing any package", () => {
     const workflow = parseYaml(
