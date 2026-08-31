@@ -263,6 +263,9 @@ pub struct RecursiveOp {
     /// Hard stop for non-settling recursive queries, especially cyclic bag
     /// semantics where multiplicities can grow forever.
     pub max_iters: usize,
+    /// Whether exhausting `max_iters` is a successful semantic cutoff rather
+    /// than a non-convergence error.
+    pub truncate_at_max_iters: bool,
     /// Tables read by the seed and step graphs, cached when the graph is compiled.
     pub read_tables: Vec<String>,
 }

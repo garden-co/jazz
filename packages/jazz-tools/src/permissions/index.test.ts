@@ -1018,10 +1018,10 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("supports bounded recursive referencing inherits depth override", () => {
+  it("supports zero recursive referencing inherits depth", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.projects.allowRead.where(
-        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 3 }),
+        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 0 }),
       ),
     ]);
 
@@ -1030,7 +1030,7 @@ describe("permissions DSL", () => {
       operation: "Select",
       source_table: "todos",
       via_column: "projectId",
-      max_depth: 3,
+      max_depth: 0,
     });
   });
 
@@ -1390,25 +1390,24 @@ describe("permissions DSL", () => {
     }
   });
 
-  it("supports bounded recursive inherits depth override", () => {
+  it("supports zero bounded recursive inherits depth and rejects invalid overrides", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 3 })),
+      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
       type: "Inherits",
       operation: "Select",
       via_column: "projectId",
-      max_depth: 3,
+      max_depth: 0,
     });
-  });
-
-  it("rejects invalid recursive depth overrides", () => {
-    expect(() =>
-      definePermissions(app, ({ policy, allowedTo }) => [
-        policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
-      ]),
-    ).toThrow(/maxdepth must be a positive integer/i);
+    for (const maxDepth of [-1, 1.5]) {
+      expect(() =>
+        definePermissions(app, ({ policy, allowedTo }) => [
+          policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth })),
+        ]),
+      ).toThrow(/maxdepth must be a non-negative integer/i);
+    }
   });
 
   it("compiles gather/hopTo recursive relation with policy.exists(relation)", () => {
@@ -1420,7 +1419,7 @@ describe("permissions DSL", () => {
         },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
-        maxDepth: 3,
+        maxDepth: 0,
       });
 
       const hasResourceRole = (resource: unknown, role: string) =>
@@ -1452,6 +1451,10 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation IR join.");
     }
     expect(using.rel.input.input.left.type).toBe("Gather");
+    if (using.rel.input.input.left.type !== "Gather") {
+      throw new Error("Expected recursive relation IR.");
+    }
+    expect(using.rel.input.input.left.maxDepth).toBe(0);
   });
 
   it("keeps recursive relation starts generic for type discriminators", () => {
@@ -1595,6 +1598,66 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("projects team keys through reachable_via recursion frontiers", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy, session }) => {
+      relation = policy.projects
+        .reachable_via(
+          "resource_access_edges",
+          "resource",
+          "team",
+          session.claims["sub"],
+          "team_team_edges",
+          "child_team",
+          "parent_team",
+        )
+        .seeded_by("user_team_edges", "user_id", "sub", "team");
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected reachable relation to be initialized.");
+    }
+
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Filter");
+    if (ir.type !== "Filter" || ir.input.type !== "Join") {
+      throw new Error("Expected filtered reachable access join.");
+    }
+    const gather = ir.input.left;
+    expect(gather.type).toBe("Gather");
+    if (gather.type !== "Gather") {
+      throw new Error("Expected reachable gather relation.");
+    }
+    expect(gather.seed).toMatchObject({
+      type: "Project",
+      columns: [
+        {
+          alias: "id",
+          expr: {
+            type: "Column",
+            column: { scope: "user_team_edges", column: "team" },
+          },
+        },
+      ],
+    });
+    expect(gather.step).toMatchObject({
+      type: "Project",
+      columns: [
+        {
+          alias: "id",
+          expr: {
+            type: "Column",
+            column: { scope: "team_team_edges", column: "parent_team" },
+          },
+        },
+      ],
+    });
+    if (gather.step.type !== "Project") {
+      throw new Error("Expected projected reachable recursion step.");
+    }
+    expect(gather.step.input.type).toBe("Filter");
+  });
+
   it("allows gather(...) to start from a same-table hop relation seed", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy }) => {
@@ -1658,20 +1721,23 @@ describe("permissions DSL", () => {
     }
     expect(ir.seed.type).toBe("Project");
     expect(ir.step.type).toBe("Project");
-    if (ir.step.type !== "Project" || ir.step.input.type !== "Join") {
-      throw new Error("Expected projected recursive step join.");
+    if (ir.step.type !== "Project" || ir.step.input.type !== "Filter") {
+      throw new Error("Expected projected scalar recursive step.");
     }
-    const stepJoin = ir.step.input;
-    expect(stepJoin.on[0]?.left).toEqual({
-      scope: "team_team_edges",
-      column: "parent_team",
-    });
-    expect(stepJoin.left.type).toBe("Filter");
-    if (stepJoin.left.type !== "Filter") {
-      throw new Error("Expected filtered step relation.");
-    }
-    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"scope":"team_team_edges"');
-    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"column":"child_team"');
+    expect(ir.step.columns).toEqual([
+      {
+        alias: "id",
+        expr: {
+          type: "Column",
+          column: {
+            scope: "team_team_edges",
+            column: "parent_team",
+          },
+        },
+      },
+    ]);
+    expect(JSON.stringify(ir.step.input.predicate)).toContain('"scope":"team_team_edges"');
+    expect(JSON.stringify(ir.step.input.predicate)).toContain('"column":"child_team"');
   });
 
   it("allows gather(...) to start from a union of same-table relations", () => {

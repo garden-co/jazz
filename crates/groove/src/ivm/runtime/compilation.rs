@@ -223,6 +223,7 @@ impl IvmRuntime {
                 step,
                 frontier,
                 max_iters,
+                truncate_at_max_iters,
             } => {
                 if builder_contains_recursive(seed) || builder_contains_recursive(step) {
                     return Err(IvmRuntimeError::UnsupportedNestedRecursion);
@@ -246,6 +247,7 @@ impl IvmRuntime {
                         OpType::Recursive(RecursiveOp {
                             frontier: frontier.clone(),
                             max_iters: *max_iters,
+                            truncate_at_max_iters: *truncate_at_max_iters,
                             read_tables: recursive_read_tables(
                                 &self.graph,
                                 compiled_seed.node,
