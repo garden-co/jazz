@@ -315,9 +315,10 @@ earlier in the same transaction.
 
 Low-level JavaScript upsert options use `{ head, base? }` for a branch view.
 `branch` is not an upsert selector: callers use it only for exact branch-target
-operations such as insert and restore. An upsert containing `branch`, and an
-upsert containing `base` without `head`, are rejected before the root/default
-target can be selected.
+operations such as insert and restore. An upsert with a `branch` property is
+rejected by property presence—including `branch: undefined` or `branch: null`—
+and an upsert containing `base` without `head` is rejected before the
+root/default target can be selected.
 
 Rust `UpsertOptions::target` now uses `WriteTarget` rather than
 `ExactWriteTarget`. Root/default callers keep their runtime behaviour, but code
