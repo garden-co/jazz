@@ -2911,7 +2911,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
         let local_tier = if self.node.defer_local_persistence.get() {
-            self.admit_deferred_local_publication(published, None)
+            self.finish_deferred_local_publication(published, None)
                 .await?;
             DurabilityTier::None
         } else {
@@ -2929,20 +2929,20 @@ where
         })
     }
 
-    /// Admit a local publication whose durable storage is owned by a later
-    /// runtime tick. The current-view refresh is part of admission, rather
-    /// than a property of one CRUD entry point: direct writes, mergeable
-    /// commits, and exclusive commits all become resident at this boundary.
-    pub(super) async fn admit_deferred_local_publication(
+    /// Transfer a published ordered slot into node ownership before resident
+    /// subscription refresh can suspend, fail, or be cancelled.
+    pub(super) async fn finish_deferred_local_publication(
         &self,
         published: PublishedTransaction,
         upload_unit: Option<SyncMessage>,
     ) -> Result<(), Error> {
-        // Publication is the synchronous visibility boundary. Refresh resident
-        // subscribers before returning, then let the host tick own suspendable
-        // persistence and later peer visibility.
-        self.refresh_subscriptions().await?;
         self.node.queue_local_publication(published, upload_unit);
+        if let Err(error) = self.refresh_subscriptions().await {
+            super::peer_connection::route_subscription_refresh_failure(
+                &self.node.subscriptions,
+                &error,
+            );
+        }
         Ok(())
     }
 
@@ -2958,10 +2958,6 @@ where
             } = outcome;
             loop {
                 if !publications.is_empty() {
-                    // Resident maintained terminals publish their immediate
-                    // local delta at the write boundary. Cold work is owned
-                    // by the scheduled runtime turn after this publication.
-                    self.refresh_subscriptions().await?;
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
                         persisted.push((publication.tx_id(), publication.persist().await));
@@ -2969,6 +2965,13 @@ where
                     let mut node = self.node.node.lock().await;
                     for (tx_id, persistence) in persisted {
                         node.settle_published_transaction(tx_id, persistence)?;
+                    }
+                    drop(node);
+                    if let Err(error) = self.refresh_subscriptions().await {
+                        super::peer_connection::route_subscription_refresh_failure(
+                            &self.node.subscriptions,
+                            &error,
+                        );
                     }
                 }
                 let Some(message) = post_settlement_work.pop_front() else {
