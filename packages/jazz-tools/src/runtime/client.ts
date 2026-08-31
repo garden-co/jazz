@@ -827,6 +827,20 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
+  /** Facade-owned subscription releases, fenced against terminal reentrancy. */
+  private activeSubscriptionReleases = new Map<number, () => void>();
+
+  private registerSubscriptionRelease(handle: number, release: () => void): void {
+    this.activeSubscriptionReleases.set(handle, release);
+  }
+
+  private releaseSubscription(handle: number): void {
+    const release = this.activeSubscriptionReleases.get(handle);
+    // Subscription ids are opaque facade results. Once their owner is gone,
+    // duplicate public calls are intentionally no-ops rather than raw native
+    // unsubscriptions (which could double-release a terminal handle).
+    release?.();
+  }
 
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
@@ -1592,10 +1606,26 @@ export class JazzClient {
     );
 
     let terminal = false;
+    let nativeHandleReleased = false;
+    const releaseNativeHandle = () => {
+      if (nativeHandleReleased) return;
+      nativeHandleReleased = true;
+      if (this.activeSubscriptionReleases.get(handle) === releaseSubscription) {
+        this.activeSubscriptionReleases.delete(handle);
+      }
+      this.runtime.unsubscribe(handle);
+    };
+    const releaseSubscription = () => {
+      // A public unsubscribe is terminal too: a queued native frame must not
+      // re-enter application callbacks after its owner has been released.
+      terminal = true;
+      releaseNativeHandle();
+    };
+    this.registerSubscriptionRelease(handle, releaseSubscription);
     const terminate = (error: Error, unsubscribe: boolean) => {
       if (terminal) return;
       terminal = true;
-      if (unsubscribe) this.runtime.unsubscribe(handle);
+      if (unsubscribe) this.releaseSubscription(handle);
       if (!onError) {
         console.error("Unhandled Jazz subscription error", error);
         return;
@@ -1611,9 +1641,9 @@ export class JazzClient {
       this.runtime.executeSubscription(handle, (result) => {
         if (terminal) return;
         if (result instanceof Error) {
-          // Native terminal failures already close their source state. The
-          // owning facade performs final handle cleanup after notification.
-          terminate(result, false);
+          // A terminal callback means this facade owns the now-dead native
+          // handle. Release it even if the core stream has stopped producing.
+          terminate(result, true);
           return;
         }
         try {
@@ -1628,7 +1658,7 @@ export class JazzClient {
       // createSubscription already transferred ownership to this facade. If
       // callback installation fails synchronously, no caller can own the
       // handle because subscribe() has not returned it yet.
-      this.runtime.unsubscribe(handle);
+      this.releaseSubscription(handle);
       throw error;
     }
 
@@ -1641,7 +1671,7 @@ export class JazzClient {
    * @param subscriptionId ID returned from subscribe()
    */
   unsubscribe(subscriptionId: number): void {
-    this.runtime.unsubscribe(subscriptionId);
+    this.releaseSubscription(subscriptionId);
   }
 
   /**

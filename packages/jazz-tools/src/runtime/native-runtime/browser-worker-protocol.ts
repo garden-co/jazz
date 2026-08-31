@@ -3,106 +3,269 @@ import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
 
-/** Structured-clone-safe Error representation used across browser worker ports. */
+/**
+ * Structured-clone-safe Error representation used across browser worker
+ * MessagePorts. Error's own fields are not consistently enumerable or retained
+ * by every browser, so the relay pins them explicitly.
+ */
 export interface BrowserRelayError {
   name: string;
   message: string;
   stack?: string;
+  /** Stable causal code when the originating error exposes a bounded string code. */
+  code?: string;
   cause?: unknown;
 }
 
+/** The relay error envelope is deliberately small enough for a MessagePort. */
+export const BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH = 32;
+export const BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS = 64 * 1024;
+export const BROWSER_RELAY_ERROR_MAX_CODE_CHARS = 128;
+
+const BROWSER_RELAY_ERROR_MAX_NAME_CHARS = 256;
+const BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS = 8 * 1024;
+const BROWSER_RELAY_ERROR_MAX_STACK_CHARS = 16 * 1024;
+const BROWSER_RELAY_ERROR_MAX_OPAQUE_CAUSE_CHARS = 2 * 1024;
+const BROWSER_RELAY_ERROR_PROTOCOL_VIOLATION = "browser_relay_error_protocol_violation";
+
 export function serializeBrowserRelayError(error: unknown): BrowserRelayError {
-  return serializeBrowserRelayErrorWithSeen(error, new WeakSet<object>());
+  const budget = { remaining: BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS };
+  const root = serializeBrowserRelayErrorNode(error, budget);
+  let source: unknown = error;
+  let target = root;
+  const seen = new WeakSet<object>();
+
+  for (let depth = 0; depth < BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH; depth += 1) {
+    if (source && typeof source === "object") {
+      if (seen.has(source)) break;
+      seen.add(source);
+    }
+    const cause = readErrorProperty(source, "cause");
+    if (cause === undefined) break;
+    if (!isBrowserRelayErrorLike(cause)) {
+      const opaqueCause = serializeOpaqueBrowserRelayCause(cause, budget);
+      if (opaqueCause !== undefined) target.cause = opaqueCause;
+      break;
+    }
+    if (depth + 1 > BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH || budget.remaining === 0) break;
+    if (seen.has(cause)) break;
+    const nested = serializeBrowserRelayErrorNode(cause, budget);
+    target.cause = nested;
+    target = nested;
+    source = cause;
+  }
+  return root;
 }
 
 export function deserializeBrowserRelayError(serialized: BrowserRelayError): Error {
-  const cause = deserializeBrowserRelayCause(serialized.cause);
-  const error = new Error(serialized.message);
-  error.name = serialized.name;
-  if (serialized.stack !== undefined) error.stack = serialized.stack;
-  if (cause !== undefined) {
-    Object.defineProperty(error, "cause", {
+  const budget = { remaining: BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS };
+  const root = deserializeBrowserRelayErrorNode(serialized, budget);
+  if (root === null) return browserRelayErrorProtocolViolation();
+
+  let source: unknown = readErrorProperty(serialized, "cause");
+  let target = root;
+  const seen = new WeakSet<object>();
+  if (serialized && typeof serialized === "object") seen.add(serialized);
+
+  for (let depth = 0; source !== undefined; depth += 1) {
+    if (depth >= BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH) return browserRelayErrorProtocolViolation();
+    if (!isBrowserRelayErrorLike(source)) {
+      const opaqueCause = deserializeOpaqueBrowserRelayCause(source, budget);
+      if (opaqueCause === INVALID_BROWSER_RELAY_CAUSE) return browserRelayErrorProtocolViolation();
+      attachBrowserRelayCause(target, opaqueCause);
+      break;
+    }
+    if (seen.has(source)) return browserRelayErrorProtocolViolation();
+    seen.add(source);
+    const nested = deserializeBrowserRelayErrorNode(source, budget);
+    if (nested === null) return browserRelayErrorProtocolViolation();
+    attachBrowserRelayCause(target, nested);
+    target = nested;
+    source = readErrorProperty(source, "cause");
+  }
+  return root;
+}
+
+function serializeBrowserRelayErrorNode(
+  value: unknown,
+  budget: { remaining: number },
+): BrowserRelayError {
+  const stack = readErrorString(value, "stack");
+  const code = validBrowserRelayCode(readErrorProperty(value, "code"));
+  const serialized: BrowserRelayError = {
+    name: consumeBrowserRelayString(
+      readErrorString(value, "name") ?? "Error",
+      BROWSER_RELAY_ERROR_MAX_NAME_CHARS,
+      budget,
+    ),
+    message: consumeBrowserRelayString(
+      readErrorString(value, "message") ?? safeErrorMessage(value),
+      BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS,
+      budget,
+    ),
+    ...(stack === undefined
+      ? {}
+      : {
+          stack: consumeBrowserRelayString(stack, BROWSER_RELAY_ERROR_MAX_STACK_CHARS, budget),
+        }),
+  };
+  // Codes are compatibility values, never diagnostic fragments. Decide only
+  // after consuming earlier fields: otherwise a later code can be sliced to
+  // the empty string and make our own envelope fail inbound validation.
+  if (code !== undefined && code.length <= budget.remaining) {
+    serialized.code = consumeBrowserRelayString(code, BROWSER_RELAY_ERROR_MAX_CODE_CHARS, budget);
+  }
+  return serialized;
+}
+
+function deserializeBrowserRelayErrorNode(
+  value: unknown,
+  budget: { remaining: number },
+): Error | null {
+  if (!isBrowserRelayErrorLike(value)) return null;
+  const name = readErrorProperty(value, "name");
+  const message = readErrorProperty(value, "message");
+  const stack = readErrorProperty(value, "stack");
+  const code = readErrorProperty(value, "code");
+  const validCode = validBrowserRelayCode(code);
+  if (
+    typeof name !== "string" ||
+    typeof message !== "string" ||
+    (stack !== undefined && typeof stack !== "string") ||
+    (code !== undefined && validCode === undefined) ||
+    name.length > BROWSER_RELAY_ERROR_MAX_NAME_CHARS ||
+    message.length > BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS ||
+    (typeof stack === "string" && stack.length > BROWSER_RELAY_ERROR_MAX_STACK_CHARS) ||
+    name.length +
+      message.length +
+      (typeof stack === "string" ? stack.length : 0) +
+      (typeof code === "string" ? code.length : 0) >
+      budget.remaining
+  ) {
+    return null;
+  }
+  const error = new Error(
+    consumeBrowserRelayString(message, BROWSER_RELAY_ERROR_MAX_MESSAGE_CHARS, budget),
+  );
+  error.name = consumeBrowserRelayString(name, BROWSER_RELAY_ERROR_MAX_NAME_CHARS, budget);
+  if (stack !== undefined) {
+    error.stack = consumeBrowserRelayString(stack, BROWSER_RELAY_ERROR_MAX_STACK_CHARS, budget);
+  }
+  if (validCode !== undefined) {
+    Object.defineProperty(error, "code", {
       configurable: true,
-      enumerable: false,
-      value: cause,
+      enumerable: true,
+      value: consumeBrowserRelayString(validCode, BROWSER_RELAY_ERROR_MAX_CODE_CHARS, budget),
       writable: true,
     });
   }
   return error;
 }
 
-function serializeBrowserRelayErrorWithSeen(
-  value: unknown,
-  seen: WeakSet<object>,
-): BrowserRelayError {
-  const error = browserRelayErrorLike(value);
-  if (typeof value === "object" && value !== null) {
-    if (seen.has(value)) {
-      return {
-        name: error.name,
-        message: error.message,
-        ...(error.stack === undefined ? {} : { stack: error.stack }),
-      };
-    }
-    seen.add(value);
-  }
-  const serialized: BrowserRelayError = {
-    name: error.name,
-    message: error.message,
-    ...(error.stack === undefined ? {} : { stack: error.stack }),
-  };
-  if (error.cause !== undefined) serialized.cause = serializeBrowserRelayCause(error.cause, seen);
-  return serialized;
+function isBrowserRelayErrorLike(value: unknown): value is Record<string, unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof readErrorProperty(value, "message") === "string"
+  );
 }
 
-function browserRelayErrorLike(value: unknown): {
-  name: string;
-  message: string;
-  stack?: string;
-  cause?: unknown;
-} {
-  if (value && typeof value === "object" && "message" in value) {
-    const message = typeof value.message === "string" ? value.message : String(value.message);
-    const name = "name" in value && typeof value.name === "string" ? value.name : "Error";
-    const stack = "stack" in value && typeof value.stack === "string" ? value.stack : undefined;
-    const cause = "cause" in value ? value.cause : undefined;
-    return {
-      name,
-      message,
-      ...(stack === undefined ? {} : { stack }),
-      ...(cause === undefined ? {} : { cause }),
-    };
-  }
-  return { name: "Error", message: String(value) };
+function validBrowserRelayCode(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= BROWSER_RELAY_ERROR_MAX_CODE_CHARS
+    ? value
+    : undefined;
 }
 
-function serializeBrowserRelayCause(cause: unknown, seen: WeakSet<object>): unknown {
-  if (cause && typeof cause === "object" && "message" in cause)
-    return serializeBrowserRelayErrorWithSeen(cause, seen);
+function readErrorProperty(value: unknown, property: string): unknown {
+  if (value === null || (typeof value !== "object" && typeof value !== "function"))
+    return undefined;
   try {
-    return structuredClone(cause);
+    return (value as Record<string, unknown>)[property];
   } catch {
-    return String(cause);
+    return undefined;
   }
 }
 
-function deserializeBrowserRelayCause(cause: unknown): unknown {
-  if (
-    cause &&
-    typeof cause === "object" &&
-    "name" in cause &&
-    typeof cause.name === "string" &&
-    "message" in cause &&
-    typeof cause.message === "string"
-  ) {
-    return deserializeBrowserRelayError({
-      name: cause.name,
-      message: cause.message,
-      ...("stack" in cause && typeof cause.stack === "string" ? { stack: cause.stack } : {}),
-      ...("cause" in cause ? { cause: cause.cause } : {}),
-    });
+function readErrorString(value: unknown, property: string): string | undefined {
+  const candidate = readErrorProperty(value, property);
+  return typeof candidate === "string" ? candidate : undefined;
+}
+
+function safeErrorMessage(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return "Unstringifiable relay error";
   }
-  return cause;
+}
+
+function consumeBrowserRelayString(
+  value: string,
+  perFieldLimit: number,
+  budget: { remaining: number },
+): string {
+  const allowed = Math.min(value.length, perFieldLimit, budget.remaining);
+  budget.remaining -= allowed;
+  return value.slice(0, allowed);
+}
+
+function serializeOpaqueBrowserRelayCause(
+  cause: unknown,
+  budget: { remaining: number },
+): string | number | boolean | null | undefined {
+  if (cause === null || typeof cause === "boolean" || typeof cause === "number") return cause;
+  if (typeof cause === "string") {
+    return consumeBrowserRelayString(cause, BROWSER_RELAY_ERROR_MAX_OPAQUE_CAUSE_CHARS, budget);
+  }
+  if (cause === undefined) return undefined;
+  return consumeBrowserRelayString(
+    "[non-error relay cause omitted]",
+    BROWSER_RELAY_ERROR_MAX_OPAQUE_CAUSE_CHARS,
+    budget,
+  );
+}
+
+const INVALID_BROWSER_RELAY_CAUSE = Symbol("invalid browser relay cause");
+
+function deserializeOpaqueBrowserRelayCause(
+  cause: unknown,
+  budget: { remaining: number },
+): string | number | boolean | null | undefined | typeof INVALID_BROWSER_RELAY_CAUSE {
+  if (cause === null || typeof cause === "boolean" || typeof cause === "number") return cause;
+  if (typeof cause === "string") {
+    if (
+      cause.length > BROWSER_RELAY_ERROR_MAX_OPAQUE_CAUSE_CHARS ||
+      cause.length > budget.remaining
+    ) {
+      return INVALID_BROWSER_RELAY_CAUSE;
+    }
+    return consumeBrowserRelayString(cause, BROWSER_RELAY_ERROR_MAX_OPAQUE_CAUSE_CHARS, budget);
+  }
+  return cause === undefined ? undefined : INVALID_BROWSER_RELAY_CAUSE;
+}
+
+function attachBrowserRelayCause(error: Error, cause: unknown): void {
+  if (cause === undefined) return;
+  Object.defineProperty(error, "cause", {
+    configurable: true,
+    enumerable: false,
+    value: cause,
+    writable: true,
+  });
+}
+
+function browserRelayErrorProtocolViolation(): Error {
+  const error = new Error("Invalid browser relay error payload");
+  error.name = "BrowserRelayErrorProtocolError";
+  Object.defineProperty(error, "code", {
+    configurable: true,
+    enumerable: true,
+    value: BROWSER_RELAY_ERROR_PROTOCOL_VIOLATION,
+    writable: true,
+  });
+  return error;
 }
 
 export interface BrowserWorkerInitOptions {
@@ -169,6 +332,8 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       type: "foreground-node-lease-worker-closing";
       attemptId: string;
     }
+  /** A different realm still owns the physical root; retrying is safe. */
+  | { type: "foreground-node-lease-busy"; message: string }
   | {
       type: "foreground-node-lease-ready";
       leaseId: string;
@@ -183,9 +348,7 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       /** @internal Test-worker realm marker, never shipped in production. */
       workerRealmId: string;
     }
-  | { type: "foreground-node-lease-busy"; message: string }
   | { type: "foreground-node-lease-error"; error: BrowserRelayError }
-  | { type: "worker-closing" }
   /**
    * The worker observed cancellation and either had no lease to clean up or
    * durably retired the lease that finished concurrently with cancellation.
@@ -210,6 +373,7 @@ export type BrowserSharedWorkerConnectResponse =
   | { type: "worker-alive" }
   | { type: "runtime-ready" }
   | { type: "runtime-error"; error: BrowserRelayError }
+  /** The realm has acknowledged inspector-directed termination. */
   | { type: "worker-closing" };
 
 export type BrowserFollowerPortRequest =
