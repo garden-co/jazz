@@ -328,6 +328,9 @@ describe("resolveDefaultDurabilityTier", () => {
 
 describe("public read tiers", () => {
   it("lowers each new public tier to the existing native durability contract", () => {
+    expect(resolveReadTier("local-first")).toBe("local");
+    expect(resolveReadTier("remote")).toBe("edge");
+    expect(resolveReadTier("remote-if-possible")).toBe("edge");
     expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
     expect(resolveReadTier(ReadTier.Remote)).toBe("edge");
     expect(resolveReadTier(ReadTier.RemoteIfPossible)).toBe("edge");

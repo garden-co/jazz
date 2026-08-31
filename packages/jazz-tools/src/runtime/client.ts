@@ -351,11 +351,12 @@ export interface AuthConfig {
  */
 export type DurabilityTier = "local" | "edge" | "global";
 /** Product-facing policy for reads. It deliberately does not change write durability. */
-export enum ReadTier {
-  LocalFirst = "local-first",
-  Remote = "remote",
-  RemoteIfPossible = "remote-if-possible",
-}
+export const ReadTier = {
+  LocalFirst: "local-first",
+  Remote: "remote",
+  RemoteIfPossible: "remote-if-possible",
+} as const;
+export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 /** @deprecated Read APIs also accept these legacy durability names unchanged. */
 export type LegacyReadDurabilityTier = DurabilityTier;
 export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;

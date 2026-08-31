@@ -8,9 +8,14 @@ import * as runtime from "./runtime/index.js";
 import type { QueryExecutionOptions } from "./runtime/index.js";
 
 const canonicalQueryExecutionOptions: QueryExecutionOptions = {
+  tier: "local-first",
   propagation: "local-only",
   branch: "draft",
   base: "main",
+};
+const remoteQueryExecutionOptions: QueryExecutionOptions = { tier: "remote" };
+const remoteIfPossibleQueryExecutionOptions: QueryExecutionOptions = {
+  tier: "remote-if-possible",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
   // @ts-expect-error propagate was removed; use propagation instead.
@@ -18,6 +23,8 @@ const removedQueryExecutionOptions: QueryExecutionOptions = {
 };
 
 void canonicalQueryExecutionOptions;
+void remoteQueryExecutionOptions;
+void remoteIfPossibleQueryExecutionOptions;
 void removedQueryExecutionOptions;
 
 // @ts-expect-error NativeRuntimeAdapter is intentionally not part of the public runtime surface.
