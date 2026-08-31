@@ -25,6 +25,23 @@ export type BrowserForegroundNodeLeaseOptions = Pick<
   "runtimeSources" | "dbName" | "storageOwner"
 >;
 
+// Acquiring a lease is deliberately the first operation on a persistent
+// browser root. On a cold browser profile that means starting the worker,
+// acquiring the Web Lock, opening IndexedDB, checking the durable owner, and
+// committing the lease receipt. This is I/O admission, not a heartbeat: the
+// one-second worker-bootstrap probe used by reconnecting followers is too
+// short for it under a contended CI/browser process. Keep this bounded so a
+// genuinely wedged worker still fails visibly, but give durable admission the
+// same order-of-magnitude budget as the public browser readiness receipts.
+const FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS = 10_000;
+
+/**
+ * A timed-out admission must keep its port alive until the worker retires a
+ * possible late lease. Coalesce that background cleanup per physical worker
+ * root so callers retrying a wedged open do not retain unbounded ports.
+ */
+const pendingForegroundLeaseCleanups = new Map<string, symbol>();
+
 /**
  * The one physical SharedWorker realm that may own a browser persistence root.
  *
@@ -39,6 +56,10 @@ export function createBrowserSharedWorkerBaseName(
   dbName: string,
 ): string {
   return ["jazz-runtime", dbName, createBrowserWorkerAssetScope(runtimeSources)].join(":");
+}
+
+function foregroundLeaseCleanupKey(workerName: string, storageOwner: string): string {
+  return `${workerName}\u0000${storageOwner}`;
 }
 
 /**
@@ -62,6 +83,12 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
   ): Promise<SharedBrowserForegroundNodeLease> {
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
+    const cleanupKey = foregroundLeaseCleanupKey(workerName, options.storageOwner);
+    if (pendingForegroundLeaseCleanups.has(cleanupKey)) {
+      throw new Error(
+        "Shared browser foreground lease cancellation cleanup is still pending for this database; wait for the previous worker admission to finish",
+      );
+    }
     const createWorker =
       runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
         ? (name: string) =>
@@ -79,13 +106,43 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
     const port = worker.port;
     port.start();
     const lease = await new Promise<SharedBrowserForegroundNodeLease>((resolve, reject) => {
+      let cancellationRequested = false;
+      let publicResultSettled = false;
+      let cleanupToken: symbol | null = null;
+      const timeoutError = new Error(
+        "Shared browser runtime did not issue a foreground node lease",
+      );
+      const rejectPublic = (error: Error) => {
+        if (publicResultSettled) return;
+        publicResultSettled = true;
+        reject(error);
+      };
       const timeout = setTimeout(() => {
-        cleanup();
-        port.close();
-        reject(new Error("Shared browser runtime did not issue a foreground node lease"));
-      }, 1000);
+        // Do not close the port immediately. The worker might be between the
+        // durable allocation and its ready reply; it must observe this cancel
+        // and retire such a lease before this acquire rejects. Otherwise a
+        // merely slow cold open would burn one node identity per timeout.
+        cancellationRequested = true;
+        cleanupToken = Symbol("foreground-lease-cleanup");
+        pendingForegroundLeaseCleanups.set(cleanupKey, cleanupToken);
+        port.postMessage({ type: "cancel-foreground-node-lease" });
+        // Public startup remains bounded. The open port and listeners stay
+        // alive in the background until the worker observes cancellation and
+        // retires any late lease; closing them here would recreate the orphan
+        // race this cancellation protocol exists to prevent.
+        rejectPublic(timeoutError);
+      }, FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS);
       const cleanup = () => {
         clearTimeout(timeout);
+        // A successful concurrent admission never owned this retained cleanup.
+        // Only its timeout owner may clear the shared key; otherwise it could
+        // let a third caller accumulate another orphan-risking port.
+        if (
+          cleanupToken !== null &&
+          pendingForegroundLeaseCleanups.get(cleanupKey) === cleanupToken
+        ) {
+          pendingForegroundLeaseCleanups.delete(cleanupKey);
+        }
         port.removeEventListener("message", onMessage);
         port.removeEventListener("messageerror", onMessageError);
       };
@@ -93,13 +150,23 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         const message = event.data;
         if (message?.type === "foreground-node-lease-error") {
           cleanup();
-          reject(new Error(message.message));
+          port.close();
+          rejectPublic(new Error(message.message));
+          return;
+        }
+        if (message?.type === "foreground-node-lease-cancelled") {
+          cleanup();
+          port.close();
+          rejectPublic(message.error ? new Error(message.error) : timeoutError);
           return;
         }
         if (message?.type !== "foreground-node-lease-ready") return;
+        // A cancel can race the ready message. Leave the port open until the
+        // worker confirms it has retired this just-issued lease.
+        if (cancellationRequested) return;
         if (!/^(0|[1-9][0-9]*)$/.test(message.confirmedTxTime)) {
           cleanup();
-          reject(
+          rejectPublic(
             new Error("Shared browser runtime returned an invalid foreground lease high-water"),
           );
           return;
@@ -112,11 +179,13 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         );
         result.worker = worker;
         result.port = port;
+        publicResultSettled = true;
         resolve(result);
       };
       const onMessageError = () => {
         cleanup();
-        reject(new Error("Shared browser foreground lease port message error"));
+        port.close();
+        rejectPublic(new Error("Shared browser foreground lease port message error"));
       };
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);

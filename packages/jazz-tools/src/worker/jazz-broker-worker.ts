@@ -13,6 +13,7 @@ import {
 import type {
   BrowserForegroundNodeLeaseAcquireRequest,
   BrowserForegroundNodeLeaseAcquireResponse,
+  BrowserForegroundNodeLeaseCancelRequest,
   BrowserForegroundNodeLeasePortEvent,
   BrowserForegroundNodeLeasePortRequest,
   BrowserFollowerPortEvent,
@@ -222,8 +223,150 @@ async function acquireForegroundNodeLease(
   port: MessagePort,
   request: BrowserForegroundNodeLeaseAcquireRequest,
 ): Promise<void> {
+  let owner: ForegroundLeaseOwner | null = null;
+  let lease: Awaited<ReturnType<IndexedDbPageStore["acquireForegroundNodeLease"]>> | null = null;
+  let allocationPromise: Promise<
+    Awaited<ReturnType<IndexedDbPageStore["acquireForegroundNodeLease"]>>
+  > | null = null;
+  let cancellationRequested = false;
+  let cancellationCompletion: Promise<void> | null = null;
+  let settled = false;
+
+  const cleanup = () => {
+    port.removeEventListener("message", onMessage);
+    port.removeEventListener("messageerror", onMessageError);
+  };
+  const finishCancellation = async (): Promise<void> => {
+    if (settled) return;
+    // The allocation can finish after the client has requested cancellation.
+    // Never publish that identity. If it exists, retire it durably before
+    // acknowledging cancellation so the next foreground cannot accumulate
+    // abandoned active lease records.
+    // A lease-pool transaction may already be in flight while `lease` is
+    // still null. Wait for it before acknowledging cancellation: it can
+    // commit a durable identity after this message handler starts.
+    if (!owner) return;
+    await allocationPromise?.catch(() => undefined);
+    if (settled) return;
+    // During an IndexedDB open cancellation can arrive after the physical
+    // owner exists but before the lease-pool transaction has started. There
+    // is no identity to retire in that case, but the lease-only worker still
+    // has to release its physical-root epoch before acknowledging the cancel.
+    if (!lease) {
+      settled = true;
+      post(port, {
+        type: "foreground-node-lease-cancelled",
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+      cleanup();
+      port.close();
+      maybeCloseWorker();
+      return;
+    }
+    settled = true;
+    owner.activeLeaseIds.delete(lease.leaseId);
+    try {
+      await owner.pageStore.retireForegroundNodeLease(lease.leaseId);
+      post(port, {
+        type: "foreground-node-lease-cancelled",
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    } catch (error) {
+      // A failed retirement remains durably active and therefore fails closed;
+      // do not claim that cancellation made the node reusable.
+      post(port, {
+        type: "foreground-node-lease-cancelled",
+        error: `Shared browser foreground lease cancellation failed: ${asError(error).message}`,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    } finally {
+      cleanup();
+      port.close();
+      maybeCloseWorker();
+    }
+  };
+  const requestCancellation = () => {
+    if (settled) return cancellationCompletion;
+    cancellationRequested = true;
+    // Before an owner exists, the admission continuation calls us again after
+    // it has opened the physical root. Do not memoize a no-op completion.
+    if (owner && !cancellationCompletion) cancellationCompletion = finishCancellation();
+    return cancellationCompletion;
+  };
+  const retire = async (): Promise<void> => {
+    if (settled || !lease || !owner) return;
+    settled = true;
+    owner.activeLeaseIds.delete(lease.leaseId);
+    await owner.pageStore.retireForegroundNodeLease(lease.leaseId);
+    maybeCloseWorker();
+  };
+  const onMessage = (
+    event: MessageEvent<
+      BrowserForegroundNodeLeasePortRequest | BrowserForegroundNodeLeaseCancelRequest
+    >,
+  ) => {
+    void (async () => {
+      const message = event.data;
+      try {
+        if (message?.type === "cancel-foreground-node-lease") {
+          requestCancellation();
+          return;
+        }
+        if (!lease || !owner || settled || cancellationRequested) return;
+        if (message?.type === "return-foreground-node-lease") {
+          if (!/^(0|[1-9][0-9]*)$/.test(message.confirmedTxTime)) {
+            throw new Error("Invalid foreground node lease high-water");
+          }
+          const highWater = BigInt(message.confirmedTxTime);
+          if (highWater > (1n << 64n) - 1n) {
+            throw new Error("Invalid foreground node lease high-water");
+          }
+          // Do not mark this finished until the durable returned receipt has
+          // committed. A failing return must still take the durable-retire
+          // path; otherwise an active lease could be silently forgotten.
+          await owner.pageStore.returnForegroundNodeLease(lease.leaseId, highWater);
+          settled = true;
+          owner.activeLeaseIds.delete(lease.leaseId);
+          post(port, {
+            type: "foreground-node-lease-result",
+          } satisfies BrowserForegroundNodeLeasePortEvent);
+          cleanup();
+          port.close();
+          maybeCloseWorker();
+          return;
+        }
+        if (message?.type === "retire-foreground-node-lease") {
+          await retire();
+          post(port, {
+            type: "foreground-node-lease-result",
+          } satisfies BrowserForegroundNodeLeasePortEvent);
+          cleanup();
+          port.close();
+        }
+      } catch (error) {
+        // A failed clean handoff is indistinguishable from an interrupted
+        // one. Failed retirement leaves the active record for a later worker
+        // bootstrap to retire instead of making it reusable.
+        await retire().catch(() => undefined);
+        post(port, {
+          type: "foreground-node-lease-result",
+          error: asError(error).message,
+        } satisfies BrowserForegroundNodeLeasePortEvent);
+        cleanup();
+        port.close();
+      }
+    })();
+  };
+  const onMessageError = () => {
+    // A dead client cannot complete clean handoff. If allocation completes
+    // later, its continuation sees this flag and retires instead of publishing.
+    requestCancellation();
+  };
+  // Install this before any awaited durable admission. It is the cancellation
+  // witness for the gap that previously existed between client timeout and
+  // the worker attaching its post-lease lifecycle listener.
+  port.addEventListener("message", onMessage);
+  port.addEventListener("messageerror", onMessageError);
+
   try {
-    let owner = foregroundLeaseOwners.get(request.dbName);
+    owner = foregroundLeaseOwners.get(request.dbName) ?? null;
     if (!owner) {
       const physicalOwner = await ensurePhysicalDatabaseOwner(request.dbName, request.storageOwner);
       owner = {
@@ -240,83 +383,43 @@ async function acquireForegroundNodeLease(
         `IndexedDB database ${request.dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
       );
     }
-    const lease = await owner.pageStore.acquireForegroundNodeLease(owner.activeLeaseIds.size === 0);
+    if (cancellationRequested) {
+      await requestCancellation();
+      return;
+    }
+    const allocated = owner.pageStore.acquireForegroundNodeLease(owner.activeLeaseIds.size === 0);
+    allocationPromise = (async () => {
+      const allocatedLease = await allocated;
+      // This is an internal browser-receipt seam. It delays only delivery of
+      // an already-durable allocation so the test can cancel in the exact
+      // window where a lease exists but this handler has not observed it yet.
+      const delay = request.testDelayAfterLeaseAllocationMs;
+      if (delay !== undefined) {
+        if (!Number.isSafeInteger(delay) || delay < 0 || delay > 1_000) {
+          throw new Error("Invalid foreground lease test delay");
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      }
+      return allocatedLease;
+    })();
+    lease = await allocationPromise;
     owner.activeLeaseIds.add(lease.leaseId);
+    if (cancellationRequested) {
+      await requestCancellation();
+      return;
+    }
     post(port, {
       type: "foreground-node-lease-ready",
       leaseId: lease.leaseId,
       node: lease.node,
       confirmedTxTime: lease.confirmedTxTime.toString(),
     } satisfies BrowserForegroundNodeLeaseAcquireResponse);
-
-    let settled = false;
-    const retire = async (): Promise<void> => {
-      if (settled) return;
-      settled = true;
-      owner!.activeLeaseIds.delete(lease.leaseId);
-      await owner!.pageStore.retireForegroundNodeLease(lease.leaseId);
-      maybeCloseWorker();
-    };
-    const onMessage = (event: MessageEvent<BrowserForegroundNodeLeasePortRequest>) => {
-      void (async () => {
-        const message = event.data;
-        try {
-          if (settled) return;
-          if (message?.type === "return-foreground-node-lease") {
-            if (!/^(0|[1-9][0-9]*)$/.test(message.confirmedTxTime)) {
-              throw new Error("Invalid foreground node lease high-water");
-            }
-            const highWater = BigInt(message.confirmedTxTime);
-            if (highWater > (1n << 64n) - 1n) {
-              throw new Error("Invalid foreground node lease high-water");
-            }
-            // Do not mark this finished until the durable returned receipt has
-            // committed. A failing return must still take the durable-retire
-            // path; otherwise an active lease could be silently forgotten.
-            await owner!.pageStore.returnForegroundNodeLease(lease.leaseId, highWater);
-            settled = true;
-            owner!.activeLeaseIds.delete(lease.leaseId);
-            post(port, {
-              type: "foreground-node-lease-result",
-            } satisfies BrowserForegroundNodeLeasePortEvent);
-            cleanup();
-            port.close();
-            maybeCloseWorker();
-            return;
-          }
-          if (message?.type === "retire-foreground-node-lease") {
-            await retire();
-            post(port, {
-              type: "foreground-node-lease-result",
-            } satisfies BrowserForegroundNodeLeasePortEvent);
-            cleanup();
-            port.close();
-          }
-        } catch (error) {
-          // A failed clean handoff is indistinguishable from an interrupted
-          // one. Failed retirement leaves the active record for a later worker
-          // bootstrap to retire instead of making it reusable.
-          await retire().catch(() => undefined);
-          post(port, {
-            type: "foreground-node-lease-result",
-            error: asError(error).message,
-          } satisfies BrowserForegroundNodeLeasePortEvent);
-          cleanup();
-          port.close();
-        }
-      })();
-    };
-    const onMessageError = () => {
-      void retire().catch(() => undefined);
-      cleanup();
-    };
-    const cleanup = () => {
-      port.removeEventListener("message", onMessage);
-      port.removeEventListener("messageerror", onMessageError);
-    };
-    port.addEventListener("message", onMessage);
-    port.addEventListener("messageerror", onMessageError);
   } catch (error) {
+    if (cancellationRequested) {
+      await requestCancellation();
+      return;
+    }
+    cleanup();
     post(port, {
       type: "foreground-node-lease-error",
       message: asError(error).message,

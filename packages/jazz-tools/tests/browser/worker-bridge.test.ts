@@ -20,6 +20,7 @@ import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
+  INDEXEDDB_FOREGROUND_NODE_LEASES_KEY,
   INDEXEDDB_STORAGE_MANIFEST,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
@@ -284,6 +285,88 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 // ---------------------------------------------------------------------------
 
 describe("SharedWorker bridge with IndexedDB", () => {
+  /**
+   * A foreground which times out while the worker is still delivering its
+   * durable identity must cancel/retire that lease before a later foreground
+   * opens the same root.
+   *
+   * first tab ──acquire──► worker ──durably allocate──► delayed delivery
+   * first tab ──cancel───► worker ──retire────────────► durable lease pool
+   * second tab ──acquire──► worker ──fresh node──► second tab
+   */
+  it("retires a foreground lease when cancellation races durable allocation delivery", async () => {
+    const dbName = uniqueDbName("cancelled-foreground-lease");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("cancelled-foreground-lease-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const worker = new SharedWorker(
+      new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-0` },
+    );
+    const port = worker.port;
+    port.start();
+    let unexpectedlyIssued = false;
+    try {
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          const onMessage = (
+            event: MessageEvent<{ type?: string; node?: Uint8Array; message?: string }>,
+          ) => {
+            if (event.data?.type === "foreground-node-lease-ready" && event.data.node) {
+              unexpectedlyIssued = true;
+            }
+            if (event.data?.type === "foreground-node-lease-error") {
+              port.removeEventListener("message", onMessage);
+              reject(new Error(event.data.message));
+            }
+            if (event.data?.type === "foreground-node-lease-cancelled") {
+              port.removeEventListener("message", onMessage);
+              resolve();
+            }
+          };
+          port.addEventListener("message", onMessage);
+          port.postMessage({
+            type: "acquire-foreground-node-lease",
+            dbName,
+            storageOwner,
+            testDelayAfterLeaseAllocationMs: 250,
+          });
+          // The worker has entered a real IndexedDB lease allocation; its
+          // delayed delivery leaves a deterministic cancellation window.
+          setTimeout(() => port.postMessage({ type: "cancel-foreground-node-lease" }), 50);
+        }),
+        5_000,
+        "in-flight foreground lease cancellation was not acknowledged after cleanup",
+      );
+    } finally {
+      port.close();
+    }
+    expect(unexpectedlyIssued).toBe(false);
+
+    // Cancellation releases the now-idle physical realm. Let the browser
+    // finish that close before opening its successor generation.
+    await sleep(100);
+
+    const pool = await rawForegroundLeasePool(dbName);
+    expect(pool.active).toEqual([]);
+    expect(pool.retired).toHaveLength(1);
+
+    // A cancelled-but-issued identity is retired, never put back into the
+    // reusable pool. A later foreground must receive a distinct node.
+    const successor = await withTimeout(
+      SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+      5_000,
+      "foreground lease cancellation left the physical root unavailable",
+    );
+    try {
+      expect(successor.node).not.toEqual(pool.retired[0]);
+    } finally {
+      await successor.retire();
+    }
+  }, 15_000);
+
   it("fences a generation-advanced worker realm until its live predecessor releases the physical root", async () => {
     const appId = uniqueDbName("physical-worker-epoch-app");
     const dbName = uniqueDbName("physical-worker-epoch-root");
@@ -3437,6 +3520,33 @@ async function rawStorageRecords(name: string): Promise<Record<string, unknown>>
   await transactionDone(transaction);
   database.close();
   return records;
+}
+
+async function rawForegroundLeasePool(
+  name: string,
+): Promise<{ active: unknown[]; reusable: unknown[]; retired: unknown[] }> {
+  const database = await requestResult(indexedDB.open(name));
+  const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+  const done = transactionDone(transaction);
+  const value = await requestResult(
+    transaction
+      .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
+      .get(INDEXEDDB_FOREGROUND_NODE_LEASES_KEY),
+  );
+  await done;
+  database.close();
+  if (!value || typeof value !== "object") {
+    throw new Error("expected foreground node lease pool");
+  }
+  const pool = value as Partial<{ active: unknown[]; reusable: unknown[]; retired: unknown[] }>;
+  if (
+    !Array.isArray(pool.active) ||
+    !Array.isArray(pool.reusable) ||
+    !Array.isArray(pool.retired)
+  ) {
+    throw new Error("expected valid foreground node lease pool");
+  }
+  return { active: pool.active, reusable: pool.reusable, retired: pool.retired };
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {

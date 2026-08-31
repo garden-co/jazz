@@ -34,6 +34,13 @@ export interface BrowserForegroundNodeLeaseAcquireRequest {
   dbName: string;
   /** Exact durable owner that must admit the physical root before lease issue. */
   storageOwner: string;
+  /** @internal Browser-only scheduling seam for the real worker receipt. */
+  testDelayAfterLeaseAllocationMs?: number;
+}
+
+/** Cancel a lease bootstrap that has not been handed to a foreground yet. */
+export interface BrowserForegroundNodeLeaseCancelRequest {
+  type: "cancel-foreground-node-lease";
 }
 
 export type BrowserForegroundNodeLeaseAcquireResponse =
@@ -44,7 +51,12 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       /** Canonical decimal u64: never a lossy JS number. */
       confirmedTxTime: string;
     }
-  | { type: "foreground-node-lease-error"; message: string };
+  | { type: "foreground-node-lease-error"; message: string }
+  /**
+   * The worker observed cancellation and either had no lease to clean up or
+   * durably retired the lease that finished concurrently with cancellation.
+   */
+  | { type: "foreground-node-lease-cancelled"; error?: string };
 
 export type BrowserForegroundNodeLeasePortRequest =
   | { type: "return-foreground-node-lease"; confirmedTxTime: string }
