@@ -9,6 +9,7 @@ import {
 } from "./db.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../drivers/types.js";
+import type { DbSubscriptionCallbacks as PublicDbSubscriptionCallbacks } from "../index.js";
 
 const schema: WasmSchema = {
   todos: {
@@ -216,13 +217,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     const connection = dbInternals.connection;
     vi.spyOn(connection, "shouldDeferSubscriptionStart").mockReturnValue(true);
     vi.spyOn(connection, "ensureReady").mockImplementation(() => readiness.promise);
+    const onUpdate = vi.fn();
     const onError = vi.fn();
 
-    const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
-      query(),
-      { onDelta: vi.fn(), onError },
-      { tier: ReadTier.Remote },
-    );
+    const unsubscribe = db.subscribe(query(), { onUpdate, onError }, { tier: ReadTier.Remote });
     expect(client.subscribe).not.toHaveBeenCalled();
 
     const failure = new Error("deferred authority readiness failed");
@@ -605,6 +603,126 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(onDelta).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledOnce();
     expect(client.unsubscribe.mock.calls).toEqual([[1]]);
+  });
+
+  it("clears buffered admission deltas when the subscription terminalizes", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-buffered-admission-error",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const admission = deferred<void>();
+    const connection = (
+      db as unknown as {
+        connection: { initialExplicitOfflineState: () => Promise<void> | null };
+      }
+    ).connection;
+    vi.spyOn(connection, "initialExplicitOfflineState").mockReturnValue(admission.promise);
+    const updates = vi.fn();
+    const errors: Error[] = [];
+
+    const unsubscribe = db.subscribe(query(), {
+      onUpdate: updates,
+      onError: (error) => errors.push(error),
+    });
+    const onDelta = client.subscriptionCallbacks.get(1)!;
+    const onNativeError = client.subscriptionErrorCallbacks.get(1)!;
+    onDelta(added("buffered", "must never publish"));
+    const failure = new Error("subscription failed before admission");
+    onNativeError(failure);
+    onNativeError(new Error("duplicate terminal failure"));
+    admission.resolve();
+    await settle();
+
+    expect(errors).toEqual([failure]);
+    expect(updates).not.toHaveBeenCalled();
+    onDelta(added("late", "must stay terminal"));
+    expect(updates).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("fences an already-running local seed after a native terminal error", async () => {
+    const client = makeClient();
+    const localSeed = deferred<
+      Array<{ id: string; values: Array<{ type: "Text"; value: string }> }>
+    >();
+    client.query.mockImplementationOnce(() => localSeed.promise);
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-running-seed-error",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const updates: string[][] = [];
+    const errors: Error[] = [];
+    const unsubscribe = db.subscribe(query(), {
+      onUpdate: (rows) => updates.push(publicationTitles(rows)),
+      onError: (error) => errors.push(error),
+    });
+    await vi.waitFor(() => expect(client.query).toHaveBeenCalledOnce());
+    const onNativeError = client.subscriptionErrorCallbacks.get(1)!;
+    const failure = new Error("native stream failed while seed was reading");
+    onNativeError(failure);
+
+    localSeed.resolve([
+      {
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "late local seed" }],
+      },
+    ]);
+    await settle();
+
+    expect(errors).toEqual([failure]);
+    expect(updates).toEqual([[]]);
+    unsubscribe();
+  });
+
+  it("routes public update callback failures once and contains error callback failures", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-public-callback-error",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const updateFailure = new Error("public subscription update failed");
+    const errorCallbackFailure = new Error("public subscription onError failed");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const updates = vi.fn((rows: Array<{ id: string; title: string }>) => {
+      if (rows.length > 0) throw updateFailure;
+    });
+    const onError = vi.fn(() => {
+      throw errorCallbackFailure;
+    });
+    const callbacks: PublicDbSubscriptionCallbacks<{ id: string; title: string }> = {
+      onUpdate: updates,
+      onError,
+    };
+    const unsubscribe = db.subscribe(query(), callbacks);
+    const onDelta = client.subscriptionCallbacks.get(1)!;
+
+    expect(() => onDelta(added("callback", "throws"))).not.toThrow();
+    onDelta(added("late", "must stay terminal"));
+
+    expect(updates).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(updateFailure);
+    expect(consoleError).toHaveBeenCalledWith(
+      "Jazz subscription error callback failed",
+      errorCallbackFailure,
+    );
+    unsubscribe();
   });
 
   it("publishes a synchronous replacement snapshot only after owning its handle", async () => {

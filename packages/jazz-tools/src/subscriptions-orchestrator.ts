@@ -391,7 +391,11 @@ export class SubscriptionsOrchestrator {
       entry.state = { status: "rejected", data: undefined, error };
       entry.rejectfulfilled(error);
       for (const listener of Array.from(entry.listeners)) {
-        listener.onError?.(error);
+        try {
+          listener.onError?.(error);
+        } catch (callbackError) {
+          console.error("Jazz subscription error callback failed", callbackError);
+        }
       }
       this.scheduleCleanup(entry);
     };
@@ -441,16 +445,12 @@ export class SubscriptionsOrchestrator {
       entry.unsubscribe = subscription;
       if (subscription.ready) {
         void subscription.ready.catch((error: unknown) => {
-          // A newer subscription or a caller teardown owns its own result.
-          // Never let a stale browser-worker open failure reject a recreated
-          // query entry.
+          // `onError` may already have terminalized this generation before its
+          // admission promise rejects. Route both paths through the same
+          // guarded transition so listeners and suspense receive exactly one
+          // terminal error.
           if (entry.generation !== generation || entry.unsubscribe !== subscription) return;
-          entry.state = { status: "rejected", data: undefined, error };
-          entry.rejectfulfilled(error);
-          for (const listener of Array.from(entry.listeners)) {
-            listener.onError?.(error);
-          }
-          this.scheduleCleanup(entry);
+          reject(error);
         });
       }
     } catch (error) {

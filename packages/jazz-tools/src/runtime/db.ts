@@ -187,16 +187,22 @@ export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
   base?: BranchBase;
 };
 /**
- * Callbacks for a live query subscription.
+ * Callbacks for a public live query subscription.
  *
- * Use the object form when terminal subscription errors need to be observed,
- * including deferred-start and replacement failures. After `onError` runs,
- * that generation will not publish further deltas.
+ * The function form of {@link Db.subscribe} remains supported for compatibility,
+ * but the object form is preferred because it makes terminal failures explicit.
+ * After `onError` runs, that subscription will not publish further values.
  */
 export interface DbSubscriptionCallbacks<T extends { id: string }> {
-  /** Called whenever the query result changes. */
+  /** Called with the complete current result whenever the query changes. */
+  onUpdate: (rows: T[]) => void;
+  /** Called once when the subscription terminates with an error. */
+  onError?: (error: Error) => void;
+}
+
+/** Package-internal callbacks for incremental subscription consumers. */
+export interface DbDeltaSubscriptionCallbacks<T extends { id: string }> {
   onDelta: (delta: SubscriptionDelta<T>) => void;
-  /** Called once when the active subscription generation terminates with an error. */
   onError?: (error: Error) => void;
 }
 
@@ -209,7 +215,7 @@ export interface DbSubscriptionSource {
   ): Promise<T[]> | T[];
   subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
-    callbacks: ((delta: SubscriptionDelta<T>) => void) | DbSubscriptionCallbacks<T>,
+    callbacks: ((delta: SubscriptionDelta<T>) => void) | DbDeltaSubscriptionCallbacks<T>,
     options?: QueryOptions,
     session?: Session,
   ): SubscriptionHandle;
@@ -2331,25 +2337,28 @@ export class Db {
 
   /**
    * Subscribe to a query and receive its complete current result whenever it changes.
-   * Each callback receives a fresh result array.
+   * Each update receives a fresh result array. Prefer the object form when the
+   * subscription's terminal errors must be handled explicitly. The legacy
+   * function form reports unhandled terminal errors to `console.error`.
    */
   subscribe<T extends { id: string }>(
     query: QueryBuilder<T>,
-    callback: (rows: T[]) => void,
+    callbacks: ((rows: T[]) => void) | DbSubscriptionCallbacks<T>,
     options?: QueryOptions,
     session?: Session,
   ): () => void {
-    return this.subscribeDelta(
-      query,
-      (update) => {
+    const { onUpdate, onError } =
+      typeof callbacks === "function" ? { onUpdate: callbacks, onError: undefined } : callbacks;
+    const deltaCallbacks: DbDeltaSubscriptionCallbacks<T> = {
+      onDelta: (update) => {
         if (update.all === undefined) {
           throw new Error("Jazz subscription update is missing its materialized result.");
         }
-        callback(update.all);
+        onUpdate(update.all);
       },
-      options,
-      session,
-    );
+      ...(onError === undefined ? {} : { onError }),
+    };
+    return this.subscribeDelta(query, deltaCallbacks, options, session);
   }
 
   /**
@@ -2387,7 +2396,7 @@ export class Db {
    */
   private subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
-    callbacks: ((delta: SubscriptionDelta<T>) => void) | DbSubscriptionCallbacks<T>,
+    callbacks: ((delta: SubscriptionDelta<T>) => void) | DbDeltaSubscriptionCallbacks<T>,
     options?: QueryOptions,
     session?: Session,
   ): SubscriptionHandle {
@@ -2423,17 +2432,6 @@ export class Db {
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
     let startLocalSeed: (() => void) | null = null;
-    const deliver = (delta: SubscriptionDelta<T>) => {
-      if (!deliveryReady) {
-        bufferedDeltas.push(delta);
-        return;
-      }
-      onDelta(delta);
-    };
-    const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(delta, transform);
-      deliver(typedDelta);
-    };
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const remoteIfPossibleOffline =
@@ -2453,6 +2451,7 @@ export class Db {
     };
     let activeSubscription: NativeSubscription | null = null;
     let unsubscribed = false;
+    let terminalized = false;
     const readyAbort = new AbortController();
     const retireNativeSubscription = (subscription: NativeSubscription) => {
       subscription.retired = true;
@@ -2461,14 +2460,29 @@ export class Db {
       subscription.nativeUnsubscribed = true;
       client.unsubscribe(id);
     };
+    const notifyTerminalError = (error: Error) => {
+      if (!onError) {
+        console.error("Unhandled Jazz subscription error", error);
+        return;
+      }
+      try {
+        onError(error);
+      } catch (callbackError) {
+        console.error("Jazz subscription error callback failed", callbackError);
+      }
+    };
     const completeTerminalization = (subscription: NativeSubscription) => {
       // A native runtime may fail from inside subscribe(). Record the terminal
       // outcome immediately, but wait for subscribe() to return its handle
       // before detaching and notifying the owner.
       if (subscription.installing) return;
       const terminalError = subscription.terminalError;
-      if (terminalError === null || subscription.terminalDelivered) return;
+      if (terminalError === null || subscription.terminalDelivered || terminalized) return;
       subscription.terminalDelivered = true;
+      terminalized = true;
+      deliveryReady = false;
+      bufferedDeltas.length = 0;
+      startLocalSeed = null;
       if (activeSubscription === subscription) {
         activeSubscription = null;
       }
@@ -2480,10 +2494,15 @@ export class Db {
       readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       manager.clear();
-      onError?.(terminalError);
+      notifyTerminalError(terminalError);
     };
     const terminalizeSubscription = (subscription: NativeSubscription, error: unknown) => {
-      if (unsubscribed || activeSubscription !== subscription || subscription.terminalDelivered) {
+      if (
+        unsubscribed ||
+        terminalized ||
+        activeSubscription !== subscription ||
+        subscription.terminalDelivered
+      ) {
         return;
       }
       subscription.terminalError ??= error instanceof Error ? error : new Error(String(error));
@@ -2503,6 +2522,24 @@ export class Db {
       };
       activeSubscription = subscription;
       return subscription;
+    };
+    const deliver = (delta: SubscriptionDelta<T>) => {
+      if (unsubscribed || terminalized || activeSubscription === null) return;
+      if (!deliveryReady) {
+        bufferedDeltas.push(delta);
+        return;
+      }
+      try {
+        onDelta(delta);
+      } catch (error) {
+        const subscription = activeSubscription;
+        if (subscription !== null) terminalizeSubscription(subscription, error);
+      }
+    };
+    const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
+      if (unsubscribed || terminalized || activeSubscription === null) return;
+      const typedDelta = manager.handleDelta(delta, transform);
+      deliver(typedDelta);
     };
     const startNativeSubscription = (
       subscription: NativeSubscription,
@@ -2582,6 +2619,9 @@ export class Db {
     const unsubscribe = () => {
       if (unsubscribed) return;
       unsubscribed = true;
+      deliveryReady = false;
+      bufferedDeltas.length = 0;
+      startLocalSeed = null;
       readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       if (activeSubscription !== null) {
@@ -2592,30 +2632,35 @@ export class Db {
         }
       }
       activeSubscription = null;
-      bufferedDeltas.length = 0;
       manager.clear();
     };
     const ready = initialReadiness
       ?.then(() => {
-        if (unsubscribed || this.isShuttingDown) return;
+        if (unsubscribed || terminalized || activeSubscription === null || this.isShuttingDown) {
+          return;
+        }
         deliveryReady = true;
         for (const delta of bufferedDeltas.splice(0)) {
-          onDelta(delta);
+          if (unsubscribed || terminalized || activeSubscription === null) return;
+          deliver(delta);
         }
-        startLocalSeed?.();
+        const seed = startLocalSeed;
+        startLocalSeed = null;
+        seed?.();
       })
       .catch((error: unknown) => {
-        if (unsubscribed || this.isShuttingDown) return;
-        // The worker admitted no durable runtime. Dispose the locally
-        // registered native subscription before surfacing that initiating
-        // operation's error through the handle/orchestrator.
-        unsubscribe();
+        if (unsubscribed || terminalized || activeSubscription === null || this.isShuttingDown) {
+          return;
+        }
+        // Admission failed after native registration. Terminalize the same
+        // generation before rejecting readiness so public and framework
+        // consumers observe one error and no buffered opening can escape.
+        terminalizeSubscription(activeSubscription, error);
         throw error;
       });
-    // Direct `Db.subscribe` has historically returned only cancellation, so
-    // retain an internal rejection handler for callers that do not consume
-    // the readiness property. Framework bindings consume `ready` below via
-    // DbSubscriptionSource and surface it as their normal error state.
+    // The public error callback owns terminal notification. Retain a rejection
+    // handler because the readiness property is an internal orchestration seam
+    // and public Db.subscribe callers are not required to consume it.
     if (ready) void ready.catch(() => undefined);
     const initialSubscription = createSubscriptionGeneration();
     if (queryOptions.tier == null || queryOptions.tier === "local") {
@@ -2691,18 +2736,34 @@ export class Db {
           propagation: "local-only",
         });
       const seedLocal = () => {
+        const subscription = activeSubscription;
+        if (subscription === null || unsubscribed || terminalized) return;
         const seedRows =
           session == null
             ? seedQuery()
             : this.withRuntimeOperationContext({ session }, () => seedQuery());
         void seedRows
           .then((rows) => {
-            if (unsubscribed) return;
+            if (
+              unsubscribed ||
+              terminalized ||
+              activeSubscription !== subscription ||
+              subscription.terminalError !== null
+            ) {
+              return;
+            }
             deliver(manager.seed(rows));
           })
           .catch((error: unknown) => {
-            if (unsubscribed || activeSubscription === null) return;
-            terminalizeSubscription(activeSubscription, error);
+            if (
+              unsubscribed ||
+              terminalized ||
+              activeSubscription !== subscription ||
+              subscription.terminalError !== null
+            ) {
+              return;
+            }
+            terminalizeSubscription(subscription, error);
           });
       };
       if (initialReadiness) startLocalSeed = seedLocal;

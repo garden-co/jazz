@@ -524,12 +524,16 @@ interface WriteContextPayload {
 
 /**
  * Subscription callback type.
+ *
+ * The function form is retained for compatibility. Prefer
+ * {@link SubscriptionCallbacks} so terminal failures are handled explicitly;
+ * otherwise they are reported to `console.error`.
  */
 export type SubscriptionCallback = (delta: RuntimeSubscriptionDelta) => void;
 export interface SubscriptionCallbacks {
   /** Called for each native subscription delta. */
   onUpdate: SubscriptionCallback;
-  /** Called once the native subscription terminates with an error. */
+  /** Called once when the native subscription or update callback fails. */
   onError?: (error: Error) => void;
 }
 
@@ -1558,8 +1562,8 @@ export class JazzClient {
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param query JSON-encoded runtime query specification
-   * @param callbacks Delta callback, or callbacks object with terminal error handling
+   * @param callbacks Delta callback, or callbacks object with terminal error handling.
+   * Legacy function-form subscriptions report terminal failures to `console.error`.
    * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
@@ -1585,13 +1589,38 @@ export class JazzClient {
       optionsJson,
     );
 
+    let terminal = false;
+    const terminate = (error: Error, unsubscribe: boolean) => {
+      if (terminal) return;
+      terminal = true;
+      if (unsubscribe) this.runtime.unsubscribe(handle);
+      if (!onError) {
+        console.error("Unhandled Jazz subscription error", error);
+        return;
+      }
+      try {
+        onError(error);
+      } catch (callbackError) {
+        console.error("Jazz subscription error callback failed", callbackError);
+      }
+    };
+
     try {
       this.runtime.executeSubscription(handle, (result) => {
+        if (terminal) return;
         if (result instanceof Error) {
-          onError?.(result);
+          // Native terminal failures already close their source state. The
+          // owning facade performs final handle cleanup after notification.
+          terminate(result, false);
           return;
         }
-        onUpdate(result);
+        try {
+          onUpdate(result);
+        } catch (error) {
+          // User callback failures must not escape through the native tick or
+          // leave a live source publishing behind the terminal notification.
+          terminate(error instanceof Error ? error : new Error(String(error)), true);
+        }
       });
     } catch (error) {
       // createSubscription already transferred ownership to this facade. If

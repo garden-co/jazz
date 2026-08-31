@@ -13,6 +13,7 @@ export {
   type QueryVisibility,
   type Row,
   type SubscriptionCallback,
+  type SubscriptionCallbacks,
   type StreamingValueChunk,
   type StreamingValueSource,
   type WasmModule,

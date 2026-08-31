@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "./runtime/context.js";
 import type {
-  DbSubscriptionCallbacks,
+  DbDeltaSubscriptionCallbacks,
   QueryBuilder,
   QueryOptions,
   SubscriptionHandle,
@@ -83,14 +83,14 @@ function createUnitHarness(
   const db: {
     subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
-      callbacks: DbSubscriptionCallbacks<T>,
+      callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
       session?: Session,
     ): SubscriptionHandle;
   } = {
     subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
-      callbacks: DbSubscriptionCallbacks<T>,
+      callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
       session?: Session,
     ): SubscriptionHandle {
@@ -496,6 +496,31 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       });
       expect(onError).toHaveBeenCalledOnce();
       await expect(entry.promise).rejects.toBe(readinessError);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14d keeps the first terminal error when onError races readiness rejection", async () => {
+    const harness = createUnitHarness();
+    let rejectReadiness!: (error: Error) => void;
+    const readiness = new Promise<void>((_resolve, reject) => {
+      rejectReadiness = reject;
+    });
+    harness.setNextReadiness(readiness);
+    try {
+      const { entry } = harness.makeEntry();
+      const errors: Error[] = [];
+      entry.subscribe({ onError: (error) => errors.push(error as Error) });
+
+      const streamError = new Error("stream failed during admission");
+      harness.emitError(0, streamError);
+      rejectReadiness(new Error("admission rejected after stream failure"));
+      await Promise.resolve();
+
+      expect(errors).toEqual([streamError]);
+      expect(entry.error).toBe(streamError);
+      await expect(entry.promise).rejects.toBe(streamError);
     } finally {
       await harness.manager.shutdown();
     }

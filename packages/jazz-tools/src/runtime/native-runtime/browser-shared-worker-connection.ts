@@ -9,14 +9,15 @@ import type {
   BrowserWorkerConnectionContext,
 } from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
-import type {
-  BrowserSharedWorkerConnectRequest,
-  BrowserSharedWorkerConnectResponse,
-  BrowserForegroundNodeLeaseAcquireResponse,
-  BrowserForegroundNodeLeasePortEvent,
-  BrowserForegroundNodeLeasePortRequest,
-  BrowserFollowerPortRequest,
-  BrowserWorkerInitOptions,
+import {
+  deserializeBrowserRelayError,
+  type BrowserSharedWorkerConnectRequest,
+  type BrowserSharedWorkerConnectResponse,
+  type BrowserForegroundNodeLeaseAcquireResponse,
+  type BrowserForegroundNodeLeasePortEvent,
+  type BrowserForegroundNodeLeasePortRequest,
+  type BrowserFollowerPortRequest,
+  type BrowserWorkerInitOptions,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
@@ -151,13 +152,13 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         if (message?.type === "foreground-node-lease-error") {
           cleanup();
           port.close();
-          rejectPublic(new Error(message.message));
+          rejectPublic(deserializeBrowserRelayError(message.error));
           return;
         }
         if (message?.type === "foreground-node-lease-cancelled") {
           cleanup();
           port.close();
-          rejectPublic(message.error ? new Error(message.error) : timeoutError);
+          rejectPublic(message.error ? deserializeBrowserRelayError(message.error) : timeoutError);
           return;
         }
         if (message?.type !== "foreground-node-lease-ready") return;
@@ -224,7 +225,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         const result = event.data;
         if (result?.type !== "foreground-node-lease-result") return;
         cleanup();
-        if (result.error) reject(new Error(result.error));
+        if (result.error) reject(deserializeBrowserRelayError(result.error));
         else resolve();
       };
       const onMessageError = () => {
@@ -360,7 +361,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           // report that rejection before the caller's operation has observed
           // readiness. The outer, constructor-owned state machine turns this
           // into the same explicit error after it has installed containment.
-          resolve({ connected: false, error: new Error(event.data.message) });
+          resolve({ connected: false, error: deserializeBrowserRelayError(event.data.error) });
           return;
         }
         if (event.data?.type !== "runtime-ready") return;

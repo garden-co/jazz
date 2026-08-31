@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Deliver established native subscription failures through the `Db.subscribeAll` callback object's `onError` listener instead of throwing them from an asynchronous callback. Errors retained by retired or unsubscribed native streams are ignored, so only the active subscription generation can reject an orchestrated query entry.
+Expose terminal errors through public `Db.subscribe` callback objects and propagate them through framework query entries. Subscription generations now fence buffered/admission/seed work after terminalization, legacy function callbacks report unhandled errors, and browser-worker relays preserve error names, messages, stacks, and serializable causes.
