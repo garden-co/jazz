@@ -505,28 +505,7 @@ const CATALOGUE_PENDING_LINEAGE_VERSION: u8 = 1;
 // This is deliberately independent of the catalogue-record payload versions:
 // physical mappings live in the fixed `jazz_schema_versions` carrier rather
 // than in `jazz_catalogue`.
-const PHYSICAL_MAPPING_VERSION: u8 = 2;
-
-fn physical_mapping_version(mapping: &SchemaPhysicalMapping) -> u8 {
-    let requires_wide_payload_ordinal = mapping.tables.values().any(|table| {
-        table
-            .payload_enum_cases
-            .values()
-            .flatten()
-            .chain(
-                table
-                    .nested_payload_enum_cases
-                    .values()
-                    .flat_map(|paths| paths.values().flatten()),
-            )
-            .any(|case| case.introducing_ordinal > u32::from(u8::MAX))
-    });
-    if requires_wide_payload_ordinal {
-        PHYSICAL_MAPPING_VERSION
-    } else {
-        1
-    }
-}
+const PHYSICAL_MAPPING_VERSION: u8 = 1;
 
 /// Encode node-local physical storage metadata as one typed, canonical value.
 ///
@@ -534,22 +513,7 @@ fn physical_mapping_version(mapping: &SchemaPhysicalMapping) -> u8 {
 /// handles.  The schema-qualified enum case identities inside it are semantic,
 /// and their vector order is the already-authoritative physical tag order.
 pub(super) fn encode_physical_mapping(mapping: &SchemaPhysicalMapping) -> Result<Vec<u8>, Error> {
-    // Preserve the epoch-one representation whenever it can express the
-    // mapping. Besides keeping logical storage exports stable, staged lineage
-    // payloads validate by exact re-encoding after a reopen.
-    encode_physical_mapping_at_version(mapping, physical_mapping_version(mapping))
-}
-
-fn encode_physical_mapping_at_version(
-    mapping: &SchemaPhysicalMapping,
-    version: u8,
-) -> Result<Vec<u8>, Error> {
-    if !matches!(version, 1 | PHYSICAL_MAPPING_VERSION) {
-        return Err(Error::InvalidStoredValue(
-            "invalid physical mapping payload",
-        ));
-    }
-    let mut payload = vec![version];
+    let mut payload = vec![PHYSICAL_MAPPING_VERSION];
     encode_physical_identity_manifest(&mut payload, &mapping.identities)?;
     put_len(
         &mut payload,
@@ -585,13 +549,9 @@ fn encode_physical_mapping_at_version(
             }
         }
         encode_direct_scalar_enum_registries(&mut payload, &table.scalar_enum_cases)?;
-        encode_direct_payload_enum_registries(&mut payload, &table.payload_enum_cases, version)?;
+        encode_direct_payload_enum_registries(&mut payload, &table.payload_enum_cases)?;
         encode_nested_scalar_enum_registries(&mut payload, &table.nested_scalar_enum_cases)?;
-        encode_nested_payload_enum_registries(
-            &mut payload,
-            &table.nested_payload_enum_cases,
-            version,
-        )?;
+        encode_nested_payload_enum_registries(&mut payload, &table.nested_payload_enum_cases)?;
     }
     Ok(payload)
 }
@@ -602,7 +562,7 @@ pub(super) fn decode_physical_mapping(payload: &[u8]) -> Result<SchemaPhysicalMa
         .first()
         .copied()
         .ok_or(Error::InvalidStoredValue(CONTEXT))?;
-    if !matches!(version, 1 | PHYSICAL_MAPPING_VERSION) {
+    if version != PHYSICAL_MAPPING_VERSION {
         return Err(Error::InvalidStoredValue(CONTEXT));
     }
     let mut cursor = CataloguePayloadCursor::new(payload, version, CONTEXT)?;
@@ -650,10 +610,9 @@ pub(super) fn decode_physical_mapping(payload: &[u8]) -> Result<SchemaPhysicalMa
             variant_cases.push(PhysicalVariantCase { tag, fields });
         }
         let scalar_enum_cases = decode_direct_scalar_enum_registries(&mut cursor)?;
-        let payload_enum_cases = decode_direct_payload_enum_registries(&mut cursor, version)?;
+        let payload_enum_cases = decode_direct_payload_enum_registries(&mut cursor)?;
         let nested_scalar_enum_cases = decode_nested_scalar_enum_registries(&mut cursor)?;
-        let nested_payload_enum_cases =
-            decode_nested_payload_enum_registries(&mut cursor, version)?;
+        let nested_payload_enum_cases = decode_nested_payload_enum_registries(&mut cursor)?;
         if tables
             .insert(
                 table_name,
@@ -772,21 +731,10 @@ fn encode_scalar_case_id(payload: &mut Vec<u8>, case: &GlobalScalarEnumCaseId) {
     payload.push(case.introducing_ordinal);
 }
 
-fn encode_payload_case_id(
-    payload: &mut Vec<u8>,
-    case: &GlobalEnumCaseId,
-    version: u8,
-) -> Result<(), Error> {
+fn encode_payload_case_id(payload: &mut Vec<u8>, case: &GlobalEnumCaseId) {
     payload.extend_from_slice(case.id.0.as_bytes());
     payload.extend_from_slice(case.introducing_schema.0.as_bytes());
-    if version == 1 {
-        payload.push(u8::try_from(case.introducing_ordinal).map_err(|_| {
-            Error::InvalidStoredValue("physical mapping payload enum ordinal exhausted")
-        })?);
-    } else {
-        payload.extend_from_slice(&case.introducing_ordinal.to_le_bytes());
-    }
-    Ok(())
+    payload.extend_from_slice(&case.introducing_ordinal.to_le_bytes());
 }
 
 fn encode_scalar_cases(
@@ -800,14 +748,10 @@ fn encode_scalar_cases(
     Ok(())
 }
 
-fn encode_payload_cases(
-    payload: &mut Vec<u8>,
-    cases: &[GlobalEnumCaseId],
-    version: u8,
-) -> Result<(), Error> {
+fn encode_payload_cases(payload: &mut Vec<u8>, cases: &[GlobalEnumCaseId]) -> Result<(), Error> {
     put_len(payload, cases.len(), "physical mapping enum case count")?;
     for case in cases {
-        encode_payload_case_id(payload, case, version)?;
+        encode_payload_case_id(payload, case);
     }
     Ok(())
 }
@@ -831,7 +775,6 @@ fn encode_direct_scalar_enum_registries(
 fn encode_direct_payload_enum_registries(
     payload: &mut Vec<u8>,
     registries: &BTreeMap<PhysicalColumnId, Vec<GlobalEnumCaseId>>,
-    version: u8,
 ) -> Result<(), Error> {
     put_len(
         payload,
@@ -840,7 +783,7 @@ fn encode_direct_payload_enum_registries(
     )?;
     for (column_id, cases) in registries {
         payload.extend_from_slice(&column_id.0.to_le_bytes());
-        encode_payload_cases(payload, cases, version)?;
+        encode_payload_cases(payload, cases)?;
     }
     Ok(())
 }
@@ -872,7 +815,6 @@ fn encode_nested_scalar_enum_registries(
 fn encode_nested_payload_enum_registries(
     payload: &mut Vec<u8>,
     registries: &BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalEnumCaseId>>>,
-    version: u8,
 ) -> Result<(), Error> {
     put_len(
         payload,
@@ -888,7 +830,7 @@ fn encode_nested_payload_enum_registries(
         )?;
         for (path, cases) in paths {
             put_string(payload, path, "physical mapping nested registry path")?;
-            encode_payload_cases(payload, cases, version)?;
+            encode_payload_cases(payload, cases)?;
         }
     }
     Ok(())
@@ -906,16 +848,11 @@ fn decode_scalar_case_id(
 
 fn decode_payload_case_id(
     cursor: &mut CataloguePayloadCursor<'_>,
-    version: u8,
 ) -> Result<GlobalEnumCaseId, Error> {
     Ok(GlobalEnumCaseId {
         id: crate::ids::GlobalPhysicalEnumVariantId(cursor.uuid()?),
         introducing_schema: SchemaVersionId(cursor.uuid()?),
-        introducing_ordinal: if version == 1 {
-            u32::from(cursor.bytes(1)?[0])
-        } else {
-            cursor.u32()?
-        },
+        introducing_ordinal: cursor.u32()?,
     })
 }
 
@@ -938,14 +875,13 @@ fn decode_scalar_cases(
 
 fn decode_payload_cases(
     cursor: &mut CataloguePayloadCursor<'_>,
-    version: u8,
 ) -> Result<Vec<GlobalEnumCaseId>, Error> {
     const CONTEXT: &str = "invalid physical mapping payload";
     let count = cursor.u32()?;
     let mut cases = Vec::new();
     let mut unique = BTreeSet::new();
     for _ in 0..count {
-        let case = decode_payload_case_id(cursor, version)?;
+        let case = decode_payload_case_id(cursor)?;
         if !unique.insert(case.clone()) {
             return Err(Error::InvalidStoredValue(CONTEXT));
         }
@@ -979,7 +915,6 @@ fn decode_direct_scalar_enum_registries(
 
 fn decode_direct_payload_enum_registries(
     cursor: &mut CataloguePayloadCursor<'_>,
-    version: u8,
 ) -> Result<BTreeMap<PhysicalColumnId, Vec<GlobalEnumCaseId>>, Error> {
     const CONTEXT: &str = "invalid physical mapping payload";
     let count = cursor.u32()?;
@@ -992,7 +927,7 @@ fn decode_direct_payload_enum_registries(
         }
         previous = Some(id);
         if registries
-            .insert(id, decode_payload_cases(cursor, version)?)
+            .insert(id, decode_payload_cases(cursor)?)
             .is_some()
         {
             return Err(Error::InvalidStoredValue(CONTEXT));
@@ -1034,7 +969,6 @@ fn decode_nested_scalar_enum_registries(
 
 fn decode_nested_payload_enum_registries(
     cursor: &mut CataloguePayloadCursor<'_>,
-    version: u8,
 ) -> Result<BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalEnumCaseId>>>, Error> {
     const CONTEXT: &str = "invalid physical mapping payload";
     let count = cursor.u32()?;
@@ -1053,10 +987,7 @@ fn decode_nested_payload_enum_registries(
             let path = cursor.string()?;
             require_strictly_increasing(previous_path.as_deref(), &path, CONTEXT)?;
             previous_path = Some(path.clone());
-            if paths
-                .insert(path, decode_payload_cases(cursor, version)?)
-                .is_some()
-            {
+            if paths.insert(path, decode_payload_cases(cursor)?).is_some() {
                 return Err(Error::InvalidStoredValue(CONTEXT));
             }
         }
@@ -1344,7 +1275,7 @@ pub(super) fn decode_catalogue_staged_lineage(
         alias,
         mapping,
     };
-    if encode_physical_mapping_at_version(&staged.mapping, mapping_payload[0])? != mapping_payload
+    if encode_physical_mapping(&staged.mapping)? != mapping_payload
         || encode_catalogue_staged_lineage_with_mapping(&staged, mapping_payload)? != payload
     {
         return Err(Error::InvalidStoredValue(CONTEXT));
@@ -1608,36 +1539,28 @@ mod catalogue_payload_tests {
                 .catalogue_seq,
             7
         );
-        let mut legacy_staged = staged.clone();
-        legacy_staged.mapping = mapping_fixture();
-        let legacy_exact = encode_catalogue_staged_lineage(&legacy_staged).unwrap();
-        let mut legacy_cursor = CataloguePayloadCursor::new(
-            &legacy_exact,
+        let mut mapped_staged = staged.clone();
+        mapped_staged.mapping = mapping_fixture();
+        let mapped_exact = encode_catalogue_staged_lineage(&mapped_staged).unwrap();
+        let mut mapped_cursor = CataloguePayloadCursor::new(
+            &mapped_exact,
             CATALOGUE_STAGED_LINEAGE_VERSION,
-            "legacy staged fixture",
+            "mapped staged fixture",
         )
         .unwrap();
-        assert_eq!(legacy_cursor.u64().unwrap(), 7);
-        legacy_cursor.sized_bytes().unwrap();
-        assert_eq!(legacy_cursor.u64().unwrap(), 3);
-        assert_eq!(legacy_cursor.sized_bytes().unwrap()[0], 1);
-        legacy_cursor.finish().unwrap();
-        let decoded_legacy = decode_catalogue_staged_lineage(&legacy_exact).unwrap();
-        assert_eq!(decoded_legacy.catalogue_seq, legacy_staged.catalogue_seq);
-        assert_eq!(decoded_legacy.publication, legacy_staged.publication);
-        assert_eq!(decoded_legacy.alias, legacy_staged.alias);
-        assert_eq!(decoded_legacy.mapping, legacy_staged.mapping);
-        let legacy_v2_mapping =
-            encode_physical_mapping_at_version(&legacy_staged.mapping, PHYSICAL_MAPPING_VERSION)
-                .unwrap();
-        let legacy_v2_exact =
-            encode_catalogue_staged_lineage_with_mapping(&legacy_staged, &legacy_v2_mapping)
-                .unwrap();
-        let decoded_legacy_v2 = decode_catalogue_staged_lineage(&legacy_v2_exact).unwrap();
-        assert_eq!(decoded_legacy_v2.catalogue_seq, legacy_staged.catalogue_seq);
-        assert_eq!(decoded_legacy_v2.publication, legacy_staged.publication);
-        assert_eq!(decoded_legacy_v2.alias, legacy_staged.alias);
-        assert_eq!(decoded_legacy_v2.mapping, legacy_staged.mapping);
+        assert_eq!(mapped_cursor.u64().unwrap(), 7);
+        mapped_cursor.sized_bytes().unwrap();
+        assert_eq!(mapped_cursor.u64().unwrap(), 3);
+        assert_eq!(
+            mapped_cursor.sized_bytes().unwrap()[0],
+            PHYSICAL_MAPPING_VERSION
+        );
+        mapped_cursor.finish().unwrap();
+        let decoded_mapped = decode_catalogue_staged_lineage(&mapped_exact).unwrap();
+        assert_eq!(decoded_mapped.catalogue_seq, mapped_staged.catalogue_seq);
+        assert_eq!(decoded_mapped.publication, mapped_staged.publication);
+        assert_eq!(decoded_mapped.alias, mapped_staged.alias);
+        assert_eq!(decoded_mapped.mapping, mapped_staged.mapping);
         let pending = PendingSchemaLineage {
             catalogue_seq: 8,
             publication: staged.publication.clone(),
@@ -1691,9 +1614,9 @@ mod catalogue_payload_tests {
     }
 
     #[test]
-    fn physical_mapping_payload_preserves_v1_until_a_wide_payload_ordinal_requires_v2() {
+    fn physical_mapping_payload_has_exact_v1_wide_payload_ordinal_fixture() {
         let mapping = mapping_fixture();
-        let mut expected_v1 = [
+        let mut expected = [
             &[1, 1, 0, 0, 0, 5, 0, 0, 0][..],
             b"items",
             &[7, 0, 0, 0, 0, 0, 0, 0],
@@ -1709,7 +1632,7 @@ mod catalogue_payload_tests {
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0][..],
             &[0x22; 16],
             &[0xa2; 16],
-            &[1],
+            &[1, 0, 0, 0],
             &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 10, 0, 0, 0][..],
             b"root/array",
             &[1, 0, 0, 0][..],
@@ -1721,7 +1644,7 @@ mod catalogue_payload_tests {
             &[1, 0, 0, 0][..],
             &[0x44; 16],
             &[0xc4; 16],
-            &[3],
+            &[3, 0, 0, 0],
         ]
         .concat();
         let identity_prefix = [
@@ -1734,12 +1657,12 @@ mod catalogue_payload_tests {
             &[0, 0, 0, 0],
         ]
         .concat();
-        expected_v1.splice(1..1, identity_prefix);
-        let encoded_v1 = encode_physical_mapping(&mapping).unwrap();
-        assert_eq!(encoded_v1, expected_v1);
-        let decoded_v1 = decode_physical_mapping(&encoded_v1).unwrap();
-        assert_eq!(decoded_v1, mapping);
-        assert_payload_case_metadata(&decoded_v1, &mapping);
+        expected.splice(1..1, identity_prefix);
+        let encoded = encode_physical_mapping(&mapping).unwrap();
+        assert_eq!(encoded, expected);
+        let decoded = decode_physical_mapping(&encoded).unwrap();
+        assert_eq!(decoded, mapping);
+        assert_payload_case_metadata(&decoded, &mapping);
 
         let mut wide_mapping = mapping;
         wide_mapping
@@ -1750,35 +1673,38 @@ mod catalogue_payload_tests {
             .get_mut(&PhysicalColumnId(11))
             .unwrap()[0]
             .introducing_ordinal = 256;
-        let mut expected_v2 = expected_v1;
-        expected_v2[0] = PHYSICAL_MAPPING_VERSION;
-        for (identity_byte, schema_byte, legacy_ordinal, ordinal) in
-            [(0x22, 0xa2, 1, 256_u32), (0x44, 0xc4, 3, 3)]
-        {
+        let mut expected_wide = expected;
+        for (identity_byte, schema_byte, ordinal, replacement) in [(0x22, 0xa2, 1_u32, 256_u32)] {
             let mut marker = vec![identity_byte; 16];
             marker.extend_from_slice(&[schema_byte; 16]);
-            marker.push(legacy_ordinal);
-            let start = expected_v2
+            marker.extend_from_slice(&ordinal.to_le_bytes());
+            let start = expected_wide
                 .windows(marker.len())
                 .position(|window| window == marker)
                 .expect("payload case marker")
                 + marker.len()
-                - 1;
-            expected_v2.splice(start..start + 1, ordinal.to_le_bytes());
+                - std::mem::size_of::<u32>();
+            expected_wide.splice(
+                start..start + std::mem::size_of::<u32>(),
+                replacement.to_le_bytes(),
+            );
         }
-        let encoded_v2 = encode_physical_mapping(&wide_mapping).unwrap();
-        assert_eq!(encoded_v2, expected_v2);
-        let decoded_v2 = decode_physical_mapping(&encoded_v2).unwrap();
-        assert_eq!(decoded_v2, wide_mapping);
-        assert_payload_case_metadata(&decoded_v2, &wide_mapping);
+        let encoded_wide = encode_physical_mapping(&wide_mapping).unwrap();
+        assert_eq!(encoded_wide, expected_wide);
+        let decoded_wide = decode_physical_mapping(&encoded_wide).unwrap();
+        assert_eq!(decoded_wide, wide_mapping);
+        assert_payload_case_metadata(&decoded_wide, &wide_mapping);
     }
 
     #[test]
     fn physical_mapping_payload_rejects_unknown_malformed_trailing_and_noncanonical_forms() {
         let valid = encode_physical_mapping(&mapping_fixture()).unwrap();
+        let mut unsupported_version = valid.clone();
+        unsupported_version[0] = 2;
         for malformed in [
             vec![],
             vec![2],
+            unsupported_version,
             valid[..valid.len() - 1].to_vec(),
             [valid.clone(), vec![0]].concat(),
         ] {

@@ -169,8 +169,9 @@ _Further invariant._ `INV-LOWER-27` — local enum tags are only interned
 representations of permanent global enum-variant UUIDs; simultaneous sibling ordinal
 allocations cannot alias one another.
 
-_Further invariant._ `INV-LOWER-29` — durable physical mappings use the
-versioned canonical binary codec described in ch. 10. Local physical aliases are
+_Further invariant._ `INV-LOWER-29` — durable physical mappings use the sole
+v1 canonical binary codec described in ch. 10, whose payload-enum introduction
+ordinals are always `u32`. Local physical aliases are
 opaque storage handles, while every table, column, scalar, payload, and nested
 enum occurrence resolves a permanent authority-allocated UUID;
 recovery rejects malformed, non-canonical, trailing, or unknown-reference
