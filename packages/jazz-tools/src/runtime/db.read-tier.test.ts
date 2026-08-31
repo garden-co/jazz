@@ -770,10 +770,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.disconnect();
     const publications: string[][] = [];
     const errors: Error[] = [];
-    const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+    const unsubscribe = db.subscribe(
       query(),
       {
-        onDelta: (delta) => publications.push(publicationTitles(delta.all)),
+        onUpdate: (rows) => publications.push(publicationTitles(rows)),
         onError: (error) => errors.push(error),
       },
       { tier: ReadTier.RemoteIfPossible },
