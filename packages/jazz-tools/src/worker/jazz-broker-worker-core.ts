@@ -1378,7 +1378,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         port.postMessage({
           type: "result",
           id: message.id,
-          error: "Worker still has live runtime contexts",
+          error: serializeBrowserRelayError(new Error("Worker still has live runtime contexts")),
         } satisfies BrowserInspectorControlEvent);
         return;
       }
@@ -1386,7 +1386,9 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         port.postMessage({
           type: "result",
           id: message.id,
-          error: "Worker still has pending bootstrap operations",
+          error: serializeBrowserRelayError(
+            new Error("Worker still has pending bootstrap operations"),
+          ),
         } satisfies BrowserInspectorControlEvent);
         return;
       }
@@ -1394,7 +1396,9 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         port.postMessage({
           type: "result",
           id: message.id,
-          error: "Worker still has pending or active foreground node leases",
+          error: serializeBrowserRelayError(
+            new Error("Worker still has pending or active foreground node leases"),
+          ),
         } satisfies BrowserInspectorControlEvent);
         return;
       }
@@ -1420,7 +1424,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       port.postMessage({
         type: "result",
         id: message.id,
-        error: "Inspector context is no longer available",
+        error: serializeBrowserRelayError(new Error("Inspector context is no longer available")),
       } satisfies BrowserInspectorControlEvent);
       return;
     }

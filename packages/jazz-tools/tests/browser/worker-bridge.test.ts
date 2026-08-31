@@ -113,7 +113,7 @@ async function terminateWorker(port: MessagePort): Promise<void> {
     const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
       if (event.data.type !== "result" || event.data.id !== id) return;
       port.removeEventListener("message", onMessage);
-      if (event.data.error) reject(new Error(event.data.error));
+      if (event.data.error) reject(deserializeBrowserRelayError(event.data.error));
       else resolve();
     };
     port.addEventListener("message", onMessage);

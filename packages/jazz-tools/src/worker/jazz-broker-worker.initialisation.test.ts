@@ -14,6 +14,10 @@ import type {
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
+import {
+  deserializeBrowserRelayError,
+  type BrowserRelayError,
+} from "../runtime/native-runtime/browser-worker-protocol.js";
 
 const mocks = vi.hoisted(() => {
   const loadWasmModule = vi.fn();
@@ -461,8 +465,23 @@ async function terminateInspector(
     const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
       if (event.data.type !== "result" || event.data.id !== id) return;
       port.removeEventListener("message", onMessage);
-      if (event.data.error) reject(new Error(event.data.error));
+      if (event.data.error) reject(deserializeBrowserRelayError(event.data.error));
       else resolve(event.data);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "terminate-worker", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
+async function inspectorResult(
+  port: MessagePort,
+  id: number,
+): Promise<Extract<BrowserInspectorControlEvent, { type: "result" }>> {
+  return new Promise((resolve) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "result" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      resolve(event.data);
     };
     port.addEventListener("message", onMessage);
     port.postMessage({ type: "terminate-worker", id } satisfies BrowserInspectorControlRequest);
@@ -476,6 +495,28 @@ describe("broker worker context initialization", () => {
     vi.resetModules();
     // The worker owns process-global state, so each case must evaluate a fresh module instance.
     await import("./jazz-broker-worker.js");
+  });
+
+  it("serializes direct inspector-control failures as bounded relay errors", async () => {
+    const first = await connect(options("inspector-relay-error"), "first-tab");
+    await initializeFollower(first.port, 1);
+    const inspector = await openInspector(first.port, 2);
+    try {
+      const result = await inspectorResult(inspector, 3);
+      expect(result.error).toEqual(
+        expect.objectContaining({
+          name: "Error",
+          message: "Worker still has live runtime contexts",
+        }),
+      );
+      expect(typeof result.error).toBe("object");
+      expect(deserializeBrowserRelayError(result.error as BrowserRelayError)).toMatchObject({
+        message: "Worker still has live runtime contexts",
+      });
+    } finally {
+      inspector.close();
+      first.port.emitMessage({ type: "close", id: 4, releaseContext: true });
+    }
   });
 
   it("recovers a rejected process-wide WASM load and retains the successful replacement", async () => {

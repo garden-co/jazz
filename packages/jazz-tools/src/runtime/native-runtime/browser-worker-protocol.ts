@@ -474,7 +474,7 @@ export type BrowserInspectorControlEvent =
   | {
       type: "result";
       id: number;
-      error?: string;
+      error?: BrowserRelayError;
       /** The acknowledged realm is closing; future opens must use its successor. */
       workerTerminated?: true;
     };
