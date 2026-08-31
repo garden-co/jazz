@@ -1328,12 +1328,25 @@ impl Database {
 
     /// Idempotently evict one unaccepted staging root. Jazz uses this mechanism
     /// to enforce its own expiry/admission policy; Groove owns the persisted
-    /// count transition and eventual orphan reclamation.
+    /// count transition and eventual orphan reclamation. Returns `false`
+    /// without mutation when the receipt is absent or a resident large-value
+    /// publication still owns lifecycle serialization; callers may retry after
+    /// that publication becomes durable.
     pub async fn evict_staged_large_value(
         &self,
         id: crate::large_values::StagedLargeValueId,
     ) -> Result<bool, Error> {
         let staged_key = staged_large_value_key(id);
+        // This database owns the lifecycle lock on behalf of one or more
+        // publications which the caller must still persist. Waiting for that
+        // same lock would prevent the caller from reaching persistence,
+        // including when this receipt and the resident publication have
+        // different keys or roots. Eviction is idempotent maintenance, so
+        // defer without changing durable state and let the caller retry after
+        // the resident frontier releases the guard.
+        if self.large_value_lifecycle_held.get() {
+            return Ok(false);
+        }
         if self
             .resident_storage()
             .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
@@ -1443,13 +1456,14 @@ impl Database {
                 }
                 let node_ref = node_ref_from_key;
                 let node_key = large_value_node_key(&node_ref)?;
-                let Some(resident_metadata) = resident
-                    .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
-                    .await?
-                else {
-                    continue;
-                };
-                let resident_metadata = decode_large_value_node_references(&resident_metadata)?;
+                let resident_override =
+                    match resident.staged_point_value(LARGE_VALUE_METADATA_CF, &node_key) {
+                        StagedPointValue::Miss => None,
+                        StagedPointValue::Set(encoded) => {
+                            Some(decode_large_value_node_references(&encoded)?)
+                        }
+                        StagedPointValue::Delete => continue,
+                    };
                 let Some(durable_metadata) = self
                     .storage
                     .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
@@ -1458,7 +1472,8 @@ impl Database {
                     continue;
                 };
                 let durable_metadata = decode_large_value_node_references(&durable_metadata)?;
-                match large_value_reclaim_decision(&durable_metadata, &resident_metadata) {
+                let resident_metadata = resident_override.as_ref().unwrap_or(&durable_metadata);
+                match large_value_reclaim_decision(&durable_metadata, resident_metadata) {
                     LargeValueReclaimDecision::ClearStaleQueue => {
                         self.storage
                             .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)

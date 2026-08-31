@@ -36,7 +36,8 @@ use crate::schema::{
 };
 use crate::storage::{
     BoxedStorage, LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
-    ReopenableStorage, StagedWriteOverlay, StagedWriteState, StorageLayout, WriteManyOutcome,
+    ReopenableStorage, StagedPointValue, StagedWriteOverlay, StagedWriteState, StorageLayout,
+    WriteManyOutcome,
 };
 use thiserror::Error;
 
