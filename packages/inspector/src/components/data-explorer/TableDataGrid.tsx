@@ -225,15 +225,40 @@ function settleSubmittedTableSave(
   const submittedInsertById = new Map(
     settledSave.submittedStagedInserts.map((insert) => [insert.id, insert]),
   );
-  const nextStagedInserts = previous.stagedInserts.filter((insert) => {
+  const nextStagedInserts: StagedInsert[] = [];
+  for (const insert of previous.stagedInserts) {
     const submitted = submittedInsertById.get(insert.id);
-    return (
-      !submitted ||
-      !queuedRowEditsEqual(insert.edits, submitted.edits) ||
-      previous.stagedInsertRevisions[insert.id] !==
-        settledSave.submittedStagedInsertRevisions[insert.id]
-    );
-  });
+    if (!submitted) {
+      nextStagedInserts.push(insert);
+      continue;
+    }
+
+    // The submitted identity now belongs to a committed row. Never retain it
+    // as a staged insert: a later Save would otherwise call `tx.insert` with
+    // the same UUID. Preserve only changes made after submission as an update
+    // of that committed row.
+    const postSubmissionEdits: QueuedRowEdits = {};
+    for (const [columnId, edit] of Object.entries(insert.edits)) {
+      if (!queuedCellEditsEqual(edit, submitted.edits[columnId])) {
+        postSubmissionEdits[columnId] = edit;
+      }
+    }
+    if (Object.keys(postSubmissionEdits).length > 0) {
+      nextQueuedEdits[insert.id] = {
+        ...nextQueuedEdits[insert.id],
+        ...postSubmissionEdits,
+      };
+      nextQueuedEditRevisions[insert.id] = {
+        ...nextQueuedEditRevisions[insert.id],
+        ...Object.fromEntries(
+          Object.keys(postSubmissionEdits).map((columnId) => [
+            columnId,
+            previous.stagedInsertRevisions[insert.id],
+          ]),
+        ),
+      };
+    }
+  }
   const nextStagedInsertRevisions: Record<string, number> = {};
   for (const insert of nextStagedInserts) {
     const revision = previous.stagedInsertRevisions[insert.id];

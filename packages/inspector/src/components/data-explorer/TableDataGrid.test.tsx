@@ -1189,7 +1189,8 @@ describe("TableDataGrid", () => {
     renderGrid();
 
     fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
-    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    const stagedCells = getCellsInRowContaining("staged");
+    fireEvent.doubleClick(stagedCells[1] as HTMLElement);
     fireEvent.change(screen.getByLabelText("Edit title"), {
       target: { value: "submitted before ambiguity" },
     });
@@ -1202,7 +1203,7 @@ describe("TableDataGrid", () => {
     expect(screen.getByText("Confirmation pending")).not.toBeNull();
     expect(mockTransaction).toHaveBeenCalledTimes(1);
     expect(mockInsert).toHaveBeenCalledTimes(1);
-    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).not.toHaveBeenCalled();
     const insertedId = getMockInsertId();
     expect(insertedId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
@@ -1213,12 +1214,12 @@ describe("TableDataGrid", () => {
     fireEvent.click(discard);
     expect(screen.getByText("1 staged insert")).not.toBeNull();
 
-    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "submitted before ambiguity" }));
+    fireEvent.doubleClick(getCellsInRowContaining("staged")[1] as HTMLElement);
     fireEvent.change(screen.getByLabelText("Edit title"), {
       target: { value: "edited after ambiguous save" },
     });
     fireEvent.blur(screen.getByLabelText("Edit title"));
-    expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Retry confirmation" }));
     await waitFor(() => {
@@ -1228,7 +1229,7 @@ describe("TableDataGrid", () => {
     });
     expect(mockTransaction).toHaveBeenCalledTimes(1);
     expect(mockInsert).toHaveBeenCalledTimes(1);
-    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).not.toHaveBeenCalled();
     expect(getMockInsertId()).toBe(insertedId);
     expect(screen.queryByText("1 staged insert")).toBeNull();
     expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
@@ -1238,14 +1239,14 @@ describe("TableDataGrid", () => {
       expect(mockTransaction).toHaveBeenCalledTimes(2);
       expect(mockTransactionWait).toHaveBeenCalledTimes(3);
       expect(mockUpdate).toHaveBeenNthCalledWith(
-        2,
+        1,
         expect.objectContaining({ _table: "todos" }),
-        "row-2",
+        insertedId,
         expect.objectContaining({ title: "edited after ambiguous save" }),
       );
       expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
     });
-    expect(mockUpdate).toHaveBeenCalledTimes(2);
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
     expect(mockInsert).toHaveBeenCalledTimes(1);
     expect(getMockInsertId()).toBe(insertedId);
   });

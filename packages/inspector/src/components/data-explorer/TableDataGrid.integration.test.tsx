@@ -20,6 +20,7 @@ const inspectorSaveApp = s.defineApp({
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user });
   policy.todos.allowInsert.where({ owner_id: session.user });
+  policy.todos.allowUpdate.where({ owner_id: session.user });
 });
 
 let currentDb: Db | null = null;
@@ -159,7 +160,7 @@ describe("TableDataGrid real Db save retries", () => {
     policyApp = null;
   });
 
-  it("confirms an ambiguously reported commit through the retained real write result", async () => {
+  it("confirms an ambiguously reported insert and updates later staged edits without reinserting", async () => {
     const setup = await createInspectorDb();
     policyApp = setup.app;
     const instrumented = instrumentDb(setup.db, true);
@@ -190,15 +191,36 @@ describe("TableDataGrid real Db save retries", () => {
       }),
     ]);
 
+    editStagedTextColumn(1, "title", "updated after ambiguity");
     fireEvent.click(screen.getByRole("button", { name: "Retry confirmation" }));
     await waitFor(
       () => {
         expect(screen.queryByText("Confirmation pending")).toBeNull();
+        expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(
+      () => {
         expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
       },
       { timeout: 10_000 },
     );
-    expect(instrumented.transactionCount()).toBe(1);
+
+    await expect(
+      setup.db.all(inspectorSaveApp.todos.where({ title: "updated after ambiguity" }), {
+        tier: "edge",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: instrumented.insertIds[0],
+        title: "updated after ambiguity",
+        owner_id: permittedOwner,
+      }),
+    ]);
+    expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toHaveLength(1);
   }, 30_000);
 
