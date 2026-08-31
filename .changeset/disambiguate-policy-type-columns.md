@@ -1,8 +1,8 @@
 ---
-"jazz-tools": major
+"jazz-tools": patch
 ---
 
-**Breaking change:** permission consumers no longer interpret unbranded `PolicyExpr` objects as raw
+Permission consumers no longer interpret unbranded `PolicyExpr` objects as raw
 policy IR. Plain objects with policy-shaped keys such as `type` remain row predicates when the table
 schema declares those columns. On a table without a `type` column, an unbranded value carrying a
 policy-expression discriminator is rejected rather than misclassified. Wrap manually-authored or
