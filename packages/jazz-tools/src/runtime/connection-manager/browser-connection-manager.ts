@@ -55,6 +55,10 @@ export class BrowserConnectionManager extends ConnectionManager {
   private openBrowserWorkerConnection(): BrowserWorkerConnection {
     const input = this.browserConnectionInput;
     if (!input) throw new Error("Browser worker connection requires an initialized client");
+    // An Inspector receipt authenticates one worker connection, not a durable
+    // database coordinate. Replacing a failed follower must therefore revoke
+    // the old receipt before the new generation can begin serving reads.
+    this.host.clearAuthenticatedInspectorLocalReads();
     const workerConfig = { ...this.host.config };
     setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
@@ -230,6 +234,7 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   private beginStorageReset(connection: BrowserWorkerConnection): void {
     if (this.connection !== connection || this.storageReset) return;
+    this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
     this.initialExplicitOfflineStateKnown = false;
@@ -251,6 +256,7 @@ export class BrowserConnectionManager extends ConnectionManager {
    */
   private reopenFailedFollower(): void {
     if (!this.recoverableConnectionFailure) return;
+    this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
     this.connectionError = null;

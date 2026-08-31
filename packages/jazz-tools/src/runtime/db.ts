@@ -1520,6 +1520,7 @@ export class Db {
       onMutationError: (event) => this.handleMutationError(event),
       enableAuthenticatedInspectorLocalReads: (physicalDbName) =>
         this.#enableAuthenticatedInspectorLocalReads(physicalDbName),
+      clearAuthenticatedInspectorLocalReads: () => this.#clearAuthenticatedInspectorLocalReads(),
     };
   }
 
@@ -1529,6 +1530,10 @@ export class Db {
     // receipt for a peer it created through Inspector control.
     if (this.config.runtimeSources?.inspectorHostPhysicalDbName !== physicalDbName) return;
     this.#authenticatedInspectorPhysicalDbName = physicalDbName;
+  }
+
+  #clearAuthenticatedInspectorLocalReads(): void {
+    this.#authenticatedInspectorPhysicalDbName = null;
   }
 
   private async inspectorAttachmentOptions<T>(

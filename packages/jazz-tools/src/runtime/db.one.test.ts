@@ -168,4 +168,33 @@ describe("Db.one", () => {
     await source.all!(app.todos.where({ done: false }), cacheOnlyMarker);
     expect(query.mock.calls[0]?.[1]).toMatchObject({ tier: "remote" });
   });
+
+  it("revokes Inspector-local authority when its worker generation is replaced", async () => {
+    const { client, query } = makeClient();
+    const db = new TestDb(client, {
+      appId: "db-one-inspector-generation",
+      runtimeSources: {
+        browserWorkerPort: {} as MessagePort,
+        inspectorHostPhysicalDbName: "jazz-inspector-authenticated-context",
+      },
+    });
+    const source = getDbSubscriptionSource(db);
+    const connectionHost = (
+      db as unknown as {
+        dbForConnection(): {
+          enableAuthenticatedInspectorLocalReads(name: string): void;
+          clearAuthenticatedInspectorLocalReads(): void;
+        };
+      }
+    ).dbForConnection();
+
+    connectionHost.enableAuthenticatedInspectorLocalReads("jazz-inspector-authenticated-context");
+    await source.all!(app.todos.where({ done: false }));
+    expect(query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: "local-only" });
+
+    // Same configured coordinate is not a receipt for a replacement worker.
+    connectionHost.clearAuthenticatedInspectorLocalReads();
+    await source.all!(app.todos.where({ done: false }));
+    expect(query.mock.calls.at(-1)?.[1]).toEqual({});
+  });
 });

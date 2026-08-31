@@ -51,6 +51,11 @@ export interface DbForConnection {
   onMutationError(event: MutationErrorEvent): void;
   /** Enables Inspector-local reads after the worker's authenticated receipt. */
   enableAuthenticatedInspectorLocalReads(physicalDbName: string): void;
+  /**
+   * Revokes an Inspector attachment receipt when its worker connection is no
+   * longer current. A new generation must authenticate itself again.
+   */
+  clearAuthenticatedInspectorLocalReads(): void;
 }
 
 /**
