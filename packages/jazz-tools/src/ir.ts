@@ -57,6 +57,9 @@ export type RelOrderByExpr = {
   direction: RelOrderDirection;
 };
 
+/**
+ * A semantic recursion bound. `MaxDepth: 0` includes the seed and no recursive hop.
+ */
 export type RelRecursionBound = "Fixpoint" | { MaxDepth: number };
 
 export type RelExpr =

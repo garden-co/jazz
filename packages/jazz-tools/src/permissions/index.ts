@@ -137,6 +137,9 @@ type SessionWhereBuilder = SessionRefValue &
   ((input: Record<string, unknown>) => PermissionExpressionInput);
 
 interface RecursiveDepthOptions {
+  /**
+   * Maximum recursive hops. Zero performs no inheritance hop and cannot grant access.
+   */
   maxDepth?: number;
 }
 
@@ -228,6 +231,7 @@ export interface PermissionRelation {
   gather(options: {
     start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): PermissionRelation;
   reachable_via(
@@ -406,6 +410,7 @@ class PermissionRelationBuilder implements PermissionRelation {
   gather(options: {
     start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): PermissionRelation {
     if (typeof options.step !== "function") {
@@ -476,28 +481,22 @@ class PermissionRelationBuilder implements PermissionRelation {
     ];
     const stepFiltered = applyRelFilter(stepState.base, stepPredicates);
 
-    const recursiveHopScope = "__recursive_hop_0";
+    // Gather carries only the recursive key across the frontier. The
+    // hopTo(...) validation above proves that stepJoin.left is the foreign key
+    // of the output row, so joining every hop back to the output table would
+    // add an unnecessary existence requirement and prevent an unmaterialized
+    // parent key from authorizing a later access-table join.
     const stepProjected: RelExpr = {
       Project: {
-        input: {
-          Join: {
-            left: stepFiltered,
-            right: {
-              TableScan: {
-                table: this.state.outputTable,
-                alias: recursiveHopScope,
-              },
+        input: stepFiltered,
+        columns: [
+          {
+            alias: "id",
+            expr: {
+              Column: relationColumnRef(stepJoin.left, stepJoin.leftScope),
             },
-            on: [
-              {
-                left: relationColumnRef(stepJoin.left, stepJoin.leftScope),
-                right: { scope: recursiveHopScope, column: "id" },
-              },
-            ],
-            join_kind: "Inner",
           },
-        },
-        columns: projectHopResult(recursiveHopScope),
+        ],
       },
     };
 
@@ -606,7 +605,6 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     team_column: string,
   ): PermissionRelation {
     const accessScope = "__reachable_access_0";
-    const recursiveHopScope = "__recursive_hop_0";
     const seedScope = seed_table;
 
     const seedPredicates: RelPredicateExpr[] = [
@@ -618,7 +616,17 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
         },
       },
     ];
-    const seed: RelExpr = applyRelFilter({ TableScan: { table: seed_table } }, seedPredicates);
+    const seed: RelExpr = {
+      Project: {
+        input: applyRelFilter({ TableScan: { table: seed_table } }, seedPredicates),
+        columns: [
+          {
+            alias: "id",
+            expr: { Column: { scope: seedScope, column: team_column } },
+          },
+        ],
+      },
+    };
 
     const stepPredicates: RelPredicateExpr[] = [
       {
@@ -636,25 +644,18 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     );
     const step: RelExpr = {
       Project: {
-        input: {
-          Join: {
-            left: stepFiltered,
-            right: {
-              TableScan: {
-                table: seed_table,
-                alias: recursiveHopScope,
+        input: stepFiltered,
+        columns: [
+          {
+            alias: "id",
+            expr: {
+              Column: {
+                scope: this.args.edge_table,
+                column: this.args.edge_parent_column,
               },
             },
-            on: [
-              {
-                left: { scope: this.args.edge_table, column: this.args.edge_parent_column },
-                right: { scope: recursiveHopScope, column: team_column },
-              },
-            ],
-            join_kind: "Inner",
           },
-        },
-        columns: projectHopResult(recursiveHopScope),
+        ],
       },
     };
 
@@ -1162,6 +1163,7 @@ function buildTablePolicyBuilder(
     gather(options: {
       start?: Record<string, unknown> | PermissionRelation;
       step: (ctx: { current: unknown }) => PermissionRelation;
+      /** Maximum recursive hops. Zero evaluates the seed only. */
       maxDepth?: number;
     }): PermissionRelation {
       return createTableRelation(table, relationsByTable).gather(options);
@@ -1629,8 +1631,8 @@ function normalizeRecursiveRelationDepth(maxDepth?: number): number {
   if (maxDepth === undefined) {
     return RECURSIVE_POLICY_MAX_DEPTH_DEFAULT;
   }
-  if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-    throw new Error("gather(...) maxDepth must be a positive integer.");
+  if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+    throw new Error("gather(...) maxDepth must be a non-negative integer.");
   }
   if (maxDepth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP) {
     throw new Error(
@@ -2022,8 +2024,8 @@ function createAllowedToContext(): AllowedToContext {
   ): PermissionExpression => {
     const maxDepth = options?.maxDepth;
     if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a positive integer.`);
+      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a non-negative integer.`);
       }
     }
     const expr: PolicyExpr = {
@@ -2045,9 +2047,9 @@ function createAllowedToContext(): AllowedToContext {
   ): PermissionExpression => {
     const maxDepth = options?.maxDepth;
     if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
         throw new Error(
-          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a positive integer.`,
+          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a non-negative integer.`,
         );
       }
     }
