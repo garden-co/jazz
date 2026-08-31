@@ -697,12 +697,21 @@ impl ReopenableStorage for RocksDbStorage {
             }
             let path = self.path.clone();
             let durability = self.durability;
+            // A column-family expansion replaces the RocksDB handle, but it
+            // is not a durability boundary. Preserve both the cadence and
+            // its outstanding WAL-sync debt so acknowledged batches before
+            // the reopen still count toward the next synchronous boundary.
+            // Capturing this before dropping the old handle also ensures an
+            // open failure cannot be reported as a successful reset.
+            let write_flush_cadence = *self.write_flush_cadence.borrow();
             drop(self);
             let column_families = column_families
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            Self::open_with_durability(path, &column_families, durability)
+            let reopened = Self::open_with_durability(path, &column_families, durability)?;
+            *reopened.write_flush_cadence.borrow_mut() = write_flush_cadence;
+            Ok(reopened)
         })
     }
 }
@@ -1744,6 +1753,109 @@ mod tests {
                 .map(|cadence| cadence.pending),
             Some(0)
         );
+    }
+
+    #[test]
+    fn reopening_with_added_families_preserves_partial_write_cadence() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set_write_flush_cadence(5)).unwrap();
+
+        for batch in 0u8..4 {
+            ready(storage.set("records".to_owned(), vec![batch], b"value".to_vec())).unwrap();
+        }
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| (cadence.every, cadence.pending)),
+            Some((5, 4))
+        );
+
+        let storage = ready(storage.reopen(vec!["records".to_owned(), "indices".to_owned()]))
+            .expect("adding a column family reopens RocksDB");
+        let storage = ready(storage.reopen(vec![
+            "records".to_owned(),
+            "indices".to_owned(),
+            "changes".to_owned(),
+        ]))
+        .expect("each subsequent column-family expansion preserves the debt");
+
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| (cadence.every, cadence.pending)),
+            Some((5, 4)),
+            "reopening must not discard unsynced acknowledged write batches"
+        );
+        assert_eq!(storage.last_wal_flush_sync.get(), None);
+
+        ready(storage.set(
+            "records".to_owned(),
+            b"boundary".to_vec(),
+            b"value".to_vec(),
+        ))
+        .unwrap();
+        assert_eq!(
+            storage.last_wal_flush_sync.get(),
+            Some(true),
+            "the first write after reopen must complete the carried sync boundary"
+        );
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn reopening_with_added_family_keeps_an_exact_sync_boundary_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set_write_flush_cadence(5)).unwrap();
+
+        for batch in 0u8..5 {
+            ready(storage.set("records".to_owned(), vec![batch], b"value".to_vec())).unwrap();
+        }
+        assert_eq!(storage.last_wal_flush_sync.get(), Some(true));
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| (cadence.every, cadence.pending)),
+            Some((5, 0))
+        );
+
+        let storage = ready(storage.reopen(vec!["records".to_owned(), "indices".to_owned()]))
+            .expect("adding a column family reopens RocksDB");
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| (cadence.every, cadence.pending)),
+            Some((5, 0)),
+            "an already-synced boundary must not gain phantom debt during reopen"
+        );
+
+        for batch in 0u8..4 {
+            ready(storage.set("records".to_owned(), vec![batch, 0xff], b"value".to_vec())).unwrap();
+        }
+        assert_eq!(storage.last_wal_flush_sync.get(), None);
+        ready(storage.set(
+            "records".to_owned(),
+            b"next-boundary".to_vec(),
+            b"value".to_vec(),
+        ))
+        .unwrap();
+        assert_eq!(storage.last_wal_flush_sync.get(), Some(true));
     }
 
     #[test]
