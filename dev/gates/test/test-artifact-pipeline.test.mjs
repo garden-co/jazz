@@ -506,7 +506,11 @@ test("CI uses the correctness artifact path while package builds keep release WA
       false,
       `${task} must remain uncached: correctness artifacts are not Turbo outputs`,
     );
-  assert.deepEqual(turbo.tasks.test.passThroughEnv, turbo.tasks["jazz-tools#build"].passThroughEnv);
+  assert.deepEqual(turbo.tasks.test.passThroughEnv, [
+    ...turbo.tasks["jazz-tools#build"].passThroughEnv,
+    "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
+    "JAZZ_CORRECTNESS_CONSUMER_TOKEN",
+  ]);
 });
 
 test("Turbo invalidates each native artifact only for its Cargo closure", () => {

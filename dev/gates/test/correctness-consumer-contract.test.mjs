@@ -41,6 +41,22 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
   assert.doesNotMatch(aggregate, /env:\s*process\.env/);
 });
 
+test("Turbo preserves the private admission capability for nested concurrent consumers", () => {
+  const turbo = JSON.parse(read("turbo.json"));
+  const privateCapability = [
+    "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
+    "JAZZ_CORRECTNESS_CONSUMER_TOKEN",
+  ];
+  assert.deepEqual(turbo.tasks.test.passThroughEnv.slice(-2), privateCapability);
+  for (const name of privateCapability) {
+    assert.equal(
+      turbo.tasks["jazz-tools#build"].passThroughEnv.includes(name),
+      false,
+      `${name} must be scoped to the admitted test process tree`,
+    );
+  }
+});
+
 const recordPlayerConfig = "examples/record-player/apps/next-betterauth/vitest.config.browser.ts";
 const recordPlayerProviderConfig =
   "examples/record-player/apps/next-betterauth/vitest.config.provider.ts";
