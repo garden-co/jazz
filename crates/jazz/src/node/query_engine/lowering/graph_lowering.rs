@@ -71,6 +71,15 @@ fn lower_correlated_path_plan(
         resolved_sources,
         request,
     )?;
+    // A correlated child can be maintained once for several provenance
+    // routes. Route is therefore part of existence identity whenever both
+    // sides carry it; otherwise a qualifying child on one route can keep a
+    // different route's parent spuriously present.
+    let shared_route_fields = root_source
+        .routing_fields
+        .intersection(&child.fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let child_graph = lower_required_nested_parent_graph(
         child.graph,
         &path.nested,
@@ -108,8 +117,10 @@ fn lower_correlated_path_plan(
                 parent_key.clone(),
                 parent_key_nullable_depth,
             );
+            let (parent_keys, child_keys) =
+                correlation_keys_with_routes(parent_key, child_key, &shared_route_fields);
             Ok(LoweredRelationInput {
-                graph: GraphBuilder::semi_join(parent, child_graph, [parent_key], [child_key])
+                graph: GraphBuilder::semi_join(parent, child_graph, parent_keys, child_keys)
                     .project_fields(project_source_fields_with_routes(
                         root_source,
                         &root_source.routing_fields,
@@ -133,6 +144,7 @@ fn lower_correlated_path_plan(
                 root_source,
                 parent_key,
                 child_key,
+                &shared_route_fields,
             )
             .map(|graph| LoweredRelationInput {
                 graph,
@@ -179,12 +191,33 @@ fn lower_required_nested_parent_graph(
     Ok(parent)
 }
 
+fn correlation_keys_with_routes(
+    parent_key: String,
+    child_key: String,
+    shared_route_fields: &BTreeSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut parent_keys = vec![parent_key];
+    let mut child_keys = vec![child_key];
+    for field in shared_route_fields {
+        if !parent_keys
+            .iter()
+            .zip(&child_keys)
+            .any(|(parent, child)| parent == field && child == field)
+        {
+            parent_keys.push(field.clone());
+            child_keys.push(field.clone());
+        }
+    }
+    (parent_keys, child_keys)
+}
+
 fn lower_cardinality_complete_parent_graph(
     parent: GraphBuilder,
     child: GraphBuilder,
     root_source: &ResolvedSource,
     parent_key: String,
     child_key: String,
+    shared_route_fields: &BTreeSet<String>,
 ) -> Result<GraphBuilder, UnsupportedReason> {
     let Some(parent_key_type) = source_field_type(root_source, &parent_key) else {
         return Err(UnsupportedReason::Operator(format!(
@@ -197,8 +230,10 @@ fn lower_cardinality_complete_parent_graph(
         _ => false,
     };
     if !is_array_key {
+        let (parent_keys, child_keys) =
+            correlation_keys_with_routes(parent_key, child_key, shared_route_fields);
         return Ok(
-            GraphBuilder::semi_join(parent, child, [parent_key], [child_key]).project_fields(
+            GraphBuilder::semi_join(parent, child, parent_keys, child_keys).project_fields(
                 project_source_fields_with_routes(root_source, &root_source.routing_fields),
             ),
         );
