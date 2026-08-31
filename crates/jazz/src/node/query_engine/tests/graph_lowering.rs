@@ -575,7 +575,9 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                                 predicate,
                                                 groove::ivm::PredicateExpr::Eq { field, value }
                                                     if field == "user_tag"
-                                                        && value == &groove::ivm::LiteralValue::String("ship".to_owned())
+                                                        && value == &groove::ivm::LiteralValue::Nullable(Some(Box::new(
+                                                            groove::ivm::LiteralValue::String("ship".to_owned()),
+                                                        )))
                                             )
                                     )
                         )
