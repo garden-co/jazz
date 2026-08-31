@@ -544,7 +544,7 @@ function wireErrorCodeName(tag: number): string {
     case 6:
       return "not_ready";
     default:
-      return `unknown_${tag}`;
+      throw new Error(`unknown WireErrorCode discriminant ${tag}`);
   }
 }
 
@@ -559,7 +559,7 @@ function wireRetryName(tag: number): string {
     case 3:
       return "later";
     default:
-      return `unknown_${tag}`;
+      throw new Error(`unknown WireRetry discriminant ${tag}`);
   }
 }
 
