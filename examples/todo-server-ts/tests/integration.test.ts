@@ -10,6 +10,7 @@ import { userIdentity } from "jazz-tools";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { join } from "node:path";
 import {
   createServer,
@@ -149,6 +150,25 @@ describe("Todo Server Integration", () => {
   });
 
   describe("Error Handling", () => {
+    it("rejects startup with the underlying listen error when the port is occupied", async () => {
+      const occupied = createHttpServer();
+      await new Promise<void>((resolve) => occupied.listen(0, resolve));
+      const address = occupied.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP listener");
+
+      const candidate = await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl });
+      try {
+        await expect(startServer(candidate, address.port)).rejects.toMatchObject({
+          code: "EADDRINUSE",
+        });
+      } finally {
+        await candidate.shutdown();
+        await new Promise<void>((resolve, reject) =>
+          occupied.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    });
+
     it("returns 404 for non-existent todo", async () => {
       const res = await authenticatedFetch(`${baseUrl}/todos/00000000-0000-0000-0000-000000000000`);
       expect(res.status).toBe(404);
