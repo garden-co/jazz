@@ -18,10 +18,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::subscriptions::BindingDelta;
 
 use super::{
-    ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
-    NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
-    VariantProjection, VariantProjectionKey, consolidate_deltas, plan_expr_names,
-    project_binding_source_deltas, scan_bounds,
+    ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
+    RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
+    VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
+    scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1216,31 +1216,11 @@ impl HydrationEvaluator<'_> {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     NodeState::update_variant_project(variant_project, output_desc, &input)
                 }
-                OpType::ArgMaxBy(arg_max_by) => {
-                    let input = self.eval_unary_input(graph_node, node).await?;
-                    Ok(RecordDeltas {
-                        descriptor: output_desc,
-                        deltas: super::arg_by_winners_from_deltas(
-                            output_desc,
-                            &arg_max_by.group_field_indices,
-                            &arg_max_by.comparison_field_indices,
-                            input.deltas,
-                            ArgByDirection::Max,
-                        )?,
-                    })
-                }
-                OpType::ArgMinBy(arg_min_by) => {
-                    let input = self.eval_unary_input(graph_node, node).await?;
-                    Ok(RecordDeltas {
-                        descriptor: output_desc,
-                        deltas: super::arg_by_winners_from_deltas(
-                            output_desc,
-                            &arg_min_by.group_field_indices,
-                            &arg_min_by.comparison_field_indices,
-                            input.deltas,
-                            ArgByDirection::Min,
-                        )?,
-                    })
+                OpType::ArgMaxBy(_) | OpType::ArgMinBy(_) => {
+                    Err(IvmRuntimeError::UnsupportedArgMaxBy(
+                        "arg_max_by and arg_min_by are not supported by recursive hydration"
+                            .to_owned(),
+                    ))
                 }
                 OpType::Union => {
                     let input_nodes = graph_node.descriptor.inputs.clone();

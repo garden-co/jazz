@@ -158,6 +158,15 @@ pub(super) fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         .any(|node| matches!(node, GraphBuilder::Recursive { .. }))
 }
 
+pub(super) fn builder_contains_arg_by(graph: &GraphBuilder) -> bool {
+    graph.postorder().iter().any(|node| {
+        matches!(
+            node,
+            GraphBuilder::ArgMaxBy { .. } | GraphBuilder::ArgMinBy { .. }
+        )
+    })
+}
+
 pub(super) fn validate_arg_by_primary_key_indices(
     op_name: &str,
     table: &TableSchema,

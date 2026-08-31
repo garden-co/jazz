@@ -22,7 +22,8 @@ Invariant digest:
 - `INV-REC-10`: Context-dependent recursive arrangements MUST be keyed by `ScopePath` and recursive `sub_tick`; root-scope arrangements MUST use `sub_tick = 0` and MUST absorb a public tick's table delta exactly once even when recursive and non-recursive consumers share them.
 - `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for existing subscribers.
 - `INV-REC-12`: Recursive recompute MUST NOT persist per-context child operator state in the runtime state maps after recompute completes.
-- `INV-REC-13`: `arg_max_by` MUST NOT be accepted inside recursive graph seed or step graphs.
+- `INV-REC-13`: `arg_max_by` and `arg_min_by` MUST NOT be accepted inside
+  recursive graph seed or step graphs.
 - `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
 - `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
 - `INV-REC-16`: A terminal collector's touched-rendered-group bound MUST NOT be applied to recursive fixed-point state, iterations, or nested logical time.
@@ -53,9 +54,10 @@ its recursive node: it names the channel by which the evaluator hands that
 iteration's accepted facts to the step graph, and it is meaningful only inside
 that step evaluation, not as a globally named weighted record set. A frontier
 source with no bound deltas in the current context yields an empty weighted
-record set with its declared descriptor (`INV-REC-2`). `arg_max_by` is not
-permitted inside a recursive seed or step graph (`INV-REC-13`). Nested recursive
-graphs are rejected at graph validation/compilation time rather than accepted
+record set with its declared descriptor (`INV-REC-2`). `arg_max_by` and
+`arg_min_by` are not permitted inside a recursive seed or step graph
+(`INV-REC-13`). Nested recursive graphs are rejected at graph
+validation/compilation time rather than accepted
 under ambiguous recursive scope (`INV-REC-15`).
 
 ### 6.2 Monotone set semantics and the fixpoint

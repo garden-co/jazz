@@ -251,8 +251,8 @@ async fn arg_max_by_projection_reorder_preserves_tied_winner_and_retraction() {
         .unwrap();
     let source = || {
         GraphBuilder::union([
-            GraphBuilder::table("history"),
             GraphBuilder::table("history_shadow"),
+            GraphBuilder::table("history"),
         ])
     };
     let declared_order_projection = database
@@ -365,55 +365,49 @@ async fn arg_max_by_direct_table_and_noop_filter_publish_same_payload_replacemen
 }
 
 #[futures_test::test]
-async fn recursive_arg_max_by_uses_declared_order_and_preserves_exact_ties() {
+async fn arg_by_snapshot_hydration_tie_breaker_is_independent_of_reversed_input_order() {
     let storage = MemoryStorage::new(&["history", "history_shadow"]).unwrap();
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
+    let tied_low = history_values(1, 20, 1, "tied-a");
+    let tied_high = history_values(1, 20, 1, "tied-z");
     let mut batch = database.open_batch();
-    batch.insert("history", history_values(1, 20, 1, "tied-a"));
-    batch.insert("history_shadow", history_values(1, 20, 1, "tied-z"));
+    batch.insert("history_shadow", tied_high);
+    batch.insert("history", tied_low);
     database.commit_batch(batch).await.unwrap();
 
-    let output = RecordDescriptor::new([
-        ("row", ColumnType::U64.clone()),
-        ("title", ColumnType::String.clone()),
-        ("stamp", ColumnType::U64.clone()),
-        ("node", ColumnType::U64.clone()),
-    ]);
-    let seed = GraphBuilder::arg_max_by(
+    let input = || {
         GraphBuilder::union([
-            GraphBuilder::table("history"),
             GraphBuilder::table("history_shadow"),
+            GraphBuilder::table("history"),
         ])
-        .project(["row", "title", "stamp", "node"]),
-        ["row"],
-        ["stamp", "node"],
-    );
-    let graph = GraphBuilder::recursive(
-        seed,
-        GraphBuilder::frontier_source("frontier", output),
-        "frontier",
-        4,
-    );
+        .project(["row", "title", "stamp", "node"])
+    };
+    let expected = [(
+        vec![
+            Value::U64(1),
+            Value::String("tied-a".to_owned()),
+            Value::U64(20),
+            Value::U64(1),
+        ],
+        1,
+    )];
 
-    assert_eq!(
-        database
-            .query_graph(graph)
-            .await
-            .unwrap()
-            .to_values()
-            .unwrap(),
-        [(
-            vec![
-                Value::U64(1),
-                Value::String("tied-a".to_owned()),
-                Value::U64(20),
-                Value::U64(1),
-            ],
-            1,
-        )]
-    );
+    for graph in [
+        GraphBuilder::arg_min_by(input(), ["row"], ["stamp", "node"]),
+        GraphBuilder::arg_max_by(input(), ["row"], ["stamp", "node"]),
+    ] {
+        assert_eq!(
+            database
+                .query_graph(graph)
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            expected
+        );
+    }
 }
 
 #[futures_test::test]
@@ -423,8 +417,8 @@ async fn arg_min_by_reordered_projection_preserves_declared_order_on_retraction(
         .await
         .unwrap();
     let input = GraphBuilder::union([
-        GraphBuilder::table("history"),
         GraphBuilder::table("history_shadow"),
+        GraphBuilder::table("history"),
     ])
     .project(["row", "title", "stamp", "node"]);
     let graph = GraphBuilder::arg_min_by(input, ["row"], ["stamp", "node"]);
@@ -584,7 +578,7 @@ async fn predicate_or_filter_matches_either_branch() {
 }
 
 #[futures_test::test]
-async fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
+async fn arg_by_rejects_bad_primary_keys_and_recursive_seed_or_step_graphs() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])
         .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
@@ -599,21 +593,61 @@ async fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
         .unwrap_err();
     assert!(format!("{err}").contains("requires primary key"));
 
-    database
-        .subscribe_one_sink(GraphBuilder::recursive(
-            history_arg_max().project(["row", "stamp"]),
-            GraphBuilder::frontier_source(
+    let output = || {
+        RecordDescriptor::new([
+            ("row", ColumnType::U64.clone()),
+            ("stamp", ColumnType::U64.clone()),
+        ])
+    };
+    let frontier = || GraphBuilder::frontier_source("frontier", output());
+    let seed = || GraphBuilder::table("history").project(["row", "stamp"]);
+    let recursive_graphs = [
+        (
+            "arg_max_by seed",
+            GraphBuilder::recursive(
+                history_arg_max().project(["row", "stamp"]),
+                frontier(),
                 "frontier",
-                RecordDescriptor::new([
-                    ("row", ColumnType::U64.clone()),
-                    ("stamp", ColumnType::U64.clone()),
-                ]),
+                4,
             ),
-            "frontier",
-            4,
-        ))
-        .await
-        .unwrap();
+        ),
+        (
+            "arg_min_by seed",
+            GraphBuilder::recursive(
+                history_arg_min().project(["row", "stamp"]),
+                frontier(),
+                "frontier",
+                4,
+            ),
+        ),
+        (
+            "arg_max_by step",
+            GraphBuilder::recursive(
+                seed(),
+                GraphBuilder::arg_max_by(frontier(), ["row"], ["stamp"]),
+                "frontier",
+                4,
+            ),
+        ),
+        (
+            "arg_min_by step",
+            GraphBuilder::recursive(
+                seed(),
+                GraphBuilder::arg_min_by(frontier(), ["row"], ["stamp"]),
+                "frontier",
+                4,
+            ),
+        ),
+    ];
+    for (case, graph) in recursive_graphs {
+        let err = database.subscribe_one_sink(graph).await.unwrap_err();
+        assert!(
+            format!("{err}").contains(
+                "arg_max_by and arg_min_by are not supported inside recursive seed or step graphs"
+            ),
+            "{case}: {err}"
+        );
+    }
 }
 
 #[futures_test::test]

@@ -166,9 +166,11 @@ in `Replace` mode reads current binding snapshots, not pending or incremental
 deltas (`INV-SHAPE-13`).
 
 Because a binding source is just another weighted record set, prepared shapes
-compose with joins, anti-joins, nullable-unwrap, `ArgMaxBy`, and recursion: the
-binding columns participate as data. Recursive fixpoint semantics are chapter 6;
-in this chapter, a binding source is simply another input weighted record set.
+compose with joins, anti-joins, nullable-unwrap, and `ArgMaxBy`; they also
+support recursive graphs. Those capabilities are independent: chapter 6
+prohibits both `ArgMaxBy` and `ArgMinBy` inside a recursive seed or step graph.
+In this chapter, a binding source is simply another input weighted record set
+whose binding columns participate as data.
 Prepared shapes retain their output graph nodes while registered
 (`INV-SHAPE-16`).
 

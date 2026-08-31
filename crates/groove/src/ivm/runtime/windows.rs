@@ -103,37 +103,6 @@ pub(super) fn arg_by_winner_before_from_deltas(
     )
 }
 
-pub(super) fn arg_by_winners_from_deltas(
-    descriptor: RecordDescriptor,
-    group_field_indices: &[usize],
-    comparison_field_indices: &[usize],
-    deltas: Vec<RecordDelta>,
-    direction: ArgByDirection,
-) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
-    let mut groups = BTreeMap::<Vec<u8>, BTreeMap<Bytes, i64>>::new();
-    for delta in deltas {
-        let group_key = encoded_record_key_part(descriptor, delta.raw(), group_field_indices)?;
-        *groups
-            .entry(group_key)
-            .or_default()
-            .entry(delta.record)
-            .or_default() += delta.weight;
-    }
-
-    let mut winners = Vec::new();
-    for identities in groups.into_values() {
-        if let Some((_, record)) = arg_by_winner_from_records(
-            descriptor,
-            comparison_field_indices,
-            identities.into_iter().collect(),
-            direction,
-        )? {
-            winners.push(RecordDelta { record, weight: 1 });
-        }
-    }
-    Ok(winners)
-}
-
 #[cfg(test)]
 pub(super) fn top_by_window_from_records(
     descriptor: RecordDescriptor,

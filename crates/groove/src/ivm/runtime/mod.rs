@@ -518,7 +518,7 @@ pub enum IvmRuntimeError {
     UnsupportedNonMonotoneRecursion,
     #[error("nested recursive graphs are not supported in v0")]
     UnsupportedNestedRecursion,
-    #[error("unsupported arg_max_by graph: {0}")]
+    #[error("unsupported arg_by graph: {0}")]
     UnsupportedArgMaxBy(String),
     #[error("collect_by is terminal-only and cannot feed another graph node")]
     CollectByMustBeTerminal,
