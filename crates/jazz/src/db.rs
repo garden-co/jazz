@@ -2031,6 +2031,9 @@ struct PendingUpstreamSubscription {
     binding: Binding,
     opts: RegisterShapeOptions,
     identity: AuthorSubject,
+    /// Immutable logical session context for a relay-multiplexed request.
+    /// Direct upstream consumers use `None` and authenticate at transport.
+    policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
 }
 
 struct QueryCoverageRegistration {
@@ -2070,12 +2073,30 @@ struct OpenedUpstreamCoverage {
 struct CoverageGroup {
     shape: ValidatedQuery,
     binding: Binding,
+    /// Immutable context represented by this relay-only coverage key.
+    policy_binding: (AuthorSubject, BTreeMap<String, Value>),
+    /// Where `policy_binding` came from at admission.
+    ///
+    /// A direct subscriber's binding is the trusted connection's current
+    /// authenticated snapshot, so claim refresh replaces it before the
+    /// maintained view is reopened. A delegated binding was asserted by the
+    /// trusted relay for this exact usage site and must remain immutable even
+    /// when the relay transport refreshes its own session. In particular, do
+    /// not infer this from the identity: SYSTEM is a valid delegated subject
+    /// in internal paths.
+    policy_binding_origin: CoveragePolicyBindingOrigin,
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
     initialized: bool,
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoveragePolicyBindingOrigin {
+    DirectAdmitted,
+    Delegated,
 }
 
 /// One propagated coverage group owned by one downstream relay connection.
@@ -2087,6 +2108,7 @@ struct CoverageGroup {
 struct RelayUpstreamSubscriptionOwner {
     downstream_connection_epoch: u64,
     coverage: CoverageKey,
+    policy_binding: (AuthorSubject, BTreeMap<String, Value>),
     downstream_subscriptions: BTreeSet<SubscriptionKey>,
 }
 
@@ -2839,6 +2861,7 @@ fn coverage_key(
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         opts,
+        policy_binding: None,
     }
 }
 

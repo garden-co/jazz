@@ -36,6 +36,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private nextRequestId = 1;
   private closed = false;
   private failed: Error | null = null;
+  private readonly disposeQueryCoverageTrace: (() => void) | null;
 
   constructor(
     private readonly runtime: NativeRuntimeAdapter,
@@ -56,6 +57,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     port.addEventListener("message", this.onMessage);
     port.addEventListener("messageerror", this.onMessageError);
     port.start();
+    this.disposeQueryCoverageTrace = traceRelay
+      ? runtime.onQueryCoverageTrace((entry) => {
+          if (this.closed) return;
+          this.port.postMessage({
+            type: "diagnostic-query-coverage",
+            ...entry,
+          } satisfies BrowserFollowerPortRequest);
+        })
+      : null;
 
     // Establish the accepted peer with this tab's claims before any runtime
     // frames can be delivered. MessagePort ordering keeps the handshake ahead
@@ -292,6 +302,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.closed = true;
     this.port.removeEventListener("message", this.onMessage);
     this.port.removeEventListener("messageerror", this.onMessageError);
+    this.disposeQueryCoverageTrace?.();
     this.pump.close();
     this.port.close();
     for (const pending of this.pending.values()) pending.reject(error);

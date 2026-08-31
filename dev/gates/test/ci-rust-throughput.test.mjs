@@ -8,6 +8,7 @@ import test from "node:test";
 import { parse } from "yaml";
 import { cleanDist } from "../../../packages/jazz-tools/scripts/clean-dist.mjs";
 import { missingJazzToolsTestSurface } from "../verify-jazz-tools-exports.mjs";
+import { TARGETS as jazzToolsTargets } from "../../../packages/jazz-tools/scripts/targets.mjs";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
@@ -22,6 +23,10 @@ const setupBlacksmithAction = fs.readFileSync(
 );
 const installRustTool = fs.readFileSync(
   path.join(root, ".github/actions/install-rust-tool/action.yml"),
+  "utf8",
+);
+const installRustToolScript = fs.readFileSync(
+  path.join(root, "dev/ci/install-rust-tool.sh"),
   "utf8",
 );
 const packageBuild = fs.readFileSync(
@@ -402,25 +407,128 @@ test("build setup isolates mutable Rustup toolchains without moving Cargo caches
   );
 });
 
-test("Rust tool installation is isolated from shared self-hosted runner state", () => {
-  const installAction = "taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9";
-  assert.match(installRustTool, new RegExp(`uses: ${installAction}`));
-  assert.match(installRustTool, /HOME: \$\{\{ runner\.temp \}\}\/jazz-install-action/);
-  assert.match(installRustTool, /CARGO_HOME: \$\{\{ runner\.temp \}\}\/jazz-install-action\/cargo/);
-  for (const caller of [workflow, setupBuildAction, packageBuild]) {
-    assert.doesNotMatch(caller, new RegExp(installAction));
+test("Rust tool installation is pinned, allowlisted, and action-download independent", () => {
+  const toolCacheKey =
+    "jazz-rust-tool-${{ inputs.installer-revision }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}";
+  assert.doesNotMatch(installRustTool, /taiki-e\/install-action/);
+  assert.match(installRustTool, /run: dev\/ci\/install-rust-tool\.sh/);
+  assert.match(installRustTool, /CARGO_HOME: \$\{\{ runner\.temp \}\}\/jazz-rust-tool\/cargo/);
+  assert.match(installRustTool, /JAZZ_RUST_TOOL: \$\{\{ inputs\.tool \}\}/);
+  assert.match(
+    installRustTool,
+    /uses: actions\/cache\/restore@caa296126883cff596d87d8935842f9db880ef25/,
+  );
+  assert.match(
+    installRustTool,
+    /uses: actions\/cache\/save@caa296126883cff596d87d8935842f9db880ef25/,
+  );
+  assert.match(
+    installRustTool,
+    new RegExp(toolCacheKey.replaceAll("$", "\\$").replaceAll("{", "\\{").replaceAll("}", "\\}")),
+  );
+  assert.match(installRustTool, /path: \$\{\{ runner\.temp \}\}\/jazz-rust-tool/);
+  assert.match(
+    installRustTool,
+    /JAZZ_RUST_TOOL_CACHE_HIT: \$\{\{ steps\.tool-cache\.outputs\.cache-hit \}\}/,
+  );
+  assert.match(
+    installRustTool,
+    /JAZZ_RUST_TOOL_CACHE_KEY: jazz-rust-tool-\$\{\{ inputs\.installer-revision \}\}-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ inputs\.tool \}\}/,
+  );
+  assert.match(installRustTool, /installer-revision:[\s\S]*default: "v1"/);
+  assert.match(
+    installRustTool,
+    /steps\.tool-cache\.outputs\.cache-hit != 'true'[\s\S]*uses: actions\/cache\/save@/,
+  );
+  for (const source of [workflow, setupBuildAction, packageBuild])
+    assert.doesNotMatch(source, /taiki-e\/install-action/);
+  for (const [tool, crate, version, provisioned] of [
+    ["sccache@0.15.0", "sccache", "0.15.0", true],
+    ["cargo-nextest@0.9.143", "cargo-nextest", "0.9.143", true],
+    // cargo-zigbuild is needed only for hosted Linux package cross-builds;
+    // the provisioned bundle intentionally does not include Zig.
+    ["cargo-zigbuild@0.20.1", "cargo-zigbuild", "0.20.1", false],
+    ["wasm-pack@0.13.1", "wasm-pack", "0.13.1", true],
+  ]) {
+    if (provisioned)
+      assert.match(
+        installRustTool,
+        new RegExp(`${tool.replaceAll(".", "\\.")}(?:\\||\\))`),
+        `provisioned and hosted paths must both support ${tool}`,
+      );
+    assert.match(
+      installRustToolScript,
+      new RegExp(
+        `${tool.replaceAll(".", "\\.")}[\\s\\S]*crate=${crate}[\\s\\S]*version=${version.replaceAll(".", "\\.")}`,
+      ),
+    );
   }
+  assert.match(
+    installRustToolScript,
+    /cargo install "\$\{crate\}" --version "\$\{version\}" --locked --root "\$\{install_root\}"/,
+  );
+  assert.match(installRustToolScript, /if \[\[ "\$\{JAZZ_RUST_TOOL_CACHE_HIT:-\}" == "true" \]\]/);
+  assert.match(installRustToolScript, /"\$\{install_root\}\/bin\/\$\{binary\}" --version/);
+  assert.match(
+    installRustToolScript,
+    /failed version validation[\s\S]*Bump installer-revision before retrying/,
+  );
+  assert.match(installRustToolScript, /exit 65/);
+  assert.doesNotMatch(installRustToolScript, /rm -rf/);
+  assert.match(installRustToolScript, /echo "\$\{install_root\}\/bin" >> "\$\{GITHUB_PATH/);
+  assert.match(setupBuildAction, /tool: sccache@0\.15\.0/);
+  assert.match(packageBuild, /tool: cargo-zigbuild@0\.20\.1/);
+  assert.throws(
+    () => assert.match(installRustToolScript.replace(" --locked", ""), / --locked/),
+    /--locked/,
+    "contract must reject a planted unlocked install",
+  );
   assert.throws(
     () =>
       assert.match(
         installRustTool.replace(
-          "        CARGO_HOME: ${{ runner.temp }}/jazz-install-action/cargo\n",
+          "        JAZZ_RUST_TOOL_CACHE_HIT: ${{ steps.tool-cache.outputs.cache-hit }}\n",
           "",
         ),
-        /CARGO_HOME: \$\{\{ runner\.temp \}\}\/jazz-install-action\/cargo/,
+        /JAZZ_RUST_TOOL_CACHE_HIT: \$\{\{ steps\.tool-cache\.outputs\.cache-hit \}\}/,
       ),
-    /CARGO_HOME/,
+    /JAZZ_RUST_TOOL_CACHE_HIT/,
+    "contract must reject a cache hit that skips validation",
   );
+  assert.throws(
+    () => assert.match(installRustToolScript.replace("  exit 65", "  exit 0"), /  exit 65/),
+    /exit 65/,
+    "contract must reject a corrupt cache hit that does not fail closed",
+  );
+});
+
+test("a corrupt exact-key Rust tool cache fails closed without installing or deleting it", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-rust-tool-invalid-cache-"));
+  const githubPath = path.join(temp, "github-path");
+  const cachedBinary = path.join(temp, "jazz-rust-tool", "bin", "sccache");
+  try {
+    fs.mkdirSync(path.dirname(cachedBinary), { recursive: true });
+    fs.writeFileSync(cachedBinary, "#!/usr/bin/env bash\necho 'sccache 0.14.0'\n");
+    fs.chmodSync(cachedBinary, 0o755);
+    const result = spawnSync("bash", ["dev/ci/install-rust-tool.sh"], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_PATH: githubPath,
+        JAZZ_RUST_TOOL: "sccache@0.15.0",
+        JAZZ_RUST_TOOL_CACHE_HIT: "true",
+        JAZZ_RUST_TOOL_CACHE_KEY: "jazz-rust-tool-v1-Linux-X64-sccache@0.15.0",
+        RUNNER_TEMP: temp,
+      },
+    });
+    assert.equal(result.status, 65);
+    assert.match(result.stderr, /failed version validation/);
+    assert.match(result.stderr, /Bump installer-revision/);
+    assert.equal(fs.existsSync(cachedBinary), true);
+  } finally {
+    fs.rmSync(temp, { force: true, recursive: true });
+  }
 });
 
 test("trusted runners consume the validated immutable tool bundle", () => {
@@ -579,13 +687,45 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     /shadow execution changed the checked-out source after the baseline/,
   );
   assert.match(rustShadowWorkflow, /Seal clean checked-out source baseline/);
+  const preCheckout = shard.steps.find(
+    (step) => step.name === "Reject pre-checkout source residue",
+  );
+  const normalizeCheckout = shard.steps.find(
+    (step) => step.name === "Record checkout source state",
+  );
+  const sealBaseline = shard.steps.find(
+    (step) => step.name === "Seal clean checked-out source baseline",
+  );
+  const checkout = shard.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+  assert.equal(
+    checkout?.with?.clean,
+    false,
+    "shadow checkout must preserve residue for the source-baseline receipt",
+  );
+  assert.ok(
+    preCheckout,
+    "shadow must inspect its inherited workspace before checkout can mutate it",
+  );
+  assert.match(preCheckout.run, /git -C "\$workspace" status --short --untracked-files=all/);
+  assert.match(preCheckout.run, /pre-checkout workspace contains source residue/);
+  assert.ok(
+    shard.steps.indexOf(preCheckout) < shard.steps.indexOf(checkout),
+    "pre-checkout inspection must run before actions/checkout",
+  );
+  assert.ok(normalizeCheckout, "shadow must record checkout state before sealing source identity");
+  assert.match(normalizeCheckout.run, /git status --short --untracked-files=all/);
+  assert.doesNotMatch(normalizeCheckout.run, /git reset|git clean/);
+  assert.ok(
+    shard.steps.indexOf(normalizeCheckout) < shard.steps.indexOf(sealBaseline),
+    "checkout inspection must precede the sealed baseline",
+  );
   assert.equal(
     shard.env?.RUST_SHADOW_SOURCE_BASELINE,
     undefined,
     "runner context is not available in jobs.<job_id>.env before a runner is assigned",
   );
   assert.equal(
-    shard.steps[1].env.RUST_SHADOW_SOURCE_BASELINE,
+    sealBaseline.env.RUST_SHADOW_SOURCE_BASELINE,
     "${{ runner.temp }}/rust-shadow-source.json",
     "the source baseline must resolve runner.temp at step scope",
   );
@@ -798,6 +938,65 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       message,
       `planted ${name} mismatch must identify the violated binding`,
     );
+  }
+});
+
+test("the exact pre-checkout shadow receipt logs and rejects tracked and untracked residue", () => {
+  const shard = parse(rustShadowWorkflow).jobs.shard;
+  const preCheckout = shard.steps.find(
+    (step) => step.name === "Reject pre-checkout source residue",
+  );
+  assert.ok(preCheckout?.run, "missing executable pre-checkout receipt");
+  for (const [name, contaminate, expectedStatus] of [
+    [
+      "tracked",
+      (workspace) => fs.writeFileSync(path.join(workspace, "tracked.txt"), "residue\n"),
+      /^ M tracked\.txt$/m,
+    ],
+    [
+      "untracked",
+      (workspace) => fs.writeFileSync(path.join(workspace, "residue.txt"), "residue\n"),
+      /^\?\? residue\.txt$/m,
+    ],
+  ]) {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-shadow-pre-checkout-"));
+    try {
+      for (const args of [
+        ["init", "--quiet"],
+        ["config", "user.email", "test@example.invalid"],
+        ["config", "user.name", "Test"],
+      ]) {
+        const initialized = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
+        assert.equal(initialized.status, 0, initialized.stderr);
+      }
+      fs.writeFileSync(path.join(workspace, "tracked.txt"), "clean\n");
+      let result = spawnSync("git", ["add", "tracked.txt"], { cwd: workspace, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      result = spawnSync("git", ["commit", "--quiet", "-m", "fixture"], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 0, result.stderr);
+      contaminate(workspace);
+
+      const receipt = spawnSync("bash", ["-c", preCheckout.run], {
+        cwd: workspace,
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_WORKSPACE: workspace },
+      });
+      assert.notEqual(receipt.status, 0, `${name} residue must fail before checkout`);
+      assert.match(receipt.stderr, /pre-checkout workspace contains source residue/);
+      assert.match(receipt.stderr, expectedStatus);
+
+      const after = spawnSync("git", ["status", "--short", "--untracked-files=all"], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
+      assert.equal(after.status, 0, after.stderr);
+      assert.match(after.stdout, expectedStatus, `${name} residue must survive to be logged`);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1415,6 +1614,38 @@ test("CodSpeed builds the BandChat caught-up fast-resume receipt", () => {
     () => assert.match(codspeedWorkflow.replace(" --bench fast_resume", ""), /--bench fast_resume/),
     /fast_resume/,
   );
+});
+
+test("jazz-tools advertises exactly the CLI artifacts its build matrix produces", () => {
+  const producedCliArtifacts = [...packageBuild.matchAll(/^\s+output: (jazz-tools-\S+)$/gm)].map(
+    (match) => match[1],
+  );
+
+  assert.deepEqual(Object.values(jazzToolsTargets).sort(), producedCliArtifacts.sort());
+  assert.equal(jazzToolsTargets["win32-x64"], undefined);
+  assert.match(packageBuild, /default: .*"platform":"win32-x64-msvc"/);
+});
+
+test("the jazz-tools launcher reports Windows as unsupported instead of a missing artifact", () => {
+  const launcherPath = path.join(root, "packages/jazz-tools/bin/jazz-tools.js");
+  const probe = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `
+        Object.defineProperty(process, "platform", { value: "win32" });
+        Object.defineProperty(process, "arch", { value: "x64" });
+        process.argv = ["node", "jazz-tools", "server"];
+        await import(${JSON.stringify(launcherPath)});
+      `,
+    ],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(probe.status, 1);
+  assert.match(probe.stderr, /jazz-tools CLI is not supported on win32\/x64\./);
+  assert.doesNotMatch(probe.stderr, /Bundled binary missing/);
 });
 
 test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {

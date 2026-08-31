@@ -25,7 +25,8 @@ export class BrowserPhysicalDatabaseBusyError extends Error {
 
 export type BrowserPhysicalDatabaseEpoch = {
   readonly id: string;
-  release(): void;
+  /** Resolves only once the browser has actually relinquished the Web Lock. */
+  release(): Promise<void>;
 };
 
 type WebLock = object;
@@ -57,9 +58,14 @@ export async function acquireBrowserPhysicalDatabaseEpoch(
     resolveEpoch = resolve;
     rejectEpoch = reject;
   });
+  let releaseRequested = false;
   let release!: () => void;
   const released = new Promise<void>((resolve) => {
     release = resolve;
+  });
+  let resolveLockReleased!: () => void;
+  const lockReleased = new Promise<void>((resolve) => {
+    resolveLockReleased = resolve;
   });
   const id = crypto.randomUUID();
 
@@ -72,12 +78,25 @@ export async function acquireBrowserPhysicalDatabaseEpoch(
           rejectEpoch(new BrowserPhysicalDatabaseBusyError(databaseName));
           return;
         }
-        resolveEpoch({ id, release });
+        resolveEpoch({
+          id,
+          release: () => {
+            if (!releaseRequested) {
+              releaseRequested = true;
+              release();
+            }
+            return lockReleased;
+          },
+        });
         await released;
       },
     )
-    .catch((error: unknown) => {
-      rejectEpoch(error instanceof Error ? error : new Error(String(error)));
-    });
+    .then(
+      () => resolveLockReleased(),
+      (error: unknown) => {
+        resolveLockReleased();
+        rejectEpoch(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
   return await epoch;
 }

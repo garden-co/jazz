@@ -419,7 +419,10 @@ where
             )
             .await?;
         }
-        let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
+        // Staging owns the decoded records and derived-index working set. Keep
+        // it behind an async allocation boundary so admission does not retain
+        // that state on the caller's poll stack.
+        let staged_versions = Box::pin(self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
             tx,
             versions,
@@ -429,7 +432,7 @@ where
             update_current_indexes,
             view_scoped_cardinality,
             None,
-        )
+        ))
         .await?;
         let mut staged_global_times = Vec::new();
         self.finalize_staged_transaction_ingest(

@@ -776,6 +776,21 @@ export class PostcardReader {
     return this.bytesOfLength(length);
   }
 
+  /**
+   * Read a postcard byte string only after admitting its declared length.
+   *
+   * Protocol adapters use this before retaining attacker-controlled byte
+   * strings. `bytesOfLength` also verifies that the admitted length remains
+   * within the physical carrier.
+   */
+  bytesAtMost(maxLength: number, label: string): Uint8Array {
+    const length = this.u64();
+    if (length > maxLength) {
+      throw new Error(`${label} exceeds maximum length of ${maxLength} bytes`);
+    }
+    return this.bytesOfLength(length);
+  }
+
   private bytesOfLength(length: number): Uint8Array {
     const end = this.offset + length;
     if (end > this.bytesValue.length) throw new Error("postcard bytes overflow");

@@ -91,6 +91,11 @@ export async function openAggregatedBrowserInspectorControlPort(
       if (message.type === "terminate-worker") {
         throw new Error("Worker termination is only available on a direct browser control port");
       }
+      if (message.type === "lifecycle-trace") {
+        throw new Error(
+          "Worker lifecycle trace is only available on a direct browser control port",
+        );
+      }
       const route = routes.get(message.contextKey);
       if (!route) throw new Error("Inspector context is no longer available");
       const control = controls.find((candidate) => candidate.port === route.port)!;

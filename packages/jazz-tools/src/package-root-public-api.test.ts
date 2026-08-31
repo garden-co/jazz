@@ -8,9 +8,14 @@ import * as runtime from "./runtime/index.js";
 import type { QueryExecutionOptions } from "./runtime/index.js";
 
 const canonicalQueryExecutionOptions: QueryExecutionOptions = {
+  tier: "local-first",
   propagation: "local-only",
   branch: "draft",
   base: "main",
+};
+const remoteQueryExecutionOptions: QueryExecutionOptions = { tier: "remote" };
+const remoteIfPossibleQueryExecutionOptions: QueryExecutionOptions = {
+  tier: "remote-if-possible",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
   // @ts-expect-error propagate was removed; use propagation instead.
@@ -18,6 +23,8 @@ const removedQueryExecutionOptions: QueryExecutionOptions = {
 };
 
 void canonicalQueryExecutionOptions;
+void remoteQueryExecutionOptions;
+void remoteIfPossibleQueryExecutionOptions;
 void removedQueryExecutionOptions;
 
 // @ts-expect-error NativeRuntimeAdapter is intentionally not part of the public runtime surface.
@@ -389,6 +396,27 @@ describe("package root public API", () => {
     ]) {
       expect(exportedPaths, removedPathFragment).not.toContain(removedPathFragment);
     }
+  });
+
+  it("maps the Node-only foreground lease implementation away from browser bundles", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
+    ) as { browser?: Record<string, string> };
+
+    expect(packageJson.browser).toMatchObject({
+      "./dist/runtime/native-runtime/node-foreground-node-lease.js":
+        "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js",
+    });
+    expect(
+      readFileSync(
+        join(
+          packageRootDir,
+          "..",
+          "src/runtime/native-runtime/node-foreground-node-lease.browser.ts",
+        ),
+        "utf8",
+      ),
+    ).not.toMatch(/from\s+["']node:/);
   });
 
   it("publishes restored React Native and Expo entrypoints", () => {

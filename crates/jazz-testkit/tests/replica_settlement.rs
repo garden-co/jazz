@@ -17,6 +17,7 @@ mod relay_topology {
     use jazz::groove::records::Value;
     use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorSubject, NodeUuid};
+    use jazz::node::CommitUnitTrust;
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
@@ -124,7 +125,16 @@ mod relay_topology {
         let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
         let (relay_upstream_transport, authority_transport) = duplex();
         let _relay_upstream = block_on(relay.connect_upstream(relay_upstream_transport));
-        let _authority_subscriber = authority.accept_subscriber(authority_transport, alice);
+        // The relay-to-authority hop is a trusted backend link. It delegates
+        // Alice's immutable session binding inside its propagated
+        // subscription; Core must not model the physical transport as Alice's
+        // direct session link.
+        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
+            authority_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -236,7 +246,16 @@ mod relay_topology {
              settlement on hold: {premature:?}"
         );
 
-        let _authority_subscriber = authority.accept_subscriber(held_authority_transport, alice);
+        // As above, this is a trusted relay transport, not a direct Alice
+        // session. Keeping the same admission model in the delayed-handshake
+        // case proves that non-settlement is caused by the missing upstream
+        // frontier, rather than rejected delegated policy context.
+        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
+            held_authority_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
         let mut events = premature;
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");

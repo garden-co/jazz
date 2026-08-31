@@ -3,7 +3,7 @@ use std::time::Duration;
 use jazz::db::ReadOpts;
 use jazz::query::{OrderDirection, Query, col, contains, eq, gt, gte, is_null, lit, lt, lte, ne};
 use jazz::tools::test_support::{disconnect_client, reconnect_client};
-use jazz::tools::{DurabilityTier, JazzClient, Value};
+use jazz::tools::{DurabilityTier, JazzClient, OrderedRowDelta, ResultKey, Value};
 use jazz_server::JazzServer;
 
 use crate::common::{
@@ -25,6 +25,33 @@ macro_rules! local_tokio_test {
                 .await;
         }
     };
+}
+
+/// Reduces the ordered public stream protocol exactly as a consumer does: a
+/// frame first removes every changed occurrence, then inserts additions and
+/// updates at their new positions. Update indexes are relative to the state
+/// before the whole frame, so callers inspect that state before applying it.
+fn apply_ordered_delta(order: &mut Vec<ResultKey>, delta: &OrderedRowDelta) {
+    order.retain(|current| {
+        !delta.added.iter().any(|change| change.id == *current)
+            && !delta.updated.iter().any(|change| change.id == *current)
+            && !delta.removed.iter().any(|change| change.id == *current)
+    });
+    let mut placements = delta
+        .added
+        .iter()
+        .map(|change| (&change.id, change.index))
+        .chain(
+            delta
+                .updated
+                .iter()
+                .map(|change| (&change.id, change.new_index)),
+        )
+        .collect::<Vec<_>>();
+    placements.sort_by_key(|(_, index)| *index);
+    for (id, index) in placements {
+        order.insert(index.min(order.len()), id.clone());
+    }
 }
 
 local_tokio_test! {
@@ -370,6 +397,15 @@ async fn reset_replacement_preserves_update_category_and_prior_order() {
         |log| has_added_id(log, moving_id) && has_added_id(log, anchor_id),
     )
     .await;
+    let mut facade_order = Vec::new();
+    for delta in &log {
+        apply_ordered_delta(&mut facade_order, delta);
+    }
+    assert_eq!(
+        facade_order,
+        vec![ResultKey::from(moving_id), ResultKey::from(anchor_id)],
+        "initial public stream order"
+    );
     log.clear();
 
     for revision in 1..=RAPID_UPDATES {
@@ -395,6 +431,7 @@ async fn reset_replacement_preserves_update_category_and_prior_order() {
     )
     .await;
     assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].1.first(), Some(&Value::Text(final_title.clone())));
     wait_for_subscription_update(
         &mut stream,
         &mut log,
@@ -422,8 +459,37 @@ async fn reset_replacement_preserves_update_category_and_prior_order() {
                     == Some(&Value::Text(final_title.clone()))
         })
         .expect("final moving-row update");
-    assert_eq!(final_update.old_index, 0);
+    let mut final_update_prior_index = None;
+    for delta in &log {
+        if delta.updated.iter().any(|update| {
+            update.id == moving_id
+                && update
+                    .row
+                    .as_ref()
+                    .and_then(|row| row.get("title"))
+                    == Some(&Value::Text(final_title.clone()))
+        }) {
+            assert!(
+                final_update_prior_index.is_none(),
+                "final title must have one normalized update frame: {log:#?}"
+            );
+            final_update_prior_index = facade_order
+                .iter()
+                .position(|id| *id == moving_id);
+        }
+        apply_ordered_delta(&mut facade_order, delta);
+    }
+    assert_eq!(
+        final_update.old_index,
+        final_update_prior_index.expect("final moving row exists before its update"),
+        "normalized update must preserve the public stream's immediately prior position"
+    );
     assert_eq!(final_update.new_index, 1);
+    assert_eq!(
+        facade_order,
+        vec![ResultKey::from(anchor_id), ResultKey::from(moving_id)],
+        "final normalized stream order"
+    );
 
     pair.shutdown().await;
 }

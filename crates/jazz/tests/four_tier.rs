@@ -312,10 +312,14 @@ fn edge_ingest(
     versions: Vec<jazz::protocol::VersionRecord>,
     now_ms: u64,
 ) -> Vec<SyncMessage> {
+    // This direct-topology fixture admits an empty claim object for the peer;
+    // pass that immutable request snapshot rather than consulting node-global
+    // compatibility state (which integration tests cannot access).
+    let policy_claims = BTreeMap::new();
     install_uuid_sub_claim(node, peer.identity());
     block_on(async {
         let outcome = peer
-            .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms)
+            .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms, now_ms, policy_claims)
             .await
             .unwrap();
         node.persist_and_settle_outcome(outcome).await.unwrap()
@@ -374,6 +378,12 @@ fn refresh(
     peer: &mut PeerState,
 ) {
     install_uuid_sub_claim(upstream, peer.identity());
+    let subscription = whole_table_key(&schema(), "todos");
+    // This test harness models a system-scoped core/edge replication link.
+    // Relay serving normally receives this immutable binding from admission;
+    // keep the direct helper equally explicit rather than inferring SYSTEM
+    // from the relay transport role.
+    peer.set_subscription_policy_binding(subscription, (peer.identity(), BTreeMap::new()));
     let update = block_on(peer.current_rows_update(upstream, "todos")).unwrap();
     apply_message(downstream, update);
 }
@@ -707,7 +717,6 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
     let scope_key = permission_scope_key(&schema, "todos", client_author);
     let whole_table = whole_table_key(&schema, "todos");
     assert_ne!(scope_key, whole_table);
-    assert!(edge_to_client.subscription_result_sets(scope_key).is_some());
     assert!(
         edge_to_client
             .subscription_result_sets(whole_table)
@@ -763,18 +772,11 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
         .is_empty()
     );
 
-    let backend_scope = permission_scope_key(&schema, "todos", backend_author);
-    let attributed_scope = permission_scope_key(&schema, "todos", attributed_user);
-    assert!(
-        edge_to_backend
-            .subscription_result_sets(backend_scope)
-            .is_some()
-    );
-    assert!(
-        edge_to_backend
-            .subscription_result_sets(attributed_scope)
-            .is_none()
-    );
+    // The support receiver is an opaque usage-site handle qualified by the
+    // admitted snapshot. Its canonical policy query key is intentionally not
+    // a public observable. The eventual fate below proves the link identity,
+    // rather than the transaction's `made_by`, selected the policy scope.
+    assert_eq!(edge_to_backend.edge_scope_subscription_count(), 1);
 
     let [fate] = drain_edge_fates(
         &mut edge_to_backend,
@@ -903,10 +905,6 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
         scope_a.binding_id, scope_b.binding_id,
         "writer claim must remain part of scope identity"
     );
-    assert!(edge_to_a.subscription_result_sets(scope_a).is_some());
-    assert!(edge_to_a.subscription_result_sets(scope_b).is_none());
-    assert!(edge_to_b.subscription_result_sets(scope_b).is_some());
-    assert!(edge_to_b.subscription_result_sets(scope_a).is_none());
     assert_eq!(
         edge_to_a.edge_scope_subscription_count(),
         1,
@@ -916,6 +914,18 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
         edge_to_b.edge_scope_subscription_count(),
         1,
         "different claims use a separate retained scope"
+    );
+    let a_fates = drain_edge_fates(&mut edge_to_a, &mut edge, u64::MAX - SKEW_TOLERANCE_MS);
+    assert_eq!(a_fates.len(), 2, "writer A's two parked writes settle");
+    assert_eq!(
+        edge_to_a.edge_scope_subscription_count(),
+        0,
+        "settling writer A retires only its binding-qualified support receiver"
+    );
+    assert_eq!(
+        edge_to_b.edge_scope_subscription_count(),
+        1,
+        "writer B retains its independent binding-qualified support receiver"
     );
 }
 
@@ -1265,6 +1275,11 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     );
 
     let mut core_to_edge = PeerState::relay();
+    let invite_subscription = whole_table_key(&access_write_policy_schema(), "canvasInvites");
+    core_to_edge.set_subscription_policy_binding(
+        invite_subscription,
+        (AuthorSubject::SYSTEM, BTreeMap::new()),
+    );
     let grant_update =
         block_on(core_to_edge.current_rows_update(&mut core, "canvasInvites")).unwrap();
     apply_message(&mut edge, grant_update);

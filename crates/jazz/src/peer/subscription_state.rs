@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use groove::ivm::MultisinkSubscription;
+use groove::records::Value;
 
 use super::super::ids::AuthorSubject;
 use super::super::node::PreparedQueryPlanHandle;
@@ -112,6 +113,9 @@ impl PeerRole {
 /// Server-side shipped-state for one downstream subscription on a peer link.
 #[derive(Debug, Default)]
 pub(super) struct PeerSubscriptionState {
+    /// Immutable admitted policy context for this usage site. Relay links can
+    /// multiplex sessions, so this must not be inferred from connection role.
+    pub(super) policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
     pub(super) member_index: BTreeMap<MemberIndexKey, MemberSlot>,
@@ -249,8 +253,15 @@ impl CachedPeerQueryPlan {
 pub(super) struct DeferredEdgeFate {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
-    pub(super) now_ms: u64,
+    /// Wall-clock authority time captured when the client upload arrived.
+    /// Deferred admission deliberately preserves this security boundary rather
+    /// than treating time spent awaiting permission support as client slack.
+    pub(super) admission_now_ms: u64,
     pub(super) permission_identity: AuthorSubject,
+    /// Immutable claims captured from the admitted uploading link. Deferred
+    /// support must not consult the identity-global compatibility cache on a
+    /// later drain turn.
+    pub(super) policy_claims: BTreeMap<String, Value>,
     pub(super) scope_subscriptions: Vec<SubscriptionKey>,
 }
 

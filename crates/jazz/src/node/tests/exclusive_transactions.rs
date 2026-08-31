@@ -1351,6 +1351,7 @@ fn register_shape_binding_for_receiver(
         },
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
 }

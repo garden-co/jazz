@@ -14,12 +14,14 @@ import type {
   BrowserForegroundNodeLeaseAcquireRequest,
   BrowserForegroundNodeLeaseAcquireResponse,
   BrowserForegroundNodeLeaseCancelRequest,
+  BrowserForegroundNodeLeaseProbeRequest,
   BrowserForegroundNodeLeasePortEvent,
   BrowserForegroundNodeLeasePortRequest,
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
   BrowserInspectorControlEvent,
   BrowserInspectorControlRequest,
+  BrowserWorkerLifecycleTrace,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
@@ -87,6 +89,7 @@ type ForegroundLeaseOwner = {
   storageOwner: string;
   activeLeaseIds: Set<string>;
   pendingLeaseAllocations: number;
+  pendingLeaseFinalizations: number;
   allocationTail: Promise<void>;
 };
 
@@ -130,6 +133,77 @@ let wasmModulePromise: Promise<WasmModule> | null = null;
 let wasmModuleSource: string | null = null;
 let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
+// A port has joined this worker but has not yet completed its first durable
+// operation.  It is already a liveness claim: closing the realm in this gap
+// can strand a first lease or context connection with no terminal reply.
+let pendingBootstrapOperations = 0;
+// `workerGlobal.close()` is necessarily deferred behind physical-owner
+// release.  A new port may arrive while that release is in flight, so the
+// deferred close needs an invalidatable token rather than an unconditional
+// `finally(() => close())`.
+let pendingWorkerClose: symbol | null = null;
+// Inspector-directed termination acknowledges before calling `close()` in a
+// later task so the reply can cross its MessagePort. Reject new ports in that
+// acknowledgement gap: admitting them into the doomed realm can otherwise
+// strand a foreground lease request with no terminal response.
+let workerTerminationScheduled = false;
+// The inspector-facing trace intentionally does not serialize this key. It
+// is only an in-worker capability boundary that prevents a later auth scope
+// from observing a prior scope's retained diagnostics for the same realm.
+type WorkerLifecycleLedgerEntry = BrowserWorkerLifecycleTrace & {
+  authSessionKey: string | null;
+};
+const workerLifecycleLedger: WorkerLifecycleLedgerEntry[] = [];
+let nextWorkerLifecycleSequence = 1;
+const MAX_WORKER_LIFECYCLE_ENTRIES = 128;
+
+/**
+ * Lifecycle evidence is retained at worker-realm scope, but inspection is a
+ * session capability. In particular, a physical database name is not itself
+ * an authorization boundary: an auth turnover can retain old entries while
+ * the same root becomes relevant to a later scope. Keep the scope check
+ * separate from the root check, and never serialize the internal scope key.
+ *
+ * @internal Exported from this worker-private module for a deterministic
+ * boundary receipt; it is not part of the Jazz application API.
+ */
+export function filterWorkerLifecycleEntriesForInspector(
+  entries: readonly WorkerLifecycleLedgerEntry[],
+  authSessionKey: string,
+  allowedDbNames: ReadonlySet<string>,
+): BrowserWorkerLifecycleTrace[] {
+  return entries
+    .filter((entry) => entry.authSessionKey === authSessionKey && allowedDbNames.has(entry.dbName))
+    .map(({ authSessionKey: _authSessionKey, ...entry }) => entry);
+}
+
+function recordWorkerLifecycle(
+  event: BrowserWorkerLifecycleTrace["event"],
+  dbName: string,
+  authSessionKey: string | null,
+  details: Pick<
+    BrowserWorkerLifecycleTrace,
+    "frameCount" | "peerActivityEpoch" | "peerProcessedActivityEpoch"
+  > = {},
+): void {
+  const activeLeases = [...foregroundLeaseOwners.values()].reduce(
+    (count, owner) => count + owner.activeLeaseIds.size,
+    0,
+  );
+  workerLifecycleLedger.push({
+    sequence: nextWorkerLifecycleSequence++,
+    event,
+    dbName,
+    authSessionKey,
+    peerCount: [...contexts.values()].reduce((count, context) => count + context.peers.size, 0),
+    pendingBootstraps: pendingBootstrapOperations,
+    activeLeases,
+    ...details,
+  });
+  if (workerLifecycleLedger.length > MAX_WORKER_LIFECYCLE_ENTRIES) {
+    workerLifecycleLedger.splice(0, workerLifecycleLedger.length - MAX_WORKER_LIFECYCLE_ENTRIES);
+  }
+}
 
 /**
  * Open a physical root only after holding its origin-wide liveness fence.
@@ -211,7 +285,7 @@ async function openPhysicalDatabaseOwner(
     return owner;
   } catch (error) {
     pageStore?.close();
-    epoch.release();
+    await epoch.release();
     throw error;
   }
 }
@@ -227,7 +301,7 @@ async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
         owner.disposeInvalidation?.();
         owner.disposeInvalidation = null;
         owner.pageStore.close();
-        owner.epoch.release();
+        await owner.epoch.release();
         physicalDatabaseOwners.delete(dbName);
       }
     })();
@@ -254,27 +328,102 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
   workerGlobal.onconnect = (event) => {
     const port = event.ports[0];
     if (!port) return;
-    const onBootstrapMessage = (
+    // A SharedWorker can accept this port while a previous idle close is
+    // awaiting IndexedDB/Web-Lock release. Treat delivery of the port as a
+    // new liveness claim before any message task can run; otherwise that old
+    // close can terminate this exact admission mid-flight. Do not merely
+    // cancel the old close token here: the bootstrap reservation is the
+    // durable fact that remains true until this port has either completed its
+    // first operation or failed it.
+    pendingBootstrapOperations += 1;
+    let bootstrapFinished = false;
+    let bootstrapPortClosed = false;
+    let probedLeaseAttemptId: string | null = null;
+    const finishBootstrap = () => {
+      if (bootstrapFinished) return;
+      bootstrapFinished = true;
+      pendingBootstrapOperations -= 1;
+      maybeCloseWorker();
+    };
+    const detachBootstrapListeners = () => {
+      port.removeEventListener("message", onBootstrapMessage);
+      port.removeEventListener("messageerror", onBootstrapMessageError);
+    };
+    const closeBootstrapPort = () => {
+      if (bootstrapPortClosed) return;
+      bootstrapPortClosed = true;
+      detachBootstrapListeners();
+      finishBootstrap();
+      port.close();
+    };
+    function onBootstrapMessage(
       messageEvent: MessageEvent<
-        BrowserSharedWorkerConnectRequest | BrowserForegroundNodeLeaseAcquireRequest
+        | BrowserSharedWorkerConnectRequest
+        | BrowserForegroundNodeLeaseProbeRequest
+        | BrowserForegroundNodeLeaseAcquireRequest
+        | BrowserForegroundNodeLeaseCancelRequest
       >,
-    ) => {
+    ) {
       const message = messageEvent.data;
+      if (workerTerminationScheduled) {
+        if (
+          message?.type === "probe-foreground-node-lease-worker" ||
+          message?.type === "acquire-foreground-node-lease"
+        ) {
+          post(port, {
+            type: "foreground-node-lease-worker-closing",
+            attemptId: message.attemptId ?? "",
+          } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+        }
+        closeBootstrapPort();
+        return;
+      }
+      if (message?.type === "probe-foreground-node-lease-worker") {
+        probedLeaseAttemptId = message.attemptId;
+        post(port, {
+          type: "foreground-node-lease-worker-alive",
+          attemptId: message.attemptId,
+        } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+        return;
+      }
+      if (message?.type === "cancel-foreground-node-lease") {
+        closeBootstrapPort();
+        return;
+      }
       if (
         message?.type !== "connect-runtime" &&
         message?.type !== "acquire-foreground-node-lease"
       ) {
         return;
       }
-      port.removeEventListener("message", onBootstrapMessage);
+      detachBootstrapListeners();
       if (message.type === "connect-runtime") {
+        recordWorkerLifecycle(
+          "bootstrap-start",
+          message.options.dbName,
+          message.options.authSessionKey,
+        );
         post(port, { type: "worker-alive" });
-        void connectTab(port, message);
+        void connectTab(port, message, finishBootstrap);
       } else {
-        void acquireForegroundNodeLease(port, message);
+        if (probedLeaseAttemptId !== null && message.attemptId !== probedLeaseAttemptId) {
+          finishBootstrap();
+          post(port, {
+            type: "foreground-node-lease-error",
+            message: "Foreground node lease request did not match its worker probe",
+          } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+          closeBootstrapPort();
+          return;
+        }
+        recordWorkerLifecycle("lease-request", message.dbName, null);
+        void acquireForegroundNodeLease(port, message).finally(finishBootstrap);
       }
-    };
+    }
+    function onBootstrapMessageError() {
+      closeBootstrapPort();
+    }
     port.addEventListener("message", onBootstrapMessage);
+    port.addEventListener("messageerror", onBootstrapMessageError);
     port.start();
   };
 }
@@ -324,9 +473,8 @@ async function acquireForegroundNodeLease(
       return;
     }
     settled = true;
-    owner.activeLeaseIds.delete(lease.leaseId);
     try {
-      await owner.pageStore.retireForegroundNodeLease(lease.leaseId);
+      await retireForegroundNodeLease(owner, lease.leaseId);
       const testLeaseState = testHooks
         ? await testHooks.cancellationRetired(owner.pageStore, lease.node)
         : undefined;
@@ -358,9 +506,7 @@ async function acquireForegroundNodeLease(
   const retire = async (): Promise<void> => {
     if (settled || !lease || !owner) return;
     settled = true;
-    owner.activeLeaseIds.delete(lease.leaseId);
-    await owner.pageStore.retireForegroundNodeLease(lease.leaseId);
-    maybeCloseWorker();
+    await retireForegroundNodeLease(owner, lease.leaseId);
   };
   const onMessage = (
     event: MessageEvent<
@@ -449,6 +595,7 @@ async function acquireForegroundNodeLease(
           storageOwner: request.storageOwner,
           activeLeaseIds: new Set(),
           pendingLeaseAllocations: 0,
+          pendingLeaseFinalizations: 0,
           allocationTail: Promise.resolve(),
         };
         foregroundLeaseOwners.set(request.dbName, owner);
@@ -484,6 +631,7 @@ async function acquireForegroundNodeLease(
       await requestCancellation();
       return;
     }
+    recordWorkerLifecycle("lease-admitted", request.dbName, null);
     post(port, {
       type: "foreground-node-lease-ready",
       leaseId: lease.leaseId,
@@ -546,9 +694,32 @@ async function allocateForegroundNodeLease(
   }
 }
 
+async function retireForegroundNodeLease(
+  owner: ForegroundLeaseOwner,
+  leaseId: string,
+): Promise<void> {
+  // Finalization becomes worker-owned synchronously, before the active marker
+  // is removed. This closes the gap where explicit worker termination could
+  // otherwise race a durable retirement that had not committed yet.
+  owner.pendingLeaseFinalizations += 1;
+  owner.activeLeaseIds.delete(leaseId);
+  try {
+    await owner.pageStore.retireForegroundNodeLease(leaseId);
+  } catch (error) {
+    // The durable lease remains active when retirement fails. Restore its
+    // in-memory marker so this realm continues to fail closed as well.
+    owner.activeLeaseIds.add(leaseId);
+    throw error;
+  } finally {
+    owner.pendingLeaseFinalizations -= 1;
+    maybeCloseWorker();
+  }
+}
+
 async function connectTab(
   port: MessagePort,
   message: BrowserSharedWorkerConnectRequest,
+  finishBootstrap: () => void,
 ): Promise<void> {
   try {
     const key = runtimeKey(message.options);
@@ -581,8 +752,16 @@ async function connectTab(
     await context.initialize;
     await enqueueTransportTransition(context, () => configureServer(context, message.options));
     attachTab(context, message.tabId, port);
+    // The peer now owns a durable runtime context.  Drop the bootstrap
+    // reservation before publishing readiness so an immediately closing tab
+    // still sees normal idle cleanup ordering.
+    finishBootstrap();
     post(port, { type: "runtime-ready" });
   } catch (error) {
+    // Failed connection setup has already cleaned any partial context; clear
+    // the bootstrap reservation before surfacing the terminal result so its
+    // physical owner can be released without a follow-on admission race.
+    finishBootstrap();
     post(port, { type: "runtime-error", message: asError(error).message });
     port.close();
   }
@@ -922,6 +1101,14 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   if (message.type === "frames") {
+    if (peer.context.options.logLevel === "trace") {
+      recordWorkerLifecycle(
+        "peer-frames",
+        peer.context.options.dbName,
+        peer.context.options.authSessionKey,
+        { frameCount: message.frames.length },
+      );
+    }
     peer.flushedLocal = false;
     if (!peer.pump) {
       // The init handler may be awaiting an evaluator pass while MessagePort
@@ -942,6 +1129,18 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     // the client closes both ends after it observes the result.
     closeTab(peer.context, peer.tabId, false);
     if (releaseWhenIdle) scheduleIdleContextRelease(peer.context);
+    return;
+  }
+  if (message.type === "diagnostic-query-coverage") {
+    recordWorkerLifecycle(
+      message.stage === "attach" ? "query-attach" : "query-covered",
+      peer.context.options.dbName,
+      peer.context.options.authSessionKey,
+      {
+        peerActivityEpoch: message.peerActivityEpoch,
+        peerProcessedActivityEpoch: message.peerProcessedActivityEpoch,
+      },
+    );
     return;
   }
   if (message.type === "storage-reset-observed") {
@@ -985,6 +1184,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       // this new peer and therefore continues while admission waits.
       const subscriber = await activeRuntime.acceptPeerWhenIdle(message.sessionClaims);
       const pump = attachPeerTransport(peer, activeRuntime, subscriber);
+      recordWorkerLifecycle(
+        "peer-attached",
+        peer.context.options.dbName,
+        peer.context.options.authSessionKey,
+      );
       if (peer.pendingFrames.length > 0) {
         const pending = peer.pendingFrames.splice(0);
         pump.receive(pending);
@@ -1102,6 +1306,31 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       } satisfies BrowserInspectorControlEvent);
       return;
     }
+    if (message.type === "lifecycle-trace") {
+      // An inspector is scoped by its authenticated worker session.  Return
+      // only entries for physical roots currently live under that session;
+      // lifecycle diagnostics must not become a cross-account root oracle.
+      const allowedDbNames = new Set(
+        [...contexts.values()]
+          .filter(
+            (context) =>
+              context.options.authSessionKey === authSessionKey &&
+              !context.storageInvalidated &&
+              context.runtime !== null,
+          )
+          .map((context) => context.options.dbName),
+      );
+      port.postMessage({
+        type: "lifecycle-trace",
+        id: message.id,
+        entries: filterWorkerLifecycleEntriesForInspector(
+          workerLifecycleLedger,
+          authSessionKey,
+          allowedDbNames,
+        ),
+      } satisfies BrowserInspectorControlEvent);
+      return;
+    }
     if (message.type === "terminate-worker") {
       if (contexts.size > 0) {
         port.postMessage({
@@ -1111,7 +1340,28 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         } satisfies BrowserInspectorControlEvent);
         return;
       }
-      port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
+      if (pendingBootstrapOperations > 0) {
+        port.postMessage({
+          type: "result",
+          id: message.id,
+          error: "Worker still has pending bootstrap operations",
+        } satisfies BrowserInspectorControlEvent);
+        return;
+      }
+      if (hasForegroundLeaseWork()) {
+        port.postMessage({
+          type: "result",
+          id: message.id,
+          error: "Worker still has pending or active foreground node leases",
+        } satisfies BrowserInspectorControlEvent);
+        return;
+      }
+      workerTerminationScheduled = true;
+      port.postMessage({
+        type: "result",
+        id: message.id,
+        workerTerminated: true,
+      } satisfies BrowserInspectorControlEvent);
       // Termination happens in a later task so the acknowledgement crosses the
       // MessagePort before this realm disappears. A subsequent connection's
       // bootstrap retry advances to a distinct SharedWorker generation.
@@ -1271,10 +1521,10 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
 }
 
 function maybeCloseWorker(): void {
-  const hasActiveForegroundLease = [...foregroundLeaseOwners.values()].some(
-    (owner) => owner.activeLeaseIds.size > 0 || owner.pendingLeaseAllocations > 0,
-  );
-  if (contexts.size === 0 && inspectorControlPorts.size === 0 && !hasActiveForegroundLease) {
+  if (!workerHasLiveWork()) {
+    if (pendingWorkerClose) return;
+    const closeToken = Symbol("worker-idle-close");
+    pendingWorkerClose = closeToken;
     const databaseNames = new Set<string>([
       ...foregroundLeaseOwners.keys(),
       ...physicalDatabaseOwners.keys(),
@@ -1282,13 +1532,51 @@ function maybeCloseWorker(): void {
     // The physical owner writes/deletes its epoch before closing the shared
     // page-store handle below. Closing lease aliases first would turn an
     // otherwise clean handoff into a stale durable epoch.
+    for (const dbName of databaseNames) recordWorkerLifecycle("owner-release-start", dbName, null);
     foregroundLeaseOwners.clear();
     void Promise.all([...databaseNames].map((dbName) => releasePhysicalDatabaseOwner(dbName)))
       .catch(() => undefined)
       // Unit harnesses execute the module outside an actual worker global;
       // production SharedWorkerGlobal always supplies `close`.
-      .finally(() => workerGlobal.close?.());
+      .finally(() => {
+        // A new connection may have arrived while IndexedDB/Web Locks were
+        // draining. Its bootstrap reservation is established synchronously
+        // in `onconnect`, before it can perform its first durable operation.
+        // Never close a realm that has acquired that new work.
+        if (pendingWorkerClose !== closeToken) return;
+        // The release completed while a new port was bootstrapping. It owns
+        // the cancellation of this particular close attempt, but not the
+        // worker forever: clear the stale token so a failed bootstrap can
+        // schedule a fresh idle close in `finishBootstrap`.
+        if (workerHasLiveWork()) {
+          pendingWorkerClose = null;
+          return;
+        }
+        for (const dbName of databaseNames) {
+          recordWorkerLifecycle("owner-release-finished", dbName, null);
+        }
+        pendingWorkerClose = null;
+        workerGlobal.close?.();
+      });
   }
+}
+
+function workerHasLiveWork(): boolean {
+  return (
+    contexts.size > 0 ||
+    inspectorControlPorts.size > 0 ||
+    pendingBootstrapOperations > 0 ||
+    hasForegroundLeaseWork()
+  );
+}
+
+function hasForegroundLeaseWork(): boolean {
+  return [...foregroundLeaseOwners.values()].some(
+    (owner) =>
+      owner.activeLeaseIds.size > 0 ||
+      owner.pendingLeaseAllocations > 0 ||
+      owner.pendingLeaseFinalizations > 0,
+  );
 }
 
 function closeContextPeers(context: RuntimeContext): void {

@@ -1564,6 +1564,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         subscription: usage_subscription,
         values: values.clone(),
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
     assert!(
@@ -1592,6 +1593,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             subscription: usage_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         })),
         Err(Error::InvalidStoredValue("binding arity mismatch"))
     ));
@@ -1601,6 +1603,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         subscription: usage_subscription,
         values: values.clone(),
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
     node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -1608,6 +1611,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         subscription: other_usage_subscription,
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
     assert!(
@@ -1720,6 +1724,7 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
         subscription: default_usage_subscription,
         values: values.clone(),
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
     node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -1727,6 +1732,7 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
         subscription: branch_usage_subscription,
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
 

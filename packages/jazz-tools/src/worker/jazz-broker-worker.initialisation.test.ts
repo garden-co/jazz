@@ -1,8 +1,15 @@
 import type { Mock } from "vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  BrowserForegroundNodeLeaseAcquireRequest,
+  BrowserForegroundNodeLeaseAcquireResponse,
+  BrowserForegroundNodeLeaseCancelRequest,
+  BrowserForegroundNodeLeasePortRequest,
+  BrowserForegroundNodeLeaseProbeRequest,
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
+  BrowserInspectorControlEvent,
+  BrowserInspectorControlRequest,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
@@ -23,6 +30,9 @@ const mocks = vi.hoisted(() => {
     claimBrowserWorkerEpoch: Mock;
     releaseBrowserWorkerEpoch: Mock;
     onInvalidated: Mock;
+    acquireForegroundNodeLease: Mock;
+    returnForegroundNodeLease: Mock;
+    retireForegroundNodeLease: Mock;
     canonicalReplicaNode: Uint8Array;
     readonly replicaNode: Uint8Array;
   }> = [];
@@ -77,6 +87,13 @@ const mocks = vi.hoisted(() => {
           claimBrowserWorkerEpoch: vi.fn(async () => undefined),
           releaseBrowserWorkerEpoch: vi.fn(async () => undefined),
           onInvalidated: vi.fn(() => () => undefined),
+          acquireForegroundNodeLease: vi.fn(async () => ({
+            leaseId: `lease-${pageStores.length}`,
+            node: Uint8Array.from(replicaNode),
+            confirmedTxTime: 0n,
+          })),
+          returnForegroundNodeLease: vi.fn(async () => undefined),
+          retireForegroundNodeLease: vi.fn(async () => undefined),
           canonicalReplicaNode: replicaNode,
           get replicaNode() {
             return Uint8Array.from(replicaNode);
@@ -151,8 +168,21 @@ type RuntimeOutcome = Extract<
   { type: "runtime-ready" | "runtime-error" }
 >;
 
+type ForegroundLeaseOutcome = Extract<
+  BrowserForegroundNodeLeaseAcquireResponse,
+  { type: "foreground-node-lease-ready" | "foreground-node-lease-error" }
+>;
+
+type ForegroundLeaseProbeOutcome = Extract<
+  BrowserForegroundNodeLeaseAcquireResponse,
+  {
+    type: "foreground-node-lease-worker-alive" | "foreground-node-lease-worker-closing";
+  }
+>;
+
 type WorkerGlobal = typeof globalThis & {
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
+  close?: Mock;
 };
 
 class TestPort {
@@ -161,6 +191,11 @@ class TestPort {
   private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
   private readonly outcomes: RuntimeOutcome[] = [];
   private readonly outcomeWaiters: Array<(outcome: RuntimeOutcome) => void> = [];
+  private readonly leaseOutcomes: ForegroundLeaseOutcome[] = [];
+  private readonly leaseOutcomeWaiters: Array<(outcome: ForegroundLeaseOutcome) => void> = [];
+  private readonly leaseProbeOutcomes: ForegroundLeaseProbeOutcome[] = [];
+  private readonly leaseProbeOutcomeWaiters: Array<(outcome: ForegroundLeaseProbeOutcome) => void> =
+    [];
   private readonly events: BrowserFollowerPortEvent[] = [];
   private readonly eventWaiters: Array<{
     predicate: (event: BrowserFollowerPortEvent) => boolean;
@@ -177,7 +212,12 @@ class TestPort {
     this.listeners.get(type)?.delete(listener);
   }
 
-  postMessage(message: BrowserSharedWorkerConnectResponse | BrowserFollowerPortEvent): void {
+  postMessage(
+    message:
+      | BrowserSharedWorkerConnectResponse
+      | BrowserFollowerPortEvent
+      | BrowserForegroundNodeLeaseAcquireResponse,
+  ): void {
     if (message.type === "runtime-ready" || message.type === "runtime-error") {
       const waiter = this.outcomeWaiters.shift();
       if (waiter) waiter(message);
@@ -187,13 +227,45 @@ class TestPort {
     // Bootstrap liveness is intentionally not a follower event or a runtime
     // connection outcome; tests only retain the latter two protocol classes.
     if (message.type === "worker-alive") return;
+    if (
+      message.type === "foreground-node-lease-worker-alive" ||
+      message.type === "foreground-node-lease-worker-closing"
+    ) {
+      const waiter = this.leaseProbeOutcomeWaiters.shift();
+      if (waiter) waiter(message);
+      else this.leaseProbeOutcomes.push(message);
+      return;
+    }
+    if (
+      message.type === "foreground-node-lease-ready" ||
+      message.type === "foreground-node-lease-error"
+    ) {
+      const waiter = this.leaseOutcomeWaiters.shift();
+      if (waiter) waiter(message);
+      else this.leaseOutcomes.push(message);
+      return;
+    }
+    if (
+      message.type === "foreground-node-lease-test-allocated" ||
+      message.type === "foreground-node-lease-cancelled"
+    ) {
+      throw new Error(`Unexpected lease bootstrap response: ${message.type}`);
+    }
     const waiterIndex = this.eventWaiters.findIndex(({ predicate }) => predicate(message));
     if (waiterIndex >= 0) {
       this.eventWaiters.splice(waiterIndex, 1)[0]!.resolve(message);
     } else this.events.push(message);
   }
 
-  emitMessage(message: BrowserSharedWorkerConnectRequest | BrowserFollowerPortRequest): void {
+  emitMessage(
+    message:
+      | BrowserSharedWorkerConnectRequest
+      | BrowserForegroundNodeLeaseProbeRequest
+      | BrowserForegroundNodeLeaseAcquireRequest
+      | BrowserForegroundNodeLeaseCancelRequest
+      | BrowserForegroundNodeLeasePortRequest
+      | BrowserFollowerPortRequest,
+  ): void {
     for (const listener of this.listeners.get("message") ?? []) {
       listener({ data: message } as MessageEvent);
     }
@@ -205,6 +277,26 @@ class TestPort {
     const waiter = deferred<RuntimeOutcome>();
     this.outcomeWaiters.push(waiter.resolve);
     return waiter.promise;
+  }
+
+  waitForLeaseOutcome(): Promise<ForegroundLeaseOutcome> {
+    const outcome = this.leaseOutcomes.shift();
+    if (outcome) return Promise.resolve(outcome);
+    const waiter = deferred<ForegroundLeaseOutcome>();
+    this.leaseOutcomeWaiters.push(waiter.resolve);
+    return waiter.promise;
+  }
+
+  waitForLeaseProbeOutcome(): Promise<ForegroundLeaseProbeOutcome> {
+    const outcome = this.leaseProbeOutcomes.shift();
+    if (outcome) return Promise.resolve(outcome);
+    const waiter = deferred<ForegroundLeaseProbeOutcome>();
+    this.leaseProbeOutcomeWaiters.push(waiter.resolve);
+    return waiter.promise;
+  }
+
+  hasLeaseProbeOutcome(): boolean {
+    return this.leaseProbeOutcomes.length > 0;
   }
 
   waitForEvent(
@@ -246,6 +338,31 @@ function options(dbName: string): BrowserWorkerInitOptions {
   };
 }
 
+function connectLease(request: BrowserForegroundNodeLeaseAcquireRequest): {
+  outcome: Promise<ForegroundLeaseOutcome>;
+  port: TestPort;
+} {
+  const port = new TestPort();
+  const onconnect = (globalThis as WorkerGlobal).onconnect;
+  if (!onconnect) throw new Error("broker worker did not install its connect handler");
+  onconnect({ ports: [port as unknown as MessagePort] } as MessageEvent & {
+    ports: MessagePort[];
+  });
+  const outcome = port.waitForLeaseOutcome();
+  port.emitMessage(request);
+  return { outcome, port };
+}
+
+function connectLeaseProbe(): { port: TestPort } {
+  const port = new TestPort();
+  const onconnect = (globalThis as WorkerGlobal).onconnect;
+  if (!onconnect) throw new Error("broker worker did not install its connect handler");
+  onconnect({ ports: [port as unknown as MessagePort] } as MessageEvent & {
+    ports: MessagePort[];
+  });
+  return { port };
+}
+
 function enabledTelemetryOptions(dbName: string): BrowserWorkerInitOptions {
   return {
     ...options(dbName),
@@ -279,9 +396,50 @@ async function initializeFollower(port: TestPort, id: number): Promise<void> {
   await result;
 }
 
+async function openInspector(port: TestPort, id: number): Promise<MessagePort> {
+  const channel = new MessageChannel();
+  const result = port.waitForEvent((event) => event.type === "result" && event.id === id);
+  port.emitMessage({ type: "open-inspector-control", id, port: channel.port2 });
+  await result;
+  channel.port1.start();
+  return channel.port1;
+}
+
+async function readLifecycle(
+  port: MessagePort,
+  id: number,
+): Promise<Extract<BrowserInspectorControlEvent, { type: "lifecycle-trace" }>["entries"]> {
+  return new Promise((resolve) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "lifecycle-trace" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      resolve(event.data.entries);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "lifecycle-trace", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
+async function terminateInspector(
+  port: MessagePort,
+  id: number,
+): Promise<Extract<BrowserInspectorControlEvent, { type: "result" }>> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "result" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve(event.data);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "terminate-worker", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
 describe("broker worker context initialization", () => {
   beforeEach(async () => {
     mocks.reset();
+    (globalThis as WorkerGlobal).close = vi.fn();
     vi.resetModules();
     // The worker owns process-global state, so each case must evaluate a fresh module instance.
     await import("./jazz-broker-worker.js");
@@ -309,6 +467,341 @@ describe("broker worker context initialization", () => {
       type: "runtime-ready",
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledTimes(2);
+  });
+
+  it("acknowledges a lease probe before touching its durable root", async () => {
+    const attemptId = "probe-before-durable-admission";
+    const initOptions = options("probe-before-durable-admission");
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId,
+    });
+
+    await expect(probeOutcome).resolves.toEqual({
+      type: "foreground-node-lease-worker-alive",
+      attemptId,
+    });
+    expect(mocks.openPageStore).not.toHaveBeenCalled();
+
+    const leaseOutcome = port.waitForLeaseOutcome();
+    port.emitMessage({
+      type: "acquire-foreground-node-lease",
+      attemptId,
+      dbName: initOptions.dbName,
+      storageOwner: initOptions.storageOwner,
+    });
+    await expect(leaseOutcome).resolves.toEqual(
+      expect.objectContaining({ type: "foreground-node-lease-ready" }),
+    );
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+  });
+
+  it("does not admit a lease probe after worker termination is acknowledged", async () => {
+    const initOptions = options("terminate-before-successor-probe");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+    const inspector = await openInspector(first.port, 2);
+
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    first.port.emitMessage({ type: "close", id: 3, releaseContext: true });
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+    await expect(terminateInspector(inspector, 4)).resolves.toEqual({
+      type: "result",
+      id: 4,
+      workerTerminated: true,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect((globalThis as WorkerGlobal).close).toHaveBeenCalledOnce();
+
+    const successor = connectLeaseProbe();
+    const closing = successor.port.waitForLeaseProbeOutcome();
+    successor.port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "probe-after-termination-ack",
+    });
+
+    await expect(closing).resolves.toEqual({
+      type: "foreground-node-lease-worker-closing",
+      attemptId: "probe-after-termination-ack",
+    });
+    expect(successor.port.close).toHaveBeenCalledOnce();
+    inspector.close();
+  });
+
+  it("rejects termination while preconnected lease bootstraps remain pending", async () => {
+    const initOptions = options("terminate-preconnected-lease-bootstrap");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+    const inspector = await openInspector(first.port, 2);
+
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    first.port.emitMessage({ type: "close", id: 3, releaseContext: true });
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+
+    // Both ports connect before termination. One has not sent its first
+    // message; the other has received a liveness response but has not yet
+    // requested durable allocation.
+    const firstMessageAfterTermination = connectLeaseProbe();
+    const acquireAfterTermination = connectLeaseProbe();
+    const alive = acquireAfterTermination.port.waitForLeaseProbeOutcome();
+    acquireAfterTermination.port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "alive-before-termination",
+    });
+    await expect(alive).resolves.toEqual({
+      type: "foreground-node-lease-worker-alive",
+      attemptId: "alive-before-termination",
+    });
+    const durableOpenCount = mocks.openPageStore.mock.calls.length;
+
+    await expect(terminateInspector(inspector, 4)).rejects.toThrow(
+      "Worker still has pending bootstrap operations",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    firstMessageAfterTermination.port.emitMessage({
+      type: "cancel-foreground-node-lease",
+    });
+    acquireAfterTermination.port.emitMessage({
+      type: "cancel-foreground-node-lease",
+    });
+    expect(firstMessageAfterTermination.port.close).toHaveBeenCalledOnce();
+    expect(acquireAfterTermination.port.close).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledTimes(durableOpenCount);
+    expect(
+      mocks.pageStores.some((store) => store.acquireForegroundNodeLease.mock.calls.length > 0),
+    ).toBe(false);
+
+    await terminateInspector(inspector, 5);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect((globalThis as WorkerGlobal).close).toHaveBeenCalledOnce();
+    inspector.close();
+  });
+
+  it("only terminates after in-flight and active foreground leases are retired", async () => {
+    const initOptions = options("terminate-during-lease-admission");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+    const inspector = await openInspector(first.port, 2);
+
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    first.port.emitMessage({ type: "close", id: 3, releaseContext: true });
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+
+    const pageStore = mocks.pageStores[0]!;
+    const physicalOwnerAdmission = deferred<typeof pageStore>();
+    mocks.openPageStore.mockImplementationOnce(() => physicalOwnerAdmission.promise);
+    const leaseDbName = `${initOptions.dbName}-lease-root`;
+    const lease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: leaseDbName,
+      storageOwner: initOptions.storageOwner,
+    });
+    await vi.waitFor(() => expect(mocks.openPageStore).toHaveBeenCalledTimes(2));
+
+    await expect(terminateInspector(inspector, 4)).rejects.toThrow(
+      "Worker still has pending bootstrap operations",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    physicalOwnerAdmission.resolve(pageStore);
+    await expect(lease.outcome).resolves.toEqual(
+      expect.objectContaining({ type: "foreground-node-lease-ready" }),
+    );
+    await expect(terminateInspector(inspector, 5)).rejects.toThrow(
+      "Worker still has pending or active foreground node leases",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    const durableRetirement = deferred<void>();
+    pageStore.retireForegroundNodeLease.mockImplementationOnce(() => durableRetirement.promise);
+    lease.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(pageStore.retireForegroundNodeLease).toHaveBeenCalledOnce());
+    await expect(terminateInspector(inspector, 6)).rejects.toThrow(
+      "Worker still has pending or active foreground node leases",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    durableRetirement.resolve();
+    await vi.waitFor(() => expect(lease.port.close).toHaveBeenCalledOnce());
+
+    await terminateInspector(inspector, 7);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect((globalThis as WorkerGlobal).close).toHaveBeenCalledOnce();
+    inspector.close();
+  });
+
+  it("cancels an idle worker close when a successor bootstrap arrives during physical release", async () => {
+    const releasePhysicalOwner = deferred<void>();
+    mocks.openPageStore.mockImplementationOnce(async () => {
+      const replicaNode = new Uint8Array(16);
+      replicaNode.fill(17);
+      const pageStore = {
+        close: vi.fn(),
+        claimBrowserWorkerEpoch: vi.fn(async () => undefined),
+        releaseBrowserWorkerEpoch: vi.fn(() => releasePhysicalOwner.promise),
+        onInvalidated: vi.fn(() => () => undefined),
+        acquireForegroundNodeLease: vi.fn(async () => ({
+          leaseId: "successor-lease",
+          node: Uint8Array.from(replicaNode),
+          confirmedTxTime: 0n,
+        })),
+        returnForegroundNodeLease: vi.fn(async () => undefined),
+        retireForegroundNodeLease: vi.fn(async () => undefined),
+        canonicalReplicaNode: replicaNode,
+        get replicaNode() {
+          return Uint8Array.from(replicaNode);
+        },
+      };
+      mocks.pageStores.push(pageStore);
+      return pageStore;
+    });
+
+    const initOptions = options("successor-during-idle-release");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    first.port.emitMessage({ type: "close", id: 2, releaseContext: true });
+    await closed;
+
+    // The idle timer has discarded the context and is now blocked on its
+    // physical Web-Lock/epoch release. Start a *lease-only* successor in
+    // this exact window: no RuntimeContext can yet exist, so this is a
+    // direct receipt that the bootstrap reservation (rather than a context
+    // map entry) fences a stale `finally(close)`.
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+    await vi.waitFor(() =>
+      expect(mocks.pageStores[0]?.releaseBrowserWorkerEpoch).toHaveBeenCalledOnce(),
+    );
+    const successor = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: initOptions.dbName,
+      storageOwner: initOptions.storageOwner,
+    });
+    expect(mocks.runtimes).toHaveLength(1);
+    releasePhysicalOwner.resolve();
+
+    await expect(successor.outcome).resolves.toEqual(
+      expect.objectContaining({
+        type: "foreground-node-lease-ready",
+        confirmedTxTime: "0",
+        node: expect.any(Uint8Array),
+      }),
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+  });
+
+  it("does not expose retained lifecycle entries across browser auth scopes", async () => {
+    const firstOptions = {
+      ...options("lifecycle-scope-a"),
+      authSessionKey: "scope-a",
+      storageOwner: "scope-a-owner",
+    };
+    const secondOptions = {
+      ...options("lifecycle-scope-b"),
+      authSessionKey: "scope-b",
+      storageOwner: "scope-b-owner",
+    };
+    const first = await connect(firstOptions, "scope-a-tab");
+    await initializeFollower(first.port, 1);
+    const second = await connect(secondOptions, "scope-b-tab");
+    await initializeFollower(second.port, 2);
+
+    const firstInspector = await openInspector(first.port, 3);
+    const secondInspector = await openInspector(second.port, 4);
+    try {
+      const firstEntries = await readLifecycle(firstInspector, 5);
+      const secondEntries = await readLifecycle(secondInspector, 6);
+
+      // Both sets remain physically retained in the one SharedWorker realm.
+      // A scope-B inspector must nevertheless receive only entries that were
+      // recorded under scope B; this rules out cross-account diagnostics when
+      // a browser turns over to a different authenticated namespace.
+      expect(firstEntries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ event: "bootstrap-start", dbName: firstOptions.dbName }),
+        ]),
+      );
+      expect(secondEntries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ event: "bootstrap-start", dbName: secondOptions.dbName }),
+        ]),
+      );
+      expect(secondEntries).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ dbName: firstOptions.dbName })]),
+      );
+    } finally {
+      firstInspector.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+      secondInspector.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+      firstInspector.close();
+      secondInspector.close();
+    }
+  });
+
+  it("filters same-root turnover evidence by scope and omits unscoped owner events", async () => {
+    const { filterWorkerLifecycleEntriesForInspector } =
+      await import("./jazz-broker-worker-core.js");
+    const dbName = "retained-turnover-root";
+    const entries = [
+      {
+        sequence: 1,
+        event: "bootstrap-start" as const,
+        dbName,
+        authSessionKey: "scope-a",
+        peerCount: 1,
+        pendingBootstraps: 0,
+        activeLeases: 0,
+      },
+      {
+        sequence: 2,
+        event: "bootstrap-start" as const,
+        dbName,
+        authSessionKey: "scope-b",
+        peerCount: 1,
+        pendingBootstraps: 0,
+        activeLeases: 0,
+      },
+      {
+        sequence: 3,
+        event: "lease-admitted" as const,
+        dbName,
+        authSessionKey: null,
+        peerCount: 0,
+        pendingBootstraps: 0,
+        activeLeases: 1,
+      },
+      {
+        sequence: 4,
+        event: "owner-release-finished" as const,
+        dbName,
+        authSessionKey: null,
+        peerCount: 0,
+        pendingBootstraps: 0,
+        activeLeases: 0,
+      },
+    ];
+
+    // `allowedDbNames` intentionally admits the same root for both scopes:
+    // physical-root filtering alone would leak scope A's retained trace to
+    // scope B after an auth turnover. Scope-less lease/owner events are also
+    // deliberately diagnostic-ineligible rather than guessed-attributed.
+    expect(filterWorkerLifecycleEntriesForInspector(entries, "scope-b", new Set([dbName]))).toEqual(
+      [
+        {
+          sequence: 2,
+          event: "bootstrap-start",
+          dbName,
+          peerCount: 1,
+          pendingBootstraps: 0,
+          activeLeases: 0,
+        },
+      ],
+    );
   });
 
   it("does not let a second context repoint the process-wide WASM realm at another origin", async () => {

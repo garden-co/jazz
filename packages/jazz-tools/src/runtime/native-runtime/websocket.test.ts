@@ -53,6 +53,51 @@ describe("websocket frame carrier", () => {
     );
   });
 
+  it("bounds and canonicalizes inbound websocket batches before retaining frames", () => {
+    expect(() => encodeWebSocketFrameBatch([])).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() =>
+      encodeWebSocketFrameBatch(Array.from({ length: 4097 }, () => new Uint8Array())),
+    ).toThrow("websocket frame batch exceeds frame-count limit of 4096");
+
+    // The count is intentionally not followed by any elements: this proves
+    // the carrier rejects it before an attacker-declared frame array is made.
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0x81, 0x20))).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0))).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0x81, 0, 1, 0x42))).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 0x81, 0, 0x42))).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 2, 0x42))).toThrow(
+      "postcard bytes overflow",
+    );
+
+    // 2 MiB + 1, encoded in postcard's canonical varint form.
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 0x81, 0x80, 0x80, 1))).toThrow(
+      "websocket frame exceeds maximum length of 2097152 bytes",
+    );
+
+    const largestSingleton = new Uint8Array(2 * 1024 * 1024 - 4);
+    const exactCarrier = encodeWebSocketFrameBatch([largestSingleton]);
+    expect(exactCarrier.byteLength).toBe(2 * 1024 * 1024);
+    expect(decodeWebSocketFrameBatch(exactCarrier)).toEqual([largestSingleton]);
+
+    const rawLimit = new Uint8Array(2 * 1024 * 1024);
+    expect(() => encodeWebSocketFrameBatch([rawLimit])).toThrow(
+      "websocket frame batch exceeds maximum length of 2097152 bytes",
+    );
+    expect(() => encodeWebSocketFrameBatch([Uint8Array.of(0x11), rawLimit])).toThrow(
+      "websocket frame batch exceeds maximum length of 2097152 bytes",
+    );
+  });
+
   // This is intentionally transport-level: the public Db API cannot expose
   // individual WebSocket message boundaries, which are the limit being kept.
   it("splits a burst of wire frames into server-sized websocket messages", async () => {
@@ -551,7 +596,7 @@ describe("websocket frame carrier", () => {
     expect(socket!.closed).toBe(true);
   });
 
-  it("rejects non-authentication errors before server hello", async () => {
+  it("surfaces terminal structured errors before server hello", async () => {
     let socket: MessageWebSocket | undefined;
     const errors: unknown[] = [];
     const carrier = new WebSocketCarrier({
@@ -572,8 +617,43 @@ describe("websocket frame carrier", () => {
       encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
     );
 
-    await expect(carrier.ready()).rejects.toThrow("semantic frame before server hello");
-    expect(errors).toEqual([]);
+    await expect(carrier.ready()).rejects.toThrow(
+      "websocket internal before server hello: conflicting commit unit",
+    );
+    expect(errors).toEqual([
+      { code: "internal", retry: "later", message: "conflicting commit unit" },
+    ]);
+    expect(socket!.closed).toBe(true);
+  });
+
+  it("preserves a typed retryable not-ready error before server hello", async () => {
+    let socket: MessageWebSocket | undefined;
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(6, 3, "catalogue bootstrapping")]),
+    );
+
+    await expect(carrier.ready()).rejects.toMatchObject({
+      name: "PreHelloWireError",
+      wireError: { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
+    });
+    expect(errors).toEqual([
+      { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
+    ]);
     expect(socket!.closed).toBe(true);
   });
 
@@ -595,6 +675,14 @@ describe("websocket frame carrier", () => {
     const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
     expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+
+    const unknownCode = encodeWireError(7, 3, "future code");
+    expect(() => isWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+    expect(() => decodeWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+
+    const unknownRetry = encodeWireError(6, 4, "future retry");
+    expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+    expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {

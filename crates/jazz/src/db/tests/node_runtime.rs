@@ -1038,6 +1038,118 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     );
 }
 
+/// Edge admission compares a client HLC's Unix-millisecond physical component
+/// with the authority wall clock, not with the process-relative retry timer.
+/// This needs the real connection topology: direct NodeState admission never
+/// exercises the served-client edge path where retry timing is also available.
+#[test]
+fn edge_admits_client_write_with_current_unix_timestamp() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let edge = open_core(0xd6, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xd7, alice, &schema);
+
+    let (client_transport, edge_client_transport) = duplex();
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_client_transport,
+            alice,
+            test_provider_claims(alice),
+            CommitUnitTrust::Session,
+        );
+
+    let unix_now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test clock is after Unix epoch")
+        .as_millis()
+        .try_into()
+        .expect("Unix milliseconds fit u64");
+    let write = client
+        .insert(
+            "todos",
+            cells("current timestamp", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd8)),
+                updated_at_ms: Some(unix_now_ms),
+                ..Default::default()
+            },
+        )
+        .expect("client creates a current-time local write");
+
+    client.tick().expect("client uploads the write");
+    for _ in 0..8 {
+        edge.tick().expect("edge services the client write");
+        if matches!(
+            crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id)),
+            Some((Fate::Accepted, None, DurabilityTier::Edge))
+        ) {
+            break;
+        }
+    }
+
+    let edge_state = crate::db::block_on(edge.node().borrow_mut().transaction_state(write.tx_id));
+    assert!(
+        matches!(
+            edge_state,
+            Some((Fate::Accepted, None, DurabilityTier::Edge))
+        ),
+        "a current Unix-time client write becomes Edge durable instead of being compared to the retry timer; observed {edge_state:?}"
+    );
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == write.tx_id),
+        "the admitted Edge write is retained for its upstream authority"
+    );
+
+    let future = client
+        .insert(
+            "todos",
+            cells("future timestamp", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd9)),
+                updated_at_ms: Some(
+                    unix_now_ms
+                        .saturating_add(crate::node::SKEW_TOLERANCE_MS)
+                        .saturating_add(10_000),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect("client creates a far-future local write");
+    client.tick().expect("client uploads the far-future write");
+    for _ in 0..8 {
+        edge.tick().expect("edge services the far-future write");
+        if matches!(
+            crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id)),
+            Some((
+                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+                None,
+                DurabilityTier::Local
+            ))
+        ) {
+            break;
+        }
+    }
+    let future_state =
+        crate::db::block_on(edge.node().borrow_mut().transaction_state(future.tx_id));
+    assert!(
+        matches!(
+            future_state,
+            Some((
+                Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+                None,
+                DurabilityTier::Local
+            ))
+        ),
+        "the same Edge path retains forward-skew rejection; observed {future_state:?}"
+    );
+}
+
 #[test]
 fn pending_global_state_does_not_complete_remote_wait_or_prune_upload() {
     let schema = schema();
@@ -1954,6 +2066,44 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
         prepared_read(&client, &query)
             .iter()
             .any(|row| row.row_uuid() == third)
+    );
+}
+
+#[test]
+fn current_rows_uses_its_connection_claim_snapshot_not_the_author_cache() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let admitted = BTreeMap::from([(
+        crate::query::provider_claim_key("session"),
+        Value::String("admitted".to_owned()),
+    )]);
+    let stale = BTreeMap::from([(
+        crate::query::provider_claim_key("session"),
+        Value::String("stale sibling".to_owned()),
+    )]);
+    let (_client_transport, server_transport) = duplex();
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, author, admitted.clone());
+
+    // Simulate another connection for the same subject updating the legacy
+    // identity-keyed compatibility cache after this link was authenticated.
+    server.node().borrow_mut().set_session_claims(author, stale);
+    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+
+    let subscription = server
+        .node()
+        .borrow()
+        .whole_table_subscription_key("todos")
+        .unwrap();
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        panic!("current-rows server connection must remain a subscriber link");
+    };
+    assert_eq!(
+        state.peer.subscription_policy_binding(subscription),
+        Some((author, admitted)),
+        "whole-table serving must use the exact session claims admitted on this connection"
     );
 }
 

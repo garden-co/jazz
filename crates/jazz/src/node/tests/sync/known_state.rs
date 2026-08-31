@@ -1,5 +1,11 @@
 // Detached usage, exact/fast/slow known state, reopen, and eviction.
 
+fn relay_with_system_binding(subscription: SubscriptionKey) -> PeerState {
+    let mut peer = PeerState::relay();
+    peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
+    peer
+}
+
 #[test]
 fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     // Internal protocol coverage: public APIs only expose this as a background
@@ -46,6 +52,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
             subscription: usage_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
     assert_eq!(
@@ -291,6 +298,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
             subscription: duplicate_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
     assert_eq!(
@@ -359,7 +367,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
             DurabilityTier::Global,
         )
         .unwrap();
-    let mut control_peer = PeerState::relay();
+    let mut control_peer = relay_with_system_binding(subscription);
     let control_update = control_peer
         .rehydrate_query_for_subscription_with_opts(
             &mut core,
@@ -381,7 +389,7 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
     assert_eq!(control_result_member_adds.len(), 1);
     assert_eq!(control_version_bundles.len(), 1);
 
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
@@ -462,7 +470,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     core.ingest_commit_unit_settled(commit_b, versions_b, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
@@ -547,7 +555,7 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
         subscription,
         Some(crate::protocol::KnownStateDeclaration::ExactVersionSet {
@@ -601,7 +609,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
         .apply_sync_message_settled(core.view_update_for_current_rows("todos").unwrap())
         .unwrap();
 
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
@@ -691,7 +699,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
         BTreeMap::from([(row_uuid, title_cells("known"))])
     );
 
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {
@@ -767,7 +775,7 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
         )
         .unwrap();
 
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
         subscription,
         Some(crate::protocol::KnownStateDeclaration::ExactVersionSet {
@@ -795,11 +803,17 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
             "todos", row_uuid, tx_id
         )]
     );
-    let messages = peer
+    // The maintained view above deliberately models a relay and therefore
+    // requires its binding explicitly. This direct repair receipt instead
+    // models the one terminated SYSTEM session that asked for those visible
+    // versions; relay transport repair is bound by its owner-loop request.
+    let mut repair_peer = PeerState::client_link(AuthorSubject::SYSTEM);
+    let messages = repair_peer
         .handle_row_versions_fetch(
             &mut core,
             SyncMessage::FetchRowVersions {
                 requests: missing.clone(),
+                delegated_session: None,
             },
         )
         .unwrap();
@@ -896,7 +910,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         }
     );
 
-    let mut control_peer = PeerState::relay();
+    let mut control_peer = relay_with_system_binding(subscription);
     let control_update = control_peer
         .rehydrate_query_for_subscription_with_opts(
             &mut core,
@@ -918,7 +932,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     assert_eq!(control_members.len(), 2);
     assert_eq!(control_bundles.len(), 2);
 
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(subscription, Some(declaration));
     let update = peer
         .rehydrate_query_for_subscription_with_opts(
@@ -993,7 +1007,7 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
         &mut core,
         MergeableCommit::new("todos", row(23), 12).cells(title_cells("full")),
     );
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     let update = peer
         .rehydrate_query_for_subscription_with_opts(
             &mut core,
@@ -1031,7 +1045,7 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
         MergeableCommit::new("todos", row_uuid, 13).cells(title_cells("persisted")),
     );
     let mut reader = reader;
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     let update = peer
         .rehydrate_query_for_subscription_with_opts(
             &mut core,
@@ -1092,7 +1106,7 @@ fn fast_known_state_fact_survives_storage_reopen() {
         &mut core,
         MergeableCommit::new("todos", row_uuid, 14).cells(title_cells("persisted storage")),
     );
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     let update = peer
         .rehydrate_query_for_subscription_with_opts(
             &mut core,
@@ -1461,7 +1475,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     };
     edge.ingest_known_transaction(tx, versions, Fate::Accepted, None, DurabilityTier::Edge)
         .unwrap();
-    let mut peer = PeerState::relay();
+    let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
         subscription,
         Some(crate::protocol::KnownStateDeclaration::Fast {

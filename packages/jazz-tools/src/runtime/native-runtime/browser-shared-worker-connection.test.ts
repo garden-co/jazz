@@ -1,15 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createBrowserSharedWorkerBaseName,
+  installWorkerTerminationGenerationHandoff,
   SharedBrowserForegroundNodeLease,
 } from "./browser-shared-worker-connection.js";
 
-type LeaseMessage = {
-  type:
-    | "acquire-foreground-node-lease"
-    | "cancel-foreground-node-lease"
-    | "retire-foreground-node-lease";
-};
+type LeaseMessage =
+  | { type: "probe-foreground-node-lease-worker"; attemptId: string }
+  | {
+      type: "acquire-foreground-node-lease";
+      attemptId?: string;
+      dbName: string;
+      storageOwner: string;
+    }
+  | { type: "cancel-foreground-node-lease" }
+  | { type: "retire-foreground-node-lease" };
 
 class DelayedLeasePort {
   private readonly messageListeners = new Set<(event: MessageEvent) => void>();
@@ -19,6 +24,9 @@ class DelayedLeasePort {
   constructor(
     private readonly readyDelayMs = 1_100,
     private readonly acknowledgeCancellation = true,
+    private readonly acknowledgeProbe = true,
+    private readonly probeDelayMs = 0,
+    private readonly closing = false,
   ) {}
 
   start(): void {}
@@ -37,6 +45,21 @@ class DelayedLeasePort {
 
   postMessage(message: LeaseMessage): void {
     this.sent.push(message);
+    if (message.type === "probe-foreground-node-lease-worker") {
+      if (this.acknowledgeProbe) {
+        setTimeout(
+          () =>
+            this.emit({
+              type: this.closing
+                ? "foreground-node-lease-worker-closing"
+                : "foreground-node-lease-worker-alive",
+              attemptId: message.attemptId,
+            }),
+          this.probeDelayMs,
+        );
+      }
+      return;
+    }
     if (message.type === "acquire-foreground-node-lease") {
       // This is intentionally just beyond the historical one-second budget.
       // Cold IDB admission is allowed to take this long before the foreground
@@ -73,12 +96,61 @@ class DelayedLeasePort {
   }
 }
 
+class InspectorPort {
+  private readonly messageListeners = new Set<(event: MessageEvent) => void>();
+
+  addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    if (type === "message") this.messageListeners.add(listener);
+  }
+
+  emit(data: unknown): void {
+    for (const listener of this.messageListeners) listener({ data } as MessageEvent);
+  }
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("browser SharedWorker realm identity", () => {
+  it("advances the shared generation when inspector termination is acknowledged", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    });
+    const dbName = "inspector-terminated-root";
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const inspector = new InspectorPort();
+    installWorkerTerminationGenerationHandoff(inspector as unknown as MessagePort, workerName, 0);
+
+    // Ordinary inspector results never affect worker selection.
+    inspector.emit({ type: "result", id: 1 });
+    expect(values.size).toBe(0);
+    inspector.emit({ type: "result", id: 2, workerTerminated: true });
+
+    const leasePort = new DelayedLeasePort(0);
+    const workerNames: string[] = [];
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = leasePort;
+
+        constructor(_url: URL, options: { name: string }) {
+          workerNames.push(options.name);
+        }
+      },
+    );
+    const lease = await SharedBrowserForegroundNodeLease.acquire({
+      dbName,
+      storageOwner: "owner",
+    });
+
+    expect(workerNames).toEqual([expect.stringContaining(":generation-1")]);
+    await lease.retire();
+  });
+
   it("waits through cold durable lease admission rather than treating it as a dead worker", async () => {
     const port = new DelayedLeasePort();
     vi.stubGlobal(
@@ -115,7 +187,12 @@ describe("browser SharedWorker realm identity", () => {
     const rejected = expect(acquire).rejects.toThrow("did not issue a foreground node lease");
     await vi.advanceTimersByTimeAsync(10_000);
     expect(port.sent).toEqual([
-      { type: "acquire-foreground-node-lease", dbName: "timed-out-root", storageOwner: "owner" },
+      expect.objectContaining({ type: "probe-foreground-node-lease-worker" }),
+      expect.objectContaining({
+        type: "acquire-foreground-node-lease",
+        dbName: "timed-out-root",
+        storageOwner: "owner",
+      }),
       { type: "cancel-foreground-node-lease" },
     ]);
     await rejected;
@@ -146,6 +223,84 @@ describe("browser SharedWorker realm identity", () => {
 
     await vi.runAllTimersAsync();
     expect(port.closed).toBe(true);
+  });
+
+  it("skips a closing worker generation before issuing a durable lease request", async () => {
+    vi.useFakeTimers();
+    const closingPort = new DelayedLeasePort(0, true, true, 0, true);
+    const successorPort = new DelayedLeasePort(0, true, true);
+    const workerNames: string[] = [];
+    let workerCount = 0;
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = ++workerCount === 1 ? closingPort : successorPort;
+
+        constructor(_url: URL, options: { name: string }) {
+          workerNames.push(options.name);
+        }
+      },
+    );
+
+    const acquiring = SharedBrowserForegroundNodeLease.acquire({
+      dbName: "closing-generation-root",
+      storageOwner: "owner",
+    });
+    await vi.runAllTimersAsync();
+    const lease = await acquiring;
+
+    expect(closingPort.sent).toEqual([
+      expect.objectContaining({ type: "probe-foreground-node-lease-worker" }),
+    ]);
+    expect(successorPort.sent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "probe-foreground-node-lease-worker" }),
+        expect.objectContaining({ type: "acquire-foreground-node-lease" }),
+      ]),
+    );
+    expect(workerNames[0]).toContain(":generation-0");
+    expect(workerNames[1]).toContain(":generation-1");
+
+    const retired = lease.retire();
+    await vi.runAllTimersAsync();
+    await retired;
+  });
+
+  it("does not advance generations when a healthy busy worker delays its probe", async () => {
+    vi.useFakeTimers();
+    const delayedHealthyPort = new DelayedLeasePort(0, true, true, 1_100);
+    const workerNames: string[] = [];
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = delayedHealthyPort;
+
+        constructor(_url: URL, options: { name: string }) {
+          workerNames.push(options.name);
+        }
+      },
+    );
+
+    const acquiring = SharedBrowserForegroundNodeLease.acquire({
+      dbName: "busy-healthy-generation-root",
+      storageOwner: "owner",
+    });
+    await vi.advanceTimersByTimeAsync(1_100);
+    await vi.runAllTimersAsync();
+    const lease = await acquiring;
+
+    expect(workerNames).toHaveLength(1);
+    expect(workerNames[0]).toContain(":generation-0");
+    expect(delayedHealthyPort.sent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "probe-foreground-node-lease-worker" }),
+        expect.objectContaining({ type: "acquire-foreground-node-lease" }),
+      ]),
+    );
+
+    const retired = lease.retire();
+    await vi.runAllTimersAsync();
+    await retired;
   });
 
   it("coalesces repeated opens behind one wedged cancellation cleanup and retries after acknowledgement", async () => {

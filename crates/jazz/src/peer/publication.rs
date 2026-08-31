@@ -58,7 +58,7 @@ fn ordinary_current_content_member(member: &ResultMemberEntry) -> bool {
 }
 
 impl PeerState {
-    pub(super) fn has_maintained_subscription(&self, subscription: SubscriptionKey) -> bool {
+    pub(crate) fn has_maintained_subscription(&self, subscription: SubscriptionKey) -> bool {
         self.publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
@@ -90,14 +90,20 @@ impl PeerState {
         self.announced_catalogue_fingerprint = Some(fingerprint);
     }
 
-    /// Construct a permanent relay peer.
+    /// Construct a standalone SYSTEM-scoped peer.
+    ///
+    /// This is suitable for direct/no-waker helpers. Network relays must use
+    /// [`Self::relay`] so a missing admitted policy binding fails closed.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Construct a permanent relay peer.
     pub fn relay() -> Self {
-        Self::default()
+        Self {
+            role: PeerRole::Relay,
+            ..Self::default()
+        }
     }
 
     /// Construct a peer link that terminates one client author identity.
@@ -144,6 +150,79 @@ impl PeerState {
             .unwrap_or_else(|| self.role.identity())
     }
 
+    /// Bind the authorization snapshot selected at subscriber admission to one
+    /// usage site. This is intentionally stored with the subscription because
+    /// a trusted relay may multiplex distinct sessions on one transport.
+    pub fn set_subscription_policy_binding(
+        &mut self,
+        subscription: SubscriptionKey,
+        binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
+    ) {
+        self.publication_states
+            .entry(subscription)
+            .or_default()
+            .policy_binding = Some(binding);
+    }
+
+    pub(crate) fn subscription_policy_binding(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<(AuthorSubject, BTreeMap<String, groove::records::Value>)> {
+        self.publication_states
+            .get(&subscription)
+            .and_then(|state| state.policy_binding.clone())
+    }
+
+    /// Return the immutable policy snapshot for a served subscription.
+    ///
+    /// Network admission records this before any owner-loop rehydrate can run.
+    /// A relay must never substitute its SYSTEM transport identity when a
+    /// multiplexed subscriber's binding was lost.
+    fn served_subscription_policy_binding(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Result<(AuthorSubject, BTreeMap<String, groove::records::Value>), Error> {
+        self.subscription_policy_binding(subscription).ok_or(
+            Error::InvalidStoredValue("served subscription is missing its immutable policy binding"),
+        )
+    }
+
+    /// Standalone no-waker helpers serve one peer identity directly. Their
+    /// owner is not a multiplexing transport, so this explicit identity
+    /// fallback is sound. Owner-loop paths bypass this helper and fail closed.
+    fn ensure_direct_internal_subscription_policy_binding<S>(
+        &mut self,
+        node: &NodeState<S>,
+        subscription: SubscriptionKey,
+    ) -> Result<(), Error>
+    where
+        S: OrderedKvStorage,
+    {
+        // A caller that has already supplied a usage-site snapshot may use
+        // the shared rehydrate helpers for either direct or relay serving.
+        // Only the fallback below is restricted to a direct, single-session
+        // peer.
+        if self.subscription_policy_binding(subscription).is_some() {
+            return Ok(());
+        }
+        if self.role == PeerRole::Relay {
+            return Err(Error::InvalidStoredValue(
+                "relay subscription requires an explicit immutable policy binding",
+            ));
+        }
+        // A direct peer terminates exactly one session, so it may take a
+        // one-time immutable snapshot from this node's admitted session
+        // state.  The snapshot is intentionally installed only when the
+        // usage site is first opened: later claim changes are handled by
+        // the owner loop rebuilding its explicitly bound views.
+        let identity = self.identity();
+        self.set_subscription_policy_binding(
+            subscription,
+            (identity, node.session_claims_for(identity)),
+        );
+        Ok(())
+    }
+
     fn clear_stale_groove_runtime_handles<S>(
         &mut self,
         node: &NodeState<S>,
@@ -182,6 +261,7 @@ impl PeerState {
                 subscription,
                 values: binding_values_in_param_order(shape, binding),
                 known_state: None,
+                delegated_session: None,
             },
         )?;
         Ok(())
@@ -205,6 +285,13 @@ impl PeerState {
             binding_id: binding.binding_id(),
             read_view: opts.read_view_key(),
         };
+        // `current_rows_update` is the direct-peer counterpart to
+        // `rehydrate_query_with_opts`: it opens a served maintained view, so
+        // it needs the same explicit direct-peer binding before that view can
+        // evaluate policy.  In particular, do not make the maintained-view
+        // code infer a fallback identity: owner-loop and relay callers must
+        // still have installed the admitted subscriber snapshot themselves.
+        self.ensure_direct_internal_subscription_policy_binding(node, subscription)?;
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, &shape, &binding)?;
         let needs_prepare = self
@@ -671,7 +758,9 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
+        let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
         let update = {
+            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
                 .publication_states
                 .get(&subscription)
@@ -680,7 +769,7 @@ impl PeerState {
                     "maintained subscription view subscription missing",
                 ))?
                 .maintained;
-            node.view_update_for_maintained_result_members(
+            scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription,
                     peer_complete_tx_payloads,
@@ -695,14 +784,14 @@ impl PeerState {
                     result_member_removes,
                     program_fact_adds,
                     program_fact_removes,
-                    identity: self.identity(),
+                    identity: policy_identity,
                     tier,
                     maintained_facts: maintained,
                     allow_storage_witness_fallback,
                 },
-            )
+            ).await
         };
-        let mut update = update.await?;
+        let mut update = update?;
         if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             terminal_operations: outgoing,
             ..
@@ -942,42 +1031,46 @@ impl PeerState {
             && self.role == PeerRole::Relay
             && tier == DurabilityTier::Edge
             && node.relay_edge_query_requires_authority_source(shape, binding)?;
-        let opened = match purpose {
+        let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        let opened = {
+            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
+            match purpose {
             // A relay's selected Edge child is the browser half of a durable
             // worker authority receipt. The selection is deliberately narrow:
             // only a window or policy-scoped exact-ID read would change
             // semantics if evaluated from the relay's local cache.
             RehydratePurpose::Query if relay_edge_requires_authority_source => {
-                node.open_seeded_relay_edge_subscription_view_with_waker(
+                scoped.open_seeded_relay_edge_subscription_view_with_waker(
                     shape,
                     binding,
-                    self.identity(),
+                    policy_identity,
                     read_view,
                     progress_waker,
                 )
                     .await
             }
             RehydratePurpose::Query => {
-                node.open_seeded_maintained_subscription_view_with_waker(
+                scoped.open_seeded_maintained_subscription_view_with_waker(
                     shape,
                     binding,
-                    self.identity(),
+                    policy_identity,
                     tier,
                     read_view,
                     progress_waker,
                 )
                 .await
             }
-            RehydratePurpose::AuthorizationSupport => node
+            RehydratePurpose::AuthorizationSupport => scoped
                 .open_seeded_authorization_support_subscription_view_with_waker(
                     shape,
                     binding,
-                    self.identity(),
+                    policy_identity,
                     tier,
                     read_view,
                     progress_waker,
                 )
                 .await,
+            }
         };
         let source_binding_view = relay_edge_requires_authority_source
             .then(|| node.relay_edge_subscription_source_binding_view_key(shape, binding, read_view))
@@ -1147,7 +1240,10 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let update = node.view_update_for_maintained_result_members(
+        let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        let update = {
+            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
+            scoped.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
                 subscription,
                 peer_complete_tx_payloads,
@@ -1168,13 +1264,14 @@ impl PeerState {
                 result_member_removes,
                 program_fact_adds,
                 program_fact_removes,
-                identity: self.identity(),
+                identity: policy_identity,
                 tier,
                 maintained_facts: &maintained,
                 allow_storage_witness_fallback: false,
             },
-        );
-        let mut update = match update.await {
+            ).await
+        };
+        let mut update = match update {
             Ok(update) => update,
             Err(err) => {
                 node.unsubscribe_groove_subscription(receiver.id());
@@ -1321,6 +1418,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.ensure_direct_internal_subscription_policy_binding(node, subscription)?;
         self.rehydrate_query_for_subscription_with_opts_and_waker(
             node,
             subscription,
@@ -1393,6 +1491,7 @@ impl PeerState {
                 .has_served_authorization_progress
                 .then_some(state.authorization_progress)
         });
+        let policy_binding = self.served_subscription_policy_binding(subscription)?;
         self.forget_subscription_with_node(node, subscription);
         if let Some(known_state) = known_state {
             self.downstream_known_states
@@ -1407,6 +1506,7 @@ impl PeerState {
         state.result_member_set = previous_member_result_set.clone();
         state.program_fact_set = previous_program_fact_set;
         state.member_index = previous_member_index;
+        state.policy_binding = Some(policy_binding);
         if let Some(authorization_progress) = retained_authorization {
             state.authorization_progress = authorization_progress;
             state.has_served_authorization_progress = true;
@@ -1437,6 +1537,7 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
         subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1445,6 +1546,12 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        // Terminal authorization support is an authority-owned usage site,
+        // not a wire Subscribe. The caller supplies the connection's admitted
+        // claim snapshot before owner-loop maintenance can run: the node's
+        // author-keyed compatibility cache can already have been overwritten
+        // by a sibling session for this same identity.
+        self.set_subscription_policy_binding(subscription, (identity, claims));
         let previous_role = self.role;
         let previous_permission_identity = self.permission_identity;
         self.role = PeerRole::ClientLink { identity };
@@ -1481,6 +1588,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.ensure_direct_internal_subscription_policy_binding(node, target_subscription)?;
         self.rehydrate_query_for_subscription_from_maintained_subscription_and_waker(
             node,
             maintained_subscription,
@@ -1636,7 +1744,10 @@ impl PeerState {
         } else {
             current_result_member_set.iter().cloned().collect()
         };
+        let (policy_identity, policy_claims) =
+            self.served_subscription_policy_binding(target_subscription)?;
         let update = {
+            let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             let maintained = &self
                 .publication_states
                 .get(&maintained_subscription)
@@ -1645,7 +1756,7 @@ impl PeerState {
                     "coverage group subscription is missing maintained state",
                 ))?
                 .maintained;
-            node.view_update_for_maintained_result_members(
+            scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
                     subscription: target_subscription,
                     peer_complete_tx_payloads,
@@ -1675,14 +1786,14 @@ impl PeerState {
                     // attachment races their first update.
                     program_fact_adds: current_program_fact_set.iter().cloned().collect(),
                     program_fact_removes: Vec::new(),
-                    identity: self.identity(),
+                    identity: policy_identity,
                     tier,
                     maintained_facts: maintained,
                     allow_storage_witness_fallback: source_allow_storage_witness_fallback,
                 },
-            )
+            ).await
         };
-        let mut update = update.await?;
+        let mut update = update?;
         if reset_result_set {
             view_update_reset_result_set(&mut update);
         }

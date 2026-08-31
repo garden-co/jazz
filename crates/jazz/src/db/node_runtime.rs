@@ -5,7 +5,7 @@
 
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    mutation_error_event, take_pending_mutation_error_delivery,
+    coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
 use crate::time::TxTime;
@@ -526,6 +526,14 @@ where
                 upload_unit,
             });
         self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    /// Whether a resident publication still needs its ordered durability turn.
+    /// This check is deliberately synchronous so a host's one bounded tick
+    /// does not spend its sole poll acquiring the publication-settler mutex
+    /// when there is no publication to advance.
+    pub(super) fn has_pending_local_publications(&self) -> bool {
+        !self.pending_local_publications.borrow().is_empty()
     }
 
     pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
@@ -1445,6 +1453,7 @@ where
                             binding: binding.clone(),
                             opts,
                             identity: state.author,
+                            policy_binding: None,
                         },
                     ));
                 }
@@ -1485,6 +1494,7 @@ where
                                     binding: group.binding.clone(),
                                     opts: group.upstream_opts.clone(),
                                     identity: subscriber.peer.link_identity(),
+                                    policy_binding: Some(group.policy_binding.clone()),
                                 })
                         })
                         .collect::<Vec<_>>()
@@ -1949,11 +1959,7 @@ where
                         }
                         peer.forget_subscription_with_node(
                             &mut node,
-                            SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: coverage.opts.read_view_key(),
-                            },
+                            coverage_group_subscription_key(&coverage),
                         );
                     }
                     scope_aggregates.clear();
@@ -2168,7 +2174,11 @@ where
         let connections = self.connections.borrow().clone();
         for connection in &connections {
             let mut connection = connection.lock().await;
-            let next = connection.tick().await?;
+            // `PeerConnection::tick` contains the subscriber admission state
+            // machine. Keep that future off the enclosing Db tick frame so a
+            // normal host/test thread cannot accumulate it across connection
+            // passes.
+            let next = Box::pin(connection.tick()).await?;
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
@@ -2196,7 +2206,7 @@ where
                     };
                     if should_tick {
                         let mut connection = connection.lock().await;
-                        let next = connection.tick().await?;
+                        let next = Box::pin(connection.tick()).await?;
                         released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                         stats.subscription_events += next.subscription_events;
                         stats.remote_sync_applied += next.remote_sync_applied;

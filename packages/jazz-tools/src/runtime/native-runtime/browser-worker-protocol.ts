@@ -28,9 +28,21 @@ export interface BrowserSharedWorkerConnectRequest {
   options: BrowserWorkerInitOptions;
 }
 
+/**
+ * Liveness handshake sent before a foreground lease request. The worker must
+ * acknowledge this without touching durable state; only then may the client
+ * send the allocation request on the same port.
+ */
+export interface BrowserForegroundNodeLeaseProbeRequest {
+  type: "probe-foreground-node-lease-worker";
+  attemptId: string;
+}
+
 /** Lease-only bootstrap that runs before the foreground schema is known. */
 export interface BrowserForegroundNodeLeaseAcquireRequest {
   type: "acquire-foreground-node-lease";
+  /** Correlates this durable operation with its preceding liveness probe. */
+  attemptId?: string;
   dbName: string;
   /** Exact durable owner that must admit the physical root before lease issue. */
   storageOwner: string;
@@ -46,6 +58,15 @@ export interface BrowserForegroundNodeLeaseCancelRequest {
 }
 
 export type BrowserForegroundNodeLeaseAcquireResponse =
+  | {
+      type: "foreground-node-lease-worker-alive";
+      attemptId: string;
+    }
+  | {
+      /** The named realm accepted termination and must not admit durable work. */
+      type: "foreground-node-lease-worker-closing";
+      attemptId: string;
+    }
   | {
       type: "foreground-node-lease-ready";
       leaseId: string;
@@ -89,6 +110,13 @@ export type BrowserSharedWorkerConnectResponse =
 export type BrowserFollowerPortRequest =
   | { type: "init"; id: number; sessionClaims: Record<string, unknown> }
   | { type: "frames"; frames: Uint8Array[] }
+  /** @internal Trace-only redacted query-coverage progress from a foreground tab. */
+  | {
+      type: "diagnostic-query-coverage";
+      stage: "attach" | "covered";
+      peerActivityEpoch: number;
+      peerProcessedActivityEpoch: number;
+    }
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
@@ -116,6 +144,32 @@ export interface BrowserInspectorContext {
 }
 
 /**
+ * Bounded, redacted lifecycle evidence for diagnosing browser-worker stalls.
+ * It deliberately carries no query text, row data, credentials, or wire
+ * frames: ordering and counters are enough to establish handoff progress.
+ */
+export type BrowserWorkerLifecycleTrace = {
+  sequence: number;
+  event:
+    | "bootstrap-start"
+    | "lease-request"
+    | "lease-admitted"
+    | "peer-attached"
+    | "peer-frames"
+    | "query-attach"
+    | "query-covered"
+    | "owner-release-start"
+    | "owner-release-finished";
+  dbName: string;
+  peerCount: number;
+  pendingBootstraps: number;
+  activeLeases: number;
+  frameCount?: number;
+  peerActivityEpoch?: number;
+  peerProcessedActivityEpoch?: number;
+};
+
+/**
  * Redacted flight-recorder entry for a browser chunk relay. Hashes and
  * locators are short fingerprints; no retrieval capability is exposed.
  */
@@ -134,6 +188,7 @@ export type BrowserRelayTrace = {
 
 export type BrowserInspectorControlRequest =
   | { type: "list-contexts"; id: number }
+  | { type: "lifecycle-trace"; id: number }
   | { type: "terminate-worker"; id: number }
   | {
       type: "attach-context";
@@ -146,7 +201,14 @@ export type BrowserInspectorControlRequest =
 
 export type BrowserInspectorControlEvent =
   | { type: "contexts"; id: number; contexts: BrowserInspectorContext[] }
-  | { type: "result"; id: number; error?: string };
+  | { type: "lifecycle-trace"; id: number; entries: BrowserWorkerLifecycleTrace[] }
+  | {
+      type: "result";
+      id: number;
+      error?: string;
+      /** The acknowledged realm is closing; future opens must use its successor. */
+      workerTerminated?: true;
+    };
 
 export type BrowserFollowerPortEvent =
   | { type: "frames"; frames: Uint8Array[] }

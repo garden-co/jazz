@@ -2067,14 +2067,16 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
       const reader = openRuntime("reader", 42, server);
       const queryJson = JSON.stringify({ table: "todos" });
-      const propagatedRow = await waitFor(async () => {
-        const rows = (await reader.query(queryJson, null, "edge")) as Array<{
-          id: string;
-          table: string;
-          values: unknown[];
-        }>;
-        return rows.find((row) => row.id === inserted.id);
-      }, "reader persistent edge query did not receive the propagated row add after server recovery");
+      // A fresh strict-remote read owns its first authority receipt.  It must
+      // not resolve with the reader's empty local state while the restarted
+      // server is still delivering that receipt; callers should receive the
+      // persisted row from this one read.
+      const rows = (await reader.query(queryJson, null, "edge")) as Array<{
+        id: string;
+        table: string;
+        values: unknown[];
+      }>;
+      const propagatedRow = rows.find((row) => row.id === inserted.id);
 
       expect(propagatedRow).toEqual({
         id: inserted.id,
