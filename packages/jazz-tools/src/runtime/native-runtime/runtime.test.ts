@@ -242,6 +242,64 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("moves a strict remote read from a stalled handshake to its auth-refresh replacement", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        // Leave the first carrier in its handshake. The second one uses the
+        // normal fake server response after the auth refresh replaces it.
+        if (sockets[0] === this) {
+          this.sent.push(data);
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            connectUpstream: () => new FakeTransport([]),
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    let settled = false;
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge").then((rows) => {
+      settled = true;
+      return rows;
+    });
+    await waitForFakeWebSocketNegotiation();
+    expect(settled).toBe(false);
+
+    await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    await waitForFakeWebSocketNegotiation();
+
+    expect(sockets).toHaveLength(2);
+    await vi.waitFor(() => expect(settled).toBe(true));
+    await expect(read).resolves.toEqual([]);
+  });
+
   it("requires native db bindings to expose a tick scheduler", () => {
     expect(
       () =>
@@ -365,6 +423,54 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets).toHaveLength(2);
     expect(upstreamConnections).toBe(1);
     expect(JSON.parse(sockets[1]!.sent[0] as string).jwt_token).toBe("fresh.jwt");
+  });
+
+  it("rejects a strict remote read when its pre-admission carrier terminates without replacement", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        // Hold the handshake so the remote read is waiting on this carrier
+        // when the authority sends its terminal pre-admission error.
+        this.sent.push(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            connectUpstream: () => new FakeTransport([]),
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    await waitForFakeWebSocketNegotiation();
+
+    sockets[0]!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(3, 1, "pre-admission denied")]),
+    );
+
+    await expect(read).rejects.toThrow("pre-admission denied");
   });
 
   it("does not report non-auth websocket errors as auth failures", async () => {

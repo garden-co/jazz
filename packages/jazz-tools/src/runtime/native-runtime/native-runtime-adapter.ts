@@ -2703,7 +2703,33 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed) return;
     if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
     if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
-    if (!this.hasUpstream()) return;
+    // `connect()` starts its WebSocket handshake before it can admit the
+    // native transport. A strict remote read begun in that interval must
+    // await the in-flight connection instead of falling through to a local
+    // materialization merely because the transport has not been installed yet.
+    while (!this.hasUpstream()) {
+      const pendingConnection = this.serverCarrierPromise;
+      if (!pendingConnection) return;
+      const attempt = this.serverConnectionAttempt;
+      const terminal =
+        attempt?.carrier === this.serverCarrier
+          ? await Promise.race([pendingConnection.then(() => null), attempt.terminal])
+          : null;
+      if (this.closed) return;
+      // Reauthentication/reconnect can retire a stalled carrier while this
+      // query is waiting. Follow the replacement attempt; only surface a
+      // terminal error when this was still the current connection.
+      if (terminal) {
+        if (
+          this.serverCarrierPromise !== null &&
+          this.serverCarrierPromise !== pendingConnection &&
+          this.serverConnectionAttempt?.carrier === this.serverCarrier
+        ) {
+          continue;
+        }
+        throw terminal;
+      }
+    }
     if (!this.db.attachQuery) return;
     // Coverage registration and probes are synchronous node operations. A
     // storage-backed evaluator may hold that node across suspension, so enter
