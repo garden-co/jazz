@@ -288,28 +288,33 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const appId = uniqueDbName("physical-worker-epoch-app");
     const dbName = uniqueDbName("physical-worker-epoch-root");
     const secret = generateAuthSecret();
-    const first = track(await createDb({ appId, secret, driver: { type: "persistent", dbName } }));
+    const config = { appId, secret, driver: { type: "persistent" as const, dbName } };
+    // `driver.dbName` is the caller-selected logical base. The worker and
+    // IndexedDB liveness fence deliberately protect its auth-scoped physical
+    // root, which is the name `createDb` actually opens.
+    const first = track(await createDb(config));
     try {
+      // `createDb` turns a local-first secret into its canonical session
+      // before deriving the physical root. Derive from that resolved config,
+      // rather than from the caller input whose secret has not yet become a
+      // session identity.
+      const physicalDbName = resolveDefaultPersistentDbName(first.config);
       // Materialize both the foreground lease and worker runtime before
       // deliberately advancing the page-side generation key.
       await first.all(allTodos, { tier: "local" });
-      const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+      const workerName = createBrowserSharedWorkerBaseName(undefined, physicalDbName);
       localStorage.setItem(`jazz:shared-worker-generation:${workerName}`, "1");
 
       // Planted overlap: generation one names a distinct SharedWorker even
       // though generation zero is live. It must fail before it can recover
       // generation zero's foreground lease pool.
-      await expect(
-        createDb({ appId, secret, driver: { type: "persistent", dbName } }),
-      ).rejects.toThrow("active in another Jazz SharedWorker realm");
+      await expect(createDb(config)).rejects.toThrow("active in another Jazz SharedWorker realm");
 
       await first.shutdown();
       untrack(first);
       await sleep(100);
 
-      const successor = track(
-        await createDb({ appId, secret, driver: { type: "persistent", dbName } }),
-      );
+      const successor = track(await createDb(config));
       try {
         await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([]);
       } finally {
@@ -492,14 +497,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
     errorListeners.add(recordAmbientError);
     const dbName = uniqueDbName("corrupt-storage-open");
     const secret = generateAuthSecret();
+    const config = { appId: "test-app", secret, driver: { type: "persistent" as const, dbName } };
     try {
-      const initial = track(
-        await createDb({
-          appId: "test-app",
-          secret,
-          driver: { type: "persistent", dbName },
-        }),
-      );
+      const initial = track(await createDb(config));
       await initial
         .insert(todos, { title: "durable sentinel", done: false })
         .wait({ tier: "local" });
@@ -510,27 +510,28 @@ describe("SharedWorker bridge with IndexedDB", () => {
       // IndexedDB namespace and cannot observe the corruption below.
       await sleep(100);
 
-      await replaceStorageManifest(dbName, {
+      // Local-first caller credentials are normalized to a canonical session
+      // during `createDb`, so the actual physical root must be derived from
+      // the resolved Db config rather than the pre-normalization input.
+      const physicalDbName = resolveDefaultPersistentDbName(initial.config);
+
+      await replaceStorageManifest(physicalDbName, {
         ...INDEXEDDB_STORAGE_MANIFEST,
         storageEpoch: 2,
       });
-      const recordsBeforeRead = await rawStorageRecords(dbName);
+      const recordsBeforeRead = await rawStorageRecords(physicalDbName);
 
       // Persistent create must acquire a durable foreground-node lease before
       // any synchronous mutation can mint a transaction identity. Storage
       // readiness therefore belongs to createDb, while schema selection stays
       // lazy. The original cause must reject that operation directly.
-      await expect(
-        createDb({
-          appId: "test-app",
-          secret,
-          driver: { type: "persistent", dbName },
-        }),
-      ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+      await expect(createDb(config)).rejects.toThrow(
+        "Missing or invalid IndexedDB storage epoch manifest",
+      );
       await sleep(0);
       expect(ambientErrors).toEqual([]);
       expect(unhandledRejections).toEqual([]);
-      expect(await rawStorageRecords(dbName)).toEqual(recordsBeforeRead);
+      expect(await rawStorageRecords(physicalDbName)).toEqual(recordsBeforeRead);
     } finally {
       globalThis.removeEventListener("error", recordAmbientError);
       globalThis.removeEventListener("unhandledrejection", recordUnhandledRejection);
@@ -887,7 +888,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       initialRow: { title: "dirty before external deletion", done: false },
     });
 
-    await deleteRemoteBrowserIndexedDbAndWaitForReload(remoteDbId, dbName);
+    await deleteRemoteBrowserIndexedDbAndWaitForReload(
+      remoteDbId,
+      resolveDefaultPersistentDbName({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
   });
 
   it("logout with wipeData clears browser storage before the next session opens", async () => {
