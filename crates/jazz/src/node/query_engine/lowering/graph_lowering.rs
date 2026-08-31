@@ -119,12 +119,20 @@ fn lower_correlated_path_plan(
             );
             let (parent_keys, child_keys) =
                 correlation_keys_with_routes(parent_key, child_key, &shared_route_fields);
+            let joined = GraphBuilder::join(parent, child_graph, parent_keys, child_keys)
+                .project_fields(project_left_source_fields_with_join_routes(
+                    root_source,
+                    &root_source.routing_fields,
+                    &BTreeSet::new(),
+                ));
+            let mut group_cols = vec![root_source.row_shape.row_uuid_field.clone()];
+            group_cols.extend(root_source.routing_fields.iter().cloned());
             Ok(LoweredRelationInput {
-                graph: GraphBuilder::semi_join(parent, child_graph, parent_keys, child_keys)
-                    .project_fields(project_source_fields_with_routes(
-                        root_source,
-                        &root_source.routing_fields,
-                    )),
+                graph: GraphBuilder::arg_min_by(
+                    joined,
+                    group_cols,
+                    [root_source.row_shape.row_uuid_field.clone()],
+                ),
                 root_source: Some(root_source.clone()),
                 fields: source_fields(root_source).collect(),
                 nullable_fields: source_nullable_fields(root_source),
@@ -232,11 +240,20 @@ fn lower_cardinality_complete_parent_graph(
     if !is_array_key {
         let (parent_keys, child_keys) =
             correlation_keys_with_routes(parent_key, child_key, shared_route_fields);
-        return Ok(
-            GraphBuilder::semi_join(parent, child, parent_keys, child_keys).project_fields(
-                project_source_fields_with_routes(root_source, &root_source.routing_fields),
+        let joined = GraphBuilder::join(parent, child, parent_keys, child_keys).project_fields(
+            project_left_source_fields_with_join_routes(
+                root_source,
+                &root_source.routing_fields,
+                &BTreeSet::new(),
             ),
         );
+        let mut group_cols = vec![root_source.row_shape.row_uuid_field.clone()];
+        group_cols.extend(root_source.routing_fields.iter().cloned());
+        return Ok(GraphBuilder::arg_min_by(
+            joined,
+            group_cols,
+            [root_source.row_shape.row_uuid_field.clone()],
+        ));
     }
 
     let required_element_field = "__jazz_required_correlation_element";
@@ -1154,89 +1171,57 @@ fn lower_linear_plan_steps_cached(
                     }
                 }
                 if *mode == JoinMode::Semi {
-                    // Route each left occurrence before applying the existence
-                    // gate. A Groove semi-join preserves left multiplicity and
-                    // collapses every matching right derivation, while carrying
-                    // the route on the left keeps prepared identities distinct.
-                    let right_route_fields = route_fields
+                    // Existence join: the right (authorization) side matters
+                    // only per (join key, route fields) group — one qualifying
+                    // derivation is as good as fifty, but the route fields must
+                    // survive because one shared program serves every bound
+                    // identity and result rows are routed by them. Project the
+                    // right side down to exactly those fields and keep one
+                    // maintained winner per group; rows within a group are
+                    // identical post-projection, so losing one of several
+                    // derivations produces no output delta and losing the last
+                    // retracts the group. The join itself stays a plain inner
+                    // join, so downstream field/route bookkeeping is unchanged.
+                    let mut dedup_fields: Vec<String> = right_keys.clone();
+                    for field in route_fields
                         .iter()
                         .filter(|field| lowered_right.fields.contains(*field))
-                        .cloned()
-                        .collect::<BTreeSet<_>>();
-                    let missing_route_fields = right_route_fields
-                        .difference(&available_route_fields)
-                        .cloned()
-                        .collect::<BTreeSet<_>>();
-                    if !missing_route_fields.is_empty() {
-                        if let Some(binding_source_shape) = &request.input.binding.source_shape {
-                            let binding = GraphBuilder::binding_source(
-                                binding_source_shape.clone(),
-                                binding_source_descriptor_with_user_params(request, [])?,
-                            );
-                            let existing_route_fields = available_route_fields
-                                .intersection(&right_route_fields)
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            let binding_route_fields = existing_route_fields
-                                .iter()
-                                .map(|field| {
-                                    route_param_from_field(field).unwrap_or(field).to_owned()
-                                })
-                                .collect::<Vec<_>>();
-                            let mut projection = fields
-                                .iter()
-                                .map(|field| {
-                                    ProjectField::renamed(left_field(field), field.clone())
-                                })
-                                .collect::<Vec<_>>();
-                            projection.extend(missing_route_fields.iter().map(|field| {
-                                let binding_field = route_param_from_field(field).unwrap_or(field);
-                                ProjectField::renamed(right_field(binding_field), field.clone())
-                            }));
-                            graph = policy_join_if_needed(
-                                graph,
-                                binding,
-                                existing_route_fields,
-                                binding_route_fields,
-                                request,
-                            )
-                            .project_fields(projection);
-                        } else {
-                            let mut projection = fields
-                                .iter()
-                                .map(|field| ProjectField::named(field.clone()))
-                                .collect::<Vec<_>>();
-                            projection.extend(
-                                missing_route_fields
-                                    .iter()
-                                    .map(|field| route_literal_project_field(field, request))
-                                    .collect::<Result<Vec<_>, _>>()?,
-                            );
-                            graph = graph.project_fields(projection);
-                        }
-                        fields.extend(missing_route_fields.iter().cloned());
-                        available_route_fields.extend(missing_route_fields);
-                    }
-
-                    let mut right_fields = right_keys.clone();
-                    let mut semi_left_keys = left_keys;
-                    let mut semi_right_keys = right_keys;
-                    for field in right_route_fields {
-                        if !semi_right_keys.contains(&field) {
-                            right_fields.push(field.clone());
-                            semi_left_keys.push(field.clone());
-                            semi_right_keys.push(field);
+                    {
+                        if !dedup_fields.contains(field) {
+                            dedup_fields.push(field.clone());
                         }
                     }
-                    let right = right_graph.project_fields(
-                        right_fields
-                            .into_iter()
-                            .map(ProjectField::named)
+                    let projected = right_graph.project_fields(
+                        dedup_fields
+                            .iter()
+                            .map(|field| ProjectField::named(field.clone()))
                             .collect::<Vec<_>>(),
                     );
+                    let right_reduced = GraphBuilder::arg_max_by(
+                        projected,
+                        dedup_fields.clone(),
+                        right_keys.clone(),
+                    );
                     graph =
-                        semi_join_if_needed(graph, right, semi_left_keys, semi_right_keys, request);
-                    last_join_right = None;
+                        policy_join_if_needed(graph, right_reduced, left_keys, right_keys, request);
+                    // Downstream steps (Project, route retention) resolve
+                    // right-prefixed fields through this; the right side now
+                    // carries only the dedup fields.
+                    let reduced_right_fields: BTreeSet<String> =
+                        dedup_fields.iter().cloned().collect();
+                    last_join_right = Some((
+                        (**right).clone(),
+                        right_nullable_fields
+                            .intersection(&reduced_right_fields)
+                            .cloned()
+                            .collect(),
+                        right_nullable_field_depths
+                            .iter()
+                            .filter(|(field, _)| reduced_right_fields.contains(*field))
+                            .map(|(field, depth)| (field.clone(), *depth))
+                            .collect(),
+                        reduced_right_fields,
+                    ));
                 } else {
                     graph =
                         policy_join_if_needed(graph, right_graph, left_keys, right_keys, request);
@@ -1329,26 +1314,11 @@ fn lower_linear_plan_steps_cached(
                         .filter(|field| lowered_right.fields.contains(*field))
                         .cloned()
                         .collect::<BTreeSet<_>>();
-                    let retained_route_fields = available_route_fields
-                        .union(&introduced_route_fields)
-                        .cloned()
-                        .collect::<BTreeSet<_>>();
-                    let mut projection = if *mode == JoinMode::Semi {
-                        project_source_fields_with_routes(root_source, &retained_route_fields)
-                    } else {
-                        project_left_source_fields_with_join_routes(
-                            root_source,
-                            &available_route_fields,
-                            &introduced_route_fields,
-                        )
-                    };
-                    let retained_left_field = |field: &str| {
-                        if *mode == JoinMode::Semi {
-                            field.to_owned()
-                        } else {
-                            left_field(field)
-                        }
-                    };
+                    let mut projection = project_left_source_fields_with_join_routes(
+                        root_source,
+                        &available_route_fields,
+                        &introduced_route_fields,
+                    );
                     let mut occurrence_fields = BTreeSet::new();
                     if !omits_public_occurrence_carriers(request) {
                         // Earlier consecutive UNION joins already flattened
@@ -1356,10 +1326,8 @@ fn lower_linear_plan_steps_cached(
                         // Retain both fields under their terminal names; row
                         // identity without its union arm is ambiguous.
                         for output in &accumulated_union_occurrence_fields {
-                            projection.push(ProjectField::renamed(
-                                retained_left_field(output),
-                                output.clone(),
-                            ));
+                            projection
+                                .push(ProjectField::renamed(left_field(output), output.clone()));
                             occurrence_fields.insert(output.clone());
                         }
                         // A trailing semi-join filters the complete public
@@ -1373,7 +1341,7 @@ fn lower_linear_plan_steps_cached(
                                 .is_some_and(|source| source.row_shape.row_uuid_field == *field);
                             if is_row_id {
                                 projection.push(ProjectField::renamed(
-                                    retained_left_field(output),
+                                    left_field(output),
                                     output.clone(),
                                 ));
                                 occurrence_fields.insert(output.clone());
@@ -1623,26 +1591,6 @@ fn policy_join_if_needed(
         GraphBuilder::policy_join(left, right, left_on, right_on)
     } else {
         GraphBuilder::join(left, right, left_on, right_on)
-    }
-}
-
-fn semi_join_if_needed(
-    left: GraphBuilder,
-    right: GraphBuilder,
-    left_on: impl IntoIterator<Item = impl Into<String>>,
-    right_on: impl IntoIterator<Item = impl Into<String>>,
-    request: &QueryProgramRequest,
-) -> GraphBuilder {
-    GraphBuilder::SemiJoin {
-        left: std::sync::Arc::new(left),
-        right: std::sync::Arc::new(right),
-        left_on: left_on.into_iter().map(FieldRef::name).collect(),
-        right_on: right_on.into_iter().map(FieldRef::name).collect(),
-        comparison: if uses_policy_value_comparison(request) {
-            groove::ivm::ValueComparison::Policy
-        } else {
-            groove::ivm::ValueComparison::Exact
-        },
     }
 }
 
