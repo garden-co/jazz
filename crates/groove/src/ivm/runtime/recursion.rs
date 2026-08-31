@@ -18,10 +18,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::subscriptions::BindingDelta;
 
 use super::{
-    ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
-    RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
-    VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
-    scan_bounds,
+    ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
+    NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
+    VariantProjection, VariantProjectionKey, consolidate_deltas, plan_expr_names,
+    project_binding_source_deltas, scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1218,62 +1218,28 @@ impl HydrationEvaluator<'_> {
                 }
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let mut winners =
-                        std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-                    for delta in input.deltas {
-                        let group_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_max_by.group_field_indices,
-                        )?;
-                        let primary_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_max_by.primary_key_field_indices,
-                        )?;
-                        let entry = winners
-                            .entry(group_key)
-                            .or_insert_with(|| (primary_key.clone(), delta.record.clone()));
-                        if primary_key > entry.0 {
-                            *entry = (primary_key, delta.record);
-                        }
-                    }
                     Ok(RecordDeltas {
                         descriptor: output_desc,
-                        deltas: winners
-                            .into_values()
-                            .map(|(_, record)| RecordDelta { record, weight: 1 })
-                            .collect(),
+                        deltas: super::arg_by_winners_from_deltas(
+                            output_desc,
+                            &arg_max_by.group_field_indices,
+                            &arg_max_by.comparison_field_indices,
+                            input.deltas,
+                            ArgByDirection::Max,
+                        )?,
                     })
                 }
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let mut winners =
-                        std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-                    for delta in input.deltas {
-                        let group_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_min_by.group_field_indices,
-                        )?;
-                        let primary_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_min_by.primary_key_field_indices,
-                        )?;
-                        let entry = winners
-                            .entry(group_key)
-                            .or_insert_with(|| (primary_key.clone(), delta.record.clone()));
-                        if primary_key < entry.0 {
-                            *entry = (primary_key, delta.record);
-                        }
-                    }
                     Ok(RecordDeltas {
                         descriptor: output_desc,
-                        deltas: winners
-                            .into_values()
-                            .map(|(_, record)| RecordDelta { record, weight: 1 })
-                            .collect(),
+                        deltas: super::arg_by_winners_from_deltas(
+                            output_desc,
+                            &arg_min_by.group_field_indices,
+                            &arg_min_by.comparison_field_indices,
+                            input.deltas,
+                            ArgByDirection::Min,
+                        )?,
                     })
                 }
                 OpType::Union => {

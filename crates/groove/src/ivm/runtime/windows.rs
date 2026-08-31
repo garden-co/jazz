@@ -53,29 +53,34 @@ pub(super) enum ArgByDirection {
 pub(super) struct ArgBySpec<'a> {
     pub(super) group_fields: &'a [String],
     pub(super) group_field_indices: &'a [usize],
-    pub(super) primary_key_field_indices: &'a [usize],
+    pub(super) comparison_field_indices: &'a [usize],
     pub(super) direction: ArgByDirection,
 }
 
 pub(super) fn arg_by_winner_from_records(
     descriptor: RecordDescriptor,
-    primary_key_field_indices: &[usize],
+    comparison_field_indices: &[usize],
     records: Vec<(Bytes, i64)>,
     direction: ArgByDirection,
 ) -> Result<Option<SourceRecord>, IvmRuntimeError> {
+    // Match TopBy's total-order convention: declared fields decide the rank
+    // under the operator direction, while encoded record bytes break exact
+    // comparison-key ties ascending for both ArgMinBy and ArgMaxBy.
     let mut winner = None;
     for (record, weight) in records {
         if weight <= 0 {
             continue;
         }
-        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
-        let replaces =
-            winner
-                .as_ref()
-                .is_none_or(|(winner_key, _): &SourceRecord| match direction {
-                    ArgByDirection::Min => key < *winner_key,
-                    ArgByDirection::Max => key > *winner_key,
-                });
+        let key = encoded_record_key_part(descriptor, &record, comparison_field_indices)?;
+        let replaces = winner
+            .as_ref()
+            .is_none_or(
+                |(winner_key, winner_record): &SourceRecord| match key.cmp(winner_key) {
+                    std::cmp::Ordering::Less => matches!(direction, ArgByDirection::Min),
+                    std::cmp::Ordering::Greater => matches!(direction, ArgByDirection::Max),
+                    std::cmp::Ordering::Equal => record < *winner_record,
+                },
+            );
         if replaces {
             winner = Some((key, record));
         }
@@ -85,30 +90,48 @@ pub(super) fn arg_by_winner_from_records(
 
 pub(super) fn arg_by_winner_before_from_deltas(
     descriptor: RecordDescriptor,
-    primary_key_field_indices: &[usize],
+    comparison_field_indices: &[usize],
     after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
     direction: ArgByDirection,
 ) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
-    for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
-        records.insert(key, (record, weight));
-    }
+    arg_by_winner_from_records(
+        descriptor,
+        comparison_field_indices,
+        records_before_deltas(after_records, &deltas),
+        direction,
+    )
+}
+
+pub(super) fn arg_by_winners_from_deltas(
+    descriptor: RecordDescriptor,
+    group_field_indices: &[usize],
+    comparison_field_indices: &[usize],
+    deltas: Vec<RecordDelta>,
+    direction: ArgByDirection,
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let mut groups = BTreeMap::<Vec<u8>, BTreeMap<Bytes, i64>>::new();
     for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), primary_key_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
+        let group_key = encoded_record_key_part(descriptor, delta.raw(), group_field_indices)?;
+        *groups
+            .entry(group_key)
+            .or_default()
+            .entry(delta.record)
+            .or_default() += delta.weight;
     }
-    let mut positive = records
-        .into_iter()
-        .filter_map(|(key, (record, weight))| (weight > 0).then_some((key, record)));
-    Ok(match direction {
-        ArgByDirection::Min => positive.next(),
-        ArgByDirection::Max => positive.next_back(),
-    })
+
+    let mut winners = Vec::new();
+    for identities in groups.into_values() {
+        if let Some((_, record)) = arg_by_winner_from_records(
+            descriptor,
+            comparison_field_indices,
+            identities.into_iter().collect(),
+            direction,
+        )? {
+            winners.push(RecordDelta { record, weight: 1 });
+        }
+    }
+    Ok(winners)
 }
 
 #[cfg(test)]

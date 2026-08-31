@@ -867,14 +867,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_max_by.primary_key_field_indices,
+                        &arg_max_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_max_by.group_fields,
                             group_field_indices: &arg_max_by.group_field_indices,
-                            primary_key_field_indices: &arg_max_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_max_by.comparison_field_indices,
                             direction: ArgByDirection::Max,
                         },
                         output_desc,
@@ -885,14 +885,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_min_by.primary_key_field_indices,
+                        &arg_min_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_min_by.group_fields,
                             group_field_indices: &arg_min_by.group_field_indices,
-                            primary_key_field_indices: &arg_min_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_min_by.comparison_field_indices,
                             direction: ArgByDirection::Min,
                         },
                         output_desc,
@@ -1653,13 +1653,13 @@ impl TickEvaluator<'_> {
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let after = arg_by_winner_from_records(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records.clone(),
                 spec.direction,
             )?;
             let before = arg_by_winner_before_from_deltas(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records,
                 group_deltas,
                 spec.direction,
