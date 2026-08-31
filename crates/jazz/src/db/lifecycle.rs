@@ -99,6 +99,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         })
     }
 
@@ -150,6 +154,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         };
         Ok((db, receipt))
     }
@@ -188,6 +196,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         })
     }
 
@@ -242,6 +254,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::new(Cell::new(false)),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::new(Cell::new(false)),
         })
     }
 
@@ -355,6 +371,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: self.backend_attribution,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::clone(&self.fail_next_subscription_refresh),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::clone(&self.stall_next_subscription_refresh),
         })
     }
 
@@ -538,6 +558,10 @@ where
             reserved_tx_id: Some(tx_id),
             owner_operation_admitted: true,
             backend_attribution: self.backend_attribution,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::clone(&self.fail_next_subscription_refresh),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::clone(&self.stall_next_subscription_refresh),
         }
     }
 
@@ -555,6 +579,10 @@ where
             reserved_tx_id: None,
             owner_operation_admitted: true,
             backend_attribution: self.backend_attribution,
+            #[cfg(test)]
+            fail_next_subscription_refresh: Rc::clone(&self.fail_next_subscription_refresh),
+            #[cfg(test)]
+            stall_next_subscription_refresh: Rc::clone(&self.stall_next_subscription_refresh),
         }
     }
 
@@ -939,6 +967,17 @@ where
 
     #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        #[cfg(test)]
+        if self.stall_next_subscription_refresh.replace(false) {
+            std::future::pending::<()>().await;
+        }
+        #[cfg(test)]
+        if self.fail_next_subscription_refresh.replace(false) {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "injected subscription refresh failure",
+            ));
+        }
         let refreshed = self.node.refresh_subscriptions().await?;
         if refreshed > 0 {
             self.node.mark_subscriber_connections_dirty();
