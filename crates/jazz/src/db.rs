@@ -42,7 +42,7 @@ use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, ViewUpdateParts,
+    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;

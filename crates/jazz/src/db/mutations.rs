@@ -2351,7 +2351,7 @@ where
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
-        let (branch, cells, parents, authored_columns) = match target {
+        let (branch, cells, parents, authored_columns, verified_inherited_cells) = match target {
             WriteTarget::Root => {
                 self.ensure_row_not_deleted(table, row).await?;
                 let exists = match identity {
@@ -2382,7 +2382,13 @@ where
                 } else {
                     (cells, Vec::new(), None)
                 };
-                (BranchSelector::default(), cells, parents, authored_columns)
+                (
+                    BranchSelector::default(),
+                    cells,
+                    parents,
+                    authored_columns,
+                    None,
+                )
             }
             WriteTarget::BranchView { head, base } => {
                 self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
@@ -2429,8 +2435,9 @@ where
                         current,
                         parent.into_iter().collect(),
                         Some(authored_columns),
+                        None,
                     )
-                } else if let Some(mut inherited) = node
+                } else if let Some(inherited) = node
                     .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
                     .await?
                 {
@@ -2439,14 +2446,19 @@ where
                     {
                         return Err(read_for_write_denied("UPSERT", table));
                     }
-                    if let Some(visible_to_session) = visible_to_session {
-                        inherited = visible_to_session;
-                    }
+                    let verified_inherited_cells = inherited.clone();
+                    let mut inherited = visible_to_session.unwrap_or(inherited);
                     inherited.extend(cells);
-                    (head, inherited, Vec::new(), Some(authored_columns))
+                    (
+                        head,
+                        inherited,
+                        Vec::new(),
+                        Some(authored_columns),
+                        Some(verified_inherited_cells),
+                    )
                 } else {
                     drop(node);
-                    (head, cells, Vec::new(), None)
+                    (head, cells, Vec::new(), None, None)
                 }
             }
         };
@@ -2462,7 +2474,7 @@ where
             authored_columns,
             now_ms,
             branch,
-            None,
+            verified_inherited_cells,
         )
         .await
     }

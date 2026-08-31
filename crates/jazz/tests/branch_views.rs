@@ -368,6 +368,144 @@ fn mergeable_transaction_branch_view_upsert_handles_all_three_row_states() {
     );
 }
 
+/// A branch upsert later in the same mergeable transaction supersedes alice's
+/// staged delete instead of committing content behind that tombstone.
+///
+/// alice ──delete head row──► tx overlay ──upsert row──► visible replacement
+#[test]
+fn branch_upsert_after_staged_delete_replaces_the_pending_tombstone() {
+    let (db, schema) = open_db();
+    let head = selector(0xbb);
+    let row = RowUuid::from_bytes([0xbc; 16]);
+    db.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("before".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let target = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: None,
+    };
+    let tx = db.mergeable_tx().unwrap();
+    tx.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            target: target.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.upsert(
+        "todos",
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("after".to_owned()))]),
+        jazz::db::UpsertOptions {
+            target,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(head, None))).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), row);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("after".to_owned()))
+    );
+}
+
+/// A session transaction can patch branch rows it inserted or upserted earlier
+/// in its own overlay; policy visibility is resolved from staged content, not
+/// only the committed branch view.
+///
+/// alice ──insert/upsert rows──► tx overlay ──upsert same rows──► merged content
+#[test]
+fn session_transaction_can_upsert_its_staged_branch_rows_again() {
+    let (db, schema) = open_db();
+    let alice = AuthorSubject::for_test_bytes([0xbd; 16]);
+    let head = selector(0xbe);
+    let inserted_row = RowUuid::from_bytes([0xbf; 16]);
+    let upserted_row = RowUuid::from_bytes([0xc0; 16]);
+    let target = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: None,
+    };
+    let tx = db.mergeable_tx_for_identity(alice).unwrap();
+    tx.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("inserted".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(inserted_row),
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.upsert(
+        "todos",
+        inserted_row,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("insert then upsert".to_owned()),
+        )]),
+        jazz::db::UpsertOptions {
+            target: target.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.upsert(
+        "todos",
+        upserted_row,
+        BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
+        jazz::db::UpsertOptions {
+            target: target.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.upsert(
+        "todos",
+        upserted_row,
+        BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
+        jazz::db::UpsertOptions {
+            target,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(&query, ReadOpts::default().branch_view(head, None))).unwrap();
+    let titles = rows
+        .iter()
+        .map(|row| {
+            (
+                row.row_uuid(),
+                row.cell(&schema.tables[0], "title").unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        titles,
+        BTreeMap::from([
+            (inserted_row, Value::String("insert then upsert".to_owned())),
+            (upserted_row, Value::String("second".to_owned())),
+        ])
+    );
+}
+
 #[test]
 fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
     let (db, schema) = open_db();

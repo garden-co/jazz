@@ -297,19 +297,32 @@ patch over the row's current local cells, so omitted fields keep their value
 An upsert's `WriteTarget` is the complete read view used to choose between
 update and insert. For a head-over-base branch view, a head-local row is patched
 with its local content winner as parent. A row inherited only from the base is
-copied into the head and patched without making the base transaction a parent.
-A row absent from both head and base is inserted into the head. A head-local
-deletion winner is not absence when it tombstone-hides the row: the upsert
-returns `ErrorCode::WriteRejected` and emits no content write. Callers that mean
-to revive the row must use `restore` with `ExactWriteTarget::Branch(head)`, which
-can publish the replacement content and `DeletionEvent::Restored` together.
-Mergeable transactions apply the same distinction while staging their writes.
+copied into the head and patched without making the base transaction a parent;
+unchanged indirect large-value cells retain engine-only proof from that exact
+inherited preimage. A row absent from both head and base is inserted into the
+head.
 
-`WriteTarget::BranchView` expands a public Rust enum. Existing calls that use
-`WriteTarget::Root` or an options default retain their source and runtime
-behaviour, and no mutation method signature changed. Downstream exhaustive
-matches over `WriteTarget` are not source-compatible with the added variant and
-must add a `BranchView` arm (or an intentional wildcard).
+A committed head-local deletion winner is not absence when it tombstone-hides
+the row: the upsert returns `ErrorCode::WriteRejected` and emits no content
+write. Callers that mean to revive committed deleted state must use `restore`
+with `ExactWriteTarget::Branch(head)`, which publishes replacement content and
+`DeletionEvent::Restored` together. Within one mergeable transaction, however,
+a later upsert supersedes that same transaction's pending delete atomically, so
+the commit cannot contain tombstone-hidden replacement content. Transactional
+branch-view classification and session read visibility include the staged
+overlay, allowing a session to upsert a branch row it inserted or upserted
+earlier in the same transaction.
+
+Low-level JavaScript upsert options use `{ head, base? }` for a branch view.
+For compatibility, the former `{ branch }` shape is an exact alias for
+`{ head: branch }`; it cannot be combined with either `head` or `base`.
+Ambiguous combinations and `base` without `head` are rejected before the
+root/default target can be selected.
+
+Rust `UpsertOptions::target` now uses `WriteTarget` rather than
+`ExactWriteTarget`. Root/default callers keep their runtime behaviour, but code
+that constructs the field with `ExactWriteTarget` must migrate, and exhaustive
+matches over the options field must handle `WriteTarget::BranchView`.
 
 The write handle is the caller's durability and fate observation point. It
 carries the affected `RowUuid`, the backing `TxId` (`mergeable_tx_id()`), and the local

@@ -188,6 +188,9 @@ pub struct UpsertOptions {
     pub author: Option<Uint8Array>,
     pub head: Option<JsonValue>,
     pub base: Option<JsonValue>,
+    /// Legacy alias for `head` when `base` is omitted. It must not be combined
+    /// with either branch-view field.
+    pub branch: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
 }
 
@@ -4696,13 +4699,22 @@ fn core_upsert_options(options: Option<UpsertOptions>) -> napi::Result<jazz::db:
     let Some(options) = options else {
         return Ok(Default::default());
     };
-    let target = match options.head {
-        Some(head) => jazz::db::WriteTarget::BranchView {
-            head: core_branch_selector_from_json(head)?,
-            base: core_branch_base_from_json(options.base)?,
+    let target = match (options.branch, options.head, options.base) {
+        (Some(branch), None, None) => jazz::db::WriteTarget::BranchView {
+            head: core_branch_selector_from_json(branch)?,
+            base: None,
         },
-        None if options.base.is_none() => Default::default(),
-        None => {
+        (Some(_), _, _) => {
+            return Err(napi::Error::from_reason(
+                "upsert options must not combine legacy branch with head or base",
+            ));
+        }
+        (None, Some(head), base) => jazz::db::WriteTarget::BranchView {
+            head: core_branch_selector_from_json(head)?,
+            base: core_branch_base_from_json(base)?,
+        },
+        (None, None, None) => Default::default(),
+        (None, None, Some(_)) => {
             return Err(napi::Error::from_reason(
                 "branch view base requires a head selector",
             ));
@@ -6698,6 +6710,7 @@ mod tests {
                 author: None,
                 head: None,
                 base: None,
+                branch: None,
                 updated_at_ms: Some(-1.0),
             }))
             .is_err()
@@ -6709,6 +6722,40 @@ mod tests {
                 updated_at_ms: Some((jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER + 1) as f64),
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_javascript_upsert_branch_is_a_safe_head_alias() {
+        let branch = json!({ "branch": "draft" });
+        let parsed = core_upsert_options(Some(UpsertOptions {
+            author: None,
+            head: None,
+            base: None,
+            branch: Some(branch.clone()),
+            updated_at_ms: None,
+        }))
+        .expect("legacy branch option remains supported");
+        assert_eq!(
+            parsed.target,
+            jazz::db::WriteTarget::BranchView {
+                head: crate::core_branch_selector_from_json(branch.clone()).unwrap(),
+                base: None,
+            }
+        );
+
+        let error = core_upsert_options(Some(UpsertOptions {
+            author: None,
+            head: Some(branch.clone()),
+            base: None,
+            branch: Some(branch),
+            updated_at_ms: None,
+        }))
+        .expect_err("legacy and branch-view options must not be ambiguous");
+        assert!(
+            error
+                .reason
+                .contains("must not combine legacy branch with head or base")
         );
     }
 

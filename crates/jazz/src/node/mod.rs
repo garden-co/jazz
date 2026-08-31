@@ -288,6 +288,7 @@ mod query_eval;
 mod recovery;
 mod source_resolution;
 mod views;
+pub(crate) use open_tx::TransactionBranchRowState;
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]
