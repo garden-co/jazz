@@ -80,12 +80,10 @@ test("the uniqueness check rejects a duplicate in a non-browser Vitest config", 
   const nonBrowserConfig = "examples/record-player/apps/next-betterauth/vitest.config.provider.ts";
   assert.throws(
     () =>
-      assertRecordPlayerPortIsUnique(
-        [recordPlayerConfig, nonBrowserConfig],
-        (path) =>
-          path === nonBrowserConfig
-            ? `${read(path)}\napi: { port: ${recordPlayerPort}, strictPort: true }`
-            : read(path),
+      assertRecordPlayerPortIsUnique([recordPlayerConfig, nonBrowserConfig], (path) =>
+        path === nonBrowserConfig
+          ? `${read(path)}\napi: { port: ${recordPlayerPort}, strictPort: true }`
+          : read(path),
       ),
     /aliases RecordPlayer's registry-owned browser port/,
   );
