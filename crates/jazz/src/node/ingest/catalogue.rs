@@ -577,7 +577,7 @@ where
             let Some(pending) = self.catalogue.pending_lineages.get(&next).cloned() else {
                 break;
             };
-            let publication = pending.publication;
+            let publication = &pending.publication;
             let Some(source) = self
                 .catalogue
                 .catalogue_schemas
@@ -620,12 +620,18 @@ where
                         identity_history,
                     )
                     .map_err(Error::InvalidCatalogueUpdate)
-            });
+            })
+            // A parked sibling was admitted against the catalogue prefix that
+            // existed when it arrived. Reconcile it again only when its
+            // sequence becomes active: an earlier sibling may have widened a
+            // shared scalar registry to the u8 limit in the meantime.
+            .and_then(|()| self.validate_pending_schema_lineage_physical_mapping(&pending));
             if validation.is_err() {
                 self.remove_pending_schema_lineage(next, publication.id)
                     .await?;
                 break;
             }
+            let publication = pending.publication;
             if self
                 .catalogue
                 .active_lineages_by_target
@@ -643,17 +649,48 @@ where
                 }
                 staged.clone()
             } else {
+                // Provisional identities are only candidates. Reconciliation can
+                // replace them with identities inherited from the source schema,
+                // so allocate against copies and commit only identities retained
+                // by the durable staged mapping.
+                let mut provisional_next_table_id =
+                    self.catalogue.next_physical_table_id;
+                let mut provisional_next_column_id =
+                    self.catalogue.next_physical_column_id;
                 let fresh = allocate_provisional_physical_mapping(
                     &publication.schema.schema,
                     publication.physical_identities.clone(),
-                    &mut self.catalogue.next_physical_table_id,
-                    &mut self.catalogue.next_physical_column_id,
+                    &mut provisional_next_table_id,
+                    &mut provisional_next_column_id,
                 )?;
                 let mapping = self.reconcile_physical_mapping_for_lens_payload(
                     &publication.lens,
                     &publication.schema,
                     &fresh,
                 )?;
+                let mut next_physical_table_id =
+                    self.catalogue.next_physical_table_id;
+                let mut next_physical_column_id =
+                    self.catalogue.next_physical_column_id;
+                for table in mapping.tables.values() {
+                    next_physical_table_id = next_physical_table_id.max(
+                        table
+                            .table_id
+                            .0
+                            .checked_add(1)
+                            .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?,
+                    );
+                    for column in table.columns.values() {
+                        next_physical_column_id = next_physical_column_id.max(
+                            column
+                                .0
+                                .checked_add(1)
+                                .ok_or(Error::InvalidStoredValue(
+                                    "physical column id exhausted",
+                                ))?,
+                        );
+                    }
+                }
                 let staged = StagedSchemaLineage {
                     catalogue_seq: next,
                     publication: publication.clone(),
@@ -661,6 +698,8 @@ where
                     mapping,
                 };
                 self.persist_catalogue_schema_lineage(&staged).await?;
+                self.catalogue.next_physical_table_id = next_physical_table_id;
+                self.catalogue.next_physical_column_id = next_physical_column_id;
                 self.catalogue.staged_lineages.insert(next, staged.clone());
                 staged
             };

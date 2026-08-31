@@ -35,7 +35,7 @@ where
         &self,
         table_id: PhysicalTableId,
         column_id: PhysicalColumnId,
-    ) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+    ) -> Result<Vec<GlobalEnumCaseId>, Error> {
         let mut cases = BTreeSet::new();
         for mapping in self.catalogue.physical_mappings.values() {
             for table in mapping
@@ -55,7 +55,7 @@ where
         }
         let mut cases = cases.into_iter().collect::<Vec<_>>();
         cases.sort_by(|left, right| {
-            compare_scalar_enum_cases(&self.catalogue.schema_version_aliases, left, right)
+            compare_global_enum_cases(&self.catalogue.schema_version_aliases, left, right)
         });
         Ok(cases)
     }
@@ -99,7 +99,7 @@ where
         table_id: PhysicalTableId,
         column_id: PhysicalColumnId,
         path: &str,
-    ) -> Result<Vec<GlobalScalarEnumCaseId>, Error> {
+    ) -> Result<Vec<GlobalEnumCaseId>, Error> {
         let mut cases = BTreeSet::new();
         for mapping in self.catalogue.physical_mappings.values() {
             for table in mapping
@@ -123,7 +123,7 @@ where
         }
         let mut cases = cases.into_iter().collect::<Vec<_>>();
         cases.sort_by(|left, right| {
-            compare_scalar_enum_cases(&self.catalogue.schema_version_aliases, left, right)
+            compare_global_enum_cases(&self.catalogue.schema_version_aliases, left, right)
         });
         Ok(cases)
     }

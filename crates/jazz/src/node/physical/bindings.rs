@@ -194,9 +194,13 @@ pub(super) fn validate_physical_mapping_registries(
                 }
             }
             validate_enum_registries(&columns, &table.scalar_enum_cases, aliases)?;
-            validate_enum_registries(&columns, &table.payload_enum_cases, aliases)?;
+            validate_payload_enum_registries(&columns, &table.payload_enum_cases, aliases)?;
             validate_nested_enum_registries(&columns, &table.nested_scalar_enum_cases, aliases)?;
-            validate_nested_enum_registries(&columns, &table.nested_payload_enum_cases, aliases)?;
+            validate_nested_payload_enum_registries(
+                &columns,
+                &table.nested_payload_enum_cases,
+                aliases,
+            )?;
         }
     }
     Ok(())
@@ -256,6 +260,68 @@ fn validate_enum_cases(
     if cases.windows(2).any(|pair| {
         compare_scalar_enum_cases(aliases, &pair[0], &pair[1]).is_gt()
     }) {
+        return Err(Error::InvalidStoredValue(
+            "physical enum registry has non-canonical case order",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_payload_enum_registries(
+    columns: &BTreeSet<PhysicalColumnId>,
+    registries: &BTreeMap<PhysicalColumnId, Vec<GlobalEnumCaseId>>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    for (column, cases) in registries {
+        if !columns.contains(column) {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry references an unknown column",
+            ));
+        }
+        validate_payload_enum_cases(cases, aliases)?;
+    }
+    Ok(())
+}
+
+fn validate_nested_payload_enum_registries(
+    columns: &BTreeSet<PhysicalColumnId>,
+    registries: &BTreeMap<PhysicalColumnId, BTreeMap<String, Vec<GlobalEnumCaseId>>>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    for (column, paths) in registries {
+        if !columns.contains(column) {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry references an unknown column",
+            ));
+        }
+        for cases in paths.values() {
+            validate_payload_enum_cases(cases, aliases)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_payload_enum_cases(
+    cases: &[GlobalEnumCaseId],
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
+    for case in cases {
+        if case.id.0.is_nil() {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry contains a nil global identity",
+            ));
+        }
+        if !seen.insert(case.clone()) {
+            return Err(Error::InvalidStoredValue(
+                "physical enum registry repeats a case identity",
+            ));
+        }
+    }
+    if cases
+        .windows(2)
+        .any(|pair| compare_global_enum_cases(aliases, &pair[0], &pair[1]).is_gt())
+    {
         return Err(Error::InvalidStoredValue(
             "physical enum registry has non-canonical case order",
         ));

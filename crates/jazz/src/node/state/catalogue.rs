@@ -119,7 +119,7 @@ self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
-    fn hydrate_scalar_enum_case_mapping(
+    fn hydrate_enum_case_mapping(
         &mut self,
         schema_version: SchemaVersionId,
     ) -> Result<(), Error> {
@@ -172,7 +172,11 @@ self.database.finish_persistence(persisted)?;
                 if ids.len() != enum_schema.cases.len() {
                     return Err(Error::InvalidStoredValue("payload enum authority identity width mismatch"));
                 }
-                install_enum_case_ids(physical.payload_enum_cases.entry(id).or_default(), ids, schema_version)?;
+                install_payload_enum_case_ids(
+                    physical.payload_enum_cases.entry(id).or_default(),
+                    ids,
+                    schema_version,
+                )?;
                 let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
                 hydrate_nested_scalar_enum_cases(
                     &column.column_type,
@@ -236,7 +240,7 @@ self.database.finish_persistence(persisted)?;
                 .schema_version_aliases
                 .contains_key(&schema_version)
         {
-            self.hydrate_scalar_enum_case_mapping(schema_version)?;
+            self.hydrate_enum_case_mapping(schema_version)?;
             return Ok(());
         }
         let mapping = match self.catalogue.physical_mappings.get(&schema_version) {
@@ -378,6 +382,101 @@ self.database.finish_persistence(persisted)?;
             .checked_add(1)
             .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?;
         Ok(id)
+    }
+
+    fn validate_pending_schema_lineage_physical_mapping(
+        &self,
+        pending: &PendingSchemaLineage,
+    ) -> Result<(), Error> {
+        if !self
+            .catalogue
+            .catalogue_schemas
+            .contains_key(&pending.publication.lens.source)
+        {
+            return Ok(());
+        }
+        // Admission must not reserve durable catalogue state or consume local
+        // physical ids for a lineage whose shared scalar registry cannot be
+        // encoded. Allocate against copies; activation performs the identical
+        // reconciliation after the pending envelope has passed this boundary.
+        let mut next_table = self.catalogue.next_physical_table_id;
+        let mut next_column = self.catalogue.next_physical_column_id;
+        let provisional = allocate_provisional_physical_mapping(
+            &pending.publication.schema.schema,
+            pending.publication.physical_identities.clone(),
+            &mut next_table,
+            &mut next_column,
+        )?;
+        self.reconcile_physical_mapping_for_lens_payload(
+            &pending.publication.lens,
+            &pending.publication.schema,
+            &provisional,
+        )
+        .map(|_| ())
+    }
+
+    fn validate_candidate_scalar_enum_capacity(
+        catalogue: &SchemaCatalogue,
+        candidate: &SchemaPhysicalMapping,
+    ) -> Result<(), Error> {
+        const SCALAR_CASE_CAPACITY: usize = u8::MAX as usize + 1;
+
+        for candidate_table in candidate.tables.values() {
+            for column_id in candidate_table.scalar_enum_cases.keys() {
+                let mut cases = BTreeSet::new();
+                for mapping in catalogue
+                    .physical_mappings
+                    .values()
+                    .chain(std::iter::once(candidate))
+                {
+                    for table in mapping
+                        .tables
+                        .values()
+                        .filter(|table| table.table_id == candidate_table.table_id)
+                    {
+                        if let Some(column_cases) = table.scalar_enum_cases.get(column_id) {
+                            cases.extend(column_cases.iter().cloned());
+                        }
+                    }
+                }
+                if cases.len() > SCALAR_CASE_CAPACITY {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "physical scalar enum registry exceeds u8 capacity",
+                    ));
+                }
+            }
+
+            for (column_id, candidate_paths) in &candidate_table.nested_scalar_enum_cases {
+                for path in candidate_paths.keys() {
+                    let mut cases = BTreeSet::new();
+                    for mapping in catalogue
+                        .physical_mappings
+                        .values()
+                        .chain(std::iter::once(candidate))
+                    {
+                        for table in mapping
+                            .tables
+                            .values()
+                            .filter(|table| table.table_id == candidate_table.table_id)
+                        {
+                            if let Some(column_cases) = table
+                                .nested_scalar_enum_cases
+                                .get(column_id)
+                                .and_then(|paths| paths.get(path))
+                            {
+                                cases.extend(column_cases.iter().cloned());
+                            }
+                        }
+                    }
+                    if cases.len() > SCALAR_CASE_CAPACITY {
+                        return Err(Error::InvalidCatalogueUpdate(
+                            "physical scalar enum registry exceeds u8 capacity",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn reconcile_physical_mapping_for_lens(
@@ -568,7 +667,11 @@ self.database.finish_persistence(persisted)?;
                             ));
                         }
                         let ids = &target_table_identities.columns[&column.name].enum_variants["root"];
-                        install_enum_case_ids(&mut cases, ids, target_schema_version.id)?;
+                        install_payload_enum_case_ids(
+                            &mut cases,
+                            ids,
+                            target_schema_version.id,
+                        )?;
                         payload_enum_cases.insert(id, cases);
                     }
                     _ => {}
@@ -622,6 +725,7 @@ self.database.finish_persistence(persisted)?;
                 },
             );
         }
+        Self::validate_candidate_scalar_enum_capacity(catalogue, &target_mapping)?;
         Ok(target_mapping)
     }
 
@@ -774,6 +878,7 @@ self.database.finish_persistence(persisted)?;
         &mut self,
         pending: &PendingSchemaLineage,
     ) -> Result<(), Error> {
+        self.validate_pending_schema_lineage_physical_mapping(pending)?;
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
