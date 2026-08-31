@@ -3486,6 +3486,12 @@ export class NativeRuntimeAdapter implements Runtime {
         if (transport.sendWireFrames) transport.sendWireFrames(canonical);
         else for (const frame of canonical) transport.sendWireFrame(frame);
       }
+      // Carrier ingress can change the result visible through every local peer,
+      // including a subscriber whose evaluator pass began before this batch was
+      // admitted. Require one distinct post-admission pass. This is deliberately
+      // narrower than the general native tick scheduler, whose routine wakes
+      // must remain coalescible to avoid self-sustaining peer-pump loops.
+      this.notifyPeerTransportWork(true);
       const carrier = this.serverCarrier;
       if (carrier) {
         this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);

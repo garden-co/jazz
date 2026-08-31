@@ -350,6 +350,48 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.disconnect();
   });
 
+  it("marks server carrier ingress as requiring a distinct peer pass", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const peerWork: Array<boolean | undefined> = [];
+    const unsubscribe = runtime.onPeerTransportWork((requiresDistinctPass) =>
+      peerWork.push(requiresDistinctPass),
+    );
+
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
+    await vi.waitFor(() => expect(transport.received).toHaveLength(1));
+
+    expect(peerWork).toContain(true);
+    unsubscribe();
+    await runtime.close();
+  });
+
   it("does not emit the fake server hello before the client prelude and hello", async () => {
     const socket = new FakeWebSocket("ws://127.0.0.1:4200/apps/app-a/ws");
     const received: Uint8Array[] = [];
