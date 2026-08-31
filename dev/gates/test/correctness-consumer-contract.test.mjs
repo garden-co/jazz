@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -40,13 +41,30 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
   assert.doesNotMatch(aggregate, /env:\s*process\.env/);
 });
 
-test("parallel RecordPlayer browser topology gets an OS-assigned isolated Vitest API port", () => {
+test("parallel RecordPlayer browser topology owns a unique strict Vitest API port", () => {
   const config = read("examples/record-player/apps/next-betterauth/vitest.config.browser.ts");
   assert.match(
     config,
-    /api:\s*\{\s*port:\s*0,\s*strictPort:\s*true\s*\}/,
-    "RecordPlayer must receive an OS-assigned API port rather than probing a shared default range",
+    /api:\s*\{\s*port:\s*63318,\s*strictPort:\s*true\s*\}/,
+    "RecordPlayer must reserve its browser API port instead of probing the workspace default range",
   );
+
+  const recordPlayerConfig = "examples/record-player/apps/next-betterauth/vitest.config.browser.ts";
+  const browserConfigs = execFileSync("git", ["ls-files", "--", "*vitest.config.browser.ts"], {
+    cwd: root,
+    encoding: "utf8",
+  })
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  for (const path of browserConfigs) {
+    if (path === recordPlayerConfig) continue;
+    assert.doesNotMatch(
+      read(path),
+      /api:\s*\{\s*port:\s*63318\b/,
+      `${path} aliases RecordPlayer's registry-owned browser port`,
+    );
+  }
 });
 
 test("sealed consumers select content-addressed artifact paths rather than worktree pointers", () => {

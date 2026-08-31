@@ -47,10 +47,10 @@ export default defineConfig({
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
-      // Let the OS allocate a private API port for this invocation. Browser
-      // projects run in parallel in the workspace gate; a fixed/default Vite
-      // port couples otherwise independent topology processes.
-      api: { port: 0, strictPort: true },
+      // The workspace browser gate starts this topology beside three other
+      // Vitest projects. This registry-owned reservation prevents it from
+      // probing their shared default range.
+      api: { port: 63318, strictPort: true },
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
