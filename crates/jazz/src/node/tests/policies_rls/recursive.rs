@@ -520,6 +520,89 @@ fn projected_frontier_authorizes_unseeded_parent_and_terminates_team_cycle() {
     assert!(removes.is_empty());
 }
 
+fn projected_frontier_visibility_at_depth(
+    max_depth: usize,
+) -> (BTreeSet<RowUuid>, RowUuid, RowUuid) {
+    let schema = projected_frontier_doc_policy_schema(max_depth);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xb2);
+    core.set_test_provider_claims(
+        reader,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
+    let child_team = row(0x21);
+    let parent_team = row(0x22);
+    let seed_doc = row(0x31);
+    let parent_doc = row(0x32);
+
+    for (team, name) in [(child_team, "child"), (parent_team, "parent")] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String(name.to_owned()),
+            )])),
+        );
+    }
+    for (doc, title, team) in [
+        (seed_doc, "seed", child_team),
+        (parent_doc, "one hop", parent_team),
+    ] {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("docs", doc, 20)
+                .cells(recursive_doc_cells(title, "visible")),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("doc_access", doc, 30).cells(BTreeMap::from([
+                ("doc".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+            ])),
+        );
+    }
+    accept_global(
+        &mut core,
+        MergeableCommit::new("user_team_edges", row(0xd2), 35).cells(BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
+            ("team".to_owned(), Value::Uuid(child_team.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("team_edges", row(0xe3), 40).cells(BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(child_team.0)),
+            ("parent".to_owned(), Value::Uuid(parent_team.0)),
+            ("enabled".to_owned(), Value::Bool(true)),
+        ])),
+    );
+
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(reader);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert!(removes.is_empty());
+    (
+        adds
+            .into_iter()
+            .map(|(_, row, _)| row)
+            .collect::<BTreeSet<_>>(),
+        seed_doc,
+        parent_doc,
+    )
+}
+
+#[test]
+fn max_depth_zero_is_seed_only_and_one_adds_exactly_one_authorization_hop() {
+    let (zero_visible, seed_doc, parent_doc) = projected_frontier_visibility_at_depth(0);
+    assert_eq!(zero_visible, BTreeSet::from([seed_doc]));
+    assert!(!zero_visible.contains(&parent_doc));
+
+    let (one_visible, seed_doc, parent_doc) = projected_frontier_visibility_at_depth(1);
+    assert_eq!(one_visible, BTreeSet::from([seed_doc, parent_doc]));
+}
+
 #[test]
 fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies() {
     let schema = projected_frontier_doc_policy_schema(2);

@@ -356,9 +356,10 @@ output-table row. Seed and edge predicates are evaluated before their projected
 keys enter the frontier.
 
 Reachability deduplicates projected keys at every step, so cycles terminate.
-A positive `MaxDepth(N)` is a semantic cutoff: the seed is depth zero, rows
-reached by exactly `N` edges are included, and an otherwise valid `N + 1`
-frontier is excluded without being treated as evaluator non-convergence.
+`MaxDepth(N)` is a semantic cutoff: the seed is depth zero, rows reached by
+exactly `N` edges are included, and an otherwise valid `N + 1` frontier is
+excluded without being treated as evaluator non-convergence. Consequently,
+`MaxDepth(0)` is seed-only and MUST NOT admit a one-hop authorization grant.
 The evaluator's independent fixpoint safety limit may still report genuine
 non-convergence. An empty seed is a live maintained relation, not a completed
 subscription; later seed grants, revokes, seed-key moves, filtered edge grants,

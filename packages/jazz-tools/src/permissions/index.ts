@@ -81,6 +81,9 @@ type SessionWhereBuilder = SessionRefValue &
   ((input: Record<string, unknown>) => SessionWhereCondition);
 
 interface RecursiveDepthOptions {
+  /**
+   * Maximum recursive hops. Zero performs no inheritance hop and cannot grant access.
+   */
   maxDepth?: number;
 }
 
@@ -166,6 +169,7 @@ export interface PermissionRelation {
   gather(options: {
     start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): PermissionRelation;
   reachable_via(
@@ -344,6 +348,7 @@ class PermissionRelationBuilder implements PermissionRelation {
   gather(options: {
     start?: Record<string, unknown> | PermissionRelation;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
+    /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
   }): PermissionRelation {
     if (typeof options.step !== "function") {
@@ -1017,6 +1022,7 @@ function buildTablePolicyBuilder(
     gather(options: {
       start?: Record<string, unknown> | PermissionRelation;
       step: (ctx: { current: unknown }) => PermissionRelation;
+      /** Maximum recursive hops. Zero evaluates the seed only. */
       maxDepth?: number;
     }): PermissionRelation {
       return createTableRelation(table, relationsByTable).gather(options);
@@ -1484,8 +1490,8 @@ function normalizeRecursiveRelationDepth(maxDepth?: number): number {
   if (maxDepth === undefined) {
     return RECURSIVE_POLICY_MAX_DEPTH_DEFAULT;
   }
-  if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-    throw new Error("gather(...) maxDepth must be a positive integer.");
+  if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+    throw new Error("gather(...) maxDepth must be a non-negative integer.");
   }
   if (maxDepth > RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP) {
     throw new Error(
@@ -1865,8 +1871,8 @@ function createAllowedToContext(): AllowedToContext {
   ): PolicyExpr => {
     const maxDepth = options?.maxDepth;
     if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
-        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a positive integer.`);
+      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
+        throw new Error(`allowedTo.*("${fkColumn}") maxDepth must be a non-negative integer.`);
       }
     }
     const expr: PolicyExpr = {
@@ -1888,9 +1894,9 @@ function createAllowedToContext(): AllowedToContext {
   ): PolicyExpr => {
     const maxDepth = options?.maxDepth;
     if (maxDepth !== undefined) {
-      if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      if (!Number.isInteger(maxDepth) || maxDepth < 0) {
         throw new Error(
-          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a positive integer.`,
+          `allowedTo.*Referencing(..., "${fkColumn}") maxDepth must be a non-negative integer.`,
         );
       }
     }

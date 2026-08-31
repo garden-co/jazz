@@ -26,7 +26,7 @@ Invariant digest:
 - `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
 - `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
 - `INV-REC-16`: A terminal collector's touched-rendered-group bound MUST NOT be applied to recursive fixed-point state, iterations, or nested logical time.
-- `INV-REC-17`: Semantically depth-bounded recursion MUST include facts produced by at most `max_iters` step evaluations and discard the next frontier without reporting non-convergence; maintained base or binding changes MUST preserve that seed-relative depth.
+- `INV-REC-17`: Semantically depth-bounded recursion MUST include the depth-zero seed and facts produced by at most `max_iters` step evaluations, including no step frontier when `max_iters = 0`, and discard the next frontier without reporting non-convergence; maintained base or binding changes MUST preserve that seed-relative depth.
 
 ## Details
 
@@ -90,10 +90,12 @@ the frontier remains non-empty beyond it (`INV-REC-7`).
 
 A semantic depth bound is different: the seed is depth zero, exactly
 `max_iters` step frontiers are accepted, and the next frontier is discarded as
-out of range rather than interpreted as non-convergence. Because positive
-incremental recursion normally resumes from the accumulated closure, which no
-longer records seed-relative depth, a semantically bounded node recomputes from
-its seed on relevant table or binding changes (`INV-REC-17`).
+out of range rather than interpreted as non-convergence. In particular, a zero
+bound returns the seed only and MUST NOT evaluate or admit a one-hop frontier.
+Because positive incremental recursion normally resumes from the accumulated
+closure, which no longer records seed-relative depth, a semantically bounded
+node recomputes from its seed on relevant table or binding changes
+(`INV-REC-17`).
 
 _Further invariants._ `INV-REC-5` — positive-only recursive evaluation rejects a
 non-positive frontier delta (`UnsupportedNonMonotoneRecursion`); non-monotone

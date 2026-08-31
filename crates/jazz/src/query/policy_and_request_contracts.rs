@@ -459,7 +459,7 @@ pub struct ReachableVia {
     pub edge_parent_column: String,
     /// Filters on recursive edges.
     pub edge_filters: Vec<Predicate>,
-    /// Recursion bound for reachable closure.
+    /// Recursion bound for reachable closure. `MaxDepth(0)` includes only the seed.
     #[serde(default = "RecursionBound::default_max_depth")]
     pub bound: RecursionBound,
     /// Optional relation that produces initial reachable team ids.
@@ -495,7 +495,7 @@ pub struct InheritsVia {
     /// Parent operation to require for the referenced row.
     #[serde(default)]
     pub operation: InheritsOperation,
-    /// Optional maximum number of recursive uses of this inheritance atom.
+    /// Optional maximum recursive uses. Zero performs no inheritance hop and denies.
     #[serde(default)]
     pub max_depth: Option<usize>,
 }
@@ -531,9 +531,10 @@ pub enum RecursionBound {
     /// Continue until the recursive frontier reaches a fixpoint. Unified
     /// lowering may still apply an independent safety cap that errors if hit.
     Fixpoint,
-    /// Stop after at most this many recursive steps. Unified lowering must carry
-    /// depth through the recursive relation and filter by it; this is not the
-    /// same as groove's internal safety cap.
+    /// Stop after at most this many recursive steps. The seed is at depth zero,
+    /// so `MaxDepth(0)` evaluates the seed without traversing an edge. Unified
+    /// lowering must carry depth through the recursive relation and filter by
+    /// it; this is not the same as groove's internal safety cap.
     MaxDepth(usize),
 }
 
@@ -547,13 +548,12 @@ impl RecursionBound {
     ///
     /// `Fixpoint` carries no user-facing depth, so it falls back to the
     /// conservative loop cap used by evaluator paths that are not true
-    /// fixpoint. Restores the behaviour of the `iteration_cap` accessor removed
-    /// in c2db5a8e4, whose last caller survived the removal and left the crate
-    /// unable to compile.
+    /// fixpoint. `MaxDepth(0)` remains zero: callers that request no recursive
+    /// steps must never be widened to one.
     pub(crate) fn depth_steps(self) -> usize {
         match self {
             Self::Fixpoint => 128,
-            Self::MaxDepth(max_depth) => max_depth.max(1),
+            Self::MaxDepth(max_depth) => max_depth,
         }
     }
 }

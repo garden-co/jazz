@@ -115,7 +115,9 @@ If a table references itself (e.g. a comment that can have sub-comments), you ca
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
 </include>
 
-`maxDepth` must be a positive integer.
+`maxDepth` must be a non-negative integer. A value of `0` performs no inheritance
+hop, so the inheritance condition cannot grant access; `1` checks only the
+directly referenced row.
 
 </Accordion>
 </Accordions>

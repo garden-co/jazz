@@ -764,10 +764,10 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("supports bounded recursive referencing inherits depth override", () => {
+  it("supports zero recursive referencing inherits depth", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.projects.allowRead.where(
-        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 3 }),
+        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 0 }),
       ),
     ]);
 
@@ -776,7 +776,7 @@ describe("permissions DSL", () => {
       operation: "Select",
       source_table: "todos",
       via_column: "projectId",
-      max_depth: 3,
+      max_depth: 0,
     });
   });
 
@@ -1136,25 +1136,24 @@ describe("permissions DSL", () => {
     }
   });
 
-  it("supports bounded recursive inherits depth override", () => {
+  it("supports zero bounded recursive inherits depth and rejects invalid overrides", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 3 })),
+      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
       type: "Inherits",
       operation: "Select",
       via_column: "projectId",
-      max_depth: 3,
+      max_depth: 0,
     });
-  });
-
-  it("rejects invalid recursive depth overrides", () => {
-    expect(() =>
-      definePermissions(app, ({ policy, allowedTo }) => [
-        policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
-      ]),
-    ).toThrow(/maxdepth must be a positive integer/i);
+    for (const maxDepth of [-1, 1.5]) {
+      expect(() =>
+        definePermissions(app, ({ policy, allowedTo }) => [
+          policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth })),
+        ]),
+      ).toThrow(/maxdepth must be a non-negative integer/i);
+    }
   });
 
   it("compiles gather/hopTo recursive relation with policy.exists(relation)", () => {
@@ -1166,7 +1165,7 @@ describe("permissions DSL", () => {
         },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
-        maxDepth: 3,
+        maxDepth: 0,
       });
 
       const hasResourceRole = (resource: unknown, role: string) =>
@@ -1198,6 +1197,10 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation IR join.");
     }
     expect(using.rel.input.input.left.type).toBe("Gather");
+    if (using.rel.input.input.left.type !== "Gather") {
+      throw new Error("Expected recursive relation IR.");
+    }
+    expect(using.rel.input.input.left.maxDepth).toBe(0);
   });
 
   it("lowers hop relation plans to relation IR join + project", () => {

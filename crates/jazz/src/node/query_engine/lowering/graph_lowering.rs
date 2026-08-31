@@ -931,7 +931,7 @@ fn lower_recursive_relation_cached(
     let truncate_at_max_iters = matches!(relation.bound, RecursionBound::MaxDepth(_));
     let max_iters = match relation.bound {
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
-        RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
+        RecursionBound::MaxDepth(max_depth) => max_depth,
     };
     if seed.fields != step.fields {
         return Err(UnsupportedReason::Operator(

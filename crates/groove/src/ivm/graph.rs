@@ -548,7 +548,7 @@ impl GraphBuilder {
     ///
     /// Unlike [`Self::recursive`]'s non-convergence guard, reaching this bound
     /// discards the next frontier and returns every fact accumulated through
-    /// `max_iters` recursive steps.
+    /// `max_iters` recursive steps. A zero bound returns only the seed.
     pub fn recursive_bounded(
         seed: GraphBuilder,
         step: GraphBuilder,

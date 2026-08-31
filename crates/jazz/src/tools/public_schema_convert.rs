@@ -1837,13 +1837,7 @@ fn lower_gather_rel(
         Some(seed)
     };
     let max_depth = match bound {
-        RelRecursionBound::MaxDepth(depth) if *depth > 0 => *depth,
-        RelRecursionBound::MaxDepth(_) => {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
-                "Gather relation policies require a positive MaxDepth",
-            ));
-        }
+        RelRecursionBound::MaxDepth(depth) => *depth,
         RelRecursionBound::Fixpoint => {
             return Err(err(
                 format!("$.{}.{}", table.as_str(), path),
