@@ -136,7 +136,7 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("forwards the logical base so the overlay resolves exactly the host physical namespace", async () => {
+  it("publishes the exact non-secret host physical namespace for the overlay", async () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({
       getConfig: () => ({
@@ -158,10 +158,16 @@ describe("installInspectorHost", () => {
       driver: { type: "persistent", dbName: "a" },
     });
     expect(config.cookieSession).toBeUndefined();
-    expect(config.runtimeSources).toBeUndefined();
-    expect(resolveDefaultPersistentDbName(config)).toBe(
-      resolveDefaultPersistentDbName((fake.db as any).getConfig()),
+    const expectedPhysicalDbName = resolveDefaultPersistentDbName((fake.db as any).getConfig());
+    expect(config.runtimeSources).toEqual({
+      inspectorHostPhysicalDbName: expectedPhysicalDbName,
+    });
+    expect(resolveDefaultPersistentDbName(config)).toBe(expectedPhysicalDbName);
+    expect(decodeURIComponent(config.runtimeSources!.inspectorHostPhysicalDbName!)).toContain(
+      '"auth":{"kind":"system"}',
     );
+    expect(JSON.stringify(config.runtimeSources)).not.toContain(config.secret);
+    expect(JSON.stringify(config.runtimeSources)).not.toContain(config.adminSecret);
     await (window as any)[INSPECTOR_HOST_GLOBAL].openControlPort();
     expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });
