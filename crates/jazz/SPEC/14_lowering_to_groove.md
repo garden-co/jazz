@@ -93,6 +93,19 @@ the semantic identity of a case is its authority-allocated identity:
 GlobalPhysicalEnumVariantId(UUID)
 ```
 
+`GlobalEnumCaseId` stores the introducing authored ordinal as `u32`, which matches
+payload-enum tags. Payload enums are not limited to 256 cases. Scalar enums keep
+their `u8` discriminants: lowering must reject a physical scalar registry or
+scalar remap position that does not fit in `u8`. Widening the qualified identity
+must not relax that scalar encoding boundary.
+
+The scalar limit is a catalogue-admission invariant, not a late storage error.
+Before a lineage reserves a pending/staged record, activates a schema, or consumes
+physical ids, the node MUST compute the union of root and nested scalar case
+identities for every reused physical occurrence. A union of 257 or more cases
+MUST reject atomically; reopening the store MUST reveal neither the rejected
+schema nor pending/staged residue.
+
 An inherited case retains the UUID allocated by its introducing publication.
 For example, if a base schema declares `draft` and `published`, concurrent
 children A and B may both declare authored ordinal `2`, respectively `archived`
@@ -128,6 +141,17 @@ Payload-enum projection preserves the selected payload record while remapping
 its case tag. Same-name cases from independent schemas are distinct identities;
 incompatible payload layouts reject rather than merge. The same translation
 recurs at nested enum occurrences.
+
+The `u32` payload tag is preserved by schema defaults and by every production
+row boundary: history/current/ahead-current writes, current and query projection,
+lens remapping, and durable reopen. These paths MUST accept authored and physical
+case ordinal 256 (including recursively nested payload values); no intermediate
+representation may narrow it to the scalar enum's `u8` width.
+
+The public payload-enum v1 boundary MUST continue to admit only scalar payload
+fields; arrays, rows, and nested enums remain unsupported. Recursive ordinal
+translation is an internal physical/catalogue invariant and does not expand the
+public schema surface.
 
 Projection from a physical case back into an authored schema is non-total. If a
 query does not read, filter, join, order, group, authorize, or otherwise require

@@ -3153,6 +3153,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn converts_payload_enums_with_more_than_u8_cases_and_a_supported_scalar_default() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("events").column_with_default(
+                    "event",
+                    ColumnType::EnumPayload {
+                        cases: (0..257)
+                            .map(|ordinal| EnumCaseDescriptor {
+                                name: format!("case-{ordinal}"),
+                                fields: (ordinal == 256)
+                                    .then(|| vec![ColumnDescriptor::new("text", ColumnType::Text)])
+                                    .unwrap_or_default(),
+                            })
+                            .collect(),
+                    },
+                    Value::Enum {
+                        case: "case-256".to_owned(),
+                        values: vec![Value::Text("wide default".to_owned())],
+                    },
+                ),
+            )
+            .build();
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .into_runtime()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+        let event = table
+            .columns
+            .iter()
+            .find(|column| column.name == "event")
+            .unwrap();
+        let GrooveColumnType::Enum(payload_enum) = &event.column_type else {
+            panic!("payload enum column expected");
+        };
+
+        assert_eq!(payload_enum.cases.len(), 257);
+        assert_eq!(payload_enum.tag("case-256").unwrap(), 256);
+        assert_eq!(
+            &payload_enum.cases[256].payload.fields()[0].value_type,
+            &GrooveColumnType::String
+        );
+        let Some(GrooveValue::Enum(default)) = &event.default else {
+            panic!("payload enum default expected");
+        };
+        assert_eq!(default.tag(), 256);
+        assert_eq!(
+            default.record().to_values().unwrap(),
+            vec![GrooveValue::String("wide default".to_owned())]
+        );
+    }
+
     // This is an internal converter test because public EnumPayload construction
     // is intentionally not exposed until the client facade can round-trip enum
     // values. It proves schema-default admission walks the selected case fields.
@@ -3254,7 +3309,7 @@ mod tests {
             ),
             (
                 ColumnDescriptor::new("nested", nested_payload_enum),
-                "must be scalar columns",
+                "nested enums are not supported",
             ),
         ];
 
