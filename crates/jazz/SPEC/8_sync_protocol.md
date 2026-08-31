@@ -98,6 +98,19 @@ including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
 derived on decode), replacing postcard's former field-by-field representation.
 
+**Decision, 2026-08-31 — relay-delegated policy snapshots are v1 fields.**
+`Subscribe` now ends with `delegated_session` and `FetchRowVersions` ends with
+`delegated_session`; each is an optional `(identity, claims)` snapshot. `None`
+is the ordinary direct-session form. `Some` is accepted only on an admitted
+`TrustedBackend` link whose authenticated transport identity is `SYSTEM`; a
+session/client link carrying it is rejected before shape admission or repair
+serving. A relay sends this immutable snapshot for each upstream coverage or
+repair request it owns, so two sessions with equal query bindings but distinct
+claims cannot share an evaluator or repair authorization. The receiver scopes
+both initial evaluation and row-version repair to that snapshot. `SYSTEM` is
+never a delegated subject. This is a deliberate redefinition of the sole,
+unreleased v1 layout: there is no old-shape decoder or compatibility path.
+
 ### 8.1.1 Frozen wire-protocol v1 byte contract
 
 `WireFrame` and its `WireEnvelope.payload` are each **one complete postcard

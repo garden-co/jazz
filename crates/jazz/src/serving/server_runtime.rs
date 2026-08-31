@@ -1475,6 +1475,7 @@ mod tests {
             },
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }));
         assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
         assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");

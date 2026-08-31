@@ -1297,6 +1297,7 @@ fn register_binding(
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     );
     let delivered = ctx.recv("core");
@@ -1329,6 +1330,7 @@ fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, b
             },
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .unwrap();
