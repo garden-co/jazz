@@ -124,6 +124,15 @@ export interface ForegroundNodeLease {
   confirmedTxTime: bigint;
 }
 
+/**
+ * Narrow durable-lease diagnostic used by browser receipts. It deliberately
+ * answers only the state of one known node, rather than exposing the private
+ * foreground lease-pool representation or its other occupants.
+ *
+ * @internal
+ */
+export type ForegroundNodeLeaseNodeState = "active" | "reusable" | "retired" | "missing";
+
 type StoredForegroundNodeLease = {
   leaseId: string;
   node: ArrayBuffer;
@@ -298,6 +307,34 @@ export class IndexedDbPageStore {
       const [lease] = pool.active.splice(index, 1);
       if (lease) pool.retired.push(lease.node);
     });
+  }
+
+  /** @internal Narrow browser-receipt diagnostic; see `ForegroundNodeLeaseNodeState`. */
+  async foregroundNodeLeaseNodeStateForTesting(
+    node: Uint8Array,
+  ): Promise<ForegroundNodeLeaseNodeState> {
+    if (node.byteLength !== INDEXEDDB_REPLICA_NODE_BYTES) {
+      throw new Error("Invalid IndexedDB foreground node identity");
+    }
+    this.assertValid();
+    const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const done = transactionDone(tx);
+    try {
+      const value = await requestResult(
+        tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_FOREGROUND_NODE_LEASES_KEY),
+      );
+      await done;
+      if (value === undefined) return "missing";
+      const pool = decodeForegroundNodeLeasePool(value);
+      const nodeKey = bytesKey(node);
+      if (pool.active.some((lease) => bytesKey(lease.node) === nodeKey)) return "active";
+      if (pool.reusable.some((lease) => bytesKey(lease.node) === nodeKey)) return "reusable";
+      if (pool.retired.some((retired) => bytesKey(retired) === nodeKey)) return "retired";
+      return "missing";
+    } catch (error) {
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   /**

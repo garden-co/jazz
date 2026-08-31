@@ -20,7 +20,6 @@ import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
-  INDEXEDDB_FOREGROUND_NODE_LEASES_KEY,
   INDEXEDDB_STORAGE_MANIFEST,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
@@ -308,6 +307,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const port = worker.port;
     port.start();
     let unexpectedlyIssued = false;
+    let allocatedNode: Uint8Array | null = null;
     try {
       await withTimeout(
         new Promise<void>((resolve, reject) => {
@@ -316,6 +316,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
           ) => {
             if (event.data?.type === "foreground-node-lease-ready" && event.data.node) {
               unexpectedlyIssued = true;
+            }
+            if (event.data?.type === "foreground-node-lease-test-allocated" && event.data.node) {
+              allocatedNode = event.data.node.slice();
+              // Follow the durable allocation receipt rather than a wall-clock
+              // guess: sealed CI can otherwise cancel during root admission,
+              // before a lease exists to retire.
+              port.postMessage({ type: "cancel-foreground-node-lease" });
             }
             if (event.data?.type === "foreground-node-lease-error") {
               port.removeEventListener("message", onMessage);
@@ -333,9 +340,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
             storageOwner,
             testDelayAfterLeaseAllocationMs: 250,
           });
-          // The worker has entered a real IndexedDB lease allocation; its
-          // delayed delivery leaves a deterministic cancellation window.
-          setTimeout(() => port.postMessage({ type: "cancel-foreground-node-lease" }), 50);
         }),
         5_000,
         "in-flight foreground lease cancellation was not acknowledged after cleanup",
@@ -344,14 +348,24 @@ describe("SharedWorker bridge with IndexedDB", () => {
       port.close();
     }
     expect(unexpectedlyIssued).toBe(false);
+    expect(allocatedNode).not.toBeNull();
 
     // Cancellation releases the now-idle physical realm. Let the browser
     // finish that close before opening its successor generation.
     await sleep(100);
 
-    const pool = await rawForegroundLeasePool(dbName);
-    expect(pool.active).toEqual([]);
-    expect(pool.retired).toHaveLength(1);
+    // Do not decode the private manifest value in this sealed-artifact
+    // receipt. The narrow diagnostic proves this exact allocated node was
+    // durably retired, and fails if cancellation only acknowledges a late
+    // allocation without performing its required cleanup.
+    const pageStore = await IndexedDbPageStore.open(dbName);
+    try {
+      expect(
+        await pageStore.foregroundNodeLeaseNodeStateForTesting(allocatedNode as Uint8Array),
+      ).toBe("retired");
+    } finally {
+      pageStore.close();
+    }
 
     // A cancelled-but-issued identity is retired, never put back into the
     // reusable pool. A later foreground must receive a distinct node.
@@ -361,7 +375,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "foreground lease cancellation left the physical root unavailable",
     );
     try {
-      expect(successor.node).not.toEqual(pool.retired[0]);
+      expect(successor.node).not.toEqual(allocatedNode);
     } finally {
       await successor.retire();
     }
@@ -3520,33 +3534,6 @@ async function rawStorageRecords(name: string): Promise<Record<string, unknown>>
   await transactionDone(transaction);
   database.close();
   return records;
-}
-
-async function rawForegroundLeasePool(
-  name: string,
-): Promise<{ active: unknown[]; reusable: unknown[]; retired: unknown[] }> {
-  const database = await requestResult(indexedDB.open(name));
-  const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
-  const done = transactionDone(transaction);
-  const value = await requestResult(
-    transaction
-      .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
-      .get(INDEXEDDB_FOREGROUND_NODE_LEASES_KEY),
-  );
-  await done;
-  database.close();
-  if (!value || typeof value !== "object") {
-    throw new Error("expected foreground node lease pool");
-  }
-  const pool = value as Partial<{ active: unknown[]; reusable: unknown[]; retired: unknown[] }>;
-  if (
-    !Array.isArray(pool.active) ||
-    !Array.isArray(pool.reusable) ||
-    !Array.isArray(pool.retired)
-  ) {
-    throw new Error("expected valid foreground node lease pool");
-  }
-  return { active: pool.active, reusable: pool.reusable, retired: pool.retired };
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {

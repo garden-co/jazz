@@ -398,6 +398,10 @@ async function acquireForegroundNodeLease(
         if (!Number.isSafeInteger(delay) || delay < 0 || delay > 1_000) {
           throw new Error("Invalid foreground lease test delay");
         }
+        post(port, {
+          type: "foreground-node-lease-test-allocated",
+          node: allocatedLease.node.slice(),
+        } satisfies BrowserForegroundNodeLeaseAcquireResponse);
         await new Promise<void>((resolve) => setTimeout(resolve, delay));
       }
       return allocatedLease;

@@ -51,6 +51,12 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       /** Canonical decimal u64: never a lossy JS number. */
       confirmedTxTime: string;
     }
+  /**
+   * @internal Deterministic browser-receipt seam. This is emitted only for an
+   * acquire request that opts into `testDelayAfterLeaseAllocationMs`, after
+   * the durable lease-pool transaction commits and before its delayed reply.
+   */
+  | { type: "foreground-node-lease-test-allocated"; node: Uint8Array }
   | { type: "foreground-node-lease-error"; message: string }
   /**
    * The worker observed cancellation and either had no lease to clean up or
