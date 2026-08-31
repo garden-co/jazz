@@ -53,6 +53,28 @@ const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT = 10;
 const REACHABLE_POLICY_MAX_DEPTH_DEFAULT = 8;
 const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP = 64;
 const PERMISSION_EXPRESSION_BRAND: unique symbol = Symbol("jazz.permission-expression");
+const POLICY_EXPRESSION_DISCRIMINATORS: Record<PolicyExpr["type"], true> = {
+  Cmp: true,
+  SessionCmp: true,
+  IsNull: true,
+  SessionIsNull: true,
+  IsNotNull: true,
+  SessionIsNotNull: true,
+  Contains: true,
+  SessionContains: true,
+  In: true,
+  InList: true,
+  SessionInList: true,
+  Exists: true,
+  ExistsRel: true,
+  Inherits: true,
+  InheritsReferencing: true,
+  And: true,
+  Or: true,
+  Not: true,
+  True: true,
+  False: true,
+};
 
 /**
  * An opaque condition produced by the permissions DSL.
@@ -832,12 +854,12 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
   constructor(
     private readonly table: string,
-    private readonly rowColumns: ReadonlySet<string>,
+    private readonly hasTypeColumn: boolean,
     private readonly registerRule?: (ruleLike: RuleLike) => void,
   ) {}
 
   where(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): Rule {
-    const condition = resolveWhereInput(input, this.rowColumns);
+    const condition = resolveWhereInput(input, this.hasTypeColumn);
     const rule: Rule = {
       table: this.table,
       action: "update",
@@ -857,13 +879,13 @@ class UpdateRuleBuilder<WhereInput, Row> {
   }
 
   whereOld(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): this {
-    this.oldCondition = resolveWhereInput(input, this.rowColumns);
+    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn);
     this.registerBuilder();
     return this;
   }
 
   whereNew(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): this {
-    this.newCondition = resolveWhereInput(input, this.rowColumns);
+    this.newCondition = resolveWhereInput(input, this.hasTypeColumn);
     this.registerBuilder();
     return this;
   }
@@ -903,7 +925,7 @@ export function definePermissions<TApp extends AppLike>(
   factory: (ctx: PolicyContext<TApp>) => void,
 ): CompiledPermissions {
   const fkReferencesByTable = collectFkReferencesByTable(app);
-  const columnsByTable = collectColumnNamesByTable(app);
+  const tablesWithTypeColumn = collectTablesWithTypeColumn(app);
   const relationsByTable = collectRelationsByTable(app);
   const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
   const rules: RuleLike[] = [];
@@ -916,7 +938,7 @@ export function definePermissions<TApp extends AppLike>(
     rules.push(ruleLike);
   };
   const ctx = {
-    policy: buildPolicyContext(tableNames, relationsByTable, columnsByTable, collectRule),
+    policy: buildPolicyContext(tableNames, relationsByTable, tablesWithTypeColumn, collectRule),
     anyOf,
     allOf,
     raw: rawPermissionExpression,
@@ -952,16 +974,24 @@ function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, strin
   return result;
 }
 
-function collectColumnNamesByTable(app: AppLike): Map<string, ReadonlySet<string>> {
-  const result = new Map<string, ReadonlySet<string>>();
-  const schema = (app as { wasmSchema?: unknown }).wasmSchema;
+function collectTablesWithTypeColumn(app: AppLike): ReadonlySet<string> {
+  const result = new Set<string>();
+  if (!("wasmSchema" in app)) {
+    return result;
+  }
+  const schema = app.wasmSchema;
   if (!schema || typeof schema !== "object") {
     return result;
   }
 
-  for (const [tableName, table] of Object.entries(schema as WasmSchema)) {
-    if (table && Array.isArray(table.columns)) {
-      result.set(tableName, new Set(table.columns.map((column) => column.name)));
+  const typedSchema = schema as WasmSchema;
+  for (const [tableName, table] of Object.entries(typedSchema)) {
+    if (
+      table &&
+      Array.isArray(table.columns) &&
+      table.columns.some(({ name }) => name === "type")
+    ) {
+      result.add(tableName);
     }
   }
   return result;
@@ -989,7 +1019,7 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
 function buildPolicyContext(
   tableNames: string[],
   relationsByTable: Map<string, Relation[]>,
-  columnsByTable: Map<string, ReadonlySet<string>>,
+  tablesWithTypeColumn: ReadonlySet<string>,
   collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
@@ -997,7 +1027,7 @@ function buildPolicyContext(
     context[table] = buildTablePolicyBuilder(
       table,
       relationsByTable,
-      columnsByTable.get(table) ?? new Set(),
+      tablesWithTypeColumn.has(table),
       collectRule,
     );
   }
@@ -1014,7 +1044,7 @@ function buildPolicyContext(
 function buildTablePolicyBuilder(
   table: string,
   relationsByTable: Map<string, Relation[]>,
-  rowColumns: ReadonlySet<string>,
+  hasTypeColumn: boolean,
   collectRule: (ruleLike: RuleLike) => void,
 ): Record<string, unknown> {
   const registerRule = (rule: Rule): Rule => {
@@ -1023,7 +1053,11 @@ function buildTablePolicyBuilder(
   };
   const read: ActionBuilder<unknown, unknown> = {
     where: (input) =>
-      registerRule({ table, action: "read", using: resolveWhereInput(input, rowColumns) }),
+      registerRule({
+        table,
+        action: "read",
+        using: resolveWhereInput(input, hasTypeColumn),
+      }),
     always: () => read.where(alwaysCondition()),
     never: () => read.where(neverCondition()),
   };
@@ -1032,19 +1066,23 @@ function buildTablePolicyBuilder(
       registerRule({
         table,
         action: "insert",
-        withCheck: resolveWhereInput(input, rowColumns),
+        withCheck: resolveWhereInput(input, hasTypeColumn),
       }),
     always: () => insert.where(alwaysCondition()),
     never: () => insert.where(neverCondition()),
   };
   const del: ActionBuilder<unknown, unknown> = {
     where: (input) =>
-      registerRule({ table, action: "delete", using: resolveWhereInput(input, rowColumns) }),
+      registerRule({
+        table,
+        action: "delete",
+        using: resolveWhereInput(input, hasTypeColumn),
+      }),
     always: () => del.where(alwaysCondition()),
     never: () => del.where(neverCondition()),
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
-    new UpdateRuleBuilder(table, rowColumns, collectRule);
+    new UpdateRuleBuilder(table, hasTypeColumn, collectRule);
   const managedByCreator = (): void => {
     read.where(CREATOR_CONDITION);
     insert.where(CREATOR_CONDITION);
@@ -1907,14 +1945,14 @@ export function createSessionContext(): SessionContext {
     __jazzPermissionKind: "session-ref",
     path,
   });
-  const whereBuilder: SessionWhereBuilder = Object.assign(
+  const whereBuilder = Object.assign(
     (input: Record<string, unknown>): SessionWhereCondition =>
       brandPermissionExpression({
         __jazzPermissionKind: "session-where",
         where: normalizeWhereObject(input),
       }),
     claimRef("where"),
-  );
+  ) satisfies SessionWhereBuilder;
   return new Proxy({} as SessionContext, {
     get(_target, prop, _receiver) {
       if (typeof prop === "string") {
@@ -2044,10 +2082,10 @@ function normalizeWhereObject(input: unknown): Record<string, unknown> {
   return input;
 }
 
-function resolveWhereInput(input: unknown, rowColumns: ReadonlySet<string>): Condition {
+function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
   if (typeof input === "function") {
     const result = input(createRowContext());
-    return resolveWhereInput(result, rowColumns);
+    return resolveWhereInput(result, hasTypeColumn);
   }
   if (isPolicyExpr(input)) {
     return input;
@@ -2065,10 +2103,15 @@ function resolveWhereInput(input: unknown, rowColumns: ReadonlySet<string>): Con
     return brandPermissionExpression({
       __jazzPermissionKind: "compound",
       op: input.op,
-      conditions: input.conditions.map((condition) => resolveWhereInput(condition, rowColumns)),
+      conditions: input.conditions.map((condition) => resolveWhereInput(condition, hasTypeColumn)),
     });
   }
   if (isPlainObject(input)) {
+    if (!hasTypeColumn && isPolicyExpressionDiscriminator(input.type)) {
+      throw new Error(
+        `Unbranded permission condition with policy expression discriminator "${input.type}" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).`,
+      );
+    }
     return brandPermissionExpression({
       __jazzPermissionKind: "where-object",
       where: normalizeWhereObject(input),
@@ -2788,11 +2831,15 @@ function isPlainObject(value: unknown): value is PlainObject {
 function isBrandedPermissionExpression(
   input: unknown,
 ): input is PlainObject & PermissionExpressionInput {
-  return isPlainObject(input) && input[PERMISSION_EXPRESSION_BRAND] === true;
+  return isPlainObject(input) && Reflect.get(input, PERMISSION_EXPRESSION_BRAND) === true;
 }
 
 function isPolicyExpr(input: unknown): input is PermissionExpression {
   return isBrandedPermissionExpression(input) && typeof input.type === "string";
+}
+
+function isPolicyExpressionDiscriminator(input: unknown): input is PolicyExpr["type"] {
+  return typeof input === "string" && Object.hasOwn(POLICY_EXPRESSION_DISCRIMINATORS, input);
 }
 
 function isSessionRefValue(input: unknown): input is SessionRefValue {

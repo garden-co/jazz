@@ -441,6 +441,17 @@ describe("permissions DSL", () => {
     );
   });
 
+  it("rejects an unbranded policy expression on a table without a type column", () => {
+    // Simulate plain JavaScript or an outdated structurally typed helper bypassing the type brand.
+    const unbrandedExpression = { type: "True" } as unknown as PermissionExpressionInput;
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => [policy.todos.allowRead.where(unbrandedExpression)]),
+    ).toThrowError(
+      'Unbranded permission condition with policy expression discriminator "True" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).',
+    );
+  });
+
   it("treats a type column as row data inside compound conditions", () => {
     const compiled = definePermissions(documentApp, ({ policy, allOf }) => [
       policy.documents.allowRead.where(allOf([{ type: "True" }, { title: "Visible" }])),
