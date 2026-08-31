@@ -2962,16 +2962,19 @@ where
                                 let error = crate::node::Error::UnsupportedSyncMessage(
                                     "peer shape registration limit exceeded",
                                 );
-                                reject_server_subscription_failure(
-                                    &mut *self.transport,
-                                    register_shape_rejection_subscription(
-                                        shape_id,
-                                        read_view_key,
+                                queue_direct_control(
+                                    &mut self.pending_control_responses,
+                                    server_subscription_failure_rejection_message(
+                                        register_shape_rejection_subscription(
+                                            shape_id,
+                                            read_view_key,
+                                        ),
+                                        &error,
                                     ),
-                                    &error,
-                                )
-                                .map_err(transport_error)?;
-                                continue;
+                                );
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                flush_subscriber_controls_or_stop!(self, peer);
+                                return Ok(true);
                             }
                             if let Err(error) = ensure_supported_register_shape_options(
                                 &opts,

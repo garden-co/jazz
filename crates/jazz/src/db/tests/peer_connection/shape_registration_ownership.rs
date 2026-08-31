@@ -36,7 +36,6 @@ fn subscribe_message(shape: &ValidatedQuery, usage_seed: u8) -> (SyncMessage, Su
     )
 }
 
-
 fn shape_unsubscribe(shape: &ValidatedQuery) -> SyncMessage {
     SyncMessage::Unsubscribe {
         subscription: SubscriptionKey {
@@ -58,17 +57,31 @@ fn repeated_anonymous_shape_registration_is_reclaimed_by_one_unsubscribe() {
     let subscriber =
         server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x72; 16]));
 
-    client_transport.send(register_shape_message(&shape)).unwrap();
+    client_transport
+        .send(register_shape_message(&shape))
+        .unwrap();
     subscriber.borrow_mut().tick().unwrap();
-    client_transport.send(register_shape_message(&shape)).unwrap();
+    client_transport
+        .send(register_shape_message(&shape))
+        .unwrap();
     subscriber.borrow_mut().tick().unwrap();
-    assert!(server.node().borrow().registered_shape(shape.shape_id()).is_some());
+    assert!(
+        server
+            .node()
+            .borrow()
+            .registered_shape(shape.shape_id())
+            .is_some()
+    );
 
     client_transport.send(shape_unsubscribe(&shape)).unwrap();
     subscriber.borrow_mut().tick().unwrap();
 
     assert!(
-        server.node().borrow().registered_shape(shape.shape_id()).is_none(),
+        server
+            .node()
+            .borrow()
+            .registered_shape(shape.shape_id())
+            .is_none(),
         "repeating one peer's anonymous registration must not create an unreclaimable refcount"
     );
 }
@@ -91,9 +104,13 @@ fn shared_shape_survives_first_owner_unsubscribe_and_leaves_with_last_owner() {
         AuthorSubject::for_test_bytes([0x75; 16]),
     );
 
-    first_transport.send(register_shape_message(&shape)).unwrap();
+    first_transport
+        .send(register_shape_message(&shape))
+        .unwrap();
     first.borrow_mut().tick().unwrap();
-    second_transport.send(register_shape_message(&shape)).unwrap();
+    second_transport
+        .send(register_shape_message(&shape))
+        .unwrap();
     second.borrow_mut().tick().unwrap();
     let (first_subscribe, first_subscription) = subscribe_message(&shape, 0x74);
     first_transport.send(first_subscribe).unwrap();
@@ -102,7 +119,6 @@ fn shared_shape_survives_first_owner_unsubscribe_and_leaves_with_last_owner() {
     second_transport.send(second_subscribe).unwrap();
     second.borrow_mut().tick().unwrap();
 
-
     first_transport
         .send(SyncMessage::Unsubscribe {
             subscription: first_subscription,
@@ -110,7 +126,11 @@ fn shared_shape_survives_first_owner_unsubscribe_and_leaves_with_last_owner() {
         .unwrap();
     first.borrow_mut().tick().unwrap();
     assert!(
-        server.node().borrow().registered_shape(shape.shape_id()).is_some(),
+        server
+            .node()
+            .borrow()
+            .registered_shape(shape.shape_id())
+            .is_some(),
         "one peer's unsubscribe must not drop a shared shape still owned by another peer"
     );
 
@@ -121,7 +141,11 @@ fn shared_shape_survives_first_owner_unsubscribe_and_leaves_with_last_owner() {
         .unwrap();
     second.borrow_mut().tick().unwrap();
     assert!(
-        server.node().borrow().registered_shape(shape.shape_id()).is_none(),
+        server
+            .node()
+            .borrow()
+            .registered_shape(shape.shape_id())
+            .is_none(),
         "the final peer owner must reclaim the shared installed shape"
     );
 }
@@ -150,27 +174,40 @@ fn unsubscribed_parked_shape_does_not_install_when_its_catalogue_arrives() {
     let subscriber =
         server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7a; 16]));
 
-    client_transport.send(register_shape_message(&shape)).unwrap();
+    client_transport
+        .send(register_shape_message(&shape))
+        .unwrap();
     subscriber.borrow_mut().tick().unwrap();
-    assert!(server.node().borrow().registered_shape(shape.shape_id()).is_none());
+    assert!(
+        server
+            .node()
+            .borrow()
+            .registered_shape(shape.shape_id())
+            .is_none()
+    );
 
     client_transport.send(shape_unsubscribe(&shape)).unwrap();
     subscriber.borrow_mut().tick().unwrap();
 
-    let publication = SchemaLineagePublication::new(
-        evolved_version.clone(),
-        MigrationLens::new(
-            base.version_id(),
-            evolved_version.id,
-            vec![TableLens {
-                source_table: "todos".to_owned(),
-                target_table: "todos".to_owned(),
-                ops: vec![],
-            }],
-        ),
-        ["notes"],
-        Vec::<String>::new(),
-    );
+    let publication = server
+        .node()
+        .borrow()
+        .author_schema_lineage_publication(
+            evolved_version.clone(),
+            MigrationLens::new(
+                base.version_id(),
+                evolved_version.id,
+                vec![TableLens {
+                    source_table: "todos".to_owned(),
+                    target_table: "todos".to_owned(),
+                    ops: vec![],
+                }],
+            )
+            .expect("valid migration lens"),
+            ["notes"],
+            Vec::<String>::new(),
+        )
+        .unwrap();
     let node = server.node();
     let mut node = node.borrow_mut();
     let catalogue_seq = node.active_catalogue_seq().saturating_add(1);
@@ -186,7 +223,6 @@ fn unsubscribed_parked_shape_does_not_install_when_its_catalogue_arrives() {
         "catalogue arrival must not resurrect a parked shape after its final owner unsubscribed"
     );
 }
-
 
 // This stays internal because abrupt peer teardown has no public receipt for the
 // process-local registered-shape catalogue it must reclaim.
@@ -222,12 +258,8 @@ fn disconnect_reclaims_all_shapes_owned_by_the_departed_peer() {
 #[test]
 fn same_cycle_reattach_reannounces_shape_after_unsubscribe() {
     let schema = schema();
-    let client = open_db(
-        0x7b,
-        AuthorSubject::for_test_bytes([0x7b; 16]),
-        &schema,
-    );
-    let query = Query::from("todos").filter(eq(col("title"), param("reattach_title")));
+    let client = open_db(0x7b, AuthorSubject::for_test_bytes([0x7b; 16]), &schema);
+    let query = Query::from("todos").filter(eq(col("title"), lit("reattach")));
     let prepared = prepared(&client, &query);
     let (client_transport, _server_transport, client_sent, _) = duplex_with_taps();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -286,7 +318,6 @@ fn same_cycle_reattach_reannounces_shape_after_unsubscribe() {
     );
 }
 
-
 // This stays internal because cardinality admission is a hostile-wire boundary;
 // public query APIs cannot forge an over-limit registration stream.
 #[test]
@@ -295,8 +326,8 @@ fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
     let server = open_core(0x78, AuthorSubject::SYSTEM, &schema);
     let mut peers = Vec::new();
 
-    for peer_index in 0..(EXPECTED_MAX_RETAINED_PEER_SHAPES
-        / EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER)
+    for peer_index in
+        0..(EXPECTED_MAX_RETAINED_PEER_SHAPES / EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER)
     {
         let (mut client_transport, server_transport) = duplex();
         let subscriber = server.accept_subscriber(
@@ -304,10 +335,11 @@ fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
             AuthorSubject::for_test_bytes([0x80 + peer_index as u8; 16]),
         );
         for shape_offset in 0..EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER {
-            let shape_index =
-                peer_index * EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER + shape_offset;
+            let shape_index = peer_index * EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER + shape_offset;
             let shape = distinct_shape(&schema, shape_index);
-            client_transport.send(register_shape_message(&shape)).unwrap();
+            client_transport
+                .send(register_shape_message(&shape))
+                .unwrap();
             subscriber.borrow_mut().tick().unwrap();
         }
         let retained = {
@@ -340,7 +372,13 @@ fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
         state.shape_registrations.len()
     };
     assert_eq!(retained, EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER);
-    assert!(server.node().borrow().registered_shape(peer_extra.shape_id()).is_none());
+    assert!(
+        server
+            .node()
+            .borrow()
+            .registered_shape(peer_extra.shape_id())
+            .is_none()
+    );
 
     let global_extra = distinct_shape(&schema, EXPECTED_MAX_RETAINED_PEER_SHAPES + 2);
     let (mut extra_transport, extra_server_transport) = duplex();
@@ -364,9 +402,16 @@ fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
         };
         state.shape_registrations.len()
     };
-    assert_eq!(retained, 0, "the over-limit shape must not reach peer retention");
+    assert_eq!(
+        retained, 0,
+        "the over-limit shape must not reach peer retention"
+    );
     assert!(
-        server.node().borrow().registered_shape(global_extra.shape_id()).is_none(),
+        server
+            .node()
+            .borrow()
+            .registered_shape(global_extra.shape_id())
+            .is_none(),
         "the over-limit shape must not reach global retention"
     );
 }
