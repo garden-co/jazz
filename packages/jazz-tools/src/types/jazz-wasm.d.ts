@@ -66,13 +66,7 @@ declare module "jazz-wasm" {
     base?: unknown;
   };
 
-  /** `branch` is the legacy alias for `head`; the two selector forms are exclusive. */
-  export type UpsertOptions = WriteOptions &
-    (
-      | { branch?: never; head?: never; base?: never }
-      | { branch?: never; head: unknown; base?: unknown }
-      | { branch: unknown; head?: never; base?: never }
-    );
+  export type UpsertOptions = UpdateOptions;
 
   export type DeleteOptions = UpdateOptions;
   export type RestoreOptions = WriteOptions & {
