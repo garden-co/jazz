@@ -729,7 +729,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
-  private readonly peerTransportWorkListeners = new Set<() => void>();
+  private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
@@ -880,7 +880,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.connectUpstream();
   }
 
-  onPeerTransportWork(listener: () => void): () => void {
+  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
     this.peerTransportWorkListeners.add(listener);
     return () => {
@@ -904,6 +904,11 @@ export class NativeRuntimeAdapter implements Runtime {
   notifyPeerTransportActivity(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.notifyPeerTransportActivity();
     this.peerTransportActivityEpoch += 1;
+    // External peer ingress can alter the result visible through every peer,
+    // including one whose evaluator pass began before this frame arrived.
+    // Require a distinct post-admission pass; routine end-of-pass work remains
+    // coalescible and therefore cannot create a self-sustaining pump loop.
+    this.notifyPeerTransportWork(true);
   }
 
   async progressPeerTransport(): Promise<void> {
@@ -3392,9 +3397,9 @@ export class NativeRuntimeAdapter implements Runtime {
     }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
-  private notifyPeerTransportWork(): void {
+  private notifyPeerTransportWork(requiresDistinctPass = false): void {
     for (const listener of this.peerTransportWorkListeners) {
-      listener();
+      listener(requiresDistinctPass);
     }
   }
 
