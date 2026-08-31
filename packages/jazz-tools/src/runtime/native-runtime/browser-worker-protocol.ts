@@ -36,6 +36,8 @@ export interface BrowserForegroundNodeLeaseAcquireRequest {
   storageOwner: string;
   /** @internal Browser-only scheduling seam for the real worker receipt. */
   testDelayAfterLeaseAllocationMs?: number;
+  /** @internal Unforgeable capability carried by the test worker URL. */
+  testCapability?: string;
 }
 
 /** Cancel a lease bootstrap that has not been handed to a foreground yet. */
@@ -51,18 +53,19 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       /** Canonical decimal u64: never a lossy JS number. */
       confirmedTxTime: string;
     }
-  /**
-   * @internal Deterministic browser-receipt seam. This is emitted only for an
-   * acquire request that opts into `testDelayAfterLeaseAllocationMs`, after
-   * the durable lease-pool transaction commits and before its delayed reply.
-   */
+  /** @internal Emitted only by a capability-bearing browser test worker. */
   | { type: "foreground-node-lease-test-allocated"; node: Uint8Array }
   | { type: "foreground-node-lease-error"; message: string }
   /**
    * The worker observed cancellation and either had no lease to clean up or
    * durably retired the lease that finished concurrently with cancellation.
    */
-  | { type: "foreground-node-lease-cancelled"; error?: string };
+  | {
+      type: "foreground-node-lease-cancelled";
+      error?: string;
+      /** @internal Test-only durable state; absent from ordinary worker replies. */
+      testLeaseState?: "active" | "reusable" | "retired" | "missing";
+    };
 
 export type BrowserForegroundNodeLeasePortRequest =
   | { type: "return-foreground-node-lease"; confirmedTxTime: string }

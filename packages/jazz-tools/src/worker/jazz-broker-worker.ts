@@ -98,6 +98,9 @@ type PhysicalDatabaseOwner = {
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const workerRealmId = crypto.randomUUID();
+const foregroundLeaseTestCapability = new URL(workerGlobal.location.href).searchParams.get(
+  "jazzForegroundLeaseTestCapability",
+);
 const contexts = new Map<string, RuntimeContext>();
 const foregroundLeaseOwners = new Map<string, ForegroundLeaseOwner>();
 const physicalDatabaseOwners = new Map<string, PhysicalDatabaseOwner>();
@@ -223,6 +226,14 @@ async function acquireForegroundNodeLease(
   port: MessagePort,
   request: BrowserForegroundNodeLeaseAcquireRequest,
 ): Promise<void> {
+  // Test scheduling/observation is disabled in the normal worker artifact.
+  // A browser receipt starts a worker with a one-off random URL capability;
+  // an arbitrary same-origin port cannot enable this behavior by merely
+  // sending test-shaped protocol fields.
+  const isForegroundLeaseTest =
+    foregroundLeaseTestCapability !== null &&
+    request.testCapability === foregroundLeaseTestCapability &&
+    request.testDelayAfterLeaseAllocationMs !== undefined;
   let owner: ForegroundLeaseOwner | null = null;
   let lease: Awaited<ReturnType<IndexedDbPageStore["acquireForegroundNodeLease"]>> | null = null;
   let allocationPromise: Promise<
@@ -266,8 +277,12 @@ async function acquireForegroundNodeLease(
     owner.activeLeaseIds.delete(lease.leaseId);
     try {
       await owner.pageStore.retireForegroundNodeLease(lease.leaseId);
+      const testLeaseState = isForegroundLeaseTest
+        ? await owner.pageStore.foregroundNodeLeaseNodeState(lease.node)
+        : undefined;
       post(port, {
         type: "foreground-node-lease-cancelled",
+        ...(testLeaseState === undefined ? {} : { testLeaseState }),
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
     } catch (error) {
       // A failed retirement remains durably active and therefore fails closed;
@@ -393,7 +408,7 @@ async function acquireForegroundNodeLease(
       // This is an internal browser-receipt seam. It delays only delivery of
       // an already-durable allocation so the test can cancel in the exact
       // window where a lease exists but this handler has not observed it yet.
-      const delay = request.testDelayAfterLeaseAllocationMs;
+      const delay = isForegroundLeaseTest ? request.testDelayAfterLeaseAllocationMs : undefined;
       if (delay !== undefined) {
         if (!Number.isSafeInteger(delay) || delay < 0 || delay > 1_000) {
           throw new Error("Invalid foreground lease test delay");

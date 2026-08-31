@@ -300,19 +300,28 @@ describe("SharedWorker bridge with IndexedDB", () => {
       secret: generateAuthSecret(),
     });
     const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
-    const worker = new SharedWorker(
-      new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url),
-      { type: "module", name: `${workerName}:generation-0` },
-    );
+    const testCapability = crypto.randomUUID();
+    const workerUrl = new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url);
+    workerUrl.searchParams.set("jazzForegroundLeaseTestCapability", testCapability);
+    const worker = new SharedWorker(workerUrl, {
+      type: "module",
+      name: `${workerName}:generation-0`,
+    });
     const port = worker.port;
     port.start();
     let unexpectedlyIssued = false;
     let allocatedNode: Uint8Array | null = null;
+    let cancellationLeaseState: string | undefined;
     try {
       await withTimeout(
         new Promise<void>((resolve, reject) => {
           const onMessage = (
-            event: MessageEvent<{ type?: string; node?: Uint8Array; message?: string }>,
+            event: MessageEvent<{
+              type?: string;
+              node?: Uint8Array;
+              message?: string;
+              testLeaseState?: string;
+            }>,
           ) => {
             if (event.data?.type === "foreground-node-lease-ready" && event.data.node) {
               unexpectedlyIssued = true;
@@ -329,6 +338,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
               reject(new Error(event.data.message));
             }
             if (event.data?.type === "foreground-node-lease-cancelled") {
+              cancellationLeaseState = event.data.testLeaseState;
               port.removeEventListener("message", onMessage);
               resolve();
             }
@@ -339,6 +349,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
             dbName,
             storageOwner,
             testDelayAfterLeaseAllocationMs: 250,
+            testCapability,
           });
         }),
         5_000,
@@ -349,23 +360,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
     }
     expect(unexpectedlyIssued).toBe(false);
     expect(allocatedNode).not.toBeNull();
+    expect(cancellationLeaseState).toBe("retired");
 
     // Cancellation releases the now-idle physical realm. Let the browser
     // finish that close before opening its successor generation.
     await sleep(100);
-
-    // Do not decode the private manifest value in this sealed-artifact
-    // receipt. The narrow diagnostic proves this exact allocated node was
-    // durably retired, and fails if cancellation only acknowledges a late
-    // allocation without performing its required cleanup.
-    const pageStore = await IndexedDbPageStore.open(dbName);
-    try {
-      expect(
-        await pageStore.foregroundNodeLeaseNodeStateForTesting(allocatedNode as Uint8Array),
-      ).toBe("retired");
-    } finally {
-      pageStore.close();
-    }
 
     // A cancelled-but-issued identity is retired, never put back into the
     // reusable pool. A later foreground must receive a distinct node.
@@ -380,6 +379,59 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await successor.retire();
     }
   }, 15_000);
+
+  it("does not expose the foreground lease test seam to an ordinary worker client", async () => {
+    const dbName = uniqueDbName("ordinary-foreground-lease");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("ordinary-foreground-lease-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const worker = new SharedWorker(
+      new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-0` },
+    );
+    const port = worker.port;
+    port.start();
+    let sawTestAllocation = false;
+    try {
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          const onMessage = (event: MessageEvent<{ type?: string; message?: string }>) => {
+            if (event.data?.type === "foreground-node-lease-test-allocated") {
+              sawTestAllocation = true;
+            }
+            if (event.data?.type === "foreground-node-lease-error") {
+              port.removeEventListener("message", onMessage);
+              reject(new Error(event.data.message));
+            }
+            if (event.data?.type === "foreground-node-lease-ready") {
+              port.postMessage({ type: "retire-foreground-node-lease" });
+            }
+            if (event.data?.type === "foreground-node-lease-result") {
+              port.removeEventListener("message", onMessage);
+              resolve();
+            }
+          };
+          port.addEventListener("message", onMessage);
+          // These fields are syntactically valid protocol input, but without
+          // the random capability encoded in a test worker URL they are inert.
+          port.postMessage({
+            type: "acquire-foreground-node-lease",
+            dbName,
+            storageOwner,
+            testDelayAfterLeaseAllocationMs: 1_000,
+            testCapability: crypto.randomUUID(),
+          });
+        }),
+        5_000,
+        "ordinary foreground lease client did not finish",
+      );
+    } finally {
+      port.close();
+    }
+    expect(sawTestAllocation).toBe(false);
+  }, 10_000);
 
   it("fences a generation-advanced worker realm until its live predecessor releases the physical root", async () => {
     const appId = uniqueDbName("physical-worker-epoch-app");

@@ -125,7 +125,7 @@ export interface ForegroundNodeLease {
 }
 
 /**
- * Narrow durable-lease diagnostic used by browser receipts. It deliberately
+ * Narrow durable-lease state used by browser receipts. It deliberately
  * answers only the state of one known node, rather than exposing the private
  * foreground lease-pool representation or its other occupants.
  *
@@ -309,10 +309,8 @@ export class IndexedDbPageStore {
     });
   }
 
-  /** @internal Narrow browser-receipt diagnostic; see `ForegroundNodeLeaseNodeState`. */
-  async foregroundNodeLeaseNodeStateForTesting(
-    node: Uint8Array,
-  ): Promise<ForegroundNodeLeaseNodeState> {
+  /** @internal Narrow browser-worker receipt primitive; see `ForegroundNodeLeaseNodeState`. */
+  async foregroundNodeLeaseNodeState(node: Uint8Array): Promise<ForegroundNodeLeaseNodeState> {
     if (node.byteLength !== INDEXEDDB_REPLICA_NODE_BYTES) {
       throw new Error("Invalid IndexedDB foreground node identity");
     }
