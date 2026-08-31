@@ -1565,6 +1565,13 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
     client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
         .send(SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
             subscription,

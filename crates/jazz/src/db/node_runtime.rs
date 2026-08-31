@@ -1936,6 +1936,7 @@ where
                     peer,
                     served,
                     coverage_groups,
+                    shape_registrations,
                     scope_purposes,
                     scope_aggregates,
                     authority_scope_hydrations,
@@ -1962,6 +1963,8 @@ where
                             coverage_group_subscription_key(&coverage),
                         );
                     }
+                    node.release_shapes_for_peer(connection_epoch);
+                    shape_registrations.clear();
                     scope_aggregates.clear();
                     authority_scope_hydrations.clear();
                     (None, None, None, retired)
