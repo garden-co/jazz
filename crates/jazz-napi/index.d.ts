@@ -12,6 +12,18 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  /**
+   * Exact wire capabilities compiled into this native binding.
+   *
+   * The TypeScript WebSocket carrier uses this for its Hello instead of an
+   * independent feature list, so a package cannot advertise a codec this
+   * native artifact cannot decode.
+   */
+  wireFeatures(): number
+  requestInsertPermissionAdviceEncoded(table: string, cells: Uint8Array): string | PendingNativePermissionAdvice
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdviceEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): string | PendingNativePermissionAdvice
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array): string | PendingNativePermissionAdvice
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
   /**
@@ -88,6 +100,20 @@ export declare class NapiDb {
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   /** Read through an open transaction using the identity bound at begin. */
   allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Read through an open transaction as its identity bound at begin.
+   *
+   * The core verifies that `author` matches the capability retained by the
+   * transaction; this ABI exists so trusted-serving hosts never fall back
+   * to their ambient/default read identity.
+   */
+  allInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Materialize a relation snapshot through an open transaction's snapshot
+   * and staged overlay rather than the owning database's ordinary view.
+   */
+  allRelationSnapshotInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshotInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
@@ -120,6 +146,17 @@ export declare class NapiDb {
   mergeableTx(openTransactionId: string): Tx
   mergeableTxForIdentity(openTransactionId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
+}
+
+/**
+ * A JavaScript-thread-owned permission preflight which is waiting for an
+ * authenticated upstream authority.  Like pending reads, this remains on the
+ * owning JavaScript thread: NAPI's worker-pool promises require `Send`, while
+ * the request future deliberately owns thread-affine connection state.
+ */
+export declare class PendingNativePermissionAdvice {
+  poll(): string | null
+  cancel(): void
 }
 
 /**

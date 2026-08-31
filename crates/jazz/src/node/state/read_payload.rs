@@ -682,12 +682,21 @@ where
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> Result<TxTime, Error> {
-        let made_at = TxTime::tick(self.clock.tx_time, now_ms)?;
+        let made_at = TxTime::tick(
+            self.clock
+                .tx_time
+                .max(self.clock.reservation_high_water.get()),
+            now_ms,
+        )?;
         self.clock.tx_time = made_at;
+        self.clock.reservation_high_water.set(made_at);
         Ok(made_at)
     }
 
     fn merge_tx_time(&mut self, observed: TxTime) {
         self.clock.tx_time = self.clock.tx_time.max(observed);
+        self.clock
+            .reservation_high_water
+            .set(self.clock.reservation_high_water.get().max(observed));
     }
 }

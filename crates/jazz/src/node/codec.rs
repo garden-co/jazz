@@ -865,16 +865,8 @@ fn require_strictly_increasing(
 }
 
 pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>, Error> {
-    let public_schema = serde_json::to_vec(schema.schema.public_schema())
-        .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))?;
-    let length = u32::try_from(public_schema.len())
-        .map_err(|_| Error::InvalidStoredValue("catalogue public schema payload too large"))?;
-    let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
-    payload.push(CATALOGUE_SCHEMA_VERSION);
-    payload.extend_from_slice(schema.id.0.as_bytes());
-    payload.extend_from_slice(&length.to_le_bytes());
-    payload.extend_from_slice(&public_schema);
-    Ok(payload)
+    crate::protocol::canonical_catalogue_schema_v1_bytes(schema)
+        .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))
 }
 
 pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, Error> {
@@ -1538,6 +1530,12 @@ mod catalogue_payload_tests {
         let encoded = encode_catalogue_schema(&schema).unwrap();
         assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
         assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
+        // Internal format receipt: publication content addressing consumes this
+        // exact CATS V1 byte payload rather than a serde SchemaVersion layout.
+        assert_eq!(
+            hex::encode(&encoded),
+            "010c17f7ec32c55d97acc37a8aeda133760d0000007b227461626c6573223a7b7d7d"
+        );
         assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
     }
 

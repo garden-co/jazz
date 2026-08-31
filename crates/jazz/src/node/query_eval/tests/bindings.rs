@@ -278,6 +278,7 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
             &binding,
             source_shape.clone(),
             PreparedClaimBindingMode::Strict,
+            None,
         )
         .unwrap_or_else(|error| {
             panic!(

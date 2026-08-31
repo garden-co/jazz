@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "./runtime/context.js";
-import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
+import type { QueryBuilder, QueryOptions, SubscriptionHandle } from "./runtime/db.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,
@@ -19,7 +19,7 @@ type SubscribeCall = {
   query: QueryBuilder<any>;
   options?: QueryOptions;
   session?: Session;
-  unsubscribe: ReturnType<typeof vi.fn>;
+  unsubscribe: SubscriptionHandle;
 };
 
 type UnitHarness = {
@@ -31,6 +31,7 @@ type UnitHarness = {
   calls: SubscribeCall[];
   emit: (index: number, delta: SubscriptionDelta<Todo>) => void;
   setThrowOnSubscribe: (error: Error | null) => void;
+  setNextReadiness: (readiness: Promise<void> | null) => void;
 };
 
 function makeTodo(id: string, title = `todo-${id}`): Todo {
@@ -68,6 +69,7 @@ function createUnitHarness(
 ): UnitHarness {
   const calls: SubscribeCall[] = [];
   let throwOnSubscribe: Error | null = null;
+  let nextReadiness: Promise<void> | null = null;
 
   const db: {
     subscribeDelta<T extends { id: string }>(
@@ -75,18 +77,22 @@ function createUnitHarness(
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
       session?: Session,
-    ): () => void;
+    ): SubscriptionHandle;
   } = {
     subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
       session?: Session,
-    ): () => void {
+    ): SubscriptionHandle {
       if (throwOnSubscribe) {
         throw throwOnSubscribe;
       }
-      const unsubscribe = vi.fn();
+      const unsubscribe = vi.fn() as SubscriptionHandle;
+      if (nextReadiness) {
+        Object.defineProperty(unsubscribe, "ready", { value: nextReadiness });
+        nextReadiness = null;
+      }
       calls.push({
         callback: callback as (delta: SubscriptionDelta<any>) => void,
         query: query as QueryBuilder<any>,
@@ -117,6 +123,9 @@ function createUnitHarness(
     },
     setThrowOnSubscribe(error) {
       throwOnSubscribe = error;
+    },
+    setNextReadiness(readiness) {
+      nextReadiness = readiness;
     },
   };
 }
@@ -389,6 +398,28 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         data: undefined,
         error: setupError,
       });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14a asynchronous subscription admission failure marks entry rejected", async () => {
+    const harness = createUnitHarness();
+    const admissionError = new Error("browser storage open failed");
+    harness.setNextReadiness(Promise.reject(admissionError));
+
+    try {
+      const { entry } = harness.makeEntry();
+      const onError = vi.fn();
+      entry.subscribe({ onError });
+
+      await expect(entry.promise).rejects.toBe(admissionError);
+      expect(entry.state).toEqual({
+        status: "rejected",
+        data: undefined,
+        error: admissionError,
+      });
+      expect(onError).toHaveBeenCalledWith(admissionError);
     } finally {
       await harness.manager.shutdown();
     }

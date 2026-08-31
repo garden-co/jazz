@@ -7,11 +7,12 @@ export interface BrowserWorkerInitOptions {
   runtimeSources?: RuntimeSourcesConfig;
   schema: WasmSchema;
   dbName: string;
-  node: Uint8Array;
   author: Uint8Array;
   selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;
   appId: string;
+  /** Non-secret logical owner pinned to an explicitly selected physical IDB root. */
+  storageOwner: string;
   authSessionKey: string;
   serverUrl?: string;
   authJson: string;
@@ -26,6 +27,59 @@ export interface BrowserSharedWorkerConnectRequest {
   fingerprint: string;
   options: BrowserWorkerInitOptions;
 }
+
+/** Lease-only bootstrap that runs before the foreground schema is known. */
+export interface BrowserForegroundNodeLeaseAcquireRequest {
+  type: "acquire-foreground-node-lease";
+  dbName: string;
+  /** Exact durable owner that must admit the physical root before lease issue. */
+  storageOwner: string;
+  /** @internal Browser-only scheduling seam for the real worker receipt. */
+  testDelayBeforeLeaseAllocationMs?: number;
+  /** @internal Browser-only scheduling seam for the real worker receipt. */
+  testDelayAfterLeaseAllocationMs?: number;
+}
+
+/** Cancel a lease bootstrap that has not been handed to a foreground yet. */
+export interface BrowserForegroundNodeLeaseCancelRequest {
+  type: "cancel-foreground-node-lease";
+}
+
+export type BrowserForegroundNodeLeaseAcquireResponse =
+  | {
+      type: "foreground-node-lease-ready";
+      leaseId: string;
+      node: Uint8Array;
+      /** Canonical decimal u64: never a lossy JS number. */
+      confirmedTxTime: string;
+    }
+  /** @internal Emitted only by a capability-bearing browser test worker. */
+  | {
+      type: "foreground-node-lease-test-allocated";
+      node: Uint8Array;
+      /** @internal Test-worker realm marker, never shipped in production. */
+      workerRealmId: string;
+    }
+  | { type: "foreground-node-lease-error"; message: string }
+  /**
+   * The worker observed cancellation and either had no lease to clean up or
+   * durably retired the lease that finished concurrently with cancellation.
+   */
+  | {
+      type: "foreground-node-lease-cancelled";
+      error?: string;
+      /** @internal Test-only durable state; absent from ordinary worker replies. */
+      testLeaseState?: "active" | "reusable" | "retired" | "missing";
+    };
+
+export type BrowserForegroundNodeLeasePortRequest =
+  | { type: "return-foreground-node-lease"; confirmedTxTime: string }
+  | { type: "retire-foreground-node-lease" };
+
+export type BrowserForegroundNodeLeasePortEvent = {
+  type: "foreground-node-lease-result";
+  error?: string;
+};
 
 export type BrowserSharedWorkerConnectResponse =
   | { type: "worker-alive" }

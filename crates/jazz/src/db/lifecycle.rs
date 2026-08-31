@@ -1,11 +1,41 @@
 //! Database construction, schema views, write-state waiting, and connection controls.
 
 use super::*;
+use crate::time::TxTime;
 
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Test-only simulation of a live catalogue change that invalidates
+    /// prepared Groove handles while preserving received authority state.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn invalidate_groove_runtime_for_test(&self) {
+        self.node
+            .node
+            .borrow_mut()
+            .invalidate_groove_runtime_for_test();
+    }
+
+    /// Internal test inspection for the retry-payload ownership boundary.
+    /// Foreign rejections may be observed for live notification, but they may
+    /// not become this database's durable retry payload.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
+        self.node.has_retained_rejection_for_test(tx_id)
+    }
+
+    /// Internal test inspection for browser-relay recovered foreground
+    /// transactions. The marker is process-local and must be consumed by
+    /// either terminal fate, not only rejection.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
+        self.node.has_recovered_browser_relay_tx_for_test(tx_id)
+    }
+
     /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
     pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
         self.node.set_large_value_staging_policy(policy);
@@ -66,6 +96,8 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         })
     }
@@ -115,6 +147,8 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         };
         Ok((db, receipt))
@@ -151,6 +185,8 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         })
     }
@@ -203,6 +239,8 @@ where
             )),
             row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: false,
         })
     }
@@ -314,6 +352,8 @@ where
             row_id_source: Rc::clone(&self.row_id_source),
             row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
             next_now_ms: Rc::clone(&self.next_now_ms),
+            reserved_tx_id: None,
+            owner_operation_admitted: false,
             backend_attribution: self.backend_attribution,
         })
     }
@@ -406,6 +446,20 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
+        self.node.begin_mutation_shutdown();
+        // Mutation admission belongs to the binding-facing owner. Once that
+        // owner enters Closing it retains this Db and awaits every operation
+        // it already accepted, in FIFO order, before storage is retired.
+        self.node.drain_queued_mutations().await;
+        // Local waits that became satisfied during the drain complete
+        // normally. Higher-tier waits cannot make further progress after
+        // retirement, so the shared Closing state terminalizes them instead
+        // of leaving binding promises parked forever.
+        self.node.drain_transaction_wait_observers().await;
+        // A drained waiter may have claimed an already-rejected transaction.
+        // Acknowledge that durable rejection before closing storage; there is
+        // no later owner turn after close to flush the bounded acknowledgement.
+        self.node.flush_deferred_rejection_discards().await?;
         // Close finalization admission before the first await. This makes the
         // queued retirement set and durable close one lifecycle transition:
         // a stream dropped while storage is shutting down is either in this
@@ -422,6 +476,94 @@ where
     /// writes begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
+    }
+
+    /// Return the highest transaction HLC observed by this live runtime.
+    ///
+    /// This narrow internal lifecycle boundary is used by foreground lease
+    /// adapters during clean handoff. It is deliberately not a public query or
+    /// application clock API.
+    #[doc(hidden)]
+    pub async fn foreground_tx_time_high_water(&self) -> TxTime {
+        self.node.node.lock().await.tx_time_high_water()
+    }
+
+    /// Seed a foreground runtime from the durable lease owner's last confirmed
+    /// high-water mark before it mints any transaction identities.
+    #[doc(hidden)]
+    pub async fn seed_foreground_tx_time_high_water(&self, high_water: TxTime) {
+        self.node
+            .node
+            .lock()
+            .await
+            .seed_tx_time_high_water(high_water);
+    }
+
+    /// Reserve a definitive local transaction identity for an owner-retained
+    /// mutation before its asynchronous preparation begins.
+    #[doc(hidden)]
+    pub fn reserve_transaction_id_at_ms(&self, now_ms: u64) -> Result<TxId, Error> {
+        self.node.reserve_transaction_id(now_ms)
+    }
+
+    /// Drive one bounded resident mutation turn without awaiting cold work.
+    #[doc(hidden)]
+    pub fn drive_queued_mutation_once(&self) {
+        self.node.poll_queued_mutation_once();
+    }
+
+    /// Queue a transaction-local read behind already-admitted transaction
+    /// work. Bindings retain the returned receiver instead of synchronously
+    /// polling cold storage on their host thread.
+    #[doc(hidden)]
+    pub fn enqueue_transaction_read<T: 'static>(
+        &self,
+        tx_id: OpenTransactionId,
+        read: impl Future<Output = Result<T, Error>> + 'static,
+    ) -> futures::channel::oneshot::Receiver<Result<T, Error>> {
+        self.node.enqueue_transaction_read(tx_id, read)
+    }
+
+    pub(super) fn clone_for_reserved_transaction(&self, tx_id: TxId) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            schema_version_id: self.schema_version_id,
+            schema_view_is_fixed: self.schema_view_is_fixed,
+            schema_views: Rc::clone(&self.schema_views),
+            identity: self.identity,
+            node: Rc::clone(&self.node),
+            row_id_source: Rc::clone(&self.row_id_source),
+            row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
+            next_now_ms: Rc::clone(&self.next_now_ms),
+            reserved_tx_id: Some(tx_id),
+            owner_operation_admitted: true,
+            backend_attribution: self.backend_attribution,
+        }
+    }
+
+    pub(super) fn clone_for_owner_operation(&self) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            schema_version_id: self.schema_version_id,
+            schema_view_is_fixed: self.schema_view_is_fixed,
+            schema_views: Rc::clone(&self.schema_views),
+            identity: self.identity,
+            node: Rc::clone(&self.node),
+            row_id_source: Rc::clone(&self.row_id_source),
+            row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
+            next_now_ms: Rc::clone(&self.next_now_ms),
+            reserved_tx_id: None,
+            owner_operation_admitted: true,
+            backend_attribution: self.backend_attribution,
+        }
+    }
+
+    pub(super) fn ensure_mutation_operation_admitted(&self) -> Result<(), Error> {
+        if self.owner_operation_admitted {
+            Ok(())
+        } else {
+            self.node.ensure_mutation_admission_open()
+        }
     }
 
     /// Configure this durable process as the internal browser relay that owns
@@ -535,6 +677,9 @@ where
 
     /// Return the locally observed fate and durability for a write transaction.
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
+        if let Some(state) = self.node.queued_mutation_write_state(tx_id) {
+            return state;
+        }
         let Some((fate, global_time, durability)) =
             crate::db::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
         else {
@@ -550,6 +695,16 @@ where
         })
     }
 
+    /// Consume a failure discovered by a binding-owned bounded admission turn.
+    ///
+    /// Normal writes retain their failure until `wait()` observes it. A
+    /// synchronous binding error has no write handle to wait on, so it must
+    /// explicitly retire that queued failure instead of retaining it forever.
+    #[doc(hidden)]
+    pub fn take_queued_mutation_failure(&self, tx_id: TxId) -> Option<Error> {
+        self.node.take_queued_mutation_failure(tx_id)
+    }
+
     /// Wait until `tx_id` reaches `tier` or is rejected.
     ///
     /// An explicit wait consumes a rejection, preventing the same failure from
@@ -561,17 +716,7 @@ where
         tx_id: TxId,
         tier: DurabilityTier,
     ) -> Result<TxId, Error> {
-        loop {
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
-                return outcome;
-            }
-            let state_change = self.node.register_write_state_waiter(tx_id);
-            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
-                drop(state_change);
-                return outcome;
-            }
-            state_change.await;
-        }
+        self.node.wait_for_transaction(tx_id, tier).await
     }
 
     /// Callback form of [`Db::wait_for_transaction`] for bindings that cannot
@@ -584,6 +729,24 @@ where
     ) {
         self.node
             .wait_for_transaction_with(tx_id, tier, Box::new(callback));
+    }
+
+    /// Binding-only callback wait that preserves a queued write handle's
+    /// bounded completion target. Unlike a durable transaction-id lookup, an
+    /// empty queued update may resolve to an existing row transaction.
+    #[doc(hidden)]
+    pub fn wait_for_write_with(
+        &self,
+        write: &WriteHandle<S>,
+        tier: DurabilityTier,
+        callback: impl FnOnce(Result<TxId, Error>) + 'static,
+    ) {
+        self.node.wait_for_write_with(
+            write.tx_id,
+            write.queued_alias.clone(),
+            tier,
+            Box::new(callback),
+        );
     }
 
     /// Wait until this database observes another state transition for `tx_id`.
@@ -737,18 +900,44 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
+        let queued_mutation_pending = self.node.poll_queued_mutation_once();
+        self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
+        if queued_mutation_pending {
+            return Ok(());
+        }
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
-        self.node.tick().await.map(|_| ())
+        self.node.tick().await?;
+        self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
+        Ok(())
     }
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        let queued_mutation_pending = self.node.poll_queued_mutation_once();
+        self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
+        if queued_mutation_pending {
+            return Ok(DbTickStats::default());
+        }
         self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
-        self.node.tick().await
+        let stats = self.node.tick().await?;
+        self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
+        Ok(stats)
     }
 
+    async fn flush_deferred_rejection_discards_after_tick(&self) -> Result<(), Error> {
+        // A durable rejection acknowledgement is part of the owner turn. If
+        // it fails, retain the ID but surface the failure instead of silently
+        // scheduling an unbounded retry loop against a poisoned database.
+        self.node.flush_deferred_rejection_discards().await
+    }
+
+    #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
         let refreshed = self.node.refresh_subscriptions().await?;
         if refreshed > 0 {

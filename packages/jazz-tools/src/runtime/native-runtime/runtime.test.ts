@@ -1113,6 +1113,80 @@ describe("NativeRuntimeAdapter server transport", () => {
     vi.useRealTimers();
   });
 
+  it("fails closed for malformed direct and pollable native permission advice", async () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            requestInsertPermissionAdviceEncoded: () => "permit" as never,
+            requestReadPermissionAdvice: () => ({
+              poll: () => "permit",
+              cancel: () => {},
+            }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    Object.assign(runtime as object, { serverTransport: {}, serverCarrier: {} });
+
+    await expect(
+      runtime.requestInsertPermissionAdvice("todos", {
+        title: { type: "Text", value: "candidate" },
+      }),
+    ).resolves.toBe("unknown");
+    await expect(
+      runtime.requestReadPermissionAdvice("todos", "00000000-0000-0000-0000-000000000001"),
+    ).resolves.toBe("unknown");
+  });
+
+  it("cancels a pending pollable native permission request on runtime close", async () => {
+    let cancellations = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            requestDeletePermissionAdvice: () => ({
+              poll: () => null,
+              cancel: () => {
+                cancellations += 1;
+              },
+            }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    Object.assign(runtime as object, {
+      serverTransport: { tick: () => 0, recvWireFrames: () => [], close: () => true },
+      serverCarrier: { close: () => {} },
+    });
+
+    const advice = runtime.requestDeletePermissionAdvice(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await runtime.close();
+
+    await expect(advice).resolves.toBe("unknown");
+    expect(cancellations).toBe(1);
+  });
+
   it("does not locally evaluate permission advice even on a serving-configured runtime", () => {
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3559,6 +3633,43 @@ describe("NativeRuntimeAdapter server transport", () => {
         "permission-introspection query",
       );
     }
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects JSON-only relation reads inside a transaction before ordinary relation APIs", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              calls.push("allRelationQuery");
+              return new Uint8Array();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const transactionId = "relation-read-batch" as never;
+    runtime.beginTransaction("mergeable", transactionId);
+    const opts = JSON.stringify({ transaction_id: transactionId });
+
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+        undefined,
+        undefined,
+        opts,
+      ),
+    ).rejects.toThrow("does not support relation reads inside a transaction");
     expect(calls).toEqual([]);
   });
 
@@ -7148,6 +7259,10 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    // A real native binding always advertises the wire features compiled into
+    // it. Individual tests can still explicitly set this to `undefined` when
+    // exercising the missing-binding diagnostic.
+    wireFeatures: () => CLIENT_WIRE_FEATURES,
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (

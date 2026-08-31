@@ -16,9 +16,16 @@ const mocks = vi.hoisted(() => {
   const openBrowserWithSelfSignedProof = vi.fn();
   const fromDb = vi.fn();
   const encodeSchema = vi.fn(() => new Uint8Array());
-  const openConfig = vi.fn(() => new Uint8Array());
+  const openConfig = vi.fn((_node: Uint8Array, ..._rest: unknown[]) => new Uint8Array());
   const telemetryDisposers: Mock[] = [];
-  const pageStores: Array<{ close: Mock }> = [];
+  const pageStores: Array<{
+    close: Mock;
+    claimBrowserWorkerEpoch: Mock;
+    releaseBrowserWorkerEpoch: Mock;
+    onInvalidated: Mock;
+    canonicalReplicaNode: Uint8Array;
+    readonly replicaNode: Uint8Array;
+  }> = [];
   const browserDbs: Array<{ close: Mock; setRelayAuthoritySessionOwner: Mock }> = [];
   const runtimes: Array<Record<string, Mock>> = [];
   const createBrowserDb = () => {
@@ -59,7 +66,22 @@ const mocks = vi.hoisted(() => {
         return dispose;
       });
       openPageStore.mockReset().mockImplementation(async () => {
-        const pageStore = { close: vi.fn() };
+        const replicaNode = new Uint8Array(16);
+        // IndexedDbPageStore deliberately returns a defensive copy: production
+        // callers must not be able to mutate its persisted replica identity.
+        // Keep this canonical byte string independently so the boundary tests
+        // below cannot pass merely because mocks share one object reference.
+        replicaNode.fill(pageStores.length + 3);
+        const pageStore = {
+          close: vi.fn(),
+          claimBrowserWorkerEpoch: vi.fn(async () => undefined),
+          releaseBrowserWorkerEpoch: vi.fn(async () => undefined),
+          onInvalidated: vi.fn(() => () => undefined),
+          canonicalReplicaNode: replicaNode,
+          get replicaNode() {
+            return Uint8Array.from(replicaNode);
+          },
+        };
         pageStores.push(pageStore);
         return pageStore;
       });
@@ -214,10 +236,10 @@ function options(dbName: string): BrowserWorkerInitOptions {
   return {
     schema: {},
     dbName,
-    node: new Uint8Array([1]),
     author: new Uint8Array([2]),
     initialSyncFlushEvery: 1,
     appId: "worker-initialization-test",
+    storageOwner: "worker-initialization-test-owner",
     authSessionKey: "session",
     authJson: "{}",
     sessionClaims: {},
@@ -344,7 +366,11 @@ describe("broker worker context initialization", () => {
       message: "telemetry installation failed",
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
-    expect(mocks.openPageStore).not.toHaveBeenCalled();
+    // Durable root admission deliberately precedes all process-wide WASM and
+    // telemetry work. A telemetry failure therefore closes the already
+    // admitted handle before allowing a retry.
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
 
     expect(
       (await connect(enabledTelemetryOptions("telemetry-failure"), "retry-tab")).outcome,
@@ -355,7 +381,39 @@ describe("broker worker context initialization", () => {
     expect(mocks.installWasmTelemetry).toHaveBeenCalledTimes(2);
   });
 
-  it("disposes telemetry when page-store opening fails and retries the same key", async () => {
+  it("rejects a conflicting page-store owner before WASM, telemetry, native open, or peer admission", async () => {
+    // This is the exact admission oracle. If initialization moves *any* of
+    // these operations before IndexedDbPageStore.open, the test fails.
+    mocks.openPageStore.mockRejectedValueOnce(
+      new Error(
+        "IndexedDB database explicit-owner is already owned by a different Jazz browser session",
+      ),
+    );
+
+    const failed = await connect(options("explicit-owner"), "blocked-tab");
+    expect(failed.outcome).toEqual({
+      type: "runtime-error",
+      message:
+        "IndexedDB database explicit-owner is already owned by a different Jazz browser session",
+    });
+    expect(failed.port.close).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.loadWasmModule).not.toHaveBeenCalled();
+    expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
+    expect(mocks.openConfig).not.toHaveBeenCalled();
+    expect(mocks.openBrowser).not.toHaveBeenCalled();
+    expect(mocks.openBrowserWithSelfSignedProof).not.toHaveBeenCalled();
+    expect(mocks.fromDb).not.toHaveBeenCalled();
+    expect(mocks.runtimes).toEqual([]);
+
+    // `connectTab` owns and serializes this rejection to the port. Yielding a
+    // turn catches a regression that instead leaves a detached promise
+    // rejection after posting the operation-level error.
+    await Promise.resolve();
+    expect(failed.port.hasEvent((event) => event.type === "result")).toBe(false);
+  });
+
+  it("does not start WASM or telemetry when page-store opening fails and retries the same key", async () => {
     mocks.openPageStore.mockRejectedValueOnce(new Error("page-store open failed"));
 
     const failed = await connect(enabledTelemetryOptions("page-store-failure"), "failed-tab");
@@ -363,7 +421,8 @@ describe("broker worker context initialization", () => {
       type: "runtime-error",
       message: "page-store open failed",
     });
-    expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
+    expect(mocks.loadWasmModule).not.toHaveBeenCalled();
+    expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
     expect(mocks.openBrowser).not.toHaveBeenCalled();
 
     expect(
@@ -371,12 +430,44 @@ describe("broker worker context initialization", () => {
     ).toEqual({
       type: "runtime-ready",
     });
-    expect(mocks.telemetryDisposers).toHaveLength(2);
-    expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
+    expect(mocks.telemetryDisposers).toHaveLength(1);
+    expect(mocks.telemetryDisposers[0]).not.toHaveBeenCalled();
     expect(mocks.openPageStore).toHaveBeenCalledTimes(2);
   });
 
+  it("passes the persisted replica node through its exact config to a normal WASM open", async () => {
+    const initOptions = options("replica-node-config-normal-open");
+    // The config is opaque WASM input. A distinct sentinel makes this an
+    // identity check, rather than merely proving a value-shaped config opened.
+    const config = Uint8Array.from([0xa1, 0xb2, 0xc3]);
+    mocks.openConfig.mockReturnValueOnce(config);
+
+    expect((await connect(initOptions, "normal-open-tab")).outcome).toEqual({
+      type: "runtime-ready",
+    });
+
+    expect(mocks.openConfig.mock.calls[0]?.[0]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.openConfig.mock.calls[0]?.[0]).not.toBe(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.openConfig.mock.calls[0]?.slice(1)).toEqual([
+      initOptions.author,
+      1,
+      false,
+      initOptions.initialSyncFlushEvery,
+      undefined,
+    ]);
+    expect(mocks.openBrowser.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]);
+    expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
+    // NativeRuntimeAdapter is the final runtime boundary. It must receive the
+    // persisted physical-replica identity, not a process constant or a node
+    // intended for a different open attempt.
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.fromDb.mock.calls[0]?.[2]).not.toBe(mocks.pageStores[0]?.canonicalReplicaNode);
+  });
+
   it("closes the page store and telemetry when browser DB opening fails, then retries", async () => {
+    const rejectedConfig = Uint8Array.from([0xd4]);
+    const retryConfig = Uint8Array.from([0xe5]);
+    mocks.openConfig.mockReturnValueOnce(rejectedConfig).mockReturnValueOnce(retryConfig);
     mocks.openBrowser.mockRejectedValueOnce(new Error("browser DB open failed"));
 
     const failed = await connect(enabledTelemetryOptions("browser-db-failure"), "failed-tab");
@@ -396,6 +487,13 @@ describe("broker worker context initialization", () => {
     expect(mocks.pageStores[1]?.close).not.toHaveBeenCalled();
     expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
+    // A failed WASM open evicts its context and retries from a newly opened
+    // page-store handle. Each attempt must derive its opaque config from that
+    // attempt's admitted physical-replica identity.
+    expect(mocks.openConfig.mock.calls[0]?.[0]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.openConfig.mock.calls[1]?.[0]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
+    expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
+    expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
   });
 
   it("carries a verified local-first proof from worker open to follower admission", async () => {
@@ -416,21 +514,16 @@ describe("broker worker context initialization", () => {
       selfSignedClientProof.appId,
       selfSignedClientProof.claimedAuthor,
     );
-    expect(mocks.fromDb).toHaveBeenCalledWith(
-      expect.anything(),
-      initOptions.schema,
-      initOptions.node,
-      initOptions.author,
-      1,
-      false,
-      { selfSignedClientProof },
-    );
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
     expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
   });
 
   it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
     const rawDb = mocks.createBrowserDb();
     mocks.openBrowser.mockResolvedValueOnce(rawDb);
+    const rejectedConfig = Uint8Array.from([0xd4]);
+    const retryConfig = Uint8Array.from([0xe5]);
+    mocks.openConfig.mockReturnValueOnce(rejectedConfig).mockReturnValueOnce(retryConfig);
     mocks.fromDb.mockImplementationOnce(() => {
       throw new Error("adapter construction failed");
     });
@@ -455,12 +548,28 @@ describe("broker worker context initialization", () => {
     expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
     expect(mocks.fromDb).toHaveBeenCalledTimes(2);
+    // The failed context has a different persisted node and config from its
+    // retry. Verify both native opens and both adapter constructions retain
+    // their own pairing rather than silently substituting a constant node.
+    expect(mocks.pageStores[0]?.canonicalReplicaNode).not.toEqual(
+      mocks.pageStores[1]?.canonicalReplicaNode,
+    );
+    expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
+    expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
+    expect(mocks.fromDb.mock.calls[1]?.[2]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
+    expect(mocks.fromDb.mock.calls[0]?.[2]).not.toEqual(mocks.fromDb.mock.calls[1]?.[2]);
   });
 
   it("shares one successful initialization between concurrent connections for the same key", async () => {
     const browserDb = deferred<ReturnType<typeof mocks.createBrowserDb>>();
     mocks.openBrowser.mockReturnValueOnce(browserDb.promise);
-    const initOptions = options("concurrent-success");
+    const exactStorageOwner =
+      '{"version":1,"appId":"worker-initialization-test","env":"dev","auth":{"kind":"principal","authMode":"external","user":"[\\"https://issuer.example\\",\\"alice\\"]"}}';
+    const initOptions = {
+      ...options("concurrent-success"),
+      storageOwner: exactStorageOwner,
+    };
 
     const first = connect(initOptions, "first-tab");
     const second = connect(initOptions, "second-tab");
@@ -472,8 +581,41 @@ describe("broker worker context initialization", () => {
     expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
     expect(mocks.installWasmTelemetry).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledWith("concurrent-success", {
+      // This exact caller-supplied marker is the durable admission boundary.
+      // Mutating production wiring to `owner: undefined` or a lossy surrogate
+      // makes this mock receipt fail before a worker can open WASM.
+      owner: exactStorageOwner,
+    });
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
+    expect(mocks.fromDb).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a second context with a different owner before it can reuse a live physical root", async () => {
+    const alice = {
+      ...options("shared-physical-root"),
+      storageOwner: "owner:alice",
+      authSessionKey: "session:alice",
+    };
+    const bob = {
+      ...options("shared-physical-root"),
+      storageOwner: "owner:bob",
+      authSessionKey: "session:bob",
+    };
+
+    expect((await connect(alice, "alice-tab")).outcome).toEqual({ type: "runtime-ready" });
+
+    // Planted positive: omitting the in-memory physical-owner comparison
+    // reuses Alice's already-open page store and admits Bob without calling
+    // IndexedDbPageStore.open, so this must fail before the fix.
+    expect((await connect(bob, "bob-tab")).outcome).toEqual({
+      type: "runtime-error",
+      message:
+        "IndexedDB database shared-physical-root is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts",
+    });
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
   });
 

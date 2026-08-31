@@ -2,6 +2,72 @@
 
 use super::*;
 
+/// A direct maintained-view opening must not wait for a cold source that may
+/// require peer progress after this call returns. The publication owner keeps
+/// Stream A gated until it receives the first complete Stream B snapshot.
+#[test]
+fn maintained_open_defers_cold_multisink_witnesses_to_its_publication_owner() {
+    let test_schema = schema();
+    let column_families = test_schema.column_families();
+    let families = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = groove::storage::YieldingStorage::wrap(
+        groove::storage::MemoryStorage::new(&families).expect("open memory storage"),
+    );
+    let mut node = NodeState::new(NodeUuid::from_bytes([23; 16]), test_schema, storage.clone())
+        .expect("open yielding node");
+    let issue = row(23);
+    let shape = Query::from("issues")
+        .select(["title", "state", "assignee", "priority"])
+        .validate(&schema())
+        .expect("validate issues query");
+    let binding = shape.bind(BTreeMap::new()).expect("bind issues query");
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("issues", issue, 23_000)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("cold issue".to_owned())),
+                    ("state".to_owned(), Value::String("open".to_owned())),
+                    ("assignee".to_owned(), Value::Uuid(author(23).test_uuid())),
+                    ("priority".to_owned(), Value::U64(23)),
+                ])),
+        )
+        .expect("commit cold issue");
+    node.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalTime(23)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("accept cold issue");
+    storage.evict_all();
+    let (shape, binding, plan) = node
+        .prepare_query_binding_for_link_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .expect("prepare cold maintained query");
+    let (local, initial) = node
+        .open_maintained_view_subscription_in_authorization_mode(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Local,
+            &ReadViewSpec::default(),
+            Some(plan),
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .expect("open cold maintained snapshot without waiting for a peer turn");
+    assert!(!local.initial_received);
+    assert_eq!(initial.root_count, 0);
+}
+
 #[test]
 fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     let (_server_dir, mut server) = open_node();

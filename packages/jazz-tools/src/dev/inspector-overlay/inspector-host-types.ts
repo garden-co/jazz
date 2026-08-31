@@ -8,7 +8,7 @@ export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
 export interface JazzInspectorHost {
   /**
    * A ready-to-use config for the overlay's own browser client: the host's
-   * identity and persistent store coordinates. The inspector obtains its
+   * identity and logical persistent-store base. The inspector obtains its
    * actual worker peer from {@link openControlPort}; it never constructs a
    * second SharedWorker.
    */

@@ -8,11 +8,13 @@
 //! cargo bench -p jazz --features testing --bench selective_global_hydration --quiet
 //! ```
 //!
-//! `JAZZ_SELECTIVE_HYDRATION_ROWS` controls the comma-separated table-size
-//! ladder. `JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS`,
+//! The default run exposes fixed 10k and 100k wall-time benchmarks to Divan
+//! and CodSpeed. Set `JAZZ_SELECTIVE_HYDRATION_RECEIPT=1` to run the JSONL
+//! scale receipt instead; in that mode `JAZZ_SELECTIVE_HYDRATION_ROWS`
+//! controls the comma-separated table-size ladder and
+//! `JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS`,
 //! `JAZZ_SELECTIVE_HYDRATION_RESULT_ROWS`, and
-//! `JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS` control the fixed selection and seed
-//! batching.
+//! `JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS` control selection and seed batching.
 
 mod schema_fixture;
 mod support;
@@ -22,8 +24,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
-    SeededRowIdSource, block_on,
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, PreparedQuery, Propagation, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
@@ -40,6 +42,23 @@ const TABLE: &str = "documents";
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
+
+    // CodSpeed recognizes Divan's benchmark protocol, not the JSONL receipt
+    // protocol below. Keep the latter for the 1M-row diagnostic rung, but make
+    // the normal bench target real wall-time benchmarks.
+    if std::env::var_os("JAZZ_SELECTIVE_HYDRATION_RECEIPT").is_some() {
+        run_receipt();
+        return;
+    }
+
+    divan::main();
+}
+
+/// Run the full read-count receipt, including the 1M diagnostic rung.
+///
+/// This is intentionally opt-in: it proves the selectivity invariant and is
+/// much too expensive to be a repeated CodSpeed sample.
+fn run_receipt() {
     let config = Config::from_env();
     config.validate();
 
@@ -96,6 +115,39 @@ fn main() {
     support::emit_json_line("selective_global_hydration", fields);
 }
 
+/// CodSpeed wall-time receipt for the maintained initial hydration path at a
+/// fixed 10k-row table size. Seeding, reopening, query preparation, and one
+/// fully-asserted validation pass are deliberately outside the timed closure.
+#[divan::bench(sample_count = 10)]
+fn maintained_subscription_hydration_10k(bencher: divan::Bencher<'_, '_>) {
+    benchmark_maintained_subscription_hydration(bencher, 10_000);
+}
+
+/// The same fixed-selectivity workload at 100k rows. Fewer samples retain a
+/// useful hosted receipt without turning fixture setup into the dominant CI
+/// cost. The 1M rung remains available through `run_receipt` above.
+#[divan::bench(sample_count = 3)]
+fn maintained_subscription_hydration_100k(bencher: divan::Bencher<'_, '_>) {
+    benchmark_maintained_subscription_hydration(bencher, 100_000);
+}
+
+fn benchmark_maintained_subscription_hydration(bencher: divan::Bencher<'_, '_>, table_rows: usize) {
+    let fixture = HydrationFixture::new(table_rows);
+    let baseline_subscriptions = fixture.active_groove_subscriptions();
+
+    // Keep the correctness/read-bound proof out of the measurement. The timed
+    // operation below is exactly the same initial maintained hydration.
+    fixture.assert_selective_hydration();
+    fixture.assert_subscription_baseline(baseline_subscriptions, "validation hydration");
+
+    bencher.bench_local(|| divan::black_box(fixture.hydrate_maintained()));
+    // `SubscriptionStream::drop` only queues its finalizer so it can never
+    // block a caller suspended on storage. Divan drops each timed result, but
+    // does not run Jazz's owner turn for us; drain that queued work outside
+    // the timing boundary before this fixture is released or reused.
+    fixture.assert_subscription_baseline(baseline_subscriptions, "Divan samples");
+}
+
 #[derive(Clone, Copy)]
 struct ConfigRef {
     target_rows: usize,
@@ -113,7 +165,10 @@ struct Config {
 impl Config {
     fn from_env() -> Self {
         Self {
-            table_rows: support::csv_usizes("JAZZ_SELECTIVE_HYDRATION_ROWS", "1000,10000,100000"),
+            table_rows: support::csv_usizes(
+                "JAZZ_SELECTIVE_HYDRATION_ROWS",
+                "10000,100000,1000000",
+            ),
             target_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS", 100),
             result_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_RESULT_ROWS", 50),
             batch_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS", 1000),
@@ -160,10 +215,159 @@ struct RungReceipt {
     db_open_us: u128,
     prepare_us: u128,
     query_us: u128,
+    maintained_subscribe_us: u128,
     result_digest: String,
+    maintained_result_digest: String,
     open_metrics: StorageReadMetrics,
     prepare_metrics: StorageReadMetrics,
     query_metrics: StorageReadMetrics,
+    maintained_metrics: StorageReadMetrics,
+}
+
+/// A settled RocksDB database plus its prepared fixed-selectivity query.
+///
+/// The tempdir is retained for the lifetime of the database so every timed
+/// sample reads the same reopened persisted fixture. Each benchmark invocation
+/// constructs this once, outside Divan's timed closure.
+struct HydrationFixture {
+    _temp: tempfile::TempDir,
+    db: Db<RocksDbStorage>,
+    prepared: PreparedQuery,
+    expected: Vec<RowUuid>,
+    target_rows: usize,
+}
+
+struct HydrationMeasurement {
+    row_count: usize,
+    result_digest: String,
+    metrics: StorageReadMetrics,
+}
+
+impl HydrationFixture {
+    fn new(table_rows: usize) -> Self {
+        let config = ConfigRef {
+            target_rows: 100,
+            result_rows: 50,
+            batch_rows: 1_000,
+        };
+        let temp = tempfile::tempdir().expect("create selective-hydration RocksDB directory");
+        let schema = schema();
+        let (seed_db, _, _) = open_db(temp.path(), schema.clone());
+        seed_rows(&seed_db, config, table_rows);
+        block_on(seed_db.close()).expect("close seeded selective-hydration database");
+        drop(seed_db);
+
+        let (db, _, _) = open_db(temp.path(), schema);
+        let query = selective_query(config.result_rows);
+        let prepared = db
+            .prepare_query_bound(
+                &query,
+                BTreeMap::from([("team".to_owned(), Value::Uuid(target_team().0))]),
+            )
+            .expect("prepare selective Global query");
+        let expected = (config.target_rows - config.result_rows..config.target_rows)
+            .rev()
+            .map(target_row)
+            .collect();
+
+        Self {
+            _temp: temp,
+            db,
+            prepared,
+            expected,
+            target_rows: config.target_rows,
+        }
+    }
+
+    fn assert_selective_hydration(&self) {
+        self.db.reset_storage_read_metrics_for_test();
+        let rows = block_on(self.db.all_for_identity(
+            &self.prepared,
+            global_read_opts(),
+            AuthorSubject::SYSTEM,
+        ))
+        .expect("run selective Global query");
+        let observed = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+        assert_eq!(observed, self.expected, "selective Global result changed");
+        let query_metrics = self.db.take_storage_read_metrics_for_test();
+        assert_selective_metrics(&query_metrics, self.target_rows, "query");
+
+        let measured = self.hydrate_maintained();
+        assert_eq!(measured.row_count, self.expected.len());
+        assert_eq!(measured.result_digest, digest_rows(&self.expected));
+        assert_selective_metrics(&measured.metrics, self.target_rows, "maintained");
+    }
+
+    fn active_groove_subscriptions(&self) -> usize {
+        self.db.active_groove_subscriptions_for_test()
+    }
+
+    /// Drain the non-blocking `SubscriptionStream::drop` finalizers and prove
+    /// a repeated benchmark cannot retain a Groove graph per sample.
+    ///
+    /// This must remain outside `hydrate_maintained`: the timed receipt is the
+    /// opening/reset path, while finalization is an ordinary later owner turn.
+    fn assert_subscription_baseline(&self, baseline: usize, phase: &str) {
+        block_on(self.db.tick()).expect("drain queued maintained-subscription finalizers");
+        assert_eq!(
+            self.active_groove_subscriptions(),
+            baseline,
+            "{phase} must retire every dropped maintained Groove subscription"
+        );
+    }
+
+    /// The timed operation: create one maintained subscription and consume its
+    /// initial reset. It returns the same result digest and logical read
+    /// counters asserted by `assert_selective_hydration`, but performs no
+    /// assertion inside the wall-time sample.
+    fn hydrate_maintained(&self) -> HydrationMeasurement {
+        self.db.reset_storage_read_metrics_for_test();
+        let mut subscription = block_on(self.db.subscribe(&self.prepared, local_read_opts()))
+            .expect("open selective maintained subscription");
+        let SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } = subscription
+            .try_next_event()
+            .expect("maintained subscription must emit its initial reset")
+        else {
+            panic!("maintained subscription must emit an initial reset");
+        };
+        let rows = added
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        let metrics = self.db.take_storage_read_metrics_for_test();
+        // This only queues teardown. The caller deliberately runs `Db::tick`
+        // after the timed operation, where the owner can retire the retained
+        // Groove subscription without contaminating the sample.
+        drop(subscription);
+        HydrationMeasurement {
+            row_count: rows.len(),
+            result_digest: digest_rows(&rows),
+            metrics,
+        }
+    }
+}
+
+fn selective_query(result_rows: usize) -> Query {
+    Query::from(TABLE)
+        .filter(eq(col("team"), param("team")))
+        .filter(eq(col("active"), lit(true)))
+        .order_by("updated_at", OrderDirection::Desc)
+        .order_by("id", OrderDirection::Desc)
+        .limit(result_rows)
+}
+
+fn assert_selective_metrics(metrics: &StorageReadMetrics, target_rows: usize, phase: &str) {
+    assert!(
+        metrics.global_current_rows.reads <= target_rows,
+        "{phase} selective Global hydration read {} current rows for {target_rows} indexed candidates",
+        metrics.global_current_rows.reads,
+    );
+    assert!(
+        (1..=target_rows).contains(&metrics.global_current_indexes.reads),
+        "{phase} selective Global hydration must use the declared index without reading more than the fixed candidate set",
+    );
 }
 
 impl RungReceipt {
@@ -186,9 +390,18 @@ impl RungReceipt {
         fields.insert("db_open_us".to_owned(), json!(self.db_open_us));
         fields.insert("prepare_us".to_owned(), json!(self.prepare_us));
         fields.insert("query_us".to_owned(), json!(self.query_us));
+        fields.insert(
+            "maintained_subscribe_us".to_owned(),
+            json!(self.maintained_subscribe_us),
+        );
+        fields.insert(
+            "maintained_result_digest".to_owned(),
+            json!(self.maintained_result_digest),
+        );
         insert_read_metrics(&mut fields, "open", &self.open_metrics);
         insert_read_metrics(&mut fields, "prepare", &self.prepare_metrics);
         insert_read_metrics(&mut fields, "query", &self.query_metrics);
+        insert_read_metrics(&mut fields, "maintained", &self.maintained_metrics);
         support::emit_json_line("selective_global_hydration", fields);
     }
 }
@@ -257,6 +470,49 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
     let result_digest = digest_rows(&observed);
     assert_eq!(result_digest, digest_rows(&expected));
 
+    // A maintained subscription must hydrate through the same declared index
+    // and retain a live continuation, not fall back to a separate one-shot
+    // authority read. The fixture is history-complete: its ahead overlay is
+    // empty, so any table-size growth here is attributable to the settled
+    // source selection rather than unfinalized local writes.
+    db.reset_storage_read_metrics_for_test();
+    let subscribe_started = Instant::now();
+    let mut subscription = block_on(db.subscribe(&prepared, local_read_opts()))
+        .expect("open selective maintained subscription");
+    let maintained_subscribe_us = subscribe_started.elapsed().as_micros();
+    let maintained_metrics = db.take_storage_read_metrics_for_test();
+    let SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    } = subscription
+        .try_next_event()
+        .expect("maintained subscription must emit its initial reset")
+    else {
+        panic!("maintained subscription must emit an initial reset");
+    };
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    let maintained_rows = added
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    assert_eq!(maintained_rows, expected);
+    assert!(
+        maintained_metrics.global_current_rows.reads <= config.target_rows,
+        "maintained selective hydration read {} current rows for {} indexed candidates at table size {table_rows}",
+        maintained_metrics.global_current_rows.reads,
+        config.target_rows,
+    );
+    assert!(
+        (1..=config.target_rows).contains(&maintained_metrics.global_current_indexes.reads),
+        "maintained selective hydration must use the declared index without reading more than the fixed candidate set",
+    );
+    let maintained_result_digest = digest_rows(&maintained_rows);
+    assert_eq!(maintained_result_digest, result_digest);
+
     block_on(db.close()).expect("close measured selective-hydration database");
 
     RungReceipt {
@@ -268,10 +524,13 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
         db_open_us: db_open_us_after_seed,
         prepare_us,
         query_us,
+        maintained_subscribe_us,
         result_digest,
+        maintained_result_digest,
         open_metrics,
         prepare_metrics,
         query_metrics,
+        maintained_metrics,
     }
 }
 
@@ -352,6 +611,16 @@ fn global_read_opts() -> ReadOpts {
     ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    }
+}
+
+fn local_read_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Immediate,
         propagation: Propagation::LocalOnly,
         include_deleted: false,
         ..ReadOpts::default()

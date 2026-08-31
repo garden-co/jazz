@@ -28,21 +28,22 @@ function parseArgs(argv) {
 
 try {
   const file = parseArgs(process.argv.slice(2));
-  const preflight = spawnSync(
+  const result = spawnSync(
     "node",
-    ["../../../../dev/artifacts/verify-correctness-test-artifacts.mjs"],
+    [
+      "../../../../dev/gates/run-correctness-consumer.mjs",
+      "--",
+      "pnpm",
+      "exec",
+      "vitest",
+      "run",
+      "--config",
+      "vitest.config.browser.ts",
+      file,
+    ],
     { stdio: "inherit" },
   );
-  if ((preflight.status ?? 1) !== 0) {
-    process.exitCode = preflight.status ?? 1;
-  } else {
-    const result = spawnSync(
-      "pnpm",
-      ["exec", "vitest", "run", "--config", "vitest.config.browser.ts", file],
-      { stdio: "inherit" },
-    );
-    process.exitCode = result.status ?? 1;
-  }
+  process.exitCode = result.status ?? 1;
 } catch (error) {
   console.error(`Focused browser test: ${error.message}`);
   console.error("Usage: pnpm test:browser:focused -- tests/browser/file.test.tsx");

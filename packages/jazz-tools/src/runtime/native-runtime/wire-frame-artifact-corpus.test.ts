@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
+import { FEATURE_PAYLOAD_ZSTD } from "./websocket.js";
 
 type FrameFixture = { name: string; frame_hex: string };
 type ArtifactCorpus = {
@@ -15,6 +16,10 @@ type ArtifactCorpus = {
 type ArtifactFrameValidator = {
   __testValidateWireFrameCorpus(frame: Uint8Array, negotiatedFeatures: string): void;
   __testWireFrameCorpusFeatures(): string;
+};
+
+type WasmArtifactFrameValidator = ArtifactFrameValidator & {
+  WasmDb: { prototype: { wireFeatures?: () => number } };
 };
 
 // The source fixtures freeze the exact Rust-produced v1 bytes. This test then
@@ -35,8 +40,22 @@ describe("wire frame artifact corpus", () => {
         // This is a deliberately test-only export (`skip_typescript` in
         // napi-rs), so production declarations must not advertise it.
         loadNapiModule() as Promise<unknown> as Promise<ArtifactFrameValidator>,
-        loadWasmModuleForTest() as Promise<ArtifactFrameValidator>,
+        loadWasmModuleForTest() as Promise<WasmArtifactFrameValidator>,
       ]);
+
+      // This executes the actual sealed artifact which package assembly
+      // publishes, rather than inferring transport support from Cargo.toml.
+      // A package receiver must advertise and decode the same zstd capability
+      // as the packaged jazz-tools server binary.
+      expect(BigInt(napi.__testWireFrameCorpusFeatures()) & BigInt(FEATURE_PAYLOAD_ZSTD)).not.toBe(
+        0n,
+      );
+
+      // A persistent browser worker creates a NativeRuntimeAdapter around this
+      // exact WasmDb export. It must use the artifact's own feature mask when
+      // sending its WebSocket Hello; otherwise a freshly sealed browser artifact
+      // fails before it can connect, even if the NAPI artifact is current.
+      expect(typeof wasm.WasmDb.prototype.wireFeatures).toBe("function");
 
       for (const artifact of [napi, wasm]) {
         const negotiatedFeatures = artifact.__testWireFrameCorpusFeatures();

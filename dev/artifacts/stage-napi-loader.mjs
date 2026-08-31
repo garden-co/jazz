@@ -1,7 +1,52 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+function hostNapiTarget() {
+  const target = `${process.platform}-${process.arch}`;
+  switch (target) {
+    case "linux-x64":
+      return "linux-x64-gnu";
+    case "darwin-x64":
+      return "darwin-x64";
+    case "darwin-arm64":
+      return "darwin-arm64";
+    case "win32-x64":
+      return "win32-x64-msvc";
+    default:
+      throw new Error(`no Jazz NAPI package target for host ${target}`);
+  }
+}
+
+// This is deliberately the package's published-artifact namespace, rather
+// than the current list of supported target triples. package.json admits every
+// matching root file, so staging must clear every unselected member even when a
+// stale or malformed suffix was written by an earlier tool.
+const stagedRootNapiArtifact = /^jazz-napi\.[^/]+\.(?:node|manifest\.json)$/;
+
+function pruneStaleRootNapiArtifacts(packageDir, selectedPlatform) {
+  const selected = new Set([
+    "native-loader.cjs",
+    `jazz-napi.${selectedPlatform}.node`,
+    `jazz-napi.${selectedPlatform}.manifest.json`,
+  ]);
+  for (const entry of readdirSync(packageDir, { withFileTypes: true })) {
+    if (entry.name !== "native-loader.cjs" && !stagedRootNapiArtifact.test(entry.name)) continue;
+    const path = join(packageDir, entry.name);
+    if (!entry.isFile() || entry.isSymbolicLink())
+      throw new Error(`staged NAPI package artifact must be a real regular file: ${path}`);
+    if (!selected.has(entry.name)) unlinkSync(path);
+  }
+}
 
 export function stageNapiLoader(root, platform) {
   if (!platform) throw new Error("usage: stage-napi-loader.mjs <platform>");
@@ -31,6 +76,11 @@ export function stageNapiLoader(root, platform) {
     throw new Error("active NAPI generation manifest has the wrong kind/profile");
   if (manifest.nativeArtifactFingerprint !== fingerprint)
     throw new Error("active NAPI pointer fingerprint does not match its sealed manifest");
+  // A working tree can retain root-level outputs from another platform build.
+  // Clear only the package-admitted generated-artifact namespace, leaving
+  // unrelated package files untouched, and fail closed rather than following a
+  // symlink.
+  pruneStaleRootNapiArtifacts(packageDir, platform);
   copyFileSync(binding, join(packageDir, `jazz-napi.${platform}.node`));
   copyFileSync(join(stage, "index.js"), join(packageDir, "native-loader.cjs"));
   copyFileSync(
@@ -46,7 +96,7 @@ export function stageNapiLoader(root, platform) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
   try {
-    stageNapiLoader(root, process.argv[2]);
+    stageNapiLoader(root, process.argv[2] ?? process.env.JAZZ_NAPI_PACK_TARGET ?? hostNapiTarget());
   } catch (error) {
     console.error(`stage NAPI loader: ${error.message}`);
     process.exitCode = 1;

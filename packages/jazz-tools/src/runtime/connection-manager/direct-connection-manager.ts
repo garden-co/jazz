@@ -1,4 +1,5 @@
 import type { DurabilityTier } from "../client.js";
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -15,7 +16,39 @@ export class DirectConnectionManager extends ConnectionManager {
     super(host);
   }
 
-  async start(): Promise<void> {}
+  async start(): Promise<void> {
+    // Node foreground clients use the same pre-runtime lease contract as
+    // browser tabs. This preserves the synchronous mutation API after Db
+    // creation while no live process can mint under an unleased node.
+    this.foregroundNodeLease = await this.host.runtimeSource.acquireForegroundNodeLease(
+      this.host.config,
+    );
+  }
+
+  override async shutdown(): Promise<void> {
+    const lease = this.foregroundNodeLease;
+    this.foregroundNodeLease = undefined;
+    const client = this.getCurrentClient();
+    try {
+      if (lease) {
+        const runtime = client?.getRuntime();
+        if (!runtime) {
+          // No schema client was ever materialized, so no local TxId could
+          // have been minted. Returning the confirmed prior high-water is a
+          // complete clean handoff, not an uncertain retirement.
+          await lease.returnWithHighWater(lease.confirmedTxTime);
+        } else if (!(runtime instanceof NativeRuntimeAdapter)) {
+          await lease.retire();
+        } else {
+          await lease.returnWithHighWater(await runtime.quiesceForegroundTxTimeHighWater());
+        }
+      }
+    } catch {
+      await lease?.retire().catch(() => undefined);
+    } finally {
+      await super.shutdown();
+    }
+  }
 
   protected override onClientCreated({ client }: ConnectionManagerClientInput): void {
     if (this.isDisconnected) {

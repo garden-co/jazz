@@ -1,6 +1,266 @@
 //! Shared node scheduling, dirty-generation cascades, and connection servicing tests.
 
 use super::*;
+use groove::storage::{TestStorage, TestStorageOperation};
+
+#[test]
+fn reopened_wait_observer_yields_instead_of_sync_polling_cold_storage() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc9; 16]);
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (storage, _) = TestStorage::controlled(&column_family_refs);
+    let reopen_handle = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc9; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc9))),
+    }))
+    .unwrap();
+    let tx_id = db
+        .insert(
+            "todos",
+            cells("cold reopened wait", false, author),
+            Default::default(),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    block_on(db.close()).unwrap();
+    drop(db);
+
+    let reopened_storage = block_on(reopen_handle.reopen(column_families)).unwrap();
+    let control = reopened_storage.control();
+    let eviction_handle = reopened_storage.clone();
+    let reopened = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage: reopened_storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc9; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xca))),
+    }))
+    .unwrap();
+    eviction_handle.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+
+    let observed = Rc::new(RefCell::new(None));
+    let callback_observed = Rc::clone(&observed);
+    reopened.wait_for_transaction_with(
+        tx_id,
+        DurabilityTier::Local,
+        move |result: Result<TxId, Error>| {
+            *callback_observed.borrow_mut() = Some(result);
+        },
+    );
+    reopened.node.poll_transaction_wait_observers();
+    assert!(
+        observed.borrow().is_none(),
+        "a cold wait observation must yield to the owner instead of completing from reservation or synchronously polling storage"
+    );
+
+    control.resume();
+    for _ in 0..4 {
+        reopened.node.poll_transaction_wait_observers();
+        if observed.borrow().is_some() {
+            break;
+        }
+    }
+    assert_eq!(observed.borrow_mut().take().unwrap().unwrap(), tx_id);
+}
+
+/// A failed durable acknowledgement remains retained, but a poisoned database
+/// must surface the terminal tick instead of hot-looping a scheduler forever.
+#[test]
+fn deferred_rejection_acknowledgement_failure_requires_explicit_reopen_without_hot_loop() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xca; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xca; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xca))),
+    }))
+    .expect("open controlled rejection fixture");
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_transport));
+    let write = db
+        .insert(
+            "todos",
+            cells("retry deferred acknowledgement", false, author),
+            Default::default(),
+        )
+        .expect("create pending write");
+    let tx_id = write.mergeable_tx_id();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .expect("authority fate reaches fixture");
+    db.tick().expect("persist authority rejection");
+
+    let outcome = Rc::new(RefCell::new(None));
+    let callback = Rc::clone(&outcome);
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+        *callback.borrow_mut() = Some(result);
+    });
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
+    control.take_observed();
+    scheduler.take();
+    control.fail_next(TestStorageOperation::WriteMany);
+    let error = db
+        .tick()
+        .expect_err("failed acknowledgement surfaces through the owner tick");
+    assert!(
+        error.to_string().contains("injected WriteMany failure"),
+        "the original acknowledgement failure is not hidden"
+    );
+    assert_eq!(
+        outcome
+            .borrow_mut()
+            .take()
+            .expect("waiter observes rejection")
+            .expect_err("rejected write")
+            .code,
+        ErrorCode::WriteRejected
+    );
+    assert!(
+        db.node
+            .node()
+            .borrow()
+            .rejected_transaction(tx_id)
+            .is_some(),
+        "failed acknowledgement remains retained until a reopened database can acknowledge it"
+    );
+
+    let first_attempts = control
+        .take_observed()
+        .iter()
+        .filter(|operation| **operation == TestStorageOperation::WriteMany)
+        .count();
+    assert!(
+        first_attempts > 0,
+        "the first owner turn attempted the durable acknowledgement"
+    );
+    assert_eq!(
+        scheduler.take(),
+        vec![TickUrgency::Immediate],
+        "the only wake is the waiter completion scheduled before its acknowledgement fails"
+    );
+    let error = db
+        .tick()
+        .expect_err("a poisoned database remains terminal until reopened");
+    assert!(
+        error.to_string().contains("poisoned"),
+        "the later explicit tick makes the reopen requirement visible"
+    );
+    assert!(
+        scheduler.take().is_empty(),
+        "a permanently poisoned acknowledgement cannot create an owner-turn hot loop"
+    );
+    assert!(
+        db.node
+            .node()
+            .borrow()
+            .rejected_transaction(tx_id)
+            .is_some(),
+        "an indeterminate atomic-write failure never loses the rejected transaction"
+    );
+}
+
+/// Close must fail before writing its clean-close marker when a drained
+/// waiter cannot durably acknowledge a rejection.
+#[test]
+fn close_fails_before_clean_marker_when_rejection_acknowledgement_fails() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcb; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xcb; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xcb))),
+    }))
+    .expect("open controlled close fixture");
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_transport));
+    let write = db
+        .insert(
+            "todos",
+            cells("close failed acknowledgement", false, author),
+            Default::default(),
+        )
+        .expect("create pending write");
+    let tx_id = write.mergeable_tx_id();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .expect("authority fate reaches fixture");
+    db.tick().expect("persist authority rejection");
+
+    let outcome = Rc::new(RefCell::new(None));
+    let callback = Rc::clone(&outcome);
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+        *callback.borrow_mut() = Some(result);
+    });
+    control.take_observed();
+    control.fail_next(TestStorageOperation::WriteMany);
+    let error = block_on(db.close()).expect_err("close propagates acknowledgement failure");
+    assert!(
+        error.to_string().contains("injected WriteMany failure"),
+        "close exposes the durable acknowledgement failure"
+    );
+    assert_eq!(
+        outcome
+            .borrow_mut()
+            .take()
+            .expect("close drains the waiter")
+            .expect_err("drained waiter observes rejection")
+            .code,
+        ErrorCode::WriteRejected
+    );
+    assert!(
+        db.node
+            .node()
+            .borrow()
+            .rejected_transaction(tx_id)
+            .is_some(),
+        "failed close retains the rejection for an explicit retry"
+    );
+    assert!(
+        !control
+            .take_observed()
+            .contains(&TestStorageOperation::Close),
+        "failed acknowledgement prevents storage close and its clean-close marker"
+    );
+}
 
 #[test]
 fn large_write_pushes_staging_before_syncing_its_referencing_row() {
@@ -143,13 +403,22 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     let mut received = None;
     let mut snapshot = RelationSnapshot::default();
     let mut pull_messages = Vec::new();
+    let mut pending_event = None;
     for _ in 0..128 {
         upload_edge.tick().unwrap();
         pull_messages.extend(upload_edge_to_core.borrow().iter().cloned());
         core.tick().unwrap();
         upload_edge.tick().unwrap();
-        while let Some(event) = subscription.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
+        if pending_event.is_none() {
+            pending_event = subscription.try_next_event();
+        }
+        if pull_messages
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_)))
+            && let Some(event) = pending_event.as_mut()
+        {
+            crate::db::block_on(upload_edge.hydrate_subscription_event_for_binding(event)).unwrap();
+            apply_subscription_event(&mut snapshot, pending_event.take().unwrap());
         }
         received = snapshot.rows.first().and_then(|row| row.cell_at(0));
         if received == Some(Value::String(title.clone())) {
@@ -237,6 +506,13 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     // Core rate-limits. Capture it before the Core transport drains it.
     writer.tick().unwrap();
     core.tick().unwrap();
+    scheduler.take();
+    writer.tick().unwrap();
+    assert_eq!(
+        scheduler.take(),
+        vec![TickUrgency::Immediate, TickUrgency::AfterCurrentTurn],
+        "the requested upload frontier preserves its exact coalesced scheduler-owned writer wake"
+    );
     writer.tick().unwrap();
     let first_batch = writer_outbound
         .borrow()
@@ -372,6 +648,13 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
 
     writer.tick().unwrap();
     core.tick().unwrap();
+    scheduler.take();
+    writer.tick().unwrap();
+    assert_eq!(
+        scheduler.take(),
+        vec![TickUrgency::Immediate, TickUrgency::AfterCurrentTurn],
+        "the requested upload frontier preserves its exact coalesced scheduler-owned writer wake"
+    );
     writer.tick().unwrap();
     assert!(
         writer_outbound
@@ -552,9 +835,9 @@ fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
     );
 }
 
-/// A Core immediately refreshes a peer-edge subscriber that was visited before
-/// a later client upload in the same service pass, so Bob receives Alice's
-/// later canonical row without needing an unrelated next websocket frame.
+/// A Core schedules a fresh owner turn for a peer-edge subscriber that was
+/// visited before a later client upload, so Bob receives Alice's later
+/// canonical row without an unrelated next websocket frame.
 ///
 /// ```text
 /// bob --empty Global subscribe--> peer edge --> Core
@@ -566,15 +849,18 @@ fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
 ///
 /// The peer connection is deliberately accepted before Alice's connection.
 /// That makes Core service the already-covered peer first, then accept Alice's
-/// write. The one Core tick following Alice's upload must revisit the earlier
-/// peer before it returns; otherwise an event-driven websocket host has no
-/// reason to call Core again and Bob stays indefinitely at the old empty cut.
+/// write. The Core tick following Alice's upload must request a fresh owner
+/// turn for the earlier peer. It deliberately must not recurse into that peer
+/// synchronously: opening the view can suspend on cold storage and would
+/// otherwise withhold inbound write receipts.
 #[test]
-fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
+fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_turn() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let bob_author = AuthorSubject::for_test_bytes([0xb1; 16]);
     let core = open_core(0xd1, AuthorSubject::SYSTEM, &schema);
+    let core_scheduler = Rc::new(RecordingScheduler::default());
+    core.server.set_scheduler(Some(core_scheduler.clone()));
     let peer_edge = open_db(0xd2, AuthorSubject::SYSTEM, &schema);
     let bob = open_db(0xd3, bob_author, &schema);
 
@@ -609,6 +895,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         core_to_peer.borrow().is_empty(),
         "the empty opening has been fully consumed before Alice writes"
     );
+    core_scheduler.take();
 
     let alice_edge = open_db(0xd4, alice, &schema);
     let (alice_transport, core_alice_transport) = duplex();
@@ -626,8 +913,18 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         .unwrap();
 
     // One edge tick uploads Alice's local commit; one Core tick finalizes it
-    // and must also serve the earlier peer connection.
+    // and asks the host for a fresh turn to serve the earlier peer connection.
     alice_edge.tick().unwrap();
+    core.tick().unwrap();
+    let wakes = core_scheduler.take();
+    assert!(
+        wakes.contains(&TickUrgency::AfterCurrentTurn),
+        "the post-receive subscriber refresh yields to a fresh owner turn instead of recursively ticking a potentially cold view"
+    );
+    assert!(
+        core_to_peer.borrow().is_empty(),
+        "the first pass does not synchronously re-enter the earlier subscriber"
+    );
     core.tick().unwrap();
     let later_view_updates = core_to_peer
         .borrow()
@@ -652,7 +949,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         .count();
     assert_eq!(
         later_view_updates, 1,
-        "the first Core service pass after Alice's upload sends the later canonical membership to the already-covered peer"
+        "the scheduled Core owner turn sends the later canonical membership to the already-covered peer"
     );
 
     // Applying that upstream ViewUpdate must dirty and refresh the existing
@@ -667,7 +964,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
-    // The bounded second pass clears its dirty work. A quiet later tick must
+    // The scheduled follow-up clears its dirty work. A quiet later tick must
     // neither replay the unchanged view nor self-arm another serving loop.
     core.tick().unwrap();
     assert!(
@@ -770,18 +1067,22 @@ fn pending_global_state_does_not_complete_remote_wait_or_prune_upload() {
     assert_eq!(state.fate, Fate::Pending);
     assert_eq!(state.durability, DurabilityTier::Global);
     assert!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
-            .is_none(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+        )
+        .is_none(),
         "a hydration-only durability claim must not complete a remote transaction wait"
     );
     assert_eq!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Local)
-            .expect("local persistence completes independently of authority fate")
-            .unwrap(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Local)
+        )
+        .expect("local persistence completes independently of authority fate")
+        .unwrap(),
         tx_id
     );
 
@@ -827,18 +1128,22 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
     assert_eq!(state.global_time, None);
     assert_eq!(state.durability, DurabilityTier::Global);
     assert!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
-            .is_none(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+        )
+        .is_none(),
         "Accepted+Global without an authority timestamp cannot complete Global wait"
     );
     assert_eq!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
-            .expect("Accepted Edge durability does not require a Global timestamp")
-            .unwrap(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+        )
+        .expect("Accepted Edge durability does not require a Global timestamp")
+        .unwrap(),
         tx_id
     );
 
@@ -858,11 +1163,13 @@ fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
         Some(GlobalTime(7))
     );
     assert_eq!(
-        client
-            .node
-            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
-            .expect("authority timestamp completes Global wait")
-            .unwrap(),
+        block_on(
+            client
+                .node
+                .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+        )
+        .expect("authority timestamp completes Global wait")
+        .unwrap(),
         tx_id
     );
 }

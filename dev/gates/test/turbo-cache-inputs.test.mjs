@@ -16,6 +16,34 @@ const tasks = [
   "jazz-wasm#build:fast",
   "jazz-napi#build",
 ];
+const uncachedCorrectnessArtifactTasks = tasks.filter((task) => task !== "@jazz/rust#build:crates");
+
+function jazzToolsDryGraph() {
+  const output = execFileSync(
+    "pnpm",
+    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--dry=json"],
+    { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
+  );
+  const task = JSON.parse(output).tasks.find(
+    (candidate) => candidate.taskId === "jazz-tools#build",
+  );
+  assert.ok(task, "dry graph omitted jazz-tools#build");
+  return task;
+}
+
+function assertUncachedCorrectnessArtifactTask(task) {
+  // A native generation contains its own Cargo target and can be tens of
+  // gigabytes. It is deliberately published through the content-addressed
+  // correctness-artifact store, not Turbo's tarball cache. Turbo's outer
+  // `cache.local`/`cache.remote` reports this invocation's cache eligibility,
+  // which CI/environment flags can disable even if the task itself says
+  // `cache: true`. Check Turbo's resolved task definition instead.
+  assert.equal(
+    task.resolvedTaskDefinition.cache,
+    false,
+    `${task.taskId} could archive native correctness output through Turbo`,
+  );
+}
 
 function dryGraph() {
   const output = execFileSync(
@@ -59,7 +87,19 @@ const originals = new Map(closures.map(({ file }) => [file, readFileSync(file, "
 const unrelatedOriginal = readFileSync(unrelated, "utf8");
 
 try {
+  // JAZZ_CORRECTNESS_WASM_PACKAGE deliberately remains pass-through: it is a
+  // sealed path, not a stable Turbo hash input. The bundle that copies it must
+  // remain explicitly uncached even if the outer invocation has caching off.
+  const jazzTools = jazzToolsDryGraph();
+  assert.equal(
+    jazzTools.resolvedTaskDefinition.cache,
+    false,
+    "jazz-tools could cache a stale sealed WASM bundle",
+  );
+
   const baseline = dryGraph();
+  for (const task of uncachedCorrectnessArtifactTasks)
+    assertUncachedCorrectnessArtifactTask(baseline.get(task));
   for (const { name } of closures)
     for (const task of tasks)
       assert(
@@ -97,4 +137,6 @@ try {
   writeFileSync(unrelated, unrelatedOriginal);
 }
 
-console.log("Turbo artifact cache inputs are sensitive to closure edits only.");
+console.log(
+  "Turbo artifact cache inputs are sensitive to closure edits only; sealed Jazz Tools bundles cannot restore.",
+);

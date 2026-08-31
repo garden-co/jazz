@@ -76,6 +76,7 @@ where
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.node
             .node
             .lock()
@@ -93,6 +94,7 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.node
             .node
             .lock()
@@ -110,6 +112,7 @@ where
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         if made_by != self.identity.author && !self.backend_attribution {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -123,6 +126,42 @@ where
             .open_mergeable(id, made_by, Some(self.identity.author))
             .await
             .map_err(Into::into)
+    }
+
+    /// Queue mergeable transaction admission behind earlier owner operations.
+    #[doc(hidden)]
+    pub fn enqueue_begin_mergeable(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorSubject>,
+        attribution: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        if attribution.is_some() && author.is_some() {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attributed transaction cannot override admission identity",
+            ));
+        }
+        if let Some(made_by) = attribution
+            && made_by != self.identity.author
+            && !self.backend_attribution
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attribution requires a trusted serving node",
+            ));
+        }
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                match (author, attribution) {
+                    (_, Some(attribution)) => db.begin_mergeable_attributed(id, attribution).await,
+                    (Some(author), None) => db.begin_mergeable_for_identity(id, author).await,
+                    (None, None) => db.begin_mergeable(id).await,
+                }
+            }),
+        )
     }
 
     /// Return a non-owning operations handle for an already-open mergeable transaction.
@@ -192,11 +231,38 @@ where
         now_ms: Option<u64>,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            branch,
+            row,
+            cells,
+            now_ms,
+            known_fresh_row,
+            None,
+        )
+        .await
+    }
+
+    /// Stage an exact branch write and, only for a branch-view fallback, carry
+    /// the engine-read base cells that may safely retain indirect values.
+    #[allow(clippy::too_many_arguments)]
+    async fn stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+        known_fresh_row: bool,
+        verified_inherited_cells: Option<RowCells>,
+    ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
-        node.tx_write_mergeable_in_schema_and_branch(
+        node.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
             tx_id,
             self.schema_version_id,
             table,
@@ -208,6 +274,7 @@ where
             false,
             branch,
             known_fresh_row,
+            verified_inherited_cells,
         )?;
         Ok(())
     }
@@ -298,9 +365,19 @@ where
                 format!("row is not visible in branch view: {}", row.0),
             ));
         };
+        let verified_inherited_cells = inherited.clone();
         inherited.extend(patch);
-        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms, false)
-            .await
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            head,
+            row,
+            inherited,
+            now_ms,
+            false,
+            Some(verified_inherited_cells),
+        )
+        .await
     }
 
     pub(super) async fn require_mergeable_transaction_upsert_visibility(
@@ -551,14 +628,50 @@ where
             .await?;
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.refresh_subscriptions().await?;
-            self.node.queue_local_publication(published, None);
+            self.admit_deferred_local_publication(published, None)
+                .await?;
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
             self.finalize_local_commit(tx_id)?;
         }
         Ok(tx_id)
+    }
+
+    /// Reserve the final identity and retain mergeable commit/finalization on
+    /// the node owner. Binding callers use this after synchronous staging so
+    /// cold parent refresh or persistence cannot strand the commit future.
+    #[doc(hidden)]
+    pub fn enqueue_commit_mergeable_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<WriteHandle<S>, Error> {
+        let now_ms = self.next_now_ms();
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_transaction_commit(
+            open_tx_id,
+            tx_id,
+            Box::pin(async move {
+                let published = db
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .commit_mergeable_open_at(open_tx_id, tx_id, || now_ms)
+                    .await?;
+                debug_assert_eq!(published.tx_id, tx_id);
+                if db.node.defer_local_persistence.get() {
+                    db.node.queue_local_publication(published, None);
+                } else {
+                    db.finish_publication_outcome(PublicationOutcome::published((), published))
+                        .await?;
+                    db.finalize_local_commit(tx_id)?;
+                }
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status, None))
     }
 
     /// Abandon an owned open transaction handle.
@@ -568,6 +681,20 @@ where
             .borrow_mut()
             .abandon_tx(open_tx_id)
             .map_err(Into::into)
+    }
+
+    /// Queue rollback after all earlier admission/staging work. Missing state
+    /// is accepted because a failed queued begin is already terminal.
+    #[doc(hidden)]
+    pub fn enqueue_abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_cleanup(Box::pin(async move {
+            let mut node = db.node.node.lock().await;
+            match node.abandon_tx(open_tx_id) {
+                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }));
     }
 
     /// Open an exclusive transaction over the current local snapshot.
@@ -593,6 +720,7 @@ where
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
     pub async fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.open_exclusive_handle(id).await
     }
 
@@ -606,7 +734,27 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
+        self.ensure_mutation_operation_admitted()?;
         self.open_exclusive_handle_for_identity(id, author).await
+    }
+
+    /// Queue exclusive snapshot admission behind earlier owner operations.
+    #[doc(hidden)]
+    pub fn enqueue_begin_exclusive(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                match author {
+                    Some(author) => db.begin_exclusive_for_identity(id, author).await,
+                    None => db.begin_exclusive(id).await,
+                }
+            }),
+        )
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -617,6 +765,141 @@ where
     /// [`ExclusiveTx`] handle.
     pub fn exclusive_tx_ref(&self, tx_id: OpenTransactionId) -> ExclusiveTxRef<'_, S> {
         ExclusiveTxRef { db: self, tx_id }
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_insert(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        cells: RowCells,
+        mut options: InsertOptions,
+    ) -> Result<RowUuid, Error> {
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
+        options.row_id = Some(row);
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .insert(&table, cells, options)
+                        .await?;
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .insert(&table, cells, options)
+                        .await?;
+                }
+                Ok(())
+            }),
+        )?;
+        Ok(row)
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_update(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        options: UpdateOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .update(&table, row, patch, options)
+                        .await
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .update(&table, row, patch, options)
+                        .await
+                }
+            }),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_upsert(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        cells: RowCells,
+        options: UpsertOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .upsert(&table, row, cells, options)
+                        .await
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .upsert(&table, row, cells, options)
+                        .await
+                }
+            }),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_delete(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        options: DeleteOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id).delete(&table, row, options).await
+                } else {
+                    db.mergeable_tx_ref(id).delete(&table, row, options).await
+                }
+            }),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_transaction_restore(
+        &self,
+        id: OpenTransactionId,
+        exclusive: bool,
+        table: String,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        options: RestoreOptions,
+    ) -> Result<(), Error> {
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                if exclusive {
+                    db.exclusive_tx_ref(id)
+                        .restore(&table, row, cells, options)
+                        .await
+                } else {
+                    db.mergeable_tx_ref(id)
+                        .restore(&table, row, cells, options)
+                        .await
+                }
+            }),
+        )
     }
 
     pub(super) async fn transaction_read(
@@ -684,6 +967,74 @@ where
             QueryAuthorizationMode::TrustedServing,
         )
         .await
+    }
+
+    pub(super) async fn transaction_relation_snapshot(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.transaction_relation_snapshot_in_authorization_mode(
+            tx_id,
+            prepared,
+            self.identity.author,
+            opts,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    pub(crate) async fn transaction_relation_snapshot_for_identity(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.transaction_relation_snapshot_in_authorization_mode(
+            tx_id,
+            prepared,
+            author,
+            opts,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn transaction_relation_snapshot_in_authorization_mode(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        ensure_default_read_view(&opts)?;
+        let mut node = self.node.node.lock().await;
+        let mut snapshot = match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => node
+                .tx_relation_snapshot_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    opts.include_deleted,
+                )
+                .await
+                .map_err(Error::from)?,
+            QueryAuthorizationMode::TrustedServing => node
+                .tx_relation_snapshot_for_identity_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    author,
+                    opts.include_deleted,
+                )
+                .await
+                .map_err(Error::from)?,
+        };
+        node.hydrate_current_rows(&mut snapshot.rows).await?;
+        Ok(snapshot)
     }
 
     async fn transaction_all_in_authorization_mode(
@@ -947,6 +1298,36 @@ where
         self.finish_exclusive_publication(published, unit).await
     }
 
+    /// Reserve the final identity and retain exclusive serializability,
+    /// publication, and finalization on the node owner.
+    #[doc(hidden)]
+    pub fn enqueue_commit_exclusive_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<WriteHandle<S>, Error> {
+        let now_ms = self.next_now_ms();
+        let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
+        let db = self.clone_for_reserved_transaction(tx_id);
+        let status = self.node.enqueue_transaction_commit(
+            open_tx_id,
+            tx_id,
+            Box::pin(async move {
+                let (published, unit) = db
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .commit_exclusive_bound_at(open_tx_id, tx_id)
+                    .await?;
+                debug_assert_eq!(published.tx_id, tx_id);
+                let committed = db.finish_exclusive_publication(published, unit).await?;
+                debug_assert_eq!(committed, tx_id);
+                Ok(())
+            }),
+        );
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status, None))
+    }
+
     /// Commit an owned exclusive transaction as an explicit policy identity.
     ///
     /// Bindings that expose session-scoped transactions use this rather than
@@ -975,8 +1356,8 @@ where
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
-            self.refresh_subscriptions().await?;
-            self.node.queue_local_publication(published, Some(unit));
+            self.admit_deferred_local_publication(published, Some(unit))
+                .await?;
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;

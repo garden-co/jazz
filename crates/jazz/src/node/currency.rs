@@ -1198,7 +1198,7 @@ where
         .await
     }
 
-    async fn query_version_by_alias_with_storage_in_schema(
+    pub(super) async fn query_version_by_alias_with_storage_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,

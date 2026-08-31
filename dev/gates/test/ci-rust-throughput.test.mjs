@@ -33,6 +33,10 @@ const previewBuild = fs.readFileSync(
   "utf8",
 );
 const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
+const routeSubscriptionCurve = fs.readFileSync(
+  path.join(root, "crates/jazz/benches/route_subscription_curve.rs"),
+  "utf8",
+);
 const realisticWorkflow = fs.readFileSync(
   path.join(root, ".github/workflows/benchmarks.yml"),
   "utf8",
@@ -464,11 +468,13 @@ test("trusted runners consume the validated immutable tool bundle", () => {
 test("Rust CI keeps the bounded real differential oracle in its shared command partition", () => {
   const workspace = job("test-rust-workspace");
   const differential = job("test-rust-differential");
+  const storageCompat = job("test-storage-compat");
   const aggregate = job("test-rust");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
 
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.match(differential, /local-ci-equivalent\.mjs --ci-partition rust-differential/);
+  assert.match(storageCompat, /local-ci-equivalent\.mjs --ci-partition storage-compat/);
   assert.match(
     localCi,
     /run-rust-tests\.mjs[\s\S]*--timeout-seconds[\s\S]*780[\s\S]*--nextest-profile[\s\S]*jazz-ci/,
@@ -487,9 +493,13 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.match(aggregate, /if: always\(\)/);
-  assert.match(aggregate, /needs: \[test-rust-workspace, test-rust-differential\]/);
+  assert.match(
+    aggregate,
+    /needs: \[test-rust-workspace, test-rust-differential, test-storage-compat\]/,
+  );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{DIFFERENTIAL_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
   assert.match(differential, /rust-cache: "false"/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
@@ -1082,7 +1092,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs dev/artifacts/test-artifact-store.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
 });
@@ -1134,6 +1144,31 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
       "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
     );
   }, /strictly equal/);
+});
+
+test("CodSpeed retains the route subscription binding-scale wall-time receipt", () => {
+  const document = parse(codspeedWorkflow);
+  const job = document.jobs["route-subscription-walltime"];
+  assert.ok(job, "route subscription wall-time job must remain present");
+  assert.equal(
+    job.if,
+    "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
+  );
+  assert.equal(job["runs-on"], "codspeed-macro");
+  const commands = job.steps
+    .map((step) => step.run)
+    .filter(Boolean)
+    .join("\n");
+  assert.match(
+    commands,
+    /cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve/,
+  );
+  const run = job.steps.find((step) => step.with?.run)?.with?.run;
+  assert.match(run, /^cargo codspeed run --package jazz --bench route_subscription_curve$/m);
+  assert.doesNotMatch(run, /--features|JAZZ_ROUTE_CURVE_ROUTES/);
+  assert.match(routeSubscriptionCurve, /#\[divan::bench\(args = \[ROUTE_BENCH_BINDINGS\]/);
+  assert.match(routeSubscriptionCurve, /fn attach_route_bindings/);
+  assert.match(routeSubscriptionCurve, /fn matching_write_fanout/);
 });
 
 test("React Native artifact builds are explicit same-repository label opt-ins", () => {
@@ -1407,13 +1442,14 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(localCi, /correctness-test artifacts[\s\S]*build:test-artifacts/);
-  assert.match(localCi, /parallel Node and browser suites[\s\S]*run-ts-tests\.sh/);
+  assert.match(localCi, /native correctness-artifact producer[\s\S]*build:correctness-artifacts/);
+  assert.match(localCi, /TypeScript consumers[\s\S]*test:typescript-consumers/);
   assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
   assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
   assert.match(runner, /verify-jazz-tools-exports\.mjs/);
   assert.match(runner, /public export surface is incomplete/);
-  assert.match(runner, /Test children only\s+# consume those immutable artifacts/);
+  assert.match(runner, /producer receipt is checked before either suite starts/);
+  assert.match(runner, /correctness-artifact-producer\.mjs/);
   assert.match(runner, /--concurrency=2/);
   assert.match(
     runner,
@@ -1445,14 +1481,9 @@ test("TypeScript CI runs the inspector's freshly built embedded browser receipt"
   );
   const browserCommand = inspectorPackage.scripts["test:browser"];
 
-  assert.equal(
-    browserCommand,
-    "pnpm run build:embedded && playwright test --config playwright.config.ts",
-  );
-  assert.throws(
-    () => assert.match(browserCommand.replace("pnpm run build:embedded && ", ""), /build:embedded/),
-    /build:embedded/,
-  );
+  assert.match(browserCommand, /run-correctness-consumer\.mjs --/);
+  assert.match(browserCommand, /pnpm run build:embedded/);
+  assert.match(browserCommand, /playwright test --config playwright\.config\.ts/);
 });
 
 test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {
@@ -1535,6 +1566,10 @@ test("a missing prepared native artifact prevents both TypeScript suites from st
       env: {
         ...process.env,
         PATH: `${fixture}:${process.env.PATH}`,
+        JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+        JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+        JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+        JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
         JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
         JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
       },
@@ -1550,7 +1585,10 @@ test("a missing prepared native artifact prevents both TypeScript suites from st
       false,
       "browser suite started after failed artifact check",
     );
-    assert.match(result.stderr, /prepared release jazz-napi artifact did not load/);
+    assert.match(
+      result.stderr,
+      /prepared native correctness artifact manifest is missing or stale/,
+    );
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
@@ -1622,6 +1660,7 @@ test("missing public root or framework exports prevent both TypeScript suites fr
     // CI deliberately has no Jazz Tools build before it runs this contract.
     for (const source of ["run-ts-tests.sh", "verify-jazz-tools-exports.mjs"])
       write(`dev/gates/${source}`, fs.readFileSync(path.join(root, "dev/gates", source), "utf8"));
+    write("dev/artifacts/correctness-artifact-producer.mjs", "process.exit(0);\n");
     write("crates/jazz-napi/package.json", JSON.stringify({ type: "commonjs" }));
     write("crates/jazz-napi/index.js", "module.exports = {};\n");
     write(
@@ -1647,6 +1686,10 @@ test("missing public root or framework exports prevent both TypeScript suites fr
         encoding: "utf8",
         env: {
           ...process.env,
+          JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+          JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+          JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+          JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
           JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
           JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
         },

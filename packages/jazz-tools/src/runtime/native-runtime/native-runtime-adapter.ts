@@ -94,7 +94,7 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
-type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
+type CoreTickWake = "immediate" | "deferred" | "after-current-turn" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
@@ -127,6 +127,10 @@ type PendingNativeRead = { poll(): Uint8Array | null };
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativeWrite = { poll(): Write | null };
+type PendingNativePermissionAdvice = {
+  poll(): string | null;
+  cancel(): void;
+};
 
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
@@ -134,6 +138,11 @@ function isPendingNativeRead(value: unknown): value is PendingNativeRead {
 
 function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
   return typeof (value as PendingNativeWrite | null)?.poll === "function";
+}
+
+function isPendingNativePermissionAdvice(value: unknown): value is PendingNativePermissionAdvice {
+  const candidate = value as PendingNativePermissionAdvice | null;
+  return typeof candidate?.poll === "function" && typeof candidate.cancel === "function";
 }
 
 type NativeInsertOptions = NativeWriteOptions & {
@@ -189,6 +198,8 @@ type NativeDb = {
     opts: unknown,
   ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
+  foregroundTxTimeHighWater?(): bigint;
+  seedForegroundTxTimeHighWater?(highWater: bigint): void;
   setRelayAuthoritySessionOwner?(): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -276,18 +287,47 @@ type NativeDb = {
   requestInsertPermissionAdviceEncoded?(
     table: string,
     cells: Uint8Array,
-  ): NativePermissionAdviceRequest;
-  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  ): NativePermissionAdviceResult;
+  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
   requestUpdatePermissionAdviceEncoded?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-  ): NativePermissionAdviceRequest;
-  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  ): NativePermissionAdviceResult;
+  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceResult;
   mergeableTx(openTransactionId: OpenTransactionId): Tx;
   mergeableTxForIdentity?(openTransactionId: OpenTransactionId, author: Uint8Array): Tx;
   exclusiveTx?(openTransactionId: OpenTransactionId): Tx;
-  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadResult;
+  /**
+   * Transaction-local reads may wait for the owning runtime to finish queued
+   * staging work or cold storage. Callers must preserve FIFO visibility by
+   * awaiting this result before decoding it.
+   */
+  allInTransaction?(
+    query: PreparedQuery,
+    tx: Tx,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
+  /** Trusted-serving transaction reads must retain the identity fixed at begin. */
+  allInTransactionForIdentity?(
+    query: PreparedQuery,
+    tx: Tx,
+    author: Uint8Array,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
+  /** Relation snapshots must use the transaction's snapshot and staged overlay. */
+  allRelationSnapshotInTransaction?(
+    query: PreparedQuery,
+    tx: Tx,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
+  /** Trusted-serving relation snapshots retain the identity fixed at begin. */
+  allRelationSnapshotInTransactionForIdentity?(
+    query: PreparedQuery,
+    tx: Tx,
+    author: Uint8Array,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -295,6 +335,8 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  /** Exact wire features compiled into the native artifact backing this DB. */
+  wireFeatures?(): number;
   setLargeValueStagingPolicy?(
     incomingBytesPerWindow: number,
     windowMs: number,
@@ -373,6 +415,11 @@ type NativePermissionAdviceRequest = {
   readonly promise: Promise<PermissionAdvice>;
   cancel(): void;
 };
+
+type NativePermissionAdviceResult =
+  | NativePermissionAdviceRequest
+  | string
+  | PendingNativePermissionAdvice;
 
 type PreparedQuery = object;
 
@@ -649,6 +696,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly pendingLocalSettlements = new Set<Promise<void>>();
+  // A streaming mutation can wait on its source while owning a native upload
+  // handle. A foreground lease cannot return until every admitted handle has
+  // published its write (and advanced the HLC) or has been aborted. Local
+  // settlement starts only after a write has already been minted.
+  private readonly pendingStreamingMutations = new Set<Promise<void>>();
   // Streaming sources can be consumed concurrently, but native `finish()`
   // mutates the owner runtime. WASM evaluates that runtime behind one async
   // borrow, so overlapping finalization can deadlock. Keep only this atomic
@@ -677,7 +729,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
-  private readonly peerTransportWorkListeners = new Set<() => void>();
+  private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
@@ -702,6 +754,14 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpAgain = false;
   private serverConnectionGeneration = 0;
   private closed = false;
+  // A foreground lease handoff closes mutation admission before it snapshots
+  // the native HLC, but physical native disposal still happens through the
+  // ordinary client shutdown path.
+  private foregroundLeaseQuiesced = false;
+  // A concurrent ordinary close must not dispose native state between a lease
+  // handoff's mutation drain and its HLC readout.
+  private foregroundLeaseCapture: Promise<bigint> | null = null;
+  private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -806,6 +866,7 @@ export class NativeRuntimeAdapter implements Runtime {
       if (
         urgency === "immediate" ||
         urgency === "deferred" ||
+        urgency === "after-current-turn" ||
         (typeof urgency === "string" && urgency.startsWith("after:"))
       ) {
         this.scheduleCoreWake(urgency as CoreTickWake);
@@ -819,7 +880,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.connectUpstream();
   }
 
-  onPeerTransportWork(listener: () => void): () => void {
+  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
     this.peerTransportWorkListeners.add(listener);
     return () => {
@@ -843,6 +904,11 @@ export class NativeRuntimeAdapter implements Runtime {
   notifyPeerTransportActivity(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.notifyPeerTransportActivity();
     this.peerTransportActivityEpoch += 1;
+    // External peer ingress can alter the result visible through every peer,
+    // including one whose evaluator pass began before this frame arrived.
+    // Require a distinct post-admission pass; routine end-of-pass work remains
+    // coalescible and therefore cannot create a self-sustaining pump loop.
+    this.notifyPeerTransportWork(true);
   }
 
   async progressPeerTransport(): Promise<void> {
@@ -875,6 +941,53 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setNonDurableClient();
     this.nonDurableClient = true;
+  }
+
+  /** @internal Return the native HLC high-water for a foreground lease handoff. */
+  foregroundTxTimeHighWater(): bigint {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.foregroundTxTimeHighWater();
+    if (!this.db.foregroundTxTimeHighWater) {
+      throw new Error("Native runtime does not expose foreground transaction high-water");
+    }
+    return this.db.foregroundTxTimeHighWater();
+  }
+
+  /**
+   * Close mutation admission, drain already-started native work, then return
+   * the final HLC high-water. No synchronous or async write can mint after
+   * this resolves. The ordinary `close()` call remains responsible for final
+   * native disposal after the lease owner has durably recorded this value.
+   * @internal
+   */
+  quiesceForegroundTxTimeHighWater(): Promise<bigint> {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.quiesceForegroundTxTimeHighWater();
+    }
+    if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
+    if (this.closed) throw new Error("Native runtime is already closed");
+    this.closed = true;
+    this.foregroundLeaseQuiesced = true;
+    const capture = this.captureForegroundTxTimeHighWater();
+    this.foregroundLeaseCapture = capture;
+    return capture;
+  }
+
+  private async captureForegroundTxTimeHighWater(): Promise<bigint> {
+    await Promise.all(this.pendingStreamingMutations);
+    await Promise.all(this.pendingLocalSettlements);
+    await this.coreTickCompletion?.catch(() => undefined);
+    return this.foregroundTxTimeHighWater();
+  }
+
+  /** @internal Seed a foreground lease high-water before the first local write. */
+  seedForegroundTxTimeHighWater(highWater: bigint): void {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.seedForegroundTxTimeHighWater(highWater);
+    }
+    if (!this.db.seedForegroundTxTimeHighWater) {
+      throw new Error("Native runtime does not expose foreground transaction high-water seeding");
+    }
+    this.db.seedForegroundTxTimeHighWater(highWater);
   }
 
   /** Configure Jazz-owned upload rate and unpublished-tree expiry policy. */
@@ -1065,14 +1178,19 @@ export class NativeRuntimeAdapter implements Runtime {
       this.closeRuntimeState();
       return;
     }
-    if (this.closed) return;
-    if (this.pendingLocalSettlements.size > 0) {
-      await Promise.all(this.pendingLocalSettlements);
-    }
-    if (this.closed) return;
+    if (this.physicalCloseStarted) return;
+    if (this.closed && !this.foregroundLeaseQuiesced) return;
+    this.physicalCloseStarted = true;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    await this.foregroundLeaseCapture?.catch(() => undefined);
+    if (this.pendingStreamingMutations.size > 0) {
+      await Promise.all(this.pendingStreamingMutations);
+    }
+    if (this.pendingLocalSettlements.size > 0) {
+      await Promise.all(this.pendingLocalSettlements);
+    }
     await this.coreTickCompletion?.catch(() => undefined);
     this.closeRuntimeState(true);
     await this.db.close?.();
@@ -1160,6 +1278,7 @@ export class NativeRuntimeAdapter implements Runtime {
     _writeContext?: string | null,
     objectId?: string | null,
   ): InsertResult {
+    this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
@@ -1223,6 +1342,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const begin = this.db.beginStreamingMutationEncoded;
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    this.assertMutationAdmission(operation);
     if (this.currentTx(writeContext, operation)) {
       throw new Error("Streaming mutations are not supported inside a transaction");
     }
@@ -1280,6 +1400,12 @@ export class NativeRuntimeAdapter implements Runtime {
           branchView?.head,
           branchView?.base,
         );
+    const owner = this.ownerRuntime;
+    let releaseAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    owner.pendingStreamingMutations.add(admission);
     const encoder = new TextEncoder();
     const pushBounded = async (bytes: Uint8Array): Promise<void> => {
       const hostWindowBytes = 64 * 1024;
@@ -1311,7 +1437,6 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
-      const owner = this.ownerRuntime;
       const previousFinalization = owner.streamingFinalization;
       let releaseFinalization!: () => void;
       const finalization = new Promise<void>((resolve) => {
@@ -1329,6 +1454,9 @@ export class NativeRuntimeAdapter implements Runtime {
     } catch (error) {
       await upload.abort();
       throw error;
+    } finally {
+      releaseAdmission();
+      owner.pendingStreamingMutations.delete(admission);
     }
   }
 
@@ -1338,6 +1466,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): InsertResult {
+    this.assertMutationAdmission("Restore");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
@@ -1387,6 +1516,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: Record<string, Value>,
     writeContext?: string | null,
   ): MutationResult {
+    this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
@@ -1437,6 +1567,7 @@ export class NativeRuntimeAdapter implements Runtime {
     descriptors: readonly unknown[],
     writeContext?: string | null,
   ): MutationResult {
+    this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1471,6 +1602,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): MutationResult {
+    this.assertMutationAdmission("Upsert");
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -1530,6 +1662,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
+    this.assertMutationAdmission("Delete");
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -1660,6 +1793,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
     }
+    if (this.closed) {
+      throw new Error("Begin transaction failed: native runtime is closed");
+    }
     if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
@@ -1695,6 +1831,9 @@ export class NativeRuntimeAdapter implements Runtime {
 
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
     if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openTransactionId);
+    if (this.closed) {
+      throw new Error("Commit transaction failed: native runtime is closed");
+    }
     const pending = this.pendingTxs.get(openTransactionId);
     if (!pending) {
       throw new Error(commitTransactionMessage(openTransactionId, this.completedTxs));
@@ -1784,6 +1923,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
+    const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+    // Relation-IR lowering still has a JSON-only binding API.  Array includes
+    // below use the transaction-aware snapshot ABI instead, so they preserve
+    // staged writes and do not fall back to the owner's ordinary view.
+    if (pendingTx && queryUsesNativeRelationApi(coreQueryJson)) {
+      throw new Error("Native runtime does not support relation reads inside a transaction");
+    }
     // Browser runtimes still materialize row bodies from their in-memory
     // cache, but an Edge/Global read must keep its requested tier while doing
     // so. The settled membership from the worker is the authorization
@@ -1816,6 +1962,40 @@ export class NativeRuntimeAdapter implements Runtime {
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
+        if (pendingTx) {
+          const payload =
+            this.readAuthorizationHost === "trusted-serving" && pendingTx.identity
+              ? this.db.allRelationSnapshotInTransactionForIdentity
+                ? await this.awaitNativeRead(
+                    this.db.allRelationSnapshotInTransactionForIdentity(
+                      query,
+                      this.txForRead(pendingTx),
+                      pendingTx.identity,
+                      opts,
+                    ),
+                  )
+                : (() => {
+                    throw new Error(
+                      "Native runtime does not support trusted-serving transaction relation reads",
+                    );
+                  })()
+              : this.db.allRelationSnapshotInTransaction
+                ? await this.awaitNativeRead(
+                    this.db.allRelationSnapshotInTransaction(
+                      query,
+                      this.txForRead(pendingTx),
+                      opts,
+                    ),
+                  )
+                : (() => {
+                    throw new Error("Native runtime does not support transaction relation reads");
+                  })();
+          return rowsFromRelationSnapshot(
+            readRelationSnapshot(payload),
+            this.schema,
+            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+          );
+        }
         if (this.readAuthorizationHost === "trusted-serving") {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
@@ -1843,7 +2023,6 @@ export class NativeRuntimeAdapter implements Runtime {
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
       const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
       let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
@@ -1996,6 +2175,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: transportIdentity,
+      features: this.nativeWireFeatures(),
       authJson,
       onFrame: (frame) => {
         if (generation !== this.serverConnectionGeneration) return;
@@ -2107,6 +2287,19 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
+  private nativeWireFeatures(): number {
+    if (!this.db.wireFeatures) {
+      throw new Error(
+        "native runtime binding does not expose its wire feature mask; install the matching Jazz native runtime package",
+      );
+    }
+    const features = this.db.wireFeatures();
+    if (!Number.isSafeInteger(features) || features < 0 || features > 0xffff_ffff) {
+      throw new Error(`native binding returned invalid wire feature mask ${features}`);
+    }
+    return features;
+  }
+
   async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverConnectionGeneration += 1;
@@ -2174,6 +2367,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.handleServerTransportError(error);
   }
 
+  /** Clear a terminal remote-peer error after its replacement transport is ready. */
+  clearRemoteServerTransportError(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
+    this.serverTransportError = null;
+    this.clearServerTransportErrorWaiters();
+  }
+
   reportRemoteMutationError(event: MutationErrorEvent): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
     this.deliverMutationError(event);
@@ -2227,6 +2427,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     return { kind: "committed", txId };
+  }
+
+  /** Refuse every mutation once a foreground lease begins clean handoff. */
+  private assertMutationAdmission(operation: string): void {
+    if (this.ownerRuntime.closed) {
+      throw new Error(`${operation} failed: native runtime is closed`);
+    }
   }
 
   private resultForRow(
@@ -2322,6 +2529,19 @@ export class NativeRuntimeAdapter implements Runtime {
     pendingTx: PendingTx | undefined,
   ): Promise<Uint8Array> {
     if (!pendingTx) return this.readRowsForHostAsync(query, opts, session?.identity);
+    if (this.readAuthorizationHost === "trusted-serving" && pendingTx.identity) {
+      if (!this.db.allInTransactionForIdentity) {
+        throw new Error("Native runtime does not support trusted-serving transaction reads");
+      }
+      return this.awaitNativeRead(
+        this.db.allInTransactionForIdentity(
+          query,
+          this.txForRead(pendingTx),
+          pendingTx.identity,
+          opts,
+        ),
+      );
+    }
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
@@ -2749,13 +2969,28 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private withPermissionAdviceTimeout(
-    start: () => NativePermissionAdviceRequest,
+    start: () => NativePermissionAdviceResult,
   ): Promise<PermissionAdvice> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
     if (this.closed || !this.serverTransport || !this.serverCarrier) {
       return Promise.resolve("unknown");
     }
-    const request = start();
+    const started = start();
+    const request: NativePermissionAdviceRequest = isPendingNativePermissionAdvice(started)
+      ? {
+          promise: this.awaitNativePermissionAdvice(started),
+          cancel: () => started.cancel(),
+        }
+      : typeof started === "string"
+        ? {
+            promise: Promise.resolve(
+              started === "allowed" || started === "denied" || started === "unknown"
+                ? started
+                : "unknown",
+            ),
+            cancel: () => {},
+          }
+        : started;
     return new Promise((resolve) => {
       let settled = false;
       const finish = (advice: PermissionAdvice) => {
@@ -2772,8 +3007,40 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  /**
+   * Keep a permission request's cancel-safe core future on its owning JS
+   * thread, allowing the normal peer pump to deliver its authority receipt
+   * between polls.  A missing or malformed native result fails closed.
+   */
+  private async awaitNativePermissionAdvice(
+    pending: PendingNativePermissionAdvice,
+  ): Promise<PermissionAdvice> {
+    for (;;) {
+      if (this.closed) {
+        pending.cancel();
+        return "unknown";
+      }
+      const advice = pending.poll();
+      if (advice !== null) {
+        return advice === "allowed" || advice === "denied" || advice === "unknown"
+          ? advice
+          : "unknown";
+      }
+      await this.pumpServerTransport();
+      await sleep(0);
+    }
+  }
+
   private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
+    if (urgency === "after-current-turn") {
+      // A microtask would set `coreTickAgain` while a core tick is still
+      // running, recursively entering the next tick before the browser can
+      // deliver newly-produced frames. Cold subscriber hydration must yield
+      // to the host task queue so inbound commits/fates get a fair turn.
+      setTimeout(() => this.scheduleCoreWake("immediate"), 0);
+      return;
+    }
     if (urgency.startsWith("after:")) {
       const delayMs = Number(urgency.slice("after:".length));
       if (!Number.isSafeInteger(delayMs) || delayMs < 0) return;
@@ -3130,9 +3397,9 @@ export class NativeRuntimeAdapter implements Runtime {
     }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
-  private notifyPeerTransportWork(): void {
+  private notifyPeerTransportWork(requiresDistinctPass = false): void {
     for (const listener of this.peerTransportWorkListeners) {
-      listener();
+      listener(requiresDistinctPass);
     }
   }
 
@@ -3219,6 +3486,12 @@ export class NativeRuntimeAdapter implements Runtime {
         if (transport.sendWireFrames) transport.sendWireFrames(canonical);
         else for (const frame of canonical) transport.sendWireFrame(frame);
       }
+      // Carrier ingress can change the result visible through every local peer,
+      // including a subscriber whose evaluator pass began before this batch was
+      // admitted. Require one distinct post-admission pass. This is deliberately
+      // narrower than the general native tick scheduler, whose routine wakes
+      // must remain coalescible to avoid self-sustaining peer-pump loops.
+      this.notifyPeerTransportWork(true);
       const carrier = this.serverCarrier;
       if (carrier) {
         this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);
@@ -4227,7 +4500,22 @@ function rejectedWaitError(
   message: string;
 } | null {
   const message = errorMessage(error);
-  if (!message.includes("WriteRejected")) return null;
+  if (extractWriteRejectedReason(message) === null) return null;
+  return queuedWriteRejection(transactionId, error);
+}
+
+function queuedWriteRejection(
+  transactionId: TxId,
+  error: unknown,
+): {
+  kind: "rejected";
+  transactionId: TxId;
+  code: string;
+  reason: string;
+  /** An Error-compatible diagnostic for direct native callers. */
+  message: string;
+} {
+  const message = errorMessage(error);
   const rejection: {
     kind: "rejected";
     transactionId: TxId;
@@ -4256,8 +4544,8 @@ function writeOrNormalizeRejection<T>(
     return write();
   } catch (error) {
     const message = errorMessage(error);
-    if (message.includes("WriteRejected")) {
-      const reason = rejectionReason(message);
+    const reason = extractWriteRejectedReason(message);
+    if (reason !== null) {
       throw new Error(`${operation} failed: WriteError("${reason}")`);
     }
     throw error;
@@ -4308,8 +4596,16 @@ function rejectionCode(message: string): string {
 }
 
 function rejectionReason(message: string): string {
-  if (message.includes("AuthorizationDenied")) return "Write rejected by server authorization";
-  return message.replace(/^.*WriteRejected:?\s*/, "") || "Write rejected";
+  const reason = extractWriteRejectedReason(message);
+  if (reason === null) return message;
+  if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
+  return reason || "Write rejected";
+}
+
+/** Parse the exact stable Rust `Error` display prefix without matching quoted diagnostics. */
+function extractWriteRejectedReason(message: string): string | null {
+  const match = /^WriteRejected:\s*(.*)$/s.exec(message);
+  return match ? match[1]! : null;
 }
 
 function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {

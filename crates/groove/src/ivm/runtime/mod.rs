@@ -53,8 +53,8 @@ use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_
 use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
-    RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
+    RecursiveState, hydrate_recursive_arrangements, recursive_delta, recursive_read_tables,
+    require_snapshot_inputs, snapshot_requirement,
 };
 use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
@@ -365,6 +365,8 @@ pub enum IvmRuntimeError {
     GraphInputMissing(NodeId),
     #[error("graph node not found: {0:?}")]
     GraphNodeNotFound(NodeId),
+    #[error("graph contains a dependency cycle at node: {0:?}")]
+    GraphCycle(NodeId),
     #[error("graph output descriptors do not match")]
     GraphOutputMismatch,
     #[error("enum tag {tag} is absent from this projection target")]

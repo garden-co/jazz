@@ -3,6 +3,7 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
+import { providerReceipt } from "./vitest-receipts.mjs";
 
 /**
  * The provider receipt mocks Jazz and Better Auth deliberately. Keep it out of
@@ -10,6 +11,9 @@ import { playwright } from "@vitest/browser-playwright";
  * when a test actually exercises an edge/core topology.
  */
 export default defineConfig({
+  // Keep this separate from the topology project's cache: CI deliberately
+  // overlaps the package's Node and browser partitions.
+  cacheDir: "node_modules/.vite-record-player-provider",
   optimizeDeps: {
     include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
   },
@@ -20,7 +24,7 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    include: ["tests/browser/provider.e2e.test.tsx"],
+    include: [providerReceipt],
     browser: {
       enabled: true,
       provider: playwright(),

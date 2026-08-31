@@ -3150,7 +3150,7 @@ fn coerce_literal_for_source_field(
     let Some(value_type) = source_field_type(source, field) else {
         return value;
     };
-    coerce_literal_for_value_type(value, non_null_value_type(value_type))
+    coerce_literal_for_value_type(value, value_type)
 }
 
 fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {

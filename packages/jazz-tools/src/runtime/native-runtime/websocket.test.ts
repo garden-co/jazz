@@ -4,6 +4,7 @@ import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  FEATURE_PAYLOAD_ZSTD,
   FEATURE_SYNC_MESSAGE_PAYLOAD,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
@@ -281,6 +282,18 @@ describe("websocket frame carrier", () => {
     const suffixed = Uint8Array.from([...hello, 0]);
     expect(new PostcardReader(suffixed).u64()).toBe(0);
     expect(() => isWireHello(suffixed)).toThrow("WireFrame::Hello has trailing postcard bytes");
+  });
+
+  it("rejects a server codec that this native artifact did not advertise", async () => {
+    const localFeatures = CLIENT_WIRE_FEATURES & ~FEATURE_PAYLOAD_ZSTD;
+    const { carrier, socket } = carrierForTest({ features: localFeatures });
+    socket.emitMessage(
+      encodeWebSocketFrameBatch([
+        encodeServerHello(1n, WIRE_PROTOCOL_VERSION, { features: CLIENT_WIRE_FEATURES }),
+      ]),
+    );
+    await expect(carrier.ready()).rejects.toThrow("server accepted unsupported wire features 0x10");
+    expect(socket.closed).toBe(true);
   });
 
   it("decodes exact Rust-produced Hello frames and rejects only true suffixes", async () => {
@@ -750,11 +763,15 @@ function encodeServerHello(
   return writer.finish();
 }
 
-function carrierForTest(): { carrier: WebSocketCarrier; socket: MessageWebSocket } {
+function carrierForTest(options: { features?: number } = {}): {
+  carrier: WebSocketCarrier;
+  socket: MessageWebSocket;
+} {
   let socket: MessageWebSocket | undefined;
   const carrier = new WebSocketCarrier({
     endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
     peerIdentity: new Uint8Array(16),
+    features: options.features,
     onFrame: () => {},
     WebSocket: class extends MessageWebSocket {
       constructor(url: string) {

@@ -356,6 +356,7 @@ where
     pub(super) admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     pub(super) downstream_fates: PendingDownstreamFates,
     pub(super) mutation_errors: SharedMutationErrors,
+    pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
     pub(super) observed_session_claim_revision: Cell<u64>,
@@ -738,22 +739,30 @@ where
         *session_claim_revision = session_claim_revision.saturating_add(1);
     }
 
-    /// Bind the process-local query compiler to this subscriber's authenticated
-    /// session immediately before it serves work for that subscriber. NodeState
-    /// retains a cache keyed by identity, while several websocket sessions can
-    /// legitimately share an identity with different claim maps.
-    fn bind_subscriber_session_claims(&self) {
+    /// Return the claims admitted for this subscriber session. They are scoped
+    /// while the node lock is held instead of being installed under the shared
+    /// author identity.
+    fn subscriber_session_claim_binding(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             ingest_context,
             session_claims,
             ..
         }) = &self.link
         else {
+            return None;
+        };
+        Some((ingest_context.identity, session_claims.clone()))
+    }
+
+    /// Keep the legacy admission map available to write-policy evaluation and
+    /// upstream propagation. Read compilation uses the scoped context above,
+    /// so this author-keyed compatibility state cannot select another live
+    /// session's maintained view.
+    fn bind_subscriber_session_claims(&self) {
+        let Some((identity, claims)) = self.subscriber_session_claim_binding() else {
             return;
         };
-        self.node
-            .borrow_mut()
-            .set_session_claims(ingest_context.identity, session_claims.clone());
+        self.node.borrow_mut().set_session_claims(identity, claims);
     }
 
     fn subscriber_session_claim_revision(&self) -> u64 {
@@ -770,7 +779,10 @@ where
     /// Rebuild this subscriber's maintained views if its process-local claims
     /// changed. Policy claim values are bound when a maintained view opens, so
     /// retaining the old view after a claim change would retain its authority.
-    async fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+    async fn rebind_subscriber_views_after_claim_change(
+        &mut self,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<bool, Error> {
         let connection_epoch = self.connection_epoch;
         let identity = match &self.link {
             ConnectionLink::Subscriber(SubscriberConnectionState { ingest_context, .. }) => {
@@ -778,7 +790,7 @@ where
             }
             ConnectionLink::Upstream(_) => return Ok(false),
         };
-        self.bind_subscriber_session_claims();
+        let session_claim_binding = self.subscriber_session_claim_binding();
         let current_revision = self.subscriber_session_claim_revision();
         if self.observed_session_claim_revision.get() == current_revision {
             return Ok(false);
@@ -815,12 +827,21 @@ where
             };
             let update = {
                 let mut node = self.node.lock().await;
-                peer.rehydrate_query_for_subscription_with_opts(
+                let mut node = node.scoped_active_session_claims(
+                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                    session_claim_binding
+                        .as_ref()
+                        .expect("subscriber claims")
+                        .1
+                        .clone(),
+                );
+                peer.rehydrate_query_for_subscription_with_opts_and_waker(
                     &mut node,
                     maintained_subscription,
                     &shape,
                     &binding,
                     coverage.opts,
+                    progress_waker,
                 )
                 .await?
             };
@@ -839,6 +860,7 @@ where
                     refresh_authorized_scope_purpose(
                         &self.node.borrow(),
                         identity,
+                        &session_claim_binding.as_ref().expect("subscriber claims").1,
                         subscription,
                         &shape,
                         &binding,
@@ -996,7 +1018,12 @@ where
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
     pub(super) async fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
-        self.bind_subscriber_session_claims();
+        let progress_waker = self
+            .scheduler
+            .borrow()
+            .as_ref()
+            .and_then(|scheduler| scheduler.query_runtime_waker());
+        let session_claim_binding = self.subscriber_session_claim_binding();
         let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
@@ -1030,12 +1057,21 @@ where
             };
             let update = {
                 let mut node = self.node.lock().await;
-                peer.rehydrate_query_for_subscription_with_opts(
+                let mut node = node.scoped_active_session_claims(
+                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                    session_claim_binding
+                        .as_ref()
+                        .expect("subscriber claims")
+                        .1
+                        .clone(),
+                );
+                peer.rehydrate_query_for_subscription_with_opts_and_waker(
                     &mut node,
                     group_subscription,
                     &shape,
                     &binding,
                     coverage.opts.clone(),
+                    progress_waker.as_ref(),
                 )
                 .await?
             };
@@ -1056,6 +1092,7 @@ where
                     refresh_authorized_scope_purpose(
                         &self.node.borrow(),
                         ingest_context.identity,
+                        &session_claim_binding.as_ref().expect("subscriber claims").1,
                         subscription,
                         &shape,
                         &binding,
@@ -1143,8 +1180,10 @@ where
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
+        let session_claim_binding = self.subscriber_session_claim_binding();
         self.bind_subscriber_session_claims();
-        self.rebind_subscriber_views_after_claim_change().await?;
+        self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
+            .await?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -1222,7 +1261,7 @@ where
                         }
                         let pending_index = 0;
                         while pending_index < pending.len() {
-                            match &pending[pending_index] {
+                            match &mut pending[pending_index] {
                                 PendingUpstreamCommand::Subscribe(pending_subscription) => {
                                     let shape = &pending_subscription.shape;
                                     let binding = &pending_subscription.binding;
@@ -1342,6 +1381,7 @@ where
                                 PendingUpstreamCommand::AuthorizationScopeIntent {
                                     request_id,
                                     action,
+                                    session_claim_binding: pending_session_claim_binding,
                                 } => {
                                     // An old or unauthenticated upstream must never receive a
                                     // downgraded preflight.  Resolve conservatively instead.
@@ -1379,10 +1419,83 @@ where
                                             pending.remove(pending_index);
                                             continue;
                                         }
+                                        let Some(expected) = expected_scope_authority else {
+                                            continue;
+                                        };
+                                        let session_claim_binding = pending_session_claim_binding
+                                            .clone()
+                                            .or_else(|| {
+                                                scope_lease_manager
+                                                    .requests
+                                                    .get(request_id)
+                                                    .map(|request| {
+                                                        request.session_claim_binding.clone()
+                                                    })
+                                            })
+                                            .unwrap_or_else(|| {
+                                                let identity = expected.link;
+                                                let claims = self
+                                                    .node
+                                                    .borrow()
+                                                    .session_claims_with_revisions()
+                                                    .into_iter()
+                                                    .find_map(|(subject, claims, _)| {
+                                                        (subject == identity).then_some(claims)
+                                                    })
+                                                    .unwrap_or_default();
+                                                (identity, claims)
+                                            });
+                                        // Allocation establishes the immutable
+                                        // request binding before the first wire
+                                        // send. A backpressured command remains
+                                        // in this queue, so it must carry the
+                                        // same binding on a later turn.
+                                        *pending_session_claim_binding =
+                                            Some(session_claim_binding.clone());
+                                        let claims_still_bound = self
+                                            .node
+                                            .borrow()
+                                            .session_claims_with_revisions()
+                                            .into_iter()
+                                            .find_map(|(identity, claims, _)| {
+                                                (identity == session_claim_binding.0)
+                                                    .then_some(claims)
+                                            });
+                                        let claims_still_bound = claims_still_bound
+                                            .unwrap_or_default()
+                                            == session_claim_binding.1;
+                                        if !claims_still_bound {
+                                            if let Some(request) =
+                                                scope_lease_manager.requests.remove(request_id)
+                                            {
+                                                for waiter_id in request.waiters {
+                                                    if let Some(waiter) = self
+                                                        .permission_advice_waiters
+                                                        .borrow_mut()
+                                                        .remove(&waiter_id)
+                                                    {
+                                                        let _ =
+                                                            waiter.send(PermissionAdvice::Unknown);
+                                                    }
+                                                }
+                                            } else if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(request_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                            pending.remove(pending_index);
+                                            continue;
+                                        }
                                         let existing = scope_lease_manager
                                             .requests
                                             .iter()
-                                            .find(|(_, request)| request.action == *action)
+                                            .find(|(_, request)| {
+                                                request.action == *action
+                                                    && request.session_claim_binding
+                                                        == session_claim_binding
+                                            })
                                             .map(|(wire_request_id, request)| {
                                                 (*wire_request_id, request.intent_sent)
                                             });
@@ -1415,6 +1528,7 @@ where
                                                 *request_id,
                                                 AuthorizationScopeLeaseRequest {
                                                     action: action.clone(),
+                                                    session_claim_binding,
                                                     waiters: BTreeSet::from([*request_id]),
                                                     intent_sent: false,
                                                     key: None,
@@ -1958,17 +2072,51 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                let Some(prior) = scope_lease_manager.requests.get(&request_id)
+                                let Some((session_claim_binding, key_mismatch, needs_acquire)) = scope_lease_manager
+                                    .requests
+                                    .get(&request_id)
+                                    .map(|prior| {
+                                        (
+                                            prior.session_claim_binding.clone(),
+                                            prior.key.as_ref().is_some_and(|known| known != &key)
+                                                || prior
+                                                    .clause_count
+                                                    .is_some_and(|known| known != clause_count),
+                                            prior.lease.is_none(),
+                                        )
+                                    })
                                 else {
                                     // A cancelled intent cannot be revived by a
                                     // late/replayed authority view.
                                     continue;
                                 };
-                                if prior.key.as_ref().is_some_and(|known| known != &key)
-                                    || prior
-                                        .clause_count
-                                        .is_some_and(|known| known != clause_count)
-                                {
+                                let claims_still_bound = self
+                                    .node
+                                    .borrow()
+                                    .session_claims_with_revisions()
+                                    .into_iter()
+                                    .find_map(|(identity, claims, _)| {
+                                        (identity == session_claim_binding.0).then_some(claims)
+                                    })
+                                    .unwrap_or_default()
+                                    == session_claim_binding.1;
+                                if !claims_still_bound {
+                                    if let Some(request) =
+                                        scope_lease_manager.requests.remove(&request_id)
+                                    {
+                                        for waiter_id in request.waiters {
+                                            if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(&waiter_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if key_mismatch {
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
@@ -1978,7 +2126,7 @@ where
                                 // that compile to this same support scope share
                                 // one registry lifecycle rather than racing after
                                 // hydration has already completed.
-                                let acquired = if prior.lease.is_none() {
+                                let acquired = if needs_acquire {
                                     scope_lease_manager.registry.acquire(key.clone())
                                 } else {
                                     None
@@ -2031,6 +2179,41 @@ where
                                 request_id,
                                 receipt,
                             } => {
+                                // Reject a receipt before applying any queued
+                                // scope views when this request's admitted
+                                // claims have changed. A B-scoped proof must
+                                // never materialize support for an A request.
+                                let claims_still_bound = scope_lease_manager
+                                    .requests
+                                    .get(&request_id)
+                                    .is_none_or(|request| {
+                                        self.node
+                                            .borrow()
+                                            .session_claims_with_revisions()
+                                            .into_iter()
+                                            .find_map(|(identity, claims, _)| {
+                                                (identity == request.session_claim_binding.0)
+                                                    .then_some(claims)
+                                            })
+                                            .unwrap_or_default()
+                                            == request.session_claim_binding.1
+                                    });
+                                if !claims_still_bound {
+                                    if let Some(request) =
+                                        scope_lease_manager.requests.remove(&request_id)
+                                    {
+                                        for waiter_id in request.waiters {
+                                            if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(&waiter_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 // The authority's FIFO ordering says this receipt
                                 // follows the views, but apply the queued views now
                                 // so receipt admission is never merely queued.
@@ -2124,6 +2307,31 @@ where
                                             applied_cut,
                                         );
                                 if !receipt_current {
+                                    let claims_still_bound = self
+                                        .node
+                                        .borrow()
+                                        .session_claims_with_revisions()
+                                        .into_iter()
+                                        .find_map(|(identity, claims, _)| {
+                                            (identity == request.session_claim_binding.0)
+                                                .then_some(claims)
+                                        })
+                                        .unwrap_or_default()
+                                        == request.session_claim_binding.1;
+                                    if !claims_still_bound {
+                                        let waiter_ids = request.waiters.clone();
+                                        scope_lease_manager.requests.remove(&request_id);
+                                        for waiter_id in waiter_ids {
+                                            if let Some(waiter) = self
+                                                .permission_advice_waiters
+                                                .borrow_mut()
+                                                .remove(&waiter_id)
+                                            {
+                                                let _ = waiter.send(PermissionAdvice::Unknown);
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     // A claim/catalogue/progress transition can
                                     // race a just-completed hydration.  Retire its
                                     // lease and allocate a new opaque wire id so
@@ -2133,12 +2341,14 @@ where
                                     let retry_id =
                                         PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
                                     let action = request.action.clone();
+                                    let session_claim_binding = request.session_claim_binding.clone();
                                     let waiters = request.waiters.clone();
                                     scope_lease_manager.requests.remove(&request_id);
                                     scope_lease_manager.requests.insert(
                                         retry_id,
                                         AuthorizationScopeLeaseRequest {
                                             action: action.clone(),
+                                            session_claim_binding: session_claim_binding.clone(),
                                             waiters,
                                             intent_sent: false,
                                             key: None,
@@ -2152,6 +2362,7 @@ where
                                         PendingUpstreamCommand::AuthorizationScopeIntent {
                                             request_id: retry_id,
                                             action,
+                                            session_claim_binding: Some(session_claim_binding),
                                         },
                                     );
                                     drop_peer_request(&self.node);
@@ -2183,10 +2394,15 @@ where
                                     continue;
                                 }
                                 let action = request.action.clone();
+                                let session_claim_binding = request.session_claim_binding.clone();
                                 let waiter_ids = request.waiters.clone();
                                 scope_lease_manager.requests.remove(&request_id);
                                 let advice = {
                                     let mut node = self.node.lock().await;
+                                    let mut node = node.scoped_active_session_claims(
+                                        session_claim_binding.0,
+                                        session_claim_binding.1,
+                                    );
                                     evaluate_authoritative_permission_advice(
                                         &mut node,
                                         receipt.key.subject,
@@ -2406,6 +2622,7 @@ where
                                 &self.node,
                                 &self.write_state_waiters,
                                 &self.mutation_errors,
+                                &self.browser_relay_recovered_tx_ids,
                                 &self.scheduler,
                                 tx_id,
                             );
@@ -2501,7 +2718,7 @@ where
                     send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut())?;
                 }
                 let mut applied_inbound = false;
-                let mut scheduled_immediate = false;
+                let mut scheduled_follow_up = false;
                 let mut sent_view_update = false;
                 let mut needs_subscription_refresh = false;
                 let relay_rejections = self
@@ -2685,12 +2902,18 @@ where
                                 peer,
                                 &mut self.pending_control_responses,
                                 ingest_context.identity,
+                                session_claim_binding
+                                    .as_ref()
+                                    .expect("subscriber claims")
+                                    .1
+                                    .clone(),
                                 connection_epoch,
                                 request_id,
                                 action,
                                 ingest_context.trust,
                                 authority_scope_hydrations,
                                 authority_scope_hydration_count,
+                                progress_waker.as_ref(),
                             )
                             .await?;
                             if !self.pending_control_responses.is_empty() {
@@ -2796,11 +3019,13 @@ where
                                             continue;
                                         }
                                     };
-                                    let supported = self
-                                        .node
-                                        .lock()
-                                        .await
-                                        .ensure_peer_maintained_subscription_view_supported(
+                                    let supported = {
+                                        let mut node = self.node.lock().await;
+                                        let mut node = node.scoped_active_session_claims(
+                                            session_claim_binding.as_ref().expect("subscriber claims").0,
+                                            session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                                        );
+                                        node.ensure_peer_maintained_subscription_view_supported(
                                             shape,
                                             &binding,
                                             opts.tier,
@@ -2808,7 +3033,8 @@ where
                                             &opts.read_view,
                                             QueryAuthorizationMode::TrustedServing,
                                         )
-                                        .await;
+                                        .await
+                                    };
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
                                     {
@@ -3029,9 +3255,15 @@ where
                                 );
                             }
                             let scope_purpose = if let Some(purpose) = scope_purpose {
-                                let expected_result =
-                                    self.node.borrow().authorization_support_scope(
+                                let expected_result = self
+                                    .node
+                                    .borrow()
+                                    .authorization_support_scope_for_session(
                                         ingest_context.identity,
+                                        Some(&session_claim_binding
+                                            .as_ref()
+                                            .expect("subscriber claims")
+                                            .1),
                                         &purpose.action,
                                     );
                                 let expected = match expected_result {
@@ -3081,11 +3313,13 @@ where
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
-                            let supported = self
-                                .node
-                                .lock()
-                                .await
-                                .ensure_peer_maintained_subscription_view_supported(
+                            let supported = {
+                                let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                                );
+                                node.ensure_peer_maintained_subscription_view_supported(
                                     &shape,
                                     &binding,
                                     opts.tier,
@@ -3093,7 +3327,8 @@ where
                                     &opts.read_view,
                                     QueryAuthorizationMode::TrustedServing,
                                 )
-                                .await;
+                                .await
+                            };
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
                                 queue_direct_control(&mut self.pending_control_responses,
                                     unsupported_shape_capability_rejection_message(
@@ -3332,8 +3567,13 @@ where
                                     ),
                                 );
                             }
-                            schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
-                            scheduled_immediate = true;
+                            // Opening a subscription creates work that may
+                            // require cold storage. Let the current transport
+                            // owner return first, so other frames (notably
+                            // local write receipts) can be ingressed before
+                            // initial hydration is attempted.
+                            schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
+                            scheduled_follow_up = true;
                             Ok::<bool, Error>(false)
                             })
                             .await?;
@@ -3506,6 +3746,7 @@ where
                                     &self.node,
                                     &self.write_state_waiters,
                                     &self.mutation_errors,
+                                    &self.browser_relay_recovered_tx_ids,
                                     &self.scheduler,
                                     tx_id,
                                 );
@@ -3630,8 +3871,8 @@ where
                     )
                     .await?;
                 }
-                if applied_inbound && !scheduled_immediate {
-                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                if applied_inbound && !scheduled_follow_up {
+                    schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
                 }
                 if applied_inbound {
                     let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
@@ -3643,7 +3884,7 @@ where
                     // is a separately scheduled turn so it cannot withhold the
                     // writer's durability receipt or later cancellation/flush
                     // traffic on this connection.
-                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                    schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);
                     return Ok(true);
                 }
                 if *serve_dirty
@@ -3675,23 +3916,29 @@ where
                         for subscription in pending_initial {
                             let update_result = {
                                 let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                                );
                                 if group.initialized
                                     || peer.has_maintained_subscription(group_subscription)
                                 {
-                                    peer.rehydrate_query_for_subscription_from_maintained_subscription(
+                                    peer.rehydrate_query_for_subscription_from_maintained_subscription_and_waker(
                                         &mut node,
                                         group_subscription,
                                         subscription,
                                         &group.shape,
+                                        progress_waker.as_ref(),
                                     )
                                     .await
                                 } else {
-                                    peer.rehydrate_query_for_subscription_with_opts(
+                                    peer.rehydrate_query_for_subscription_with_opts_and_waker(
                                         &mut node,
                                         group_subscription,
                                         &group.shape,
                                         &group.binding,
                                         coverage.opts.clone(),
+                                        progress_waker.as_ref(),
                                     )
                                     .await
                                     .map(|update| {
@@ -3773,22 +4020,57 @@ where
                         }
                         let update_result = {
                             let mut node = self.node.lock().await;
-                            if settled_handoff {
-                                peer.rehydrate_query_for_subscription_with_opts(
+                            let mut node = node.scoped_active_session_claims(
+                                session_claim_binding.as_ref().expect("subscriber claims").0,
+                                session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
+                            );
+                            if settled_handoff && peer.has_maintained_subscription(group_subscription) {
+                                // A cold handoff opens the maintained view on
+                                // its first turn. Retrying that full rehydrate
+                                // would discard the just-opened receiver each
+                                // time, so resume the existing view's initial
+                                // delta and turn it into the authority reset.
+                                peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
+                                    progress_waker.as_ref(),
+                                )
+                                .await
+                                .map(|update| {
+                                    update.map(|mut update| {
+                                        if let SyncMessage::ViewUpdate(
+                                            crate::protocol::ViewUpdatePayload {
+                                                reset_result_set,
+                                                ..
+                                            },
+                                        ) = &mut update
+                                        {
+                                            *reset_result_set = true;
+                                        }
+                                        update
+                                    })
+                                })
+                            } else if settled_handoff {
+                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                    &mut node,
+                                    group_subscription,
+                                    &group.shape,
+                                    &group.binding,
+                                    coverage.opts.clone(),
+                                    progress_waker.as_ref(),
                                 )
                                 .await
                             } else {
-                                peer.query_update_for_subscription_with_opts(
+                                peer.query_update_for_subscription_with_opts_and_waker(
                                     &mut node,
                                     group_subscription,
                                     &group.shape,
                                     &group.binding,
                                     coverage.opts.clone(),
+                                    progress_waker.as_ref(),
                                 )
                                 .await
                             }
@@ -4233,6 +4515,7 @@ async fn serve_authorization_scope_intent<S>(
     peer: &mut PeerState,
     pending_control_responses: &mut VecDeque<PendingSubscriberControlResponse>,
     identity: AuthorSubject,
+    session_claims: BTreeMap<String, Value>,
     connection_epoch: u64,
     request_id: PermissionAdviceRequestId,
     action: PermissionAdviceAction,
@@ -4242,6 +4525,7 @@ async fn serve_authorization_scope_intent<S>(
         ServedAuthorizationScopeHydration,
     >,
     hydration_count: &mut u64,
+    progress_waker: Option<&std::task::Waker>,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -4255,7 +4539,11 @@ where
         );
         return Ok(());
     }
-    let scope = match node.borrow().authorization_support_scope(identity, &action) {
+    let scope = match node.borrow().authorization_support_scope_for_session(
+        identity,
+        Some(&session_claims),
+        &action,
+    ) {
         Ok(scope) => scope,
         Err(_) => {
             queue_direct_control(
@@ -4280,6 +4568,7 @@ where
     if clause_count == 0 {
         let advice = {
             let mut node = node.lock().await;
+            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
             evaluate_authoritative_permission_advice(&mut node, identity, action).await
         };
         queue_direct_control(
@@ -4331,10 +4620,10 @@ where
             );
             return Ok(());
         }
-        let supported = node
-            .lock()
-            .await
-            .ensure_peer_maintained_subscription_view_supported(
+        let supported = {
+            let mut node = node.lock().await;
+            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
+            node.ensure_peer_maintained_subscription_view_supported(
                 shape,
                 binding,
                 scope.options.tier,
@@ -4342,7 +4631,8 @@ where
                 &scope.options.read_view,
                 QueryAuthorizationMode::TrustedServing,
             )
-            .await;
+            .await
+        };
         if supported.is_err() {
             queue_direct_control(
                 pending_control_responses,
@@ -4365,12 +4655,14 @@ where
         peer.declare_known_state(subscription, None);
         let update = {
             let mut node = node.lock().await;
-            peer.rehydrate_query_for_subscription_with_opts(
+            let mut node = node.scoped_active_session_claims(identity, session_claims.clone());
+            peer.rehydrate_query_for_subscription_with_opts_and_waker(
                 &mut node,
                 subscription,
                 shape,
                 binding,
                 scope.options.clone(),
+                progress_waker,
             )
             .await?
         };
@@ -4614,6 +4906,7 @@ pub(super) fn remove_scope_aggregate_member(
 fn refresh_authorized_scope_purpose<S>(
     node: &NodeState<S>,
     link_identity: AuthorSubject,
+    session_claims: &BTreeMap<String, Value>,
     subscription: SubscriptionKey,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -4623,7 +4916,7 @@ where
     S: OrderedKvStorage,
 {
     let expected = node
-        .authorization_support_scope(link_identity, &prior.action)
+        .authorization_support_scope_for_session(link_identity, Some(session_claims), &prior.action)
         .ok()?;
     let exact_support = subscription.shape_id == shape.shape_id()
         && subscription.binding_id == binding.binding_id()
@@ -5118,10 +5411,6 @@ fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool 
                     handled_mutation_error = true;
                 }
             }
-            WriteStateWaiterNotify::Callback(callback) => {
-                callback();
-                handled_mutation_error = true;
-            }
         }
     }
     handled_mutation_error
@@ -5131,31 +5420,78 @@ fn handle_write_state_update<S>(
     node: &SharedNodeState<S>,
     waiters: &WriteStateWaiters,
     mutation_errors: &SharedMutationErrors,
+    browser_relay_recovered_tx_ids: &Rc<RefCell<BTreeSet<TxId>>>,
     scheduler: &SharedTickScheduler,
     tx_id: TxId,
 ) where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let handled_by_waiter = notify_write_state_waiters(waiters, tx_id);
+    // Extract the owned rejection before deciding how to report it. Keeping a
+    // `LocalMutex` guard in an `if let` scrutinee spans the entire body, which
+    // used to reenter the suspended node when an acknowledged rejection was
+    // discarded below.
     let rejected = node.borrow().rejected_transaction(tx_id);
-    let Some(rejected) = rejected else {
-        return;
-    };
+    if let Some(rejected) = rejected {
+        if handled_by_waiter {
+            mutation_errors.borrow_mut().pending.remove(&tx_id);
+            if let Err(error) = crate::db::block_on(node.borrow_mut().discard_rejection(tx_id)) {
+                tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
+            }
+            return;
+        }
 
-    if handled_by_waiter {
-        mutation_errors.borrow_mut().pending.remove(&tx_id);
-        if let Err(error) = crate::db::block_on(node.borrow_mut().discard_rejection(tx_id)) {
-            tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
+        let should_schedule = {
+            let mut state = mutation_errors.borrow_mut();
+            state
+                .pending
+                .entry(tx_id)
+                .or_insert_with(|| mutation_error_event(rejected));
+            state.callback.is_some()
+        };
+        if should_schedule {
+            schedule_tick_in(scheduler, TickUrgency::Immediate);
         }
         return;
     }
+
+    // A restarted browser relay re-uploads durable foreground commits whose
+    // TxId node belongs to the former, non-durable foreground runtime. Their
+    // row-version payload is deliberately not retained as this worker's
+    // rejection state (INV-TX-9), but an attached foreground runtime still
+    // needs one live notification when that exact replayed transaction is
+    // rejected. This ownership set is process-local and populated only by the
+    // browser relay recovery path, so it cannot turn arbitrary foreign
+    // history into callbacks or survive an app-less worker interval.
+    let Some(record) = browser_relay_recovered_tx_ids
+        .borrow()
+        .contains(&tx_id)
+        .then(|| crate::db::block_on(node.borrow_mut().transaction_record(tx_id)))
+        .flatten()
+    else {
+        return;
+    };
+
+    let terminal = matches!(record.fate, Fate::Rejected(_))
+        || matches!(record.fate, Fate::Accepted)
+            && record.global_time.is_some()
+            && record.durability >= DurabilityTier::Global;
+    if !terminal || !browser_relay_recovered_tx_ids.borrow_mut().remove(&tx_id) {
+        return;
+    }
+    if handled_by_waiter {
+        return;
+    }
+    let Fate::Rejected(reason) = record.fate else {
+        return;
+    };
 
     let should_schedule = {
         let mut state = mutation_errors.borrow_mut();
         state
             .pending
             .entry(tx_id)
-            .or_insert_with(|| mutation_error_event(rejected));
+            .or_insert_with(|| mutation_error_event_for(tx_id, record.kind, &reason));
         state.callback.is_some()
     };
     if should_schedule {
@@ -5176,14 +5512,22 @@ pub(super) fn take_pending_mutation_error_delivery(
 
 pub(super) fn mutation_error_event(rejected: crate::tx::RejectedTransaction) -> MutationErrorEvent {
     let tx_id = rejected.tx_id();
+    mutation_error_event_for(tx_id, rejected.kind(), &rejected.reason())
+}
+
+fn mutation_error_event_for(
+    tx_id: TxId,
+    kind: TxKind,
+    rejection: &RejectionReason,
+) -> MutationErrorEvent {
     let transaction_id = TransactionId::from_committed_tx(tx_id);
-    let (code, reason) = mutation_error_details(&rejected.reason());
+    let (code, reason) = mutation_error_details(rejection);
     MutationErrorEvent {
         code: code.clone(),
         reason: reason.clone(),
         transaction: LocalTransactionRecord {
             transaction_id,
-            kind: rejected.kind().into(),
+            kind: kind.into(),
             sealed: true,
             latest_settlement: TransactionFate::Rejected {
                 transaction_id,

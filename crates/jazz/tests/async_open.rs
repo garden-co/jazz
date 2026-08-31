@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts};
+use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, LocalUpdates, Propagation, ReadOpts};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -133,6 +133,60 @@ fn concurrent_cold_reads_and_subscription_wait_for_the_async_node_owner() {
     };
     assert!(reset);
     assert_eq!(added.len(), 1);
+}
+
+/// Transaction relation reads use the same async owner/query path as ordinary
+/// relation reads. A cold storage operation must suspend the caller rather
+/// than falling back to a synchronous owner view.
+#[test]
+fn exclusive_transaction_relation_snapshot_suspends_on_cold_storage() {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(config(storage.clone()))).expect("open test db");
+    block_on(db.insert(
+        "todos",
+        [("title".to_owned(), Value::String("cold read".to_owned()))].into(),
+        Default::default(),
+    ))
+    .expect("seed todo");
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare todos query");
+    let tx = block_on(db.exclusive_tx()).expect("open exclusive transaction");
+
+    storage.evict_all();
+    control.pause();
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut read = Box::pin(tx.relation_snapshot_prepared_with_opts(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Immediate,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ));
+    assert!(matches!(
+        Pin::new(&mut read).poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(
+        control.observed().iter().any(|operation| matches!(
+            operation,
+            TestStorageOperation::ScanOpen | TestStorageOperation::Get
+        )),
+        "the transaction relation read must reach the actual asynchronous storage path"
+    );
+
+    control.resume();
+    let snapshot = block_on(read).expect("cold transaction relation read resumes");
+    assert_eq!(snapshot.root_count, 1);
 }
 
 /// Alice explicitly closes a subscription. Closing queues the same command as

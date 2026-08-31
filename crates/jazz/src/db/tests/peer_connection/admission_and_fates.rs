@@ -518,6 +518,264 @@ fn upstream_authorization_scope_intent_retries_after_bounded_transport_backpress
     drop(advice);
 }
 
+/// A request captures its session claims before the first intent is admitted.
+/// This seam test keeps that intent behind one bounded send, advances only the
+/// same author's ambient claims, then reconnects to a B-context authority. The
+/// old A-bound request must close conservatively; only a new B-owned request
+/// may receive the successor's receipt.
+#[test]
+fn backpressured_scope_intent_claim_transition_closes_before_reconnect() {
+    struct ScopeIntentBackpressureTransport {
+        outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+        failed_scope_intent: bool,
+        session_context: ConnectionSessionContext,
+    }
+
+    impl Transport for ScopeIntentBackpressureTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::AuthorizationScopeIntent { .. })
+                && !self.failed_scope_intent
+            {
+                self.failed_scope_intent = true;
+                return Err(TransportError::Backpressure);
+            }
+            self.outbound.borrow_mut().push_back(message);
+            Ok(())
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            None
+        }
+
+        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+            Some(self.session_context)
+        }
+    }
+
+    let schema = editor_claim_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc4, author, &schema);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("editor".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("viewer".to_owned()),
+    )]);
+    client.set_test_provider_claims(author, a_claims.clone());
+    let (first_transport, _first_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xc4; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = crate::db::block_on(client.connect_upstream(first_transport));
+    let session_context = upstream
+        .borrow()
+        .transport
+        .connection_session_context()
+        .expect("the admitted transport supplies an authority context");
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    upstream.borrow_mut().transport = Box::new(ScopeIntentBackpressureTransport {
+        outbound: Rc::clone(&outbound),
+        failed_scope_intent: false,
+        session_context,
+    });
+
+    let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+    client.tick().unwrap();
+    {
+        let connection = upstream.borrow();
+        let ConnectionLink::Upstream(state) = &connection.link else {
+            panic!("client connection must be upstream");
+        };
+        assert!(state.pending.iter().any(|command| matches!(
+            command,
+            PendingUpstreamCommand::AuthorizationScopeIntent {
+                session_claim_binding: Some((_, claims)),
+                ..
+            } if *claims == a_claims
+        )));
+        assert!(
+            state
+                .scope_lease_manager
+                .requests
+                .values()
+                .any(|request| request.session_claim_binding.1 == a_claims),
+            "allocation captures A before the first intent reaches the wire"
+        );
+    }
+    assert!(
+        !outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::AuthorizationScopeIntent { .. })),
+        "the scope intent remains retained after its one bounded refusal"
+    );
+
+    client.set_test_provider_claims(author, b_claims.clone());
+    assert!(client.detach_connection(&upstream));
+    let (retry_transport, retry_server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xc4; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let retry_upstream = crate::db::block_on(client.connect_upstream(retry_transport));
+    let retry_subscriber =
+        server.accept_subscriber_with_claims(retry_server_transport, author, a_claims.clone());
+    retry_subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(b_claims);
+    client.tick().unwrap();
+    {
+        let connection = retry_upstream.borrow();
+        let ConnectionLink::Upstream(state) = &connection.link else {
+            panic!("replacement client connection must be upstream");
+        };
+        assert!(
+            state.scope_lease_manager.requests.is_empty(),
+            "claim transition closes the A request instead of sending B a mixed-context intent"
+        );
+    }
+    assert_eq!(
+        block_on(advice),
+        PermissionAdvice::Unknown,
+        "the B-context successor cannot settle the A-bound request"
+    );
+
+    let b_advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(b_advice), PermissionAdvice::Denied);
+}
+
+/// This is the same transition without a detach. The retained command must
+/// remember A after its bounded send refusal and close before it can ask the
+/// still-connected authority for a B-shaped proof.
+#[test]
+fn backpressured_scope_intent_claim_transition_closes_on_same_connection() {
+    struct NullTransport;
+
+    impl Transport for NullTransport {
+        fn send(&mut self, _: SyncMessage) -> Result<(), TransportError> {
+            Err(TransportError::Failed(
+                "test placeholder must never send".to_owned(),
+            ))
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            None
+        }
+    }
+
+    struct ScopeIntentBackpressureTransport {
+        inner: Box<dyn Transport>,
+        failed_scope_intent: bool,
+    }
+
+    impl Transport for ScopeIntentBackpressureTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            if matches!(message, SyncMessage::AuthorizationScopeIntent { .. })
+                && !self.failed_scope_intent
+            {
+                self.failed_scope_intent = true;
+                return Err(TransportError::Backpressure);
+            }
+            self.inner.send(message)
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+
+        fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+            self.inner.connection_session_context()
+        }
+    }
+
+    let schema = editor_claim_write_schema();
+    let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc5, author, &schema);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("editor".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("viewer".to_owned()),
+    )]);
+    client.set_test_provider_claims(author, a_claims.clone());
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xc5; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber_with_claims(server_transport, author, a_claims);
+    let original_transport = {
+        let mut connection = upstream.borrow_mut();
+        std::mem::replace(&mut connection.transport, Box::new(NullTransport))
+    };
+    upstream.borrow_mut().transport = Box::new(ScopeIntentBackpressureTransport {
+        inner: original_transport,
+        failed_scope_intent: false,
+    });
+
+    let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+    client.tick().unwrap();
+    client.set_test_provider_claims(author, b_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(b_claims);
+    client.tick().unwrap();
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut advice = Box::pin(advice);
+    assert_eq!(
+        advice.as_mut().poll(&mut context),
+        Poll::Ready(PermissionAdvice::Unknown),
+        "a retained A command closes before the same connection can admit it under B"
+    );
+    let hydration_count = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber(SubscriberConnectionState {
+            authority_scope_hydration_count,
+            ..
+        }) => *authority_scope_hydration_count,
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        hydration_count, 0,
+        "no A request reaches the B authority, so no support shape can be disclosed"
+    );
+
+    let b_advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(b_advice), PermissionAdvice::Denied);
+}
+
 /// A permission preflight is a node-owned caller obligation, not an
 /// old-transport obligation. When the selected authority disconnects after
 /// accepting the request, the successor must receive one fresh intent and
@@ -970,6 +1228,103 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     assert_eq!(
         hydration_count, 1,
         "candidate rows must share the compiled authority support hydration"
+    );
+}
+
+/// This stays at the peer/transport seam because the public advice future
+/// cannot hold an authority's completed proof between its wire receipt and
+/// the local callback. It proves that the request owns the claims it observed
+/// when it was issued: advancing the same author's ambient claims must retire
+/// the old receipt, ignore its A-only support, and make the caller issue a
+/// fresh B-bound request rather than combining those contexts.
+#[test]
+fn scope_receipt_claim_transition_ignores_late_a_support_and_requires_fresh_b_request() {
+    let schema = owner_read_schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let replacement_subject = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("owned-by-a", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, author, &schema);
+    let a_claims = test_provider_claims(author);
+    let b_claims = test_provider_claims(replacement_subject);
+    client.set_test_provider_claims(author, a_claims);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, author);
+
+    let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(0xa2),
+    });
+    let live = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+
+    // The authority has now queued both A-bound proofs, but the client has
+    // deliberately not consumed either receipt yet.
+    drop(cancelled);
+    client.set_test_provider_claims(author, b_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(b_claims);
+    client.tick().unwrap();
+
+    let mut retried_live = false;
+    loop {
+        let Some(message) = try_recv_subscriber_payload(subscriber.borrow_mut().transport.as_mut())
+        else {
+            break;
+        };
+        if let SyncMessage::AuthorizationScopeIntent { request_id, action } = message {
+            assert_eq!(
+                action,
+                PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: target,
+                },
+                "the cancelled request's late A receipt must not revive or retry it"
+            );
+            let _ = request_id;
+            retried_live = true;
+        }
+    }
+    assert!(
+        !retried_live,
+        "neither the cancelled nor the claim-transitioned A request may retry under B"
+    );
+    assert_eq!(
+        block_on(live),
+        PermissionAdvice::Unknown,
+        "a B-context receipt cannot settle the retired A request"
+    );
+    assert!(
+        prepared_read(&client, &Query::from("todos")).is_empty(),
+        "late A-scoped support must not materialize for the B session"
+    );
+
+    let b_request = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        block_on(b_request),
+        PermissionAdvice::Denied,
+        "a deliberately fresh B request receives only B-shaped authorization"
     );
 }
 

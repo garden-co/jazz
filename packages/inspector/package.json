@@ -11,7 +11,7 @@
     "build:embedded": "vite build --mode embedded",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts && pnpm test:browser-contract",
-    "test:browser": "pnpm run build:embedded && playwright test --config playwright.config.ts",
+    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- bash -lc 'pnpm run build:embedded && pnpm exec playwright test --config playwright.config.ts'",
     "test:browser-contract": "node --test tests/browser/test-browser-command.test.mjs"
   },
   "dependencies": {

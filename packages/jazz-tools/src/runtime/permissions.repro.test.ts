@@ -574,32 +574,53 @@ describe("runtime permission repros for recursive gather and qualified predicate
     });
 
     const db = context.db(doubleRefReproApp);
-    const { value: userTeam } = db.insert(
-      doubleRefReproApp.teams,
-      { name: "User" },
-      { id: userTeamId },
-    );
-    const { value: directTeam } = db.insert(doubleRefReproApp.teams, { name: "Direct" });
-    const { value: nestedTeam } = db.insert(doubleRefReproApp.teams, { name: "Nested" });
-    const { value: dropdown } = db.insert(doubleRefReproApp.dropdowns, { name: "Visible" });
-    db.insert(doubleRefReproApp.team_entry, {
-      team_id: userTeam.id,
-      target_id: directTeam.id,
-      user_id: reproUser(userTeam.id),
-      administrator: false,
-    });
-    db.insert(doubleRefReproApp.team_entry, {
-      team_id: directTeam.id,
-      target_id: nestedTeam.id,
-      user_id: reproUser("unused"),
-      administrator: false,
-    });
-    db.insert(doubleRefReproApp.dropdowns_access_edges, {
-      resource_id: dropdown.id,
-      team_id: nestedTeam.id,
-      grant_role: "viewer",
-      administrator: false,
-    });
+    const userTeam = await db
+      .insert(doubleRefReproApp.teams, { name: "User" }, { id: userTeamId })
+      .wait({ tier: "local" });
+    const directTeam = await db
+      .insert(doubleRefReproApp.teams, { name: "Direct" })
+      .wait({ tier: "local" });
+    const nestedTeam = await db
+      .insert(doubleRefReproApp.teams, { name: "Nested" })
+      .wait({ tier: "local" });
+    const dropdown = await db
+      .insert(doubleRefReproApp.dropdowns, { name: "Visible" })
+      .wait({ tier: "local" });
+    const sourceOnlyDropdown = await db
+      .insert(doubleRefReproApp.dropdowns, { name: "Not reachable through target_id" })
+      .wait({ tier: "local" });
+    await db
+      .insert(doubleRefReproApp.team_entry, {
+        team_id: userTeam.id,
+        target_id: directTeam.id,
+        user_id: reproUser(userTeam.id),
+        administrator: false,
+      })
+      .wait({ tier: "local" });
+    await db
+      .insert(doubleRefReproApp.team_entry, {
+        team_id: directTeam.id,
+        target_id: nestedTeam.id,
+        user_id: reproUser("unused"),
+        administrator: false,
+      })
+      .wait({ tier: "local" });
+    await db
+      .insert(doubleRefReproApp.dropdowns_access_edges, {
+        resource_id: dropdown.id,
+        team_id: nestedTeam.id,
+        grant_role: "viewer",
+        administrator: false,
+      })
+      .wait({ tier: "local" });
+    await db
+      .insert(doubleRefReproApp.dropdowns_access_edges, {
+        resource_id: sourceOnlyDropdown.id,
+        team_id: userTeam.id,
+        grant_role: "viewer",
+        administrator: false,
+      })
+      .wait({ tier: "local" });
 
     const userDb = context.forSession(
       {

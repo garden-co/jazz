@@ -99,11 +99,15 @@ describe("TS Restore API", () => {
     ).resolves.toEqual(inserted);
   });
 
-  it("fails when the row is not deleted", async () => {
+  it("reports a restore rejection through the write handle", async () => {
     const project = insertProject(db);
 
-    expect(() => db.restore(app.projects, project.id, { name: "Restored Project" })).toThrow(
-      `Restore failed: WriteError("row not deleted: ${project.id}")`,
-    );
+    await expect(
+      db.restore(app.projects, project.id, { name: "Restored Project" }).wait({ tier: "local" }),
+    ).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      code: "write_rejected",
+      reason: `row not deleted: ${project.id}`,
+    });
   });
 });

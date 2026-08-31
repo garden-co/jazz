@@ -13,6 +13,7 @@ use crate::protocol::{
 };
 use crate::query::{
     Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
+    table,
 };
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
@@ -39,6 +40,38 @@ fn row_from_u64(value: u64) -> RowUuid {
     let mut bytes = [0; 16];
     bytes[..8].copy_from_slice(&value.to_be_bytes());
     RowUuid::from_bytes(bytes)
+}
+
+#[test]
+fn flat_tuple_source_vocabulary_is_derived_positionally_from_the_validated_query() {
+    let ordinary = Query::from("todos")
+        .validate(&schema())
+        .expect("validate ordinary query");
+    assert!(
+        crate::node::FlatTupleSourceTables::for_query(&ordinary)
+            .as_slice()
+            .is_empty(),
+        "a non-flat query has no tuple-source roles"
+    );
+
+    let shared_source_table = Query::from(table("todos").alias("root"))
+        .flat_join(
+            table("todos").alias("first"),
+            "root.title",
+            "first.title",
+        )
+        .flat_join(
+            table("todos").alias("second"),
+            "first.title",
+            "second.title",
+        )
+        .validate(&schema())
+        .expect("validate two-source flat query");
+    assert_eq!(
+        crate::node::FlatTupleSourceTables::for_query(&shared_source_table).as_slice(),
+        &["todos".to_owned(), "todos".to_owned()],
+        "shared physical tables retain one contributor role per source position"
+    );
 }
 
 fn settled_member(row_uuid: RowUuid, position: u64) -> ResultMemberEntry {
@@ -1602,7 +1635,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
             .table(
                 PublicTableSchemaBuilder::new("todos")
                     .column("title", PublicColumnType::Text)
-                    .column("owner_id", PublicColumnType::Uuid),
+                    .fk_column("owner_id", "users"),
             ),
     );
     let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
@@ -1638,7 +1671,47 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
         )
         .unwrap();
     accept_global(&mut core, child_tx, 2);
-    peer.query_update(&mut core, &shape, &binding).unwrap();
+    let child_update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        program_fact_adds: child_fact_adds,
+        ..
+    }) = child_update
+    else {
+        panic!("expected child view update")
+    };
+    assert!(
+        child_fact_adds
+            .iter()
+            .any(|fact| matches!(fact, ProgramFactEntry::RelationEdge(_))),
+        "child insertion should establish its relation fact"
+    );
+    let canonical = subscription_key(&shape, &binding);
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0xa11a)),
+        ..canonical
+    };
+    let duplicate = peer
+        .rehydrate_query_for_subscription_from_maintained_subscription(
+            &mut core, canonical, target, &shape,
+        )
+        .unwrap()
+        .expect("duplicate structured usage receives a reset");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        program_fact_adds,
+        ..
+    }) = duplicate
+    else {
+        panic!("expected duplicate structured view update")
+    };
+    assert!(reset_result_set);
+    assert!(
+        program_fact_adds
+            .iter()
+            .any(|fact| matches!(fact, ProgramFactEntry::RelationEdge(_))),
+        "a duplicate structured usage needs the canonical relation facts, not only future deltas"
+    );
+
     let child_update_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xb1), 1_002).cells(BTreeMap::from([(
@@ -1671,6 +1744,7 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
         &[],
     ));
     let _ = (program_fact_adds, program_fact_removes);
+
 }
 
 #[test]
@@ -3022,8 +3096,13 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     assert_eq!(metrics.footprint.result_rows, 1);
     assert_eq!(metrics.footprint.structured_app_rows, 0);
     assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
-    assert!(metrics.footprint.version_identities >= 1);
-    assert!(metrics.footprint.version_tx_entries >= 1);
+    // Simple default-view root queries retain only delivered membership. The
+    // exact immutable content body is loaded by `(table, row, tx)` when it
+    // enters the result, rather than retaining every source witness per
+    // binding.
+    assert_eq!(metrics.footprint.version_identities, 0);
+    assert_eq!(metrics.footprint.version_tx_entries, 0);
+    assert_eq!(metrics.footprint.replacement_entries, 1);
 
     // Flat subscriptions release this duplicate collector after the reset, but
     // membership/version witnesses must still publish a later removal and a
@@ -3060,6 +3139,112 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.footprint.structured_app_rows, 0);
     assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
+
+    // The storage-backed path never needs to read a newer content winner to
+    // retract a deleted row. A restore re-enters through its exact original
+    // content transaction and is shipped from immutable storage.
+    let deleted_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_003).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, deleted_tx, 4);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![],
+        vec![("todos", row(0x51), restored_tx)],
+    );
+    let re_restored_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_004)
+                .deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+    accept_global(&mut core, re_restored_tx, 5);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![("todos", row(0x51), restored_tx)],
+        vec![],
+    );
+}
+
+#[test]
+fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
+    let schema = public_peer_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
+    let query_schema = schema.clone();
+    let (_dir, mut core) = open_node_with_schema(node(0x99), schema);
+    let first = row(0x9a);
+    let second = row(0x9b);
+    let first_tx = core
+        .commit_mergeable_settled(MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")))
+        .unwrap();
+    accept_global(&mut core, first_tx, 1);
+    let second_tx = core
+        .commit_mergeable_settled(MergeableCommit::new("todos", second, 1_001).cells(title_cells("match")))
+        .unwrap();
+    accept_global(&mut core, second_tx, 2);
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("title")))
+        .validate(&query_schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("match".to_owned()),
+        )]))
+        .unwrap();
+    let mut peer = PeerState::new();
+    peer.set_ship_complete_exclusive_payloads(true);
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+    let tx = OpenTransactionId::new();
+    core.open_exclusive(tx).unwrap();
+    core.tx_write(tx, "todos", first, title_cells("other"), None)
+        .unwrap();
+    core.tx_write(tx, "todos", second, title_cells("other"), None)
+        .unwrap();
+    let unrelated = row(0x9c);
+    core.tx_write(
+        tx,
+        "users",
+        unrelated,
+        BTreeMap::from([("name".to_owned(), Value::String("unrelated".to_owned()))]),
+        None,
+    )
+    .unwrap();
+    let (replacement_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_002).unwrap();
+    accept_global(&mut core, replacement_tx, 3);
+
+    let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        update.clone(),
+        Vec::new(),
+        vec![("todos", first, first_tx), ("todos", second, second_tx)],
+    );
+    let bundles = version_bundles_for_update(&update);
+    assert_eq!(bundles.len(), 1);
+    assert_eq!(bundles[0].tx.tx_id, replacement_tx);
+    assert_eq!(
+        bundles[0].scope,
+        crate::protocol::VersionBundleScope::CompleteTransaction
+    );
+    assert_eq!(bundles[0].versions.len(), 3);
+    assert_eq!(
+        bundles[0]
+            .versions
+            .iter()
+            .map(|version| (version.table().to_owned(), version.row_uuid()))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            ("todos".to_owned(), first),
+            ("todos".to_owned(), second),
+            ("users".to_owned(), unrelated),
+        ]),
+    );
 }
 
 #[test]

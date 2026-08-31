@@ -3,19 +3,251 @@ import {
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
-import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
+import type {
+  ForegroundNodeLease,
+  BrowserWorkerConnection,
+  BrowserWorkerConnectionContext,
+} from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type {
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
+  BrowserForegroundNodeLeaseAcquireResponse,
+  BrowserForegroundNodeLeasePortEvent,
+  BrowserForegroundNodeLeasePortRequest,
   BrowserFollowerPortRequest,
   BrowserWorkerInitOptions,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
+export type BrowserForegroundNodeLeaseOptions = Pick<
+  BrowserWorkerInitOptions,
+  "runtimeSources" | "dbName" | "storageOwner"
+>;
+
+// Acquiring a lease is deliberately the first operation on a persistent
+// browser root. On a cold browser profile that means starting the worker,
+// acquiring the Web Lock, opening IndexedDB, checking the durable owner, and
+// committing the lease receipt. This is I/O admission, not a heartbeat: the
+// one-second worker-bootstrap probe used by reconnecting followers is too
+// short for it under a contended CI/browser process. Keep this bounded so a
+// genuinely wedged worker still fails visibly, but give durable admission the
+// same order-of-magnitude budget as the public browser readiness receipts.
+const FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS = 10_000;
+
+/**
+ * A timed-out admission must keep its port alive until the worker retires a
+ * possible late lease. Coalesce that background cleanup per physical worker
+ * root so callers retrying a wedged open do not retain unbounded ports.
+ */
+const pendingForegroundLeaseCleanups = new Map<string, symbol>();
+
+/**
+ * The one physical SharedWorker realm that may own a browser persistence root.
+ *
+ * Authentication is intentionally not a part of this name. An explicitly
+ * named IndexedDB root is durably bound to its owner at open time; putting the
+ * owner in the worker name would instead make two workers race to own the same
+ * root. Foreground lease acquisition happens before the complete runtime
+ * configuration exists, so it must use precisely this same name.
+ */
+export function createBrowserSharedWorkerBaseName(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  dbName: string,
+): string {
+  return ["jazz-runtime", dbName, createBrowserWorkerAssetScope(runtimeSources)].join(":");
+}
+
+function foregroundLeaseCleanupKey(workerName: string, storageOwner: string): string {
+  return `${workerName}\u0000${storageOwner}`;
+}
+
+/**
+ * Lease-only worker connection established before a foreground schema/runtime
+ * exists. Its port stays open as the durable owner's liveness witness until
+ * explicit clean return or retirement.
+ */
+export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
+  private worker: SharedWorker | null = null;
+  private port: MessagePort | null = null;
+  private closed = false;
+
+  private constructor(
+    readonly node: Uint8Array,
+    readonly confirmedTxTime: bigint,
+    private readonly leaseId: string,
+  ) {}
+
+  static async acquire(
+    options: BrowserForegroundNodeLeaseOptions,
+  ): Promise<SharedBrowserForegroundNodeLease> {
+    const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
+    const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
+    const cleanupKey = foregroundLeaseCleanupKey(workerName, options.storageOwner);
+    if (pendingForegroundLeaseCleanups.has(cleanupKey)) {
+      throw new Error(
+        "Shared browser foreground lease cancellation cleanup is still pending for this database; wait for the previous worker admission to finish",
+      );
+    }
+    const createWorker =
+      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
+        ? (name: string) =>
+            new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name })
+        : (name: string) =>
+            new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
+              type: "module",
+              name,
+            });
+    // Lease acquisition and the schema/runtime connection enter this exact
+    // physical SharedWorker realm. Both generation-qualify the base name so a
+    // realm that has begun closing can be retired without creating a second
+    // durable owner for the same IndexedDB.
+    const worker = createWorker(`${workerName}:generation-${readWorkerGeneration(workerName)}`);
+    const port = worker.port;
+    port.start();
+    const lease = await new Promise<SharedBrowserForegroundNodeLease>((resolve, reject) => {
+      let cancellationRequested = false;
+      let publicResultSettled = false;
+      let cleanupToken: symbol | null = null;
+      const timeoutError = new Error(
+        "Shared browser runtime did not issue a foreground node lease",
+      );
+      const rejectPublic = (error: Error) => {
+        if (publicResultSettled) return;
+        publicResultSettled = true;
+        reject(error);
+      };
+      const timeout = setTimeout(() => {
+        // Do not close the port immediately. The worker might be between the
+        // durable allocation and its ready reply; it must observe this cancel
+        // and retire such a lease before this acquire rejects. Otherwise a
+        // merely slow cold open would burn one node identity per timeout.
+        cancellationRequested = true;
+        cleanupToken = Symbol("foreground-lease-cleanup");
+        pendingForegroundLeaseCleanups.set(cleanupKey, cleanupToken);
+        port.postMessage({ type: "cancel-foreground-node-lease" });
+        // Public startup remains bounded. The open port and listeners stay
+        // alive in the background until the worker observes cancellation and
+        // retires any late lease; closing them here would recreate the orphan
+        // race this cancellation protocol exists to prevent.
+        rejectPublic(timeoutError);
+      }, FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS);
+      const cleanup = () => {
+        clearTimeout(timeout);
+        // A successful concurrent admission never owned this retained cleanup.
+        // Only its timeout owner may clear the shared key; otherwise it could
+        // let a third caller accumulate another orphan-risking port.
+        if (
+          cleanupToken !== null &&
+          pendingForegroundLeaseCleanups.get(cleanupKey) === cleanupToken
+        ) {
+          pendingForegroundLeaseCleanups.delete(cleanupKey);
+        }
+        port.removeEventListener("message", onMessage);
+        port.removeEventListener("messageerror", onMessageError);
+      };
+      const onMessage = (event: MessageEvent<BrowserForegroundNodeLeaseAcquireResponse>) => {
+        const message = event.data;
+        if (message?.type === "foreground-node-lease-error") {
+          cleanup();
+          port.close();
+          rejectPublic(new Error(message.message));
+          return;
+        }
+        if (message?.type === "foreground-node-lease-cancelled") {
+          cleanup();
+          port.close();
+          rejectPublic(message.error ? new Error(message.error) : timeoutError);
+          return;
+        }
+        if (message?.type !== "foreground-node-lease-ready") return;
+        // A cancel can race the ready message. Leave the port open until the
+        // worker confirms it has retired this just-issued lease.
+        if (cancellationRequested) return;
+        if (!/^(0|[1-9][0-9]*)$/.test(message.confirmedTxTime)) {
+          cleanup();
+          rejectPublic(
+            new Error("Shared browser runtime returned an invalid foreground lease high-water"),
+          );
+          return;
+        }
+        cleanup();
+        const result = new SharedBrowserForegroundNodeLease(
+          message.node.slice(),
+          BigInt(message.confirmedTxTime),
+          message.leaseId,
+        );
+        result.worker = worker;
+        result.port = port;
+        publicResultSettled = true;
+        resolve(result);
+      };
+      const onMessageError = () => {
+        cleanup();
+        port.close();
+        rejectPublic(new Error("Shared browser foreground lease port message error"));
+      };
+      port.addEventListener("message", onMessage);
+      port.addEventListener("messageerror", onMessageError);
+      port.postMessage({
+        type: "acquire-foreground-node-lease",
+        dbName: options.dbName,
+        storageOwner: options.storageOwner,
+      });
+    });
+    return lease;
+  }
+
+  async returnWithHighWater(highWater: bigint): Promise<void> {
+    if (highWater < 0n) throw new Error("Invalid foreground transaction high-water");
+    await this.finish({
+      type: "return-foreground-node-lease",
+      confirmedTxTime: highWater.toString(),
+    });
+  }
+
+  async retire(): Promise<void> {
+    if (this.closed) return;
+    await this.finish({ type: "retire-foreground-node-lease" });
+  }
+
+  private async finish(message: BrowserForegroundNodeLeasePortRequest): Promise<void> {
+    if (this.closed) throw new Error("Shared browser foreground lease is already closed");
+    const port = this.port;
+    if (!port) throw new Error("Shared browser foreground lease port is unavailable");
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        port.removeEventListener("message", onMessage);
+        port.removeEventListener("messageerror", onMessageError);
+      };
+      const onMessage = (event: MessageEvent<BrowserForegroundNodeLeasePortEvent>) => {
+        const result = event.data;
+        if (result?.type !== "foreground-node-lease-result") return;
+        cleanup();
+        if (result.error) reject(new Error(result.error));
+        else resolve();
+      };
+      const onMessageError = () => {
+        cleanup();
+        reject(new Error("Shared browser foreground lease port message error"));
+      };
+      port.addEventListener("message", onMessage);
+      port.addEventListener("messageerror", onMessageError);
+      port.postMessage(message);
+    }).finally(() => {
+      this.closed = true;
+      this.port?.close();
+      this.port = null;
+      this.worker?.port.close();
+      this.worker = null;
+    });
+  }
+}
+
 export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
+  private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
 
@@ -33,17 +265,12 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       | "onStorageInvalidated"
     >,
   ) {
-    // A local database namespace is one browser replica/session. Tabs opening
-    // that same replica share its worker; explicitly separate replicas must
-    // not share one WASM realm, because their independent runtime lifecycles
-    // can overlap. Inspector controls aggregate across these workers.
+    // A physical database namespace has exactly one broker realm for a given
+    // worker asset. The physical namespace already includes the complete
+    // app/environment/auth scope, so different accounts intentionally reach
+    // separate workers and caches while same-scope tabs share one realm.
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
-    const workerName = [
-      "jazz-runtime",
-      options.authSessionKey,
-      options.dbName,
-      createBrowserWorkerAssetScope(runtimeSources),
-    ].join(":");
+    const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     const createWorker =
       runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
         ? (name: string) =>
@@ -56,14 +283,25 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
               type: "module",
               name,
             });
+    // Retain admission failures as state rather than leaving a process-wide
+    // bootstrap promise rejected. The manager converts this state back into
+    // the caller's `all()`/`wait()` rejection at its operation boundary; a
+    // tab which has not yet installed one must never produce an ambient
+    // unhandled-rejection event merely because its durable root is owned by
+    // another account.
     this.readyPromise = this.connect(
       runtime,
       { ...options, runtimeSources },
       fingerprint,
       workerName,
       createWorker,
+    ).then(
+      () => undefined,
+      (error: unknown) => {
+        this.readyError = error instanceof Error ? error : new Error(String(error));
+        callbacks.onFailure(this.readyError);
+      },
     );
-    void this.readyPromise.catch(callbacks.onFailure);
   }
 
   private async connect(
@@ -76,7 +314,15 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     let generation = readWorkerGeneration(workerName);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const generationName = `${workerName}:generation-${generation}`;
-      if (await this.connectOnce(runtime, options, fingerprint, generationName, createWorker)) {
+      const outcome = await this.connectOnce(
+        runtime,
+        options,
+        fingerprint,
+        generationName,
+        createWorker,
+      );
+      if (outcome.error) throw outcome.error;
+      if (outcome.connected) {
         return;
       }
       generation = advanceWorkerGeneration(workerName, generation);
@@ -90,17 +336,17 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     fingerprint: string,
     workerName: string,
     createWorker: (name: string) => SharedWorker,
-  ): Promise<boolean> {
+  ): Promise<{ connected: boolean; error?: Error }> {
     const worker = createWorker(workerName);
     this.worker = worker;
     const port = worker.port;
     port.start();
-    return new Promise<boolean>((resolve, reject) => {
+    return new Promise<{ connected: boolean; error?: Error }>((resolve) => {
       let bootstrapTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         cleanup();
         port.close();
         if (this.worker === worker) this.worker = null;
-        resolve(false);
+        resolve({ connected: false });
       }, 1000);
       const onMessage = (event: MessageEvent<BrowserSharedWorkerConnectResponse>) => {
         if (event.data?.type === "worker-alive") {
@@ -110,7 +356,11 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         }
         if (event.data?.type === "runtime-error") {
           cleanup();
-          reject(new Error(event.data.message));
+          // Do not reject a bare MessagePort callback promise. A browser can
+          // report that rejection before the caller's operation has observed
+          // readiness. The outer, constructor-owned state machine turns this
+          // into the same explicit error after it has installed containment.
+          resolve({ connected: false, error: new Error(event.data.message) });
           return;
         }
         if (event.data?.type !== "runtime-ready") return;
@@ -121,7 +371,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             releaseContext: true,
           } satisfies BrowserFollowerPortRequest);
           port.close();
-          resolve(true);
+          resolve({ connected: true });
           return;
         }
         this.connection = new MessagePortBrowserFollowerConnection(
@@ -139,11 +389,21 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           },
           options.logLevel === "trace",
         );
-        void this.connection.ready().then(() => resolve(true), reject);
+        void this.connection.ready().then(
+          () => resolve({ connected: true }),
+          (error: unknown) =>
+            resolve({
+              connected: false,
+              error: error instanceof Error ? error : new Error(String(error)),
+            }),
+        );
       };
       const onMessageError = () => {
         cleanup();
-        reject(new Error("Shared browser runtime port message error"));
+        resolve({
+          connected: false,
+          error: new Error("Shared browser runtime port message error"),
+        });
       };
       const cleanup = () => {
         if (bootstrapTimer) clearTimeout(bootstrapTimer);
@@ -162,8 +422,13 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     });
   }
 
-  async ready(): Promise<void> {
-    await this.readyPromise;
+  ready(): Promise<void> {
+    // The constructor-owned promise always settles successfully; this is the
+    // operation boundary that turns its retained admission failure back into
+    // a normal caller-visible rejection.
+    return this.readyPromise.then(() => {
+      if (this.readyError) throw this.readyError;
+    });
   }
 
   async waitForServerConnection(): Promise<void> {

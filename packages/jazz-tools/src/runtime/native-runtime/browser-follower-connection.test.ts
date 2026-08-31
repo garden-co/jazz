@@ -9,6 +9,7 @@ class TestPort {
   readonly close = vi.fn();
   readonly start = vi.fn();
   readonly sent: BrowserFollowerPortRequest[] = [];
+  onPostMessage: ((message: BrowserFollowerPortRequest) => void) | null = null;
   private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
 
   addEventListener(type: string, listener: (event: MessageEvent) => void): void {
@@ -23,6 +24,7 @@ class TestPort {
 
   postMessage(message: BrowserFollowerPortRequest): void {
     this.sent.push(message);
+    this.onPostMessage?.(message);
   }
 
   emit(event: BrowserFollowerPortEvent): void {
@@ -33,6 +35,143 @@ class TestPort {
 }
 
 describe("MessagePortBrowserFollowerConnection", () => {
+  it("clears a remote peer failure after the worker confirms reconnect", async () => {
+    const port = new TestPort();
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => 0,
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onFailure: vi.fn(),
+      },
+    );
+
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+
+    port.onPostMessage = (request) => {
+      if (request.type === "reconnect" || request.type === "wait-server") {
+        port.emit({ type: "result", id: request.id });
+      }
+    };
+    await connection.reconnect("{}", {});
+
+    expect(runtime.clearRemoteServerTransportError).toHaveBeenCalledOnce();
+    connection.detachForReconnect();
+  });
+
+  it("keeps the prior remote error when the replacement upstream negotiation fails", async () => {
+    const port = new TestPort();
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => 0,
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onFailure: vi.fn(),
+      },
+    );
+
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+
+    const negotiationFailure = "websocket authentication failed";
+    port.onPostMessage = (request) => {
+      if (request.type === "reconnect") port.emit({ type: "result", id: request.id });
+      if (request.type === "wait-server") {
+        port.emit({ type: "result", id: request.id, error: negotiationFailure });
+      }
+    };
+
+    await expect(connection.reconnect("{}", {})).rejects.toThrow(negotiationFailure);
+    expect(runtime.clearRemoteServerTransportError).not.toHaveBeenCalled();
+    connection.detachForReconnect();
+  });
+
+  it("surfaces a foreground peer tick failure before disposing the follower", async () => {
+    const port = new TestPort();
+    const failure = new Error(
+      "Protocol: maintained root occurrence sidecar length does not match root rows",
+    );
+    const retirementFailure = new Error("retiring the failed transport also failed");
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => Promise.reject(failure),
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(() => Promise.reject(failure)),
+      retirePeerTransport: vi.fn(() => Promise.reject(retirementFailure)),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const onFailure = vi.fn();
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onFailure,
+      },
+    );
+
+    await vi.waitFor(() =>
+      expect(runtime.reportRemoteServerTransportError).toHaveBeenCalledWith(failure),
+    );
+    await vi.waitFor(() => expect(runtime.retirePeerTransport).toHaveBeenCalledOnce());
+    // The rejected retirement is delivered on a later microtask through the
+    // same pump callback. Let that path run before asserting first-cause wins.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtime.reportRemoteServerTransportError).toHaveBeenCalledTimes(1);
+    expect(onFailure).toHaveBeenCalledWith(failure);
+    expect(onFailure).toHaveBeenCalledTimes(1);
+    expect(port.close).toHaveBeenCalled();
+
+    await connection.shutdown();
+  });
+
   it("records a relayed transport error before follower disposal without treating it as a mutation rejection", async () => {
     const port = new TestPort();
     const transport = {

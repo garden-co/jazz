@@ -282,9 +282,11 @@ fn write_during_cold_subscription_hydration_is_delivered_exactly_once() {
         "albums",
         vec![Value::U64(2), Value::String("Blue Train".into())],
     );
-    let publication = block_on(database.apply_batch(write)).unwrap();
+    let mut apply = Box::pin(database.apply_batch(write));
+    assert!(matches!(apply.as_mut().poll(&mut context), Poll::Pending));
 
     control.resume_operation(TestStorageOperation::ScanOpen);
+    let publication = block_on(apply).unwrap();
     block_on(database.drive_progress()).unwrap();
 
     let mut cardinality: Vec<(Vec<Value>, i64)> = Vec::new();
@@ -814,8 +816,16 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
 
 #[test]
 fn resident_publication_returns_before_independent_recursive_hydration() {
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
-    let mut database = block_on(Database::new(albums_and_edges_schema(), storage)).unwrap();
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
     let mut seed = database.open_batch();
     seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
@@ -835,6 +845,10 @@ fn resident_publication_returns_before_independent_recursive_hydration() {
             .len(),
         3
     );
+    // Force the recursive branch to make a real storage request. Otherwise
+    // the receipt exercises only bounded resident CPU slices, not independent
+    // cold hydration.
+    storage.evict_scans("edges");
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
 
@@ -845,30 +859,54 @@ fn resident_publication_returns_before_independent_recursive_hydration() {
     );
     batch.delete("edges", PrimaryKeyValue::U64(2));
     let mut publication = Box::pin(database.apply_batch(batch));
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    let mut context = Context::from_waker(&owner_waker);
     let Poll::Ready(result) = publication.as_mut().poll(&mut context) else {
         panic!("resident publication must not wait for independent hydration");
     };
-    let _published = result.unwrap();
+    let published = result.unwrap();
+    let publication_id = published.publication();
+    assert!(
+        control.observed().contains(&TestStorageOperation::ScanOpen),
+        "the recursive branch must have retained a real cold scan while the resident publication returned"
+    );
     drop(publication);
 
-    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
+    assert!(reach.try_recv().is_err());
+
+    // The initial cold poll has only installed its waker. A separate bounded
+    // owner turn reaches the paused storage operation; it must remain pending
+    // rather than falsely treating the recursive branch as resident work.
+    let mut recursive_progress = Box::pin(database.drive_progress());
+    assert!(matches!(
+        recursive_progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(recursive_progress);
+
+    // A resident one-shot query must still complete while the independent
+    // recursive branch is paused on storage.
     let mut query = Box::pin(database.query_graph(GraphBuilder::table("albums")));
     let Poll::Ready(rows) = query.as_mut().poll(&mut context) else {
-        panic!("resident one-shot query must complete in its first poll");
+        panic!("resident one-shot query must complete while recursive hydration is cold");
     };
-    let rows = rows.unwrap();
-    assert_eq!(rows.deltas.len(), 1);
+    assert_eq!(rows.unwrap().deltas.len(), 1);
     drop(query);
 
+    let wakes_before_resume = wakes.0.load(Ordering::Acquire);
+    control.resume_operation(TestStorageOperation::ScanOpen);
     assert_eq!(
-        block_on(database.next_subscription(&reach))
-            .unwrap()
-            .deltas
-            .len(),
-        2
+        wakes.0.load(Ordering::Acquire),
+        wakes_before_resume + 1,
+        "the paused recursive scan must retain the bounded owner's waker"
     );
+    let resumed = block_on(database.next_subscription_with_publication(&reach)).unwrap();
+    assert_eq!(resumed.publication, Some(publication_id));
+    assert_eq!(resumed.deltas.deltas.len(), 2);
+    let persistence = block_on(published.persist());
+    database.finish_persistence(persistence).unwrap();
 }
 
 #[test]

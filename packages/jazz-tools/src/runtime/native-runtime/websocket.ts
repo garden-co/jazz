@@ -24,6 +24,8 @@ export type WebSocketNegotiation = {
 export type WebSocketCarrierOptions = {
   endpointUrl: string;
   peerIdentity: Uint8Array;
+  /** Features supported by the native runtime that will receive this link. */
+  features?: number;
   authJson?: string;
   onFrame: WebSocketFrameHandler;
   onError?: WebSocketErrorHandler;
@@ -94,12 +96,13 @@ export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
   return frames;
 }
 
-export function encodeWireClientHello(): Uint8Array {
+export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Array {
+  assertWireFeatures(features, "client wire features");
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
   writer.u64(MIN_WIRE_PROTOCOL_VERSION); // min_protocol_version
   writer.u64(MAX_WIRE_PROTOCOL_VERSION); // max_protocol_version
-  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(features);
   writer.u64(0); // WirePeerRole::Client
   // Browser carriers do not receive the authenticated session context needed
   // to validate scoped receipts. Do not self-assert an authority endpoint:
@@ -161,6 +164,7 @@ export class WebSocketCarrier {
   private readonly onFrame: WebSocketFrameHandler;
   private readonly onError?: WebSocketErrorHandler;
   private readonly onTerminal?: WebSocketTerminalHandler;
+  private readonly localFeatures: number;
   private readonly opened: Promise<WebSocketNegotiation>;
   private resolveNegotiation!: (value: WebSocketNegotiation) => void;
   private rejectNegotiation!: (reason: unknown) => void;
@@ -174,6 +178,8 @@ export class WebSocketCarrier {
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.onTerminal = options.onTerminal;
+    this.localFeatures = options.features ?? CLIENT_WIRE_FEATURES;
+    assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
     this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
@@ -183,7 +189,7 @@ export class WebSocketCarrier {
     void waitForOpen(this.socket).then(
       () => {
         this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
-        this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+        this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
       },
       (error) => {
         this.reportTerminal({
@@ -281,7 +287,7 @@ export class WebSocketCarrier {
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
         this.negotiated = true;
-        this.resolveNegotiation(decodeServerHello(frame));
+        this.resolveNegotiation(decodeServerHello(frame, this.localFeatures));
         continue;
       }
       if (!this.negotiated) {
@@ -317,7 +323,10 @@ export class WebSocketCarrier {
   }
 }
 
-function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
+function decodeServerHello(
+  frame: Uint8Array,
+  localFeatures = CLIENT_WIRE_FEATURES,
+): WebSocketNegotiation {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
   const hello = readWireHelloBodyExact(reader);
@@ -327,12 +336,20 @@ function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
       `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${min}..=${max}`,
     );
   }
-  const unsupportedFeatures = features & ~BigInt(CLIENT_WIRE_FEATURES);
+  const unsupportedFeatures = features & ~BigInt(localFeatures);
   if (unsupportedFeatures !== 0n) {
-    throw new Error(`server accepted unsupported wire features 0x${features.toString(16)}`);
+    throw new Error(
+      `server accepted unsupported wire features 0x${unsupportedFeatures.toString(16)}`,
+    );
   }
   if (role !== 1) throw new Error("expected WirePeerRole::Core server hello");
   return { protocolVersion: WIRE_PROTOCOL_VERSION, features: Number(features), authority };
+}
+
+function assertWireFeatures(features: number, label: string): void {
+  if (!Number.isSafeInteger(features) || features < 0 || features > 0xffff_ffff) {
+    throw new Error(`${label} must be an unsigned 32-bit integer, got ${features}`);
+  }
 }
 
 function readWireHelloBodyExact(reader: PostcardReader): {

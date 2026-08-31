@@ -129,7 +129,7 @@ where
         {
             return Err(Error::DuplicateOpenBatch(id));
         }
-        let local_base = self.clock.tx_time;
+        let local_base = self.tx_time_high_water();
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
             dots.extend(self.transaction_ids_for_global_time(global_time).await?);
@@ -486,6 +486,7 @@ where
             now_ms,
             refresh_parents_at_commit: false,
             known_fresh_row: false,
+            verified_inherited_cells: None,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
@@ -575,6 +576,42 @@ where
         branch: BranchSelector,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
+        self.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
+            tx_id,
+            write_schema_version,
+            table,
+            row_uuid,
+            cells,
+            deletion,
+            parents,
+            now_ms,
+            refresh_parents_at_commit,
+            branch,
+            known_fresh_row,
+            None,
+        )
+    }
+
+    /// Stage a branch-local replacement whose unchanged cells were read from
+    /// a visible branch-view base. Commit construction reuses an indirect
+    /// descriptor only when its final cell still exactly matches this private
+    /// engine provenance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, Value>,
+        deletion: Option<DeletionEvent>,
+        parents: Vec<TxId>,
+        now_ms: Option<u64>,
+        refresh_parents_at_commit: bool,
+        branch: BranchSelector,
+        known_fresh_row: bool,
+        verified_inherited_cells: Option<BTreeMap<String, Value>>,
+    ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -599,6 +636,7 @@ where
                 now_ms,
                 refresh_parents_at_commit,
                 known_fresh_row,
+                verified_inherited_cells,
             },
         )
     }
@@ -692,6 +730,7 @@ where
                 now_ms,
                 refresh_parents_at_commit: false,
                 known_fresh_row: false,
+                verified_inherited_cells: None,
             },
         )
     }
@@ -713,6 +752,14 @@ where
                     && write.deletion.is_none()
             }) {
                 pending.known_fresh_row |= existing.known_fresh_row;
+                // A patch extends a previously materialized branch-view
+                // replacement, so it keeps its engine-proven preimage. A
+                // later complete replacement deliberately replaces that proof.
+                if matches!(pending.cells, PendingCells::Patch(_))
+                    && pending.verified_inherited_cells.is_none()
+                {
+                    pending.verified_inherited_cells = existing.verified_inherited_cells.clone();
+                }
                 let cells = match (&existing.cells, &pending.cells) {
                     (PendingCells::Replace(existing), PendingCells::Patch(patch)) => {
                         let mut cells = existing.clone();
@@ -768,12 +815,45 @@ where
         self.commit_exclusive(open_batch_id, author, now_ms).await
     }
 
+    /// Commit a bound exclusive transaction at a synchronously reserved local
+    /// identity after all cold serializability and large-value checks finish.
+    pub(crate) async fn commit_exclusive_bound_at(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        reserved: TxId,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let OpenTransactionKind::Exclusive {
+            bound_author: Some(author),
+        } = self.open_tx(open_batch_id)?.kind
+        else {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        };
+        self.commit_exclusive_inner(
+            open_batch_id,
+            author,
+            reserved.time.physical_ms(),
+            Some(reserved),
+        )
+        .await
+    }
+
     /// Commit an exclusive transaction and return its sync commit unit.
     pub async fn commit_exclusive(
         &mut self,
         open_batch_id: OpenTransactionId,
         made_by: AuthorSubject,
         now_ms: u64,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        self.commit_exclusive_inner(open_batch_id, made_by, now_ms, None)
+            .await
+    }
+
+    async fn commit_exclusive_inner(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        made_by: AuthorSubject,
+        now_ms: u64,
+        reserved: Option<TxId>,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
         let made_by = match self.open_tx(open_batch_id)?.kind {
             OpenTransactionKind::Exclusive {
@@ -813,8 +893,28 @@ where
         for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
-        let made_at = self.mint_tx_time(now_ms)?;
-        let tx_id = TxId::new(made_at, self.node_uuid);
+        let tx_id = match reserved {
+            Some(reserved) => {
+                if reserved.node != self.node_uuid {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity belongs to another node",
+                    ));
+                }
+                if open_tx
+                    .writes
+                    .iter()
+                    .flat_map(|write| write.parents.iter())
+                    .any(|parent| parent.time >= reserved.time)
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity must dominate every parent",
+                    ));
+                }
+                self.merge_tx_time(reserved.time);
+                reserved
+            }
+            None => TxId::new(self.mint_tx_time(now_ms)?, self.node_uuid),
+        };
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
         for write in open_tx.writes {
@@ -987,6 +1087,28 @@ where
         open_batch_id: OpenTransactionId,
         mut next_now_ms: impl FnMut() -> u64,
     ) -> Result<PublishedTransaction, Error> {
+        self.commit_mergeable_open_inner(open_batch_id, &mut next_now_ms, None)
+            .await
+    }
+
+    /// Commit an open mergeable transaction at an identity synchronously
+    /// reserved by the owning runtime before cold preparation begins.
+    pub(crate) async fn commit_mergeable_open_at(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        reserved: TxId,
+        mut next_now_ms: impl FnMut() -> u64,
+    ) -> Result<PublishedTransaction, Error> {
+        self.commit_mergeable_open_inner(open_batch_id, &mut next_now_ms, Some(reserved))
+            .await
+    }
+
+    async fn commit_mergeable_open_inner(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        next_now_ms: &mut impl FnMut() -> u64,
+        reserved: Option<TxId>,
+    ) -> Result<PublishedTransaction, Error> {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -1055,12 +1177,15 @@ where
             let mut commit = MergeableCommit::new(
                 &write.table,
                 write.row_uuid,
-                write.now_ms.unwrap_or_else(&mut next_now_ms),
+                write.now_ms.unwrap_or_else(&mut *next_now_ms),
             )
             .branch(write.branch)
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
+            if let Some(inherited) = write.verified_inherited_cells.as_ref() {
+                commit = commit.verified_inherited_large_cells(inherited);
+            }
             if let Some(authored_columns) = authored_columns {
                 commit = commit.authored_columns(authored_columns);
             }
@@ -1095,7 +1220,27 @@ where
                 self.merge_tx_time(parent.time);
             }
         }
-        let made_at = self.mint_tx_time(first.1.now_ms)?;
+        let made_at = match reserved {
+            Some(reserved) => {
+                if reserved.node != self.node_uuid {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity belongs to another node",
+                    ));
+                }
+                if commits
+                    .iter()
+                    .flat_map(|(_, commit)| commit.parents.iter())
+                    .any(|parent| parent.time >= reserved.time)
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "reserved transaction identity must dominate every parent",
+                    ));
+                }
+                self.merge_tx_time(reserved.time);
+                reserved.time
+            }
+            None => self.mint_tx_time(first.1.now_ms)?,
+        };
         let committed = self
             .commit_mergeable_many_at_with_schema_versions(commits, made_at)
             .await?;
@@ -1116,7 +1261,7 @@ where
 
     /// Return whether local transaction time advanced after this transaction opened.
     pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenTransactionId) -> Result<bool, Error> {
-        Ok(self.clock.tx_time > self.open_tx(tx_id)?.base_snapshot.local_base)
+        Ok(self.tx_time_high_water() > self.open_tx(tx_id)?.base_snapshot.local_base)
     }
 
     pub(super) fn open_tx(&self, tx_id: OpenTransactionId) -> Result<&OpenTransaction, Error> {
@@ -1448,6 +1593,9 @@ pub(super) struct PendingWrite {
     /// The production UUID source generated this staged insert's id, so it may
     /// use the trusted fresh-coordinate fast path.
     pub(super) known_fresh_row: bool,
+    /// Engine-private cells read from a branch-view base while creating the
+    /// first target-branch overlay. This never originates in public input.
+    verified_inherited_cells: Option<BTreeMap<String, Value>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

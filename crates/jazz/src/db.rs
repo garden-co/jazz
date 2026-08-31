@@ -1254,6 +1254,14 @@ pub enum TickUrgency {
     /// Coalesce bursty local work before ticking. Used for uploads created by
     /// local writes.
     Deferred,
+    /// Service work in a later host turn, rather than recursively entering a
+    /// second database tick from the current transport/query owner turn.
+    ///
+    /// This is for work that may start cold I/O (notably subscriber view
+    /// hydration). It preserves prompt eventual progress without allowing a
+    /// just-admitted subscription to monopolize the owner before later inbound
+    /// frames and durability receipts are observed.
+    AfterCurrentTurn,
 }
 
 /// Runtime-neutral wake hook for thread-affine [`Node`] sync work.
@@ -1444,6 +1452,11 @@ where
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
     row_id_source_guarantees_fresh: bool,
     next_now_ms: Rc<Cell<u64>>,
+    /// Set only on the private clone owned by one queued mutation operation.
+    reserved_tx_id: Option<TxId>,
+    /// True only for a future accepted while the shared owner was Open. Such
+    /// futures must remain executable while close drains the accepted FIFO.
+    owner_operation_admitted: bool,
     // Minted only by the explicitly unsafe trusted-backend open path. SYSTEM
     // itself is an admission identity, not proof that a Db may forge external
     // row provenance.
@@ -1496,6 +1509,30 @@ type RelayUpstreamSubscriptionOwners =
 type PendingRelaySubscriptionRejections =
     Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
+type QueuedMutationFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
+type QueuedMutationCompletion = Box<dyn FnOnce(Result<(), Error>) + 'static>;
+type TransactionWaitObserver = Pin<Box<dyn Future<Output = ()> + 'static>>;
+type QueuedMutationAlias = Rc<RefCell<Option<TxId>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MutationOwnerLifecycle {
+    Open,
+    Closing,
+}
+
+struct QueuedMutationOperation {
+    tx_id: Option<TxId>,
+    open_tx_id: Option<OpenTransactionId>,
+    future: QueuedMutationFuture,
+    status: Option<Rc<RefCell<QueuedMutationStatus>>>,
+    completion: Option<QueuedMutationCompletion>,
+}
+
+enum QueuedMutationStatus {
+    Pending,
+    Published,
+    Failed(Error),
+}
 
 /// Authenticated logical destination for an upstream upload retry.
 ///
@@ -1965,7 +2002,6 @@ struct WriteStateWaiter {
 
 enum WriteStateWaiterNotify {
     Future(oneshot::Sender<()>),
-    Callback(Box<dyn FnOnce()>),
 }
 
 #[derive(Default)]
@@ -1981,6 +2017,10 @@ enum PendingUpstreamCommand {
     AuthorizationScopeIntent {
         request_id: PermissionAdviceRequestId,
         action: PermissionAdviceAction,
+        /// Present only when an existing request crosses an upstream boundary.
+        /// A fresh request binds its claims when its selected authority admits
+        /// it; a reconnect must preserve the original immutable binding.
+        session_claim_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     },
 }
 
@@ -2081,6 +2121,10 @@ type ScopeAggregate = AuthorityScopeAggregate;
 /// aggregate receipt names only the final completing subscription.
 struct AuthorizationScopeLeaseRequest {
     action: PermissionAdviceAction,
+    /// Immutable requesting-session claims captured when this upstream advice
+    /// operation is allocated. Receipts are evaluated on an Upstream link,
+    /// which has no subscriber-side ambient claims to consult.
+    session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
     /// Every local caller sharing this authority hydration.  The first id is
     /// the wire correlation id; later ids never cause another support view.
     waiters: BTreeSet<PermissionAdviceRequestId>,
@@ -2431,7 +2475,7 @@ pub enum Propagation {
 }
 
 /// Public API error with stable machine-readable codes.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Error {
     /// Stable error code.
     pub code: ErrorCode,
@@ -3312,6 +3356,29 @@ where
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
             .await
     }
+
+    /// Read a relation snapshot with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot(self.tx_id(), prepared, opts)
+            .await
+    }
+
+    /// Read a relation snapshot as `author` with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot_for_identity(self.tx_id(), prepared, author, opts)
+            .await
+    }
 }
 
 /// Owning, Rust-facing handle for a group of mergeable writes.
@@ -3464,6 +3531,29 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
+            .await
+    }
+
+    /// Read a relation snapshot with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot(self.tx_id(), prepared, opts)
+            .await
+    }
+
+    /// Read a relation snapshot as `author` with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot_for_identity(self.tx_id(), prepared, author, opts)
             .await
     }
 
@@ -3637,6 +3727,8 @@ where
     row_uuid: RowUuid,
     tx_id: TxId,
     local_tier: DurabilityTier,
+    queued_status: Option<Rc<RefCell<QueuedMutationStatus>>>,
+    queued_alias: Option<QueuedMutationAlias>,
 }
 
 impl<S> WriteHandle<S>
@@ -3684,7 +3776,11 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub async fn wait(&self, tier: DurabilityTier) -> Result<TxId, Error> {
-        if tier <= self.local_tier {
+        let reservation_is_pending = self
+            .queued_status
+            .as_ref()
+            .is_some_and(|status| matches!(*status.borrow(), QueuedMutationStatus::Pending));
+        if tier <= self.local_tier && !reservation_is_pending {
             return Ok(self.tx_id);
         }
         let state = self.write_state().await?;
@@ -3713,14 +3809,32 @@ where
 
     /// Return the locally observed fate and durability for this write.
     pub async fn write_state(&self) -> Result<WriteState, Error> {
+        if let Some(status) = &self.queued_status {
+            match &*status.borrow() {
+                QueuedMutationStatus::Pending => {
+                    return Ok(WriteState {
+                        fate: Fate::Pending,
+                        global_time: None,
+                        durability: DurabilityTier::None,
+                    });
+                }
+                QueuedMutationStatus::Failed(error) => return Err(error.clone()),
+                QueuedMutationStatus::Published => {}
+            }
+        }
         let Some(node) = self.node.upgrade() else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 "database handle was dropped",
             ));
         };
+        let resolved_tx_id = self
+            .queued_alias
+            .as_ref()
+            .and_then(|alias| *alias.borrow())
+            .unwrap_or(self.tx_id);
         let Some((fate, global_time, durability)) =
-            node.lock().await.transaction_state(self.tx_id).await
+            node.lock().await.transaction_state(resolved_tx_id).await
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,

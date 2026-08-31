@@ -175,6 +175,7 @@ struct ControlState {
     paused_operations: BTreeSet<TestStorageOperation>,
     permits: usize,
     observed: Vec<TestStorageOperation>,
+    poll_counts: BTreeMap<TestStorageOperation, usize>,
     waiters: Vec<Waker>,
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
 }
@@ -187,6 +188,7 @@ impl Default for ControlState {
             paused_operations: BTreeSet::new(),
             permits: 0,
             observed: Vec::new(),
+            poll_counts: BTreeMap::new(),
             waiters: Vec::new(),
             failures: BTreeMap::new(),
         }
@@ -274,11 +276,31 @@ impl TestStorageControl {
         std::mem::take(&mut self.state.borrow_mut().observed)
     }
 
+    /// Number of times an operation's controlled suspension point was polled.
+    ///
+    /// Unlike [`Self::observed`], this includes repeated polls of one pending
+    /// storage future. It lets callers prove that a synchronous adapter gave a
+    /// yielding operation exactly one resident turn rather than spinning it.
+    pub fn poll_count(&self, operation: TestStorageOperation) -> usize {
+        self.state
+            .borrow()
+            .poll_counts
+            .get(&operation)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Number of controlled storage-future polls across every operation.
+    pub fn total_poll_count(&self) -> usize {
+        self.state.borrow().poll_counts.values().sum()
+    }
+
     async fn before(&self, operation: TestStorageOperation) -> Result<(), Error> {
         let mut recorded = false;
         let mut yielded = false;
         poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
+            *state.poll_counts.entry(operation).or_default() += 1;
             if !recorded {
                 state.observed.push(operation);
                 recorded = true;

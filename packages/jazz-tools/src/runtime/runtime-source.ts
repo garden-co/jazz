@@ -14,6 +14,21 @@ export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig>
   config: RuntimeConfig;
   schema: WasmSchema;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  /**
+   * Browser-only identity leased by the durable SharedWorker before the
+   * synchronous foreground client is constructed.
+   */
+  foregroundNodeLease?: ForegroundNodeLease;
+}
+
+/** Internal foreground TxId lease, never exposed as application API. */
+export interface ForegroundNodeLease {
+  readonly node: Uint8Array;
+  readonly confirmedTxTime: bigint;
+  /** Atomically persists runtime high-water and makes this node reusable. */
+  returnWithHighWater(highWater: bigint): Promise<void>;
+  /** Permanently retires this node when clean handoff is not certain. */
+  retire(): Promise<void>;
 }
 
 export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
@@ -92,6 +107,22 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   }
 
   abstract createClient(context: RuntimeClientContext<RuntimeConfig>): JazzClient;
+
+  /**
+   * Optional pre-runtime foreground identity lease for non-browser hosts.
+   * Browser persistence uses the dedicated SharedWorker variant below.
+   */
+  async acquireForegroundNodeLease(
+    _config: RuntimeConfig,
+  ): Promise<ForegroundNodeLease | undefined> {
+    return undefined;
+  }
+
+  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<ForegroundNodeLease> {
+    return Promise.reject(
+      new Error("Db runtime source does not support browser foreground leases"),
+    );
+  }
 
   createBrowserWorkerConnection(
     _context: BrowserWorkerConnectionContext<RuntimeConfig>,

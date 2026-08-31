@@ -183,21 +183,6 @@ impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionVi
     }
 }
 
-fn flat_tuple_source_tables(shape: &ValidatedQuery) -> Vec<String> {
-    shape
-        .query()
-        .flat_join
-        .as_ref()
-        .map(|flat_join| {
-            flat_join
-                .sources
-                .iter()
-                .map(|source| source.table.clone())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     include!("peer/tests.rs");

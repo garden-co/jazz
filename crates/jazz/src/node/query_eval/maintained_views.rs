@@ -180,6 +180,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -189,6 +190,32 @@ where
         read_view: &ReadViewSpec,
         retained_prepared_plan: Option<SubscriptionPreparedPlan>,
         authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
+        self.open_maintained_view_subscription_in_authorization_mode_with_waker(
+            shape,
+            binding,
+            identity,
+            tier,
+            read_view,
+            retained_prepared_plan,
+            authorization_mode,
+            None,
+        )
+        .await
+    }
+
+    /// Owner-loop variant that preserves a durable wake route while opening
+    /// cold maintained subscription hydration.
+    pub(crate) async fn open_maintained_view_subscription_in_authorization_mode_with_waker(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        retained_prepared_plan: Option<SubscriptionPreparedPlan>,
+        authorization_mode: QueryAuthorizationMode,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<(LocalMaintainedViewSubscription, RelationSnapshot), Error> {
         if let Some(retained) = retained_prepared_plan.as_ref() {
             if retained.authorization_mode != authorization_mode {
@@ -213,6 +240,7 @@ where
                 authorization_mode,
                 settled_binding_view,
                 PreparedClaimBindingMode::Strict,
+                progress_waker,
             )
             .await?;
         let mut local = LocalMaintainedViewSubscription {
@@ -256,31 +284,65 @@ where
         Ok((local, initial.snapshot))
     }
 
+    #[allow(dead_code)] // Test-only direct callers use the no-owner form.
     pub(crate) async fn drain_local_maintained_view_subscription(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
     ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
-        self.drain_local_maintained_view_subscription_preserving_rows(
+        self.drain_local_maintained_view_subscription_with_waker(
+            local,
+            authoritative_binding_view,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn drain_local_maintained_view_subscription_with_waker(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+        authoritative_binding_view: Option<BindingViewKey>,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
+        self.drain_local_maintained_view_subscription_preserving_rows_with_waker(
             local,
             authoritative_binding_view,
             &BTreeSet::new(),
+            progress_waker,
         )
         .await
         .map(|(update, _)| update)
     }
 
+    #[allow(dead_code)] // Test-only direct callers use the no-owner form.
     pub(crate) async fn drain_local_maintained_view_subscription_preserving_rows(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
     ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
+        self.drain_local_maintained_view_subscription_preserving_rows_with_waker(
+            local,
+            authoritative_binding_view,
+            preserved_row_keys,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn drain_local_maintained_view_subscription_preserving_rows_with_waker(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+        authoritative_binding_view: Option<BindingViewKey>,
+        preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<(Option<LocalMaintainedViewSubscriptionUpdate>, bool), Error> {
         let (transitions, suppressed_authoritative_change) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 authoritative_binding_view,
                 preserved_row_keys,
+                progress_waker,
             )
             .await?;
         let Some(transitions) = transitions else {
@@ -292,16 +354,32 @@ where
         Ok((Some(update), suppressed_authoritative_change))
     }
 
+    #[allow(dead_code)] // Test-only direct callers use the no-owner form.
     pub(crate) async fn drain_local_maintained_view_subscription_state(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
+    ) -> Result<bool, Error> {
+        self.drain_local_maintained_view_subscription_state_with_waker(
+            local,
+            authoritative_binding_view,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn drain_local_maintained_view_subscription_state_with_waker(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+        authoritative_binding_view: Option<BindingViewKey>,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<bool, Error> {
         let (Some(transitions), _) = self
             .drain_local_maintained_view_subscription_transitions(
                 local,
                 authoritative_binding_view,
                 &BTreeSet::new(),
+                progress_waker,
             )
             .await?
         else {
@@ -431,6 +509,7 @@ where
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
         preserved_row_keys: &BTreeSet<(String, RowUuid)>,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             Option<super::maintained_subscription_view::ResultTransitions>,
@@ -438,7 +517,8 @@ where
         ),
         Error,
     > {
-        self.drive_ready_query_runtime().await?;
+        self.drive_ready_query_runtime_with_waker(progress_waker)
+            .await?;
         if local.result_query.aggregate.is_some()
             && let Some(remote_members) =
                 self.query.settled_result_sets.get(&local.binding_view_key)

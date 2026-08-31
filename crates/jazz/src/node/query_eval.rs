@@ -21,6 +21,7 @@ use super::maintained_subscription_view::{MaintainedSubscriptionView, Maintained
 use super::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint, MaintainedTerminalSchemasFootprint,
 };
+use super::query_engine::BranchViewSourceBase;
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
     AppProjectionTree, AppRowOutputRequest, AppRowSchema, CapabilityReport, ClaimPath, ClosurePath,
@@ -403,6 +404,7 @@ where
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<QueryProgram, Error> {
+        let allow_secondary_indexes = matches!(&output, CurrentQueryProgramOutput::MaintainedView);
         let request = self.current_query_program_request_with_prepared_claim_mode(
             shape,
             binding,
@@ -415,11 +417,20 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // Maintained index scans retain their established full source because
-        // an index can settle against a different persisted frontier. A
-        // physical primary-key source has no independent index frontier and
-        // remains incrementally complete for that one immutable row identity.
-        let access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        // Retain the established, guarded primary-key paths. In particular a
+        // policy-scoped or declared-`id` root must stay a complete current
+        // source: a point cap there can strand a deletion-driven membership
+        // transition. The new selector contributes only secondary equality
+        // indexes for concrete maintained roots; it must not widen that
+        // legacy guard by injecting another primary-key cap.
+        let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        if allow_secondary_indexes {
+            access_paths.extend(
+                self.query_program_access_paths(&request, true)?
+                    .into_iter()
+                    .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+            );
+        }
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
@@ -720,6 +731,36 @@ where
         )
     }
 
+    /// The storage-backed maintained subset retrieves omitted witnesses by the
+    /// result table name at the wire boundary.  A table-rename lens breaks
+    /// that identity: its result member is named with the projected table but
+    /// its persisted history is named with the authored table.  Keep such
+    /// shapes on the self-contained witness path until the fallback resolves
+    /// canonical physical identities end-to-end.
+    fn storage_backed_maintained_root_has_identity_table_mapping(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+    ) -> bool {
+        if schema_version != self.catalogue.current_schema_version_id {
+            return false;
+        }
+        let Some(table_id) = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .map(|mapping| mapping.table_id)
+        else {
+            return false;
+        };
+        self.catalogue.physical_mappings.values().all(|mapping| {
+            mapping.tables.iter().all(|(candidate_name, candidate)| {
+                candidate.table_id != table_id || candidate_name == table
+            })
+        })
+    }
+
     fn current_query_program_request_with_prepared_claim_mode(
         &self,
         shape: &ValidatedQuery,
@@ -856,6 +897,40 @@ where
                 )
             })
             .flatten();
+        // Prepared binding-source names are runtime identities.  Claim values
+        // normally route independent bindings through one shape, but equal
+        // author identities may hold distinct authenticated sessions.  Give
+        // their claim scopes separate source identities so a later session
+        // cannot replace an already-maintained sibling binding.
+        let source_shape = source_shape.map(|source_shape| {
+            self.active_session_claim_scope_key(identity)
+                .map(|scope| format!("{source_shape}:session:{scope}"))
+                .unwrap_or(source_shape)
+        });
+        let query_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let root_has_read_policy = query_schema
+            .schema
+            .tables
+            .iter()
+            .find(|table| table.name == shape.query().table)
+            .is_some_and(|table| table.read_policy.is_some());
+        let storage_backed_result_materialization =
+            matches!(output, CurrentQueryProgramOutput::MaintainedView)
+                && !root_has_read_policy
+                && self.storage_backed_maintained_root_has_identity_table_mapping(
+                    shape.schema_version(),
+                    &shape.query().table,
+                )
+                && storage_backed_maintained_view_eligible(
+                    shape.query(),
+                    tier,
+                    read_view,
+                    &input_shape,
+                );
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy_with_prepared_claim_mode(
                 shape,
@@ -868,11 +943,21 @@ where
             )?,
             shape: input_shape,
         };
-        let query_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&shape.schema_version())
-            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let mut output_request =
+            current_query_output_request(output, shape.query(), &query_schema.schema);
+        if storage_backed_result_materialization {
+            // A simple current root query carries the exact visible content
+            // transaction in its result-member terminal.  Keeping every
+            // source version/replacement body in every binding merely so the
+            // facade can re-read that immutable version multiplies retained
+            // state by source rows × bindings.  The member's exact identity
+            // is enough to load the immutable body from the node store on
+            // entry; deletion/restore removals need only retire the old
+            // occurrence, never materialize a newer winner.
+            output_request
+                .facts
+                .remove(&ProgramFactKey::VersionWitnesses);
+        }
         Ok(QueryProgramRequest {
             authorization_mode,
             reads: query_read_set_for_read_view(
@@ -887,7 +972,7 @@ where
             )?,
             policy,
             input,
-            output: current_query_output_request(output, shape.query(), &query_schema.schema),
+            output: output_request,
         })
     }
 
@@ -2807,6 +2892,98 @@ where
         .await
     }
 
+    /// Evaluate a query and its relation payload inside an open transaction.
+    ///
+    /// This uses the same transaction snapshot and staged overlay as
+    /// [`Self::tx_query_with_options`].  In particular, it must not fall back
+    /// to the ordinary maintained relation view: doing so would silently omit
+    /// writes staged by the transaction.
+    pub(crate) async fn tx_relation_snapshot_with_options(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        include_deleted: bool,
+    ) -> Result<RelationSnapshot, Error> {
+        self.tx_relation_snapshot_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            AuthorSubject::SYSTEM,
+            include_deleted,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    /// Evaluate a relation payload inside an open transaction as its bound
+    /// serving identity.
+    pub(crate) async fn tx_relation_snapshot_for_identity_with_options(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        include_deleted: bool,
+    ) -> Result<RelationSnapshot, Error> {
+        self.tx_relation_snapshot_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            identity,
+            include_deleted,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn tx_relation_snapshot_in_authorization_mode(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
+        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
+        let program = self
+            .compile_open_tx_query_program(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                CurrentQueryProgramOutput::RelationSnapshot,
+                include_deleted,
+                authorization_mode,
+            )
+            .await?;
+        let snapshots = self
+            .database
+            .query_graphs(lowered_program_sinks(&program))
+            .await
+            .map_err(Error::Groove)?;
+        let snapshot = self
+            .materialize_relation_snapshot_from_query_engine(
+                shape,
+                &ReadViewSpec::default(),
+                &snapshots,
+            )
+            .await?;
+        let predicate_read = PredicateRead {
+            table: shape.query().table.clone(),
+            shape_id: shape.shape_id(),
+            shape: shape.query().clone(),
+            binding_id: binding.binding_id(),
+            binding_values: binding.values().clone(),
+        };
+        let open_tx = self.open_tx_mut(tx_id)?;
+        open_tx.predicate_reads.truncate(predicate_len);
+        open_tx.predicate_reads.push(predicate_read);
+        Ok(snapshot)
+    }
+
     async fn tx_query_in_authorization_mode(
         &mut self,
         tx_id: OpenTransactionId,
@@ -2816,22 +2993,7 @@ where
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let identity = match self.open_tx(tx_id)?.kind {
-            OpenTransactionKind::Exclusive {
-                bound_author: Some(bound_identity),
-            } => {
-                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
-                    && identity != bound_identity
-                {
-                    return Err(Error::OpenTransactionIdentityMismatch);
-                }
-                // Explicitly bound exclusive transactions are identity capabilities:
-                // ordinary and serving reads use the identity fixed at begin.
-                bound_identity
-            }
-            OpenTransactionKind::Exclusive { bound_author: None } => identity,
-            OpenTransactionKind::Mergeable { .. } => identity,
-        };
+        let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
@@ -2867,6 +3029,47 @@ where
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
         Ok(rows)
+    }
+
+    fn transaction_query_identity(
+        &self,
+        tx_id: OpenTransactionId,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<AuthorSubject, Error> {
+        Ok(match self.open_tx(tx_id)?.kind {
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound_identity),
+            } => {
+                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                    && identity != bound_identity
+                {
+                    return Err(Error::OpenTransactionIdentityMismatch);
+                }
+                // Explicitly bound exclusive transactions are identity capabilities:
+                // ordinary and serving reads use the identity fixed at begin.
+                bound_identity
+            }
+            OpenTransactionKind::Exclusive { bound_author: None } => identity,
+            OpenTransactionKind::Mergeable {
+                permission_subject: Some(bound_identity),
+                ..
+            } => {
+                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                    && identity != bound_identity
+                {
+                    return Err(Error::OpenTransactionIdentityMismatch);
+                }
+                // A serving-side mergeable batch is also an identity
+                // capability. The raw foreign-function argument selects no
+                // authority beyond the subject fixed at begin.
+                bound_identity
+            }
+            OpenTransactionKind::Mergeable {
+                permission_subject: None,
+                ..
+            } => identity,
+        })
     }
 
     pub(crate) async fn prepared_query_plan(
@@ -2948,6 +3151,7 @@ where
             .clone()
     }
 
+    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_seeded_maintained_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -2955,6 +3159,33 @@ where
         identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
+        self.open_seeded_maintained_subscription_view_with_waker(
+            shape, binding, identity, tier, read_view, None,
+        )
+        .await
+    }
+
+    /// Owner-loop variant retaining a durable wake route during cold initial
+    /// hydration.
+    pub(crate) async fn open_seeded_maintained_subscription_view_with_waker(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -2975,6 +3206,7 @@ where
             QueryAuthorizationMode::TrustedServing,
             None,
             PreparedClaimBindingMode::Strict,
+            progress_waker,
         )
         .await
     }
@@ -2983,12 +3215,37 @@ where
     /// browser peer. The relay's Global receipt already names the
     /// authority-selected members, so this must consume that membership as
     /// its source instead of applying the query window a second time.
+    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_seeded_relay_edge_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorSubject,
         read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
+        self.open_seeded_relay_edge_subscription_view_with_waker(
+            shape, binding, identity, read_view, None,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_seeded_relay_edge_subscription_view_with_waker(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        read_view: &ReadViewSpec,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3011,6 +3268,7 @@ where
             QueryAuthorizationMode::ClientLocal,
             settled_binding_view,
             PreparedClaimBindingMode::Strict,
+            progress_waker,
         )
         .await
     }
@@ -3062,6 +3320,7 @@ where
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
     /// ordinary prepared query, a missing policy claim is a denied proof and
     /// is surfaced to the peer as an empty, settled authorization view.
+    #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_seeded_authorization_support_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -3069,6 +3328,31 @@ where
         identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
+        self.open_seeded_authorization_support_subscription_view_with_waker(
+            shape, binding, identity, tier, read_view, None,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_seeded_authorization_support_subscription_view_with_waker(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3089,6 +3373,7 @@ where
             QueryAuthorizationMode::TrustedServing,
             None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
+            progress_waker,
         )
         .await
     }
@@ -3103,6 +3388,7 @@ where
         authorization_mode: QueryAuthorizationMode,
         settled_binding_view: Option<BindingViewKey>,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
             MultisinkSubscription,
@@ -3152,16 +3438,46 @@ where
                     &program.lowered.parameters,
                 ))
             });
+        let storage_backed_result_materialization = !program
+            .request
+            .output
+            .facts
+            .contains(&ProgramFactKey::VersionWitnesses);
+        let inline_content_branch_keys = program
+            .request
+            .reads
+            .primary
+            .sources
+            .values()
+            .filter_map(|source| match source {
+                SourceExpr::BranchView {
+                    base: Some(BranchViewSourceBase::Snapshot(branch_key, _)),
+                    ..
+                } => Some(branch_key.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let subscription = self
             .subscribe_lowered_program(
                 program,
                 &binding,
                 binding_source_shape,
                 prepared_claim_binding_mode,
+                progress_waker,
             )
             .await?;
         let mut maintained = MaintainedSubscriptionView::default();
+        if storage_backed_result_materialization {
+            maintained.enable_storage_backed_result_materialization();
+        }
+        for branch_key in &inline_content_branch_keys {
+            maintained.enable_inline_content_branch_key(branch_key);
+        }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
+        // A cold opening may depend on a peer that can only be advanced after
+        // this call returns. Keep Stream A unpublished until the first
+        // complete Stream B snapshot arrives; publication drains this same
+        // subscription and gates ViewUpdate on `initial_received`.
         let initial_received = match subscription.try_recv() {
             Ok(snapshot) => {
                 let snapshot_transitions = maintained.apply_multisink_deltas(

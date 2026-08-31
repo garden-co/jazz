@@ -16,7 +16,7 @@ use super::codec::{
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
     ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
-    ResultMembershipSchema, ResultMembershipVersionSchema, VersionWitnessSchema,
+    ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
     VersionedRowRefSchema, logical_user_column,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
@@ -53,7 +53,15 @@ struct VersionDecodePlan {
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
     result_weights: BTreeMap<ResultMemberEntry, i64>,
+    /// Result memberships already exposed to the subscription consumer. A
+    /// result-current terminal can advance before the companion content
+    /// witness terminal, so raw membership alone is not publishable.
+    published_result_members: BTreeSet<ResultMemberEntry>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    /// Payloads paired with memberships already exposed to a consumer. Keep
+    /// this separate from `result_payloads`: the latter records the raw
+    /// result-terminal state while a membership waits for its content witness.
+    published_result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     /// Incrementally maintained collector output. The key is the root row and
     /// the encoded tree so a -/+ replacement for one root never requires
     /// touching the rendered trees for other roots.
@@ -63,6 +71,14 @@ pub(crate) struct MaintainedSubscriptionView {
     /// collector. Flat unordered subscriptions release it after their reset;
     /// subsequent terminal deltas must not rebuild the duplicate state.
     retains_structured_app_rows: bool,
+    /// This binding retains only result membership. Its exact content bodies
+    /// are loaded from immutable node storage on entry instead of being held
+    /// as source-wide version/replacement terminal witnesses.
+    storage_backed_result_materialization: bool,
+    /// Frozen branch bases are static graph inputs with an exact immutable
+    /// version identity. They do not emit a live Stream-B witness when a head
+    /// deletion or rejection exposes the inherited member.
+    inline_content_branch_keys: BTreeSet<Vec<u8>>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -71,10 +87,14 @@ impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
             result_weights: BTreeMap::new(),
+            published_result_members: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
+            published_result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
+            storage_backed_result_materialization: false,
+            inline_content_branch_keys: BTreeSet::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -161,9 +181,10 @@ pub(crate) struct ResultTransitions {
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_result_delta_batches: usize,
     /// A deletion-register witness changed while its anti-joined result
-    /// terminal may be silent. The caller must replace this tick with an
-    /// authoritative membership reconciliation, even if other terminals
-    /// produced deltas concurrently.
+    /// terminal may be silent. When the public result terminals are silent,
+    /// the caller must replace this tick with an authoritative membership
+    /// reconciliation. A complete public result delta remains authoritative
+    /// and must not be discarded merely because its witness changed too.
     pub(crate) requires_authoritative_membership_reconcile: bool,
 }
 
@@ -238,6 +259,19 @@ enum NetEvent {
 }
 
 impl MaintainedSubscriptionView {
+    pub(crate) fn uses_storage_backed_result_materialization(&self) -> bool {
+        self.storage_backed_result_materialization
+    }
+
+    pub(crate) fn enable_storage_backed_result_materialization(&mut self) {
+        self.storage_backed_result_materialization = true;
+    }
+
+    pub(crate) fn enable_inline_content_branch_key(&mut self, branch_key: &BranchKey) {
+        self.inline_content_branch_keys
+            .insert(branch_key.canonical_bytes());
+    }
+
     pub(crate) fn terminal_schemas_for_program(
         program: &QueryProgram,
     ) -> MaintainedTerminalSchemas {
@@ -325,7 +359,38 @@ impl MaintainedSubscriptionView {
             transitions.requires_authoritative_membership_reconcile |=
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
+        self.finalize_multisink_transitions(&mut transitions, node_aliases);
         Ok(transitions)
+    }
+
+    fn finalize_multisink_transitions(
+        &mut self,
+        transitions: &mut ResultTransitions,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) {
+        // A multisink delta need not contain every terminal that participates
+        // in one maintained result. In particular, a current-membership row
+        // can arrive before its content witness while a cold source finishes
+        // on a later runtime turn. Keep that raw membership internally, but
+        // do not publish Stream A until its Stream B bundle witness is
+        // present. A later content-only delta revisits all pending members and
+        // promotes the now-complete one without requiring another membership
+        // edge.
+        // Synthetic/path payloads are self-contained. Row-digest payloads,
+        // however, are the Stream-A half of a real-row membership and must
+        // cross the same witness boundary as that membership.
+        transitions
+            .result_payload_adds
+            .retain(|(member, _)| member.as_row().is_none());
+        transitions
+            .result_payload_removes
+            .retain(|member| member.as_row().is_none());
+        let (adds, removes, payload_adds, payload_removes) =
+            self.reconcile_publishable_result_members(node_aliases);
+        transitions.adds = adds;
+        transitions.removes = removes;
+        transitions.result_payload_adds.extend(payload_adds);
+        transitions.result_payload_removes.extend(payload_removes);
     }
 
     pub(crate) fn apply_decoded_deltas(
@@ -467,10 +532,24 @@ impl MaintainedSubscriptionView {
                 .result_weights
                 .keys()
                 .map(|member| result_member_entry_bytes(member) + mem::size_of::<i64>())
+                .sum::<usize>()
+            + btree_map_bytes(self.published_result_members.len())
+            + self
+                .published_result_members
+                .iter()
+                .map(result_member_entry_bytes)
                 .sum::<usize>();
         let result_payloads_bytes = btree_map_bytes(self.result_payloads.len())
             + self
                 .result_payloads
+                .iter()
+                .map(|(member, payload)| {
+                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
+                })
+                .sum::<usize>()
+            + btree_map_bytes(self.published_result_payloads.len())
+            + self
+                .published_result_payloads
                 .iter()
                 .map(|(member, payload)| {
                     result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
@@ -619,6 +698,102 @@ impl MaintainedSubscriptionView {
                     .insert(payload.member.clone(), payload.clone());
             }
         }
+        // An authoritative reset has already published these aggregate
+        // members through its replacement snapshot. Do not re-emit them when
+        // the next unrelated multisink delta is drained.
+        self.published_result_members
+            .retain(|member| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        self.published_result_members.extend(
+            self.result_weights
+                .iter()
+                .filter(|(member, weight)| {
+                    matches!(member, ResultMemberEntry::Synthetic { .. }) && **weight > 0
+                })
+                .map(|(member, _)| member.clone()),
+        );
+    }
+
+    fn reconcile_publishable_result_members(
+        &mut self,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> (
+        Vec<ResultMemberEntry>,
+        Vec<ResultMemberEntry>,
+        Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
+        Vec<ResultMemberEntry>,
+    ) {
+        let publishable = self
+            .result_weights
+            .iter()
+            .filter(|(member, weight)| {
+                **weight > 0
+                    && (self.storage_backed_result_materialization
+                        || self.result_member_has_inline_content_source(member)
+                        || self.result_member_has_bundle_witness(member, node_aliases))
+            })
+            .map(|(member, _)| member.clone())
+            .collect::<BTreeSet<_>>();
+        let adds = publishable
+            .difference(&self.published_result_members)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removes = self
+            .published_result_members
+            .difference(&publishable)
+            .cloned()
+            .collect::<Vec<_>>();
+        let payload_removes = removes
+            .iter()
+            .filter(|member| self.published_result_payloads.contains_key(*member))
+            .cloned()
+            .collect::<Vec<_>>();
+        let payload_adds = adds
+            .iter()
+            .filter_map(|member| {
+                self.result_payloads
+                    .get(member)
+                    .cloned()
+                    .map(|payload| (member.clone(), payload))
+            })
+            .collect::<Vec<_>>();
+        self.published_result_members = publishable;
+        for member in &payload_removes {
+            self.published_result_payloads.remove(member);
+        }
+        for (member, payload) in &payload_adds {
+            self.published_result_payloads
+                .insert(member.clone(), payload.clone());
+        }
+        (adds, removes, payload_adds, payload_removes)
+    }
+
+    fn result_member_has_bundle_witness(
+        &self,
+        member: &ResultMemberEntry,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> bool {
+        let Some((table, row_uuid, tx_id)) = member.as_row() else {
+            // Synthetic aggregate output is self-contained in its payload
+            // fact, so it has no Stream B history-row witness.
+            return true;
+        };
+        self.versions_by_tx(tx_id).iter().any(|version| {
+            version.table() == table.as_str()
+                && version.row_uuid() == row_uuid
+                && version.deletion().is_none()
+        }) || self
+            .replacement_for(table.as_str(), row_uuid)
+            .0
+            .is_some_and(|version| {
+                version_tx_id_from_aliases(&version, node_aliases) == Some(tx_id)
+            })
+    }
+
+    fn result_member_has_inline_content_source(&self, member: &ResultMemberEntry) -> bool {
+        member
+            .as_real_row()
+            .and_then(|row| row.branch_or_prefix.as_ref())
+            .is_some_and(|branch_key| self.inline_content_branch_keys.contains(branch_key))
     }
 
     fn apply_result_delta(
@@ -1211,13 +1386,7 @@ fn decode_typed_terminal_record(
                                 .map_err(super::Error::from)
                         })
                         .collect::<Result<Vec<_>, _>>()
-                        .and_then(|values| {
-                            postcard::to_allocvec(&values).map_err(|_| {
-                                super::Error::InvalidStoredValue(
-                                    "flat joined result revision encoding failed",
-                                )
-                            })
-                        })
+                        .and_then(|values| flat_join_row_digest(&schema.payload_fields, &values))
                 })
                 .transpose()?;
             let branch_or_prefix = schema
@@ -1352,6 +1521,121 @@ fn decode_typed_terminal_record(
                 record: OwnedRecord::new(record.raw().to_vec(), schema.descriptor),
             })
         }
+    }
+}
+
+/// Domain separation for the durable flat-join result revision.
+///
+/// `ResultMemberEntry::row_digest` is persisted as part of settled result and
+/// program-fact state, so this must not inherit Rust/postcard layout. The
+/// preimage is a V1 envelope containing a canonical Groove descriptor with
+/// engine-owned ordinal field names and one canonical record under that exact
+/// descriptor. The descriptor carries every declared field type (including
+/// nested enum registry identity); ordinal names make user aliases irrelevant.
+const FLAT_JOIN_ROW_DIGEST_DOMAIN: &str = "jazz.flat-join-row-digest.v1";
+const FLAT_JOIN_ROW_DIGEST_MAGIC: &[u8; 4] = b"JFRD";
+const FLAT_JOIN_ROW_DIGEST_VERSION: u8 = 1;
+
+fn flat_join_row_digest(
+    fields: &[TypedOutputField],
+    values: &[Value],
+) -> Result<Vec<u8>, super::Error> {
+    let bytes = flat_join_row_digest_preimage(fields, values)?;
+    Ok(blake3::derive_key(FLAT_JOIN_ROW_DIGEST_DOMAIN, &bytes).to_vec())
+}
+
+fn flat_join_row_digest_preimage(
+    fields: &[TypedOutputField],
+    values: &[Value],
+) -> Result<Vec<u8>, super::Error> {
+    if fields.len() != values.len() {
+        return Err(super::Error::InvalidStoredValue(
+            "flat joined result revision field/value arity disagrees",
+        ));
+    }
+    let descriptor = RecordDescriptor::new(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| (format!("flat_join_payload_{index}"), field.ty.clone())),
+    );
+    let descriptor_bytes = encode_record_descriptor(&descriptor)?;
+    // The public payload descriptor is the durable contract. An inner join may
+    // nevertheless tighten a proven-present `Nullable(T)` runtime field to
+    // `T` before the terminal sees it. Restore that wrapper here so the same
+    // logical tuple gets one digest regardless of that execution detail.
+    let values = values
+        .iter()
+        .cloned()
+        .zip(fields)
+        .map(|(value, field)| canonicalize_flat_join_payload_value(value, &field.ty))
+        .collect::<Vec<_>>();
+    let record_bytes = descriptor.create(&values)?;
+    let field_count = u32::try_from(fields.len()).map_err(|_| {
+        super::Error::InvalidStoredValue("flat joined result revision has too many fields")
+    })?;
+    let descriptor_len = u32::try_from(descriptor_bytes.len()).map_err(|_| {
+        super::Error::InvalidStoredValue("flat joined result revision descriptor is too large")
+    })?;
+    let record_len = u32::try_from(record_bytes.len()).map_err(|_| {
+        super::Error::InvalidStoredValue("flat joined result revision record is too large")
+    })?;
+    let mut bytes = Vec::with_capacity(4 + 1 + 12 + descriptor_bytes.len() + record_bytes.len());
+    bytes.extend_from_slice(FLAT_JOIN_ROW_DIGEST_MAGIC);
+    bytes.push(FLAT_JOIN_ROW_DIGEST_VERSION);
+    bytes.extend_from_slice(&field_count.to_be_bytes());
+    bytes.extend_from_slice(&descriptor_len.to_be_bytes());
+    bytes.extend_from_slice(&descriptor_bytes);
+    bytes.extend_from_slice(&record_len.to_be_bytes());
+    bytes.extend_from_slice(&record_bytes);
+    Ok(bytes)
+}
+
+fn canonicalize_flat_join_payload_value(value: Value, target: &ValueType) -> Value {
+    match (value, target) {
+        (Value::Nullable(None), ValueType::Nullable(_)) => Value::Nullable(None),
+        (Value::Nullable(Some(value)), ValueType::Nullable(inner)) => {
+            let value = canonicalize_flat_join_payload_value(*value, inner);
+            // A relation carrier can add one nullable layer around a null
+            // authored value. A `Nullable(T)` public field has only one such
+            // layer, so collapse that extra present-null carrier.
+            if matches!(value, Value::Nullable(None))
+                && !matches!(inner.as_ref(), ValueType::Nullable(_))
+            {
+                Value::Nullable(None)
+            } else {
+                Value::Nullable(Some(Box::new(value)))
+            }
+        }
+        // Runtime lowering may unwrap a nullable join key after proving it is
+        // present. Persisted payload identity remains expressed in the public
+        // nullable descriptor, not in that temporary tightened layout.
+        (value, ValueType::Nullable(inner)) => Value::Nullable(Some(Box::new(
+            canonicalize_flat_join_payload_value(value, inner),
+        ))),
+        // Conversely, a runtime source can retain an optional carrier around
+        // a field whose public flat-join projection is proven non-null. Only a
+        // present wrapper is equivalent; `None` deliberately remains invalid
+        // for a non-null declared field and is rejected by `descriptor.create`.
+        (Value::Nullable(Some(value)), target) => {
+            canonicalize_flat_join_payload_value(*value, target)
+        }
+        (Value::Array(values), ValueType::Array(inner)) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| canonicalize_flat_join_payload_value(value, inner))
+                .collect(),
+        ),
+        (Value::Tuple(values), ValueType::Tuple(types)) if values.len() == types.len() => {
+            Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(types)
+                    .map(|(value, target)| canonicalize_flat_join_payload_value(value, target))
+                    .collect(),
+            )
+        }
+        (value, _) => value,
     }
 }
 
@@ -2093,6 +2377,104 @@ mod tests {
         BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
     }
 
+    // Internal receipt: `row_digest` is a durable settled-result identity, so
+    // its exact bytes cannot be asserted through the public query API alone.
+    #[test]
+    fn flat_join_row_digest_uses_the_v1_groove_record_envelope() {
+        let fields = vec![
+            TypedOutputField {
+                name: "ignored_alias".to_owned(),
+                ty: ValueType::U64,
+            },
+            TypedOutputField {
+                name: "title".to_owned(),
+                ty: ValueType::String,
+            },
+        ];
+        let values = vec![Value::U64(7), Value::String("blue".to_owned())];
+        let preimage = flat_join_row_digest_preimage(&fields, &values).unwrap();
+        let digest = flat_join_row_digest(&fields, &values).unwrap();
+
+        // Frozen JFRD v1 receipt: magic/version, count, Groove descriptor,
+        // then the record. Any source-alias rename leaves these bytes intact.
+        assert_eq!(
+            hex::encode(&preimage),
+            "4a4652440100000002000000a8050000002a00000053000000690000009200000000000000000000000002000000120000000000000000010000000000000000010000002500000001666c61745f6a6f696e5f7061796c6f61645f300000000005000000000000000000000000120000000000000000010000000000000000010000002500000001666c61745f6a6f696e5f7061796c6f61645f31000000000a0000000000000000000000001200000000000000000000000d070000000000000002626c7565"
+        );
+        assert_eq!(
+            hex::encode(&digest),
+            "d4bacd5d453e647a4da1c55842ddbf8e39a263ceb1ddb07f3f8fac090ff9480b"
+        );
+
+        let renamed = vec![
+            TypedOutputField {
+                name: "different_alias".to_owned(),
+                ty: ValueType::U64,
+            },
+            TypedOutputField {
+                name: "different_title".to_owned(),
+                ty: ValueType::String,
+            },
+        ];
+        assert_eq!(flat_join_row_digest(&renamed, &values).unwrap(), digest);
+        assert_ne!(
+            flat_join_row_digest(&fields, &[Value::U64(7), Value::String("red".to_owned())],)
+                .unwrap(),
+            digest
+        );
+    }
+
+    #[test]
+    fn flat_join_row_digest_restores_a_proven_present_nullable_payload() {
+        let fields = vec![TypedOutputField {
+            name: "team_id".to_owned(),
+            ty: ValueType::Nullable(Box::new(ValueType::Uuid)),
+        }];
+        let id = uuid::Uuid::from_bytes([0x71; 16]);
+
+        // Inner-join lowering is permitted to use the proven-present UUID
+        // directly, while the public result field remains nullable.
+        let tightened = flat_join_row_digest(&fields, &[Value::Uuid(id)]).unwrap();
+        let declared =
+            flat_join_row_digest(&fields, &[Value::Nullable(Some(Box::new(Value::Uuid(id))))])
+                .unwrap();
+
+        assert_eq!(tightened, declared);
+    }
+
+    #[test]
+    fn flat_join_row_digest_removes_a_present_runtime_nullable_carrier() {
+        let fields = vec![TypedOutputField {
+            name: "team_id".to_owned(),
+            ty: ValueType::Uuid,
+        }];
+        let id = uuid::Uuid::from_bytes([0x72; 16]);
+
+        let declared = flat_join_row_digest(&fields, &[Value::Uuid(id)]).unwrap();
+        let carried =
+            flat_join_row_digest(&fields, &[Value::Nullable(Some(Box::new(Value::Uuid(id))))])
+                .unwrap();
+
+        assert_eq!(declared, carried);
+    }
+
+    #[test]
+    fn flat_join_row_digest_collapses_an_extra_present_null_carrier() {
+        let fields = vec![TypedOutputField {
+            name: "parent_id".to_owned(),
+            ty: ValueType::Nullable(Box::new(ValueType::Uuid)),
+        }];
+
+        let declared = flat_join_row_digest(&fields, &[Value::Nullable(None)]).unwrap();
+        let carried = flat_join_row_digest(
+            &fields,
+            &[Value::Nullable(Some(Box::new(Value::Nullable(None))))],
+        )
+        .unwrap();
+
+        assert_eq!(declared, carried);
+    }
+
     /// Production-shaped typed relation facts retain branch identity through
     /// decode, initial/reset installation, and ordinary removal.
     #[test]
@@ -2548,6 +2930,212 @@ mod tests {
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn membership_waits_for_later_content_witness_before_publication() {
+        // Model two separately delivered multisink deltas: Stream A reports
+        // membership first, while a cold Stream B finishes the exact history
+        // witness only on the later runtime turn. Publishing the first delta
+        // would make the wire builder fail closed for the missing bundle.
+        let aliases = aliases();
+        let member = ResultMemberEntry::from(result(row(1), 10));
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        let mut first = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut first, &aliases);
+        assert!(
+            first.adds.is_empty(),
+            "Stream A must remain pending without Stream B"
+        );
+        assert!(first.removes.is_empty());
+        assert!(first.result_payload_adds.is_empty());
+        assert!(first.result_payload_removes.is_empty());
+
+        let mut second = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut second, &aliases);
+        assert_eq!(second.adds, vec![member.clone()]);
+        assert!(second.removes.is_empty());
+        assert!(second.result_payload_adds.is_empty());
+        assert!(second.result_payload_removes.is_empty());
+
+        let mut third = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut third, &aliases);
+        assert!(third.adds.is_empty());
+        assert_eq!(third.removes, vec![member]);
+        assert!(third.result_payload_adds.is_empty());
+        assert!(third.result_payload_removes.is_empty());
+    }
+
+    #[test]
+    fn storage_backed_membership_publishes_without_bundle_witness() {
+        // This must remain an internal receipt: public test routes cannot
+        // synthesize the deliberately omitted Stream B terminal. The
+        // storage-backed subset instead resolves the exact member `(table,
+        // row, tx)` from node storage at materialization time.
+        let aliases = aliases();
+        let member = ResultMemberEntry::from(result(row(2), 20));
+        let mut maintained = MaintainedSubscriptionView::default();
+        maintained.enable_storage_backed_result_materialization();
+
+        let mut transitions = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut transitions, &aliases);
+
+        assert_eq!(transitions.adds, vec![member]);
+        assert!(transitions.removes.is_empty());
+    }
+
+    #[test]
+    fn row_digest_payload_waits_for_its_membership_witness_boundary() {
+        let aliases = aliases();
+        let member = ResultMemberEntry::from(
+            RealRowMemberEntry::current_content(result(row(1), 10))
+                .with_row_digest(vec![0xd1, 0x6e]),
+        );
+        let payload = ResultMemberPayloadEntry {
+            member: member.clone(),
+            descriptor: vec![0x01],
+            record: vec![0x02],
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        // The raw result terminal carries both Stream-A fields, but neither
+        // may be published before Stream B proves the content row.
+        let mut raw = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::ResultCurrent {
+                        member: member.clone(),
+                        payload: payload.clone(),
+                    },
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        assert_eq!(
+            raw.result_payload_adds,
+            vec![(member.clone(), payload.clone())]
+        );
+        maintained.finalize_multisink_transitions(&mut raw, &aliases);
+        assert!(raw.adds.is_empty());
+        assert!(raw.removes.is_empty());
+        assert!(raw.result_payload_adds.is_empty());
+        assert!(raw.result_payload_removes.is_empty());
+
+        // A pending membership may disappear and re-enter with a replacement
+        // payload before its witness arrives. Neither half becomes visible,
+        // and the later promotion must use the replacement payload only.
+        let mut pending_remove = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut pending_remove, &aliases);
+        assert!(pending_remove.adds.is_empty());
+        assert!(pending_remove.removes.is_empty());
+        assert!(pending_remove.result_payload_adds.is_empty());
+        assert!(pending_remove.result_payload_removes.is_empty());
+
+        let replacement_payload = ResultMemberPayloadEntry {
+            member: member.clone(),
+            descriptor: vec![0x03],
+            record: vec![0x04],
+        };
+        let mut pending_readd = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::ResultCurrent {
+                        member: member.clone(),
+                        payload: replacement_payload.clone(),
+                    },
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut pending_readd, &aliases);
+        assert!(pending_readd.adds.is_empty());
+        assert!(pending_readd.removes.is_empty());
+        assert!(pending_readd.result_payload_adds.is_empty());
+        assert!(pending_readd.result_payload_removes.is_empty());
+
+        let mut content = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut content, &aliases);
+        assert_eq!(content.adds, vec![member.clone()]);
+        assert!(content.removes.is_empty());
+        assert_eq!(
+            content.result_payload_adds,
+            vec![(member.clone(), replacement_payload.clone())]
+        );
+        assert!(content.result_payload_removes.is_empty());
+
+        // Losing an already-published content witness must withdraw both
+        // stream halves; restoring that witness emits the current pair again.
+        let mut content_retraction = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    -1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut content_retraction, &aliases);
+        assert!(content_retraction.adds.is_empty());
+        assert_eq!(content_retraction.removes, vec![member.clone()]);
+        assert!(content_retraction.result_payload_adds.is_empty());
+        assert_eq!(
+            content_retraction.result_payload_removes,
+            vec![member.clone()]
+        );
+
+        let mut content_restore = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version(row(1), 10, "ready")),
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut content_restore, &aliases);
+        assert_eq!(content_restore.adds, vec![member.clone()]);
+        assert!(content_restore.removes.is_empty());
+        assert_eq!(
+            content_restore.result_payload_adds,
+            vec![(member.clone(), replacement_payload)]
+        );
+        assert!(content_restore.result_payload_removes.is_empty());
+
+        let mut removal = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
+            .unwrap();
+        maintained.finalize_multisink_transitions(&mut removal, &aliases);
+        assert!(removal.adds.is_empty());
+        assert_eq!(removal.removes, vec![member.clone()]);
+        assert!(removal.result_payload_adds.is_empty());
+        assert_eq!(removal.result_payload_removes, vec![member]);
     }
 
     #[test]

@@ -22,13 +22,15 @@ const rejected = {
 
 describe("worker mutation-error delivery", () => {
   it("keeps the worker rejection path stateless", () => {
-    const worker = readFileSync(
-      fileURLToPath(new URL("./jazz-broker-worker.ts", import.meta.url)),
+    const workerCore = readFileSync(
+      fileURLToPath(new URL("./jazz-broker-worker-core.ts", import.meta.url)),
       "utf8",
     );
 
-    expect(worker).not.toContain("pendingMutationErrors");
-    expect(worker).toContain("deliverMutationErrorToAttachedPeers(context.peers.values(), event");
+    expect(workerCore).not.toContain("pendingMutationErrors");
+    expect(workerCore).toContain(
+      "deliverMutationErrorToAttachedPeers(context.peers.values(), event",
+    );
   });
 
   it("does not retain an error observed without peers for a later peer", () => {

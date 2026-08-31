@@ -89,6 +89,42 @@ pub(super) fn current_query_output_request(
     }
 }
 
+/// Whether a maintained current-read can retain only its delivered result
+/// members and re-load their immutable content bodies from storage.
+///
+/// This is intentionally a proof for the small common case, not a heuristic:
+/// one default-view root table without a read-policy proof, relation/recursive
+/// output expansion, or aggregate. A policy-bearing root keeps its complete
+/// source witnesses: membership alone cannot preserve the policy's deletion
+/// and replacement liveness across a seeded maintained view.
+pub(super) fn storage_backed_maintained_view_eligible(
+    query: &JazzQuery,
+    tier: DurabilityTier,
+    read_view: &ReadViewSpec,
+    normalized: &NormalizedRowSetShape,
+) -> bool {
+    tier != DurabilityTier::None
+        && read_view.is_default()
+        && query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && query.policy_branches.is_empty()
+        // `JazzQuery::includes` captures only caller-requested includes.
+        // Normalization also injects the default root-reference closure for
+        // reference-bearing tables, and that auxiliary source needs its
+        // version/replacement witnesses on a separate receiving node.  The
+        // storage-backed subset is consequently a proof over the normalized
+        // program, not a surface-query shortcut.
+        && normalized.closure_paths.is_empty()
+        && normalized.auxiliary_sources.is_empty()
+        && normalized.join_contributions.is_empty()
+        && normalized.reachable_contributions.is_empty()
+}
+
 fn app_row_payload_projection(
     query: &JazzQuery,
     schema: &RuntimeSchema,
@@ -336,7 +372,10 @@ pub(super) fn select_current_access_path(
     let mut probes = Vec::new();
     for column in table.global_current_indexed_columns() {
         if let Some(value) = equalities.get(&column).cloned() {
-            probes.push((column, vec![Value::Nullable(Some(Box::new(value)))]));
+            probes.push((
+                column.clone(),
+                vec![physical_current_index_value(table, &column, value)],
+            ));
         }
     }
     let (column, prefix) = probes.first()?.clone();
@@ -344,8 +383,38 @@ pub(super) fn select_current_access_path(
         column,
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
+        maintained: false,
         source_limit: None,
     })
+}
+
+/// Current storage uses one nullable envelope to represent an un-authored
+/// cell. A logically nullable column has its own, inner envelope as well.
+/// Predicates use logical values, but secondary-index keys are physical
+/// current-row values, so preserve that declared nullable shape before adding
+/// the storage envelope.
+fn physical_current_index_value(table: &TableSchema, column: &str, value: Value) -> Value {
+    let logical_value = match table
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+    {
+        Some(candidate) => coerce_literal_preserving_nullable(value, &candidate.column_type),
+        None => value,
+    };
+    Value::Nullable(Some(Box::new(logical_value)))
+}
+
+fn coerce_literal_preserving_nullable(value: Value, column_type: &ColumnType) -> Value {
+    match (value, column_type) {
+        (Value::Nullable(value), ColumnType::Nullable(inner)) => Value::Nullable(
+            value.map(|value| Box::new(coerce_literal_preserving_nullable(*value, inner))),
+        ),
+        (value, ColumnType::Nullable(inner)) => Value::Nullable(Some(Box::new(
+            coerce_literal_preserving_nullable(value, inner),
+        ))),
+        (value, column_type) => coerce_literal_for_column_type(value, column_type),
+    }
 }
 
 pub(super) fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) -> StaticScanSpec {

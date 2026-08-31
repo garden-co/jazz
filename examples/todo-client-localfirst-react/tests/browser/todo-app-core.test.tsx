@@ -162,14 +162,12 @@ describe("React Todo App core browser canary", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
     });
     const reader = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
     });
 

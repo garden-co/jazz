@@ -1191,7 +1191,7 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
             },
             descriptor: groove::records::encode_record_descriptor(&payload_descriptor).unwrap(),
             record: payload_descriptor
-                .create(&[Value::String("payload".to_owned())])
+                .create(&[Value::String("large settled payload ".repeat(20_000))])
                 .unwrap(),
         },
     );
@@ -1202,12 +1202,173 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
             vec![],
         ))
         .unwrap();
+    let settled_facts_store = reader
+        .database
+        .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
+        .unwrap();
+    let durable_fact = futures::executor::block_on(settled_facts_store.prefix_entries(&[]))
+    .unwrap()
+    .into_iter()
+    .find(|entry| {
+        matches!(
+            entry.value.get_idx(0),
+            Ok(Value::Bytes(bytes)) if bytes.len() > 64 * 1024
+        )
+    })
+    .expect("settled program fact is durable");
+    assert!(matches!(&durable_fact.key[3], Value::Bytes(digest) if digest.len() == 32));
+    assert!(matches!(
+        durable_fact.value.get_idx(0).unwrap(),
+        Value::Bytes(bytes) if bytes.len() > 64 * 1024
+    ));
     drop(reader);
     let reopened = open_node_at(&reader_dir, schema());
     assert_eq!(
         reopened.query.settled_program_facts[&key],
         BTreeSet::from([rewritten, nested_payload])
     );
+}
+
+/// Internal direct-store recovery receipt for a local reader: large synthetic,
+/// path, and real result identities must reopen through bounded digest keys.
+/// This stays below the public client layer because applications cannot inspect
+/// the direct-store key/value boundary or inject a digest/payload mismatch.
+#[test]
+fn settled_result_members_use_digest_keys_and_recover_large_payloads() {
+    // The member itself is application-shaped data (synthetic rows and path
+    // tuples can be large).  It must therefore never become an ordered-store
+    // key: every durable key has a fixed 32-byte digest and the complete
+    // canonical member is retained in the value cell for exact recovery.
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let key = BindingViewKey::from_canonical_subscription_key(subscription);
+    let update = |reset_result_set, adds, removes| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set,
+            version_carriers: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: adds,
+            result_member_removes: removes,
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+    };
+
+    let mut real = crate::protocol::RealRowMemberEntry::current_content((
+        groove::Intern::from("todos".to_owned()),
+        row(61),
+        TxId::new(TxTime(61), node(61)),
+    ));
+    // Nearly the maximum member encoding: this used to make the ordered IDB
+    // key too large even though the direct-store value is intentionally able
+    // to carry it.
+    real.branch_or_prefix = Some(vec![0x61; 900 * 1024]);
+    // This is a pure output identity receipt, not a row payload delivery;
+    // avoid claiming that this synthetic view update carries a transaction
+    // whose version bundle was not included above.
+    real.content_tx = None;
+    let real = ResultMemberEntry::Row(real);
+    let synthetic_row = crate::node::codec::settled_result_value_storage_bytes(
+        &Value::String("synthetic ".repeat(10_000)),
+        &groove::records::ValueType::String,
+    )
+    .unwrap();
+    let synthetic_replacement = crate::node::codec::settled_result_value_storage_bytes(
+        &Value::U64(1),
+        &groove::records::ValueType::U64,
+    )
+    .unwrap();
+    let synthetic = ResultMemberEntry::Synthetic {
+        table: "totals".to_owned(),
+        row: synthetic_row,
+        replacement: crate::protocol::SyntheticReplacementToken::from_encoded_record(
+            synthetic_replacement,
+        ),
+    };
+    let path = ResultMemberEntry::PathTuple {
+        path: "album.tracks".to_owned(),
+        source_table: groove::Intern::from("albums".to_owned()),
+        source_row: row(62),
+        target_table: groove::Intern::from("tracks".to_owned()),
+        target_row: row(63),
+        edge_id: Some(vec![0x62; 64 * 1024]),
+        revision: vec![0x63; 96 * 1024],
+    };
+    reader
+        .apply_sync_message_settled(update(
+            false,
+            vec![real.clone(), synthetic.clone(), path.clone()],
+            vec![],
+        ))
+        .unwrap();
+    // Repeating an add is idempotent because the digest is a stable identity.
+    reader
+        .apply_sync_message_settled(update(false, vec![synthetic.clone()], vec![]))
+        .unwrap();
+    let store = reader
+        .database
+        .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
+        .unwrap();
+    let entries = futures::executor::block_on(store.prefix_entries(&[])).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|entry| {
+        entry.key.len() == 4
+            && matches!(&entry.key[3], Value::Bytes(digest) if digest.len() == 32)
+            && matches!(entry.value.get_idx(0), Ok(Value::Bytes(bytes)) if bytes.len() > 0)
+    }));
+    assert!(entries.iter().any(|entry| {
+        matches!(entry.value.get_idx(0), Ok(Value::Bytes(bytes)) if bytes.len() > 64 * 1024)
+    }));
+    assert!(entries.iter().any(|entry| {
+        matches!(entry.value.get_idx(0), Ok(Value::Bytes(bytes)) if bytes.len() > 800 * 1024)
+    }));
+    drop(reader);
+
+    let mut reopened = open_node_at(&reader_dir, schema());
+    assert_eq!(
+        reopened.query.settled_result_sets[&key],
+        BTreeSet::from([real.clone(), synthetic.clone(), path.clone()])
+    );
+    // Exercise delete and full rewrite using the same digest-key codec.
+    reopened
+        .apply_sync_message_settled(update(false, vec![], vec![path]))
+        .unwrap();
+    reopened
+        .apply_sync_message_settled(update(true, vec![synthetic.clone()], vec![]))
+        .unwrap();
+    drop(reopened);
+    let mut reopened = open_node_at(&reader_dir, schema());
+    assert_eq!(
+        reopened.query.settled_result_sets[&key],
+        BTreeSet::from([synthetic.clone()])
+    );
+
+    // A full-size but unrelated digest must fail closed rather than allowing a
+    // corrupt record to masquerade as a different member.
+    let store = reopened
+        .database
+        .direct_record_store(crate::schema::SETTLED_RESULT_MEMBERS_STORE)
+        .unwrap();
+    futures::executor::block_on(store.set(
+        &[
+            Value::Uuid(key.shape_id.0),
+            Value::Uuid(key.binding_id.0),
+            Value::Uuid(key.read_view.id),
+            Value::Bytes(vec![0xff; 32]),
+        ],
+        &[Value::Bytes(
+            crate::node::codec::result_member_storage_bytes(&synthetic).unwrap(),
+        )],
+    ))
+    .unwrap();
+    assert!(futures::executor::block_on(reopened.recover_known_state_facts()).is_err());
+    assert!(reopened.query.settled_result_sets.is_empty());
+    assert!(reopened.query.settled_through_by_binding_view.is_empty());
 }
 
 #[test]
@@ -1240,7 +1401,7 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
             terminal_operations: Vec::new(),
-            program_fact_adds: vec![fact],
+            program_fact_adds: vec![fact.clone()],
             program_fact_removes: Vec::new(),
         }))
         .unwrap();
@@ -1253,9 +1414,13 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
                 Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
                 Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
                 Value::Uuid(uuid::Uuid::from_bytes([0xff; 16])),
-                Value::Bytes(vec![0]),
+                // A full-sized but wrong digest proves recovery verifies the
+                // key/value binding rather than only the digest's shape.
+                Value::Bytes(vec![0xff; 32]),
             ],
-            &[Value::U64(1)],
+            &[Value::Bytes(
+                crate::node::codec::program_fact_storage_bytes(&fact).unwrap(),
+            )],
         ))
     .unwrap();
     assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());

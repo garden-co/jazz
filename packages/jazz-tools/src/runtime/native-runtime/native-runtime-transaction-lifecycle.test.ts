@@ -169,6 +169,329 @@ type TxForTest = {
   ): void;
 };
 
+it("quiesces foreground mutation admission before capturing its final HLC", async () => {
+  const insertEncoded = vi.fn(() => ({ ...fakeWrite(), rowId: new Uint8Array(16) }));
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => 41n,
+          insertEncoded,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const preexisting = beginTestBatch(runtime);
+  expect(await runtime.quiesceForegroundTxTimeHighWater()).toBe(41n);
+  // This is the P0 handoff ordering: an already-open batch cannot mint H+1
+  // after the high-water was captured, nor can a new synchronous batch start.
+  expect(() => runtime.commitTransaction(preexisting)).toThrow("native runtime is closed");
+  expect(() => beginTestBatch(runtime)).toThrow("native runtime is closed");
+  expect(() => runtime.insert("todos", { title: { type: "Text", value: "late" } })).toThrow(
+    "native runtime is closed",
+  );
+  expect(insertEncoded).not.toHaveBeenCalled();
+  await runtime.close();
+});
+
+it("drains an already admitted streaming mutation before returning its foreground HLC", async () => {
+  let highWater = 7n;
+  let releaseSource!: () => void;
+  const sourceGate = new Promise<void>((resolve) => {
+    releaseSource = resolve;
+  });
+  const beginStreamingMutationEncoded = vi.fn(() => ({
+    push: () => undefined,
+    finish: () => {
+      highWater = 42n;
+      return fakeWrite();
+    },
+    abort: () => true,
+  }));
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => highWater,
+          beginStreamingMutationEncoded,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const stream = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    (async function* () {
+      await sourceGate;
+      yield "late write";
+    })(),
+  );
+  await Promise.resolve();
+  expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
+
+  let handoffResolved = false;
+  const handoff = runtime.quiesceForegroundTxTimeHighWater().then((value) => {
+    handoffResolved = true;
+    return value;
+  });
+  await Promise.resolve();
+  expect(handoffResolved).toBe(false);
+
+  releaseSource();
+  await stream;
+  expect(await handoff).toBe(42n);
+  await runtime.close();
+});
+
+it("waits for a failed stream's native abort before foreground handoff", async () => {
+  let releaseSource!: () => void;
+  const sourceGate = new Promise<void>((resolve) => {
+    releaseSource = resolve;
+  });
+  let releaseAbort!: () => void;
+  const abortGate = new Promise<boolean>((resolve) => {
+    releaseAbort = () => resolve(true);
+  });
+  const abort = vi.fn(() => abortGate);
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => 7n,
+          beginStreamingMutationEncoded: () => ({
+            push: () => undefined,
+            finish: () => fakeWrite(),
+            abort,
+          }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const stream = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    (async function* () {
+      await sourceGate;
+      yield "partial upload";
+      throw new Error("source cancelled");
+    })(),
+  );
+  await Promise.resolve();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  releaseSource();
+  await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+
+  let handoffResolved = false;
+  void handoff.then(() => {
+    handoffResolved = true;
+  });
+  await Promise.resolve();
+  expect(handoffResolved).toBe(false);
+
+  releaseAbort();
+  await expect(stream).rejects.toThrow("source cancelled");
+  await expect(handoff).resolves.toBe(7n);
+  await runtime.close();
+});
+
+it("does not let a concurrent close preempt foreground HLC capture", async () => {
+  const order: string[] = [];
+  let releaseSource!: () => void;
+  const sourceGate = new Promise<void>((resolve) => {
+    releaseSource = resolve;
+  });
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => {
+            order.push("high-water");
+            return 42n;
+          },
+          beginStreamingMutationEncoded: () => ({
+            push: () => undefined,
+            finish: () => fakeWrite(),
+            abort: () => true,
+          }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+          close: () => {
+            order.push("close");
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const stream = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    (async function* () {
+      await sourceGate;
+      yield "finish before close";
+    })(),
+  );
+  await Promise.resolve();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  const close = runtime.close();
+  releaseSource();
+  await stream;
+  await expect(handoff).resolves.toBe(42n);
+  await close;
+  expect(order).toEqual(["high-water", "close"]);
+});
+
+it("awaits the binding-owned native close promise", async () => {
+  let releaseClose!: () => void;
+  const closeGate = new Promise<void>((resolve) => {
+    releaseClose = resolve;
+  });
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => 0n,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+          close: () => closeGate,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  let settled = false;
+  const close = runtime.close().then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  releaseClose();
+  await close;
+  expect(settled).toBe(true);
+});
+
+it("waits for every concurrently admitted stream before foreground handoff", async () => {
+  let highWater = 7n;
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const secondGate = new Promise<void>((resolve) => {
+    releaseSecond = resolve;
+  });
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          foregroundTxTimeHighWater: () => highWater,
+          beginStreamingMutationEncoded: () => ({
+            push: () => undefined,
+            finish: () => {
+              highWater += 1n;
+              return fakeWrite();
+            },
+            abort: () => true,
+          }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const makeSource = (gate: Promise<void>, value: string) =>
+    (async function* () {
+      await gate;
+      yield value;
+    })();
+  const first = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    makeSource(firstGate, "one"),
+  );
+  const second = runtime.streamingMutation(
+    "insert",
+    "todos",
+    {},
+    "title",
+    makeSource(secondGate, "two"),
+  );
+  await Promise.resolve();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  let handoffResolved = false;
+  void handoff.then(() => {
+    handoffResolved = true;
+  });
+
+  releaseFirst();
+  await first;
+  await Promise.resolve();
+  expect(handoffResolved).toBe(false);
+
+  releaseSecond();
+  await second;
+  await expect(handoff).resolves.toBe(9n);
+  await runtime.close();
+});
+
 function uuidBytes(value: string): Uint8Array {
   const hex = value.replaceAll("-", "");
   const bytes = new Uint8Array(16);
@@ -396,8 +719,16 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
         fakeDb({
           all: () => encodeRows([]),
           allForIdentity: () => encodeRows([]),
-          allInTransaction: (_query: object, receivedTx: TxForTest) => {
+          allInTransaction: () => {
+            throw new Error("trusted-serving reads must not use the ambient transaction method");
+          },
+          allInTransactionForIdentity: (
+            _query: object,
+            receivedTx: TxForTest,
+            receivedIdentity: Uint8Array,
+          ) => {
             expect(receivedTx).toBe(tx);
+            expect(new TextDecoder().decode(receivedIdentity)).toBe(`["${issuer}","${alice}"]`);
             return encodeRows([
               {
                 table: "todos",

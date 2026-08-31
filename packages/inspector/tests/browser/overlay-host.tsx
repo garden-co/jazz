@@ -99,7 +99,10 @@ function HostApp() {
             claims: { role: "inspector-test" },
             authMode: "external",
           },
-          driver: { type: "persistent", dbName: "inspector-secondary-context" },
+          // Deliberately share the primary runtime's logical base. The
+          // browser physical namespace must still separate this external
+          // principal from the local-first primary context.
+          driver: { type: "persistent", dbName: APP_ID },
           devMode: true,
         }}
         autoAttachDevTools={false}

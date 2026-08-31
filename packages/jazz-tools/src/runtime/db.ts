@@ -53,7 +53,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
 } from "./client-session.js";
-import { canonicalAuthorSubject } from "./author-id.js";
+import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
 import { authSecretSeedForMinting } from "./auth-secret-codec.js";
 import {
   getDbInternalSession,
@@ -144,28 +144,18 @@ function trimOptionalString(value?: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/** @internal Derive the default browser persistence namespace for this Db config. */
-export function resolveDefaultPersistentDbName(config: DbConfig): string {
+/** @internal Resolve the caller-selected logical base for browser persistence. */
+export function resolvePersistentDbBaseName(config: DbConfig): string {
   const driver = resolveStorageDriver(config.driver);
   const explicitDbName = trimOptionalString(
     (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
   );
-  if (explicitDbName) {
-    return explicitDbName;
-  }
+  return explicitDbName ?? config.appId;
+}
 
-  const session = resolveClientInternalSessionSync({
-    appId: config.appId,
-    jwtToken: config.jwtToken,
-    cookieSession: config.cookieSession,
-    trustedReservedSession: getTrustedReservedSession(config),
-  });
-
-  if (!session?.user_id || session.authMode === "anonymous") {
-    return config.appId;
-  }
-
-  return `${config.appId}::${encodeURIComponent(canonicalAuthorSubject(session.issuer, session.user_id))}`;
+/** @internal Derive the physical browser persistence namespace for this Db config. */
+export function resolveDefaultPersistentDbName(config: DbConfig): string {
+  return createBrowserPhysicalDatabaseName(config, resolvePersistentDbBaseName(config));
 }
 
 /**
@@ -209,8 +199,18 @@ export interface DbSubscriptionSource {
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
     session?: Session,
-  ): () => void;
+  ): SubscriptionHandle;
 }
+
+/**
+ * Cancels a subscription. Browser-worker followers also expose the initial
+ * admission boundary so framework bindings can surface an asynchronous open
+ * failure through their ordinary subscription error state rather than as an
+ * ambient exception.
+ *
+ * @internal
+ */
+export type SubscriptionHandle = (() => void) & { readonly ready?: Promise<void> };
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
 
@@ -1542,11 +1542,17 @@ export class Db {
       jwtToken,
       trustedReservedSession,
     });
+    const tokenChanged = previousToken !== jwtToken;
+    // Browser persistent roots are principal-bound. Let the connection manager
+    // reject a token-carried incompatible switch while config, local auth state
+    // and worker claims still describe the preceding principal.
+    if (tokenChanged && this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) {
+      this.connection.updateAuth({ jwtToken, trustedReservedSession });
+    }
+
     const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
     );
-    const tokenChanged = previousToken !== jwtToken;
-
     if (!tokenChanged && published.value === previousState) {
       published.rollback();
       return false;
@@ -1555,7 +1561,9 @@ export class Db {
     this.config.jwtToken = jwtToken;
     setTrustedReservedSession(this.config, trustedReservedSession);
 
-    this.connection.updateAuth({ jwtToken, trustedReservedSession });
+    // A same-token package-private session refresh cannot cross the public
+    // principal boundary above; preserve the old no-op/refresh behavior.
+    if (!tokenChanged) this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }
@@ -1568,11 +1576,14 @@ export class Db {
       ...this.config,
       cookieSession,
     });
+    const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
+    if (sessionChanged && this.authStateStore.validateCookieSession(cookieSession)) {
+      this.connection.updateAuth({ cookieSession });
+    }
+
     const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyCookieSession(cookieSession),
     );
-    const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
-
     if (!sessionChanged && published.value === previousState) {
       published.rollback();
       return false;
@@ -1580,7 +1591,7 @@ export class Db {
 
     this.config.cookieSession = cookieSession;
 
-    this.connection.updateAuth({ cookieSession });
+    if (!sessionChanged) this.connection.updateAuth({ cookieSession });
 
     return true;
   }
@@ -1591,6 +1602,16 @@ export class Db {
    */
   static create(config: DbConfig, runtimeSource: AnyRuntimeSource): Db {
     return new Db(config, runtimeSource);
+  }
+
+  /** @internal Create a direct Db after its pre-runtime identity bootstrap. */
+  static async createWithDirectConnection(
+    config: DbConfig,
+    runtimeSource: AnyRuntimeSource,
+  ): Promise<Db> {
+    const db = new Db(config, runtimeSource);
+    await db.connection.start();
+    return db;
   }
 
   /** @internal Create a Db whose durable peer lives in a dedicated browser worker. */
@@ -2355,45 +2376,17 @@ export class Db {
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
     session?: Session,
-    statusReady = false,
-  ): () => void {
+  ): SubscriptionHandle {
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
-    // See all(): only a newly attached browser peer delays this tier's
-    // subscription setup until it knows the shared worker's state. All other
-    // runtimes, including established browser peers, start synchronously.
-    const initialOfflineState =
-      !statusReady && options?.tier === ReadTier.RemoteIfPossible
-        ? this.connection.initialExplicitOfflineState()
-        : null;
-    if (initialOfflineState) {
-      let unsubscribed = false;
-      let unsubscribe = () => {};
-      const readyAbort = new AbortController();
-      void initialOfflineState
-        .then(() => {
-          if (unsubscribed || readyAbort.signal.aborted) return;
-          const installed = this.subscribeDelta(query, callback, options, session, true);
-          // Native subscription installation can synchronously deliver an
-          // opening delta. If that callback unsubscribes the outer handle,
-          // dispose the just-created inner subscription rather than retaining
-          // it after this continuation returns.
-          if (unsubscribed || readyAbort.signal.aborted) installed();
-          else unsubscribe = installed;
-        })
-        .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
-          setTimeout(() => {
-            throw error;
-          }, 0);
-        });
-      return () => {
-        unsubscribed = true;
-        readyAbort.abort();
-        unsubscribe();
-      };
-    }
+    // A newly attached browser peer does not yet know whether its worker can
+    // open durable storage.  Keep the native subscription installation in the
+    // old immediate order (several hooks may register together), but hold its
+    // public deltas until that one admission succeeds.  This makes a corrupt
+    // store fail the subscription that triggered it without publishing a
+    // misleading empty opening or perturbing maintained-view registration.
+    const initialReadiness = this.connection.initialExplicitOfflineState();
     const manager = new SubscriptionManager<T>();
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
@@ -2411,9 +2404,19 @@ export class Db {
           builtQuery.partialSelect,
         ),
       );
+    let deliveryReady = initialReadiness === null;
+    const bufferedDeltas: SubscriptionDelta<T>[] = [];
+    let startLocalSeed: (() => void) | null = null;
+    const deliver = (delta: SubscriptionDelta<T>) => {
+      if (!deliveryReady) {
+        bufferedDeltas.push(delta);
+        return;
+      }
+      callback(delta);
+    };
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform);
-      callback(typedDelta);
+      deliver(typedDelta);
     };
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
@@ -2479,8 +2482,41 @@ export class Db {
       builtQuery.table,
       queryOptions,
     );
+    const unsubscribe = () => {
+      unsubscribed = true;
+      readyAbort.abort();
+      this.unregisterActiveQuerySubscriptionTrace(traceId);
+      if (activeSubscription !== null && activeSubscription.id >= 0) {
+        client.unsubscribe(activeSubscription.id);
+      }
+      activeSubscription = null;
+      bufferedDeltas.length = 0;
+      manager.clear();
+    };
+    const ready = initialReadiness
+      ?.then(() => {
+        if (unsubscribed || this.isShuttingDown) return;
+        deliveryReady = true;
+        for (const delta of bufferedDeltas.splice(0)) {
+          callback(delta);
+        }
+        startLocalSeed?.();
+      })
+      .catch((error: unknown) => {
+        if (unsubscribed || this.isShuttingDown) return;
+        // The worker admitted no durable runtime.  Dispose the locally
+        // registered native subscription before surfacing that initiating
+        // operation's error through the handle/orchestrator.
+        unsubscribe();
+        throw error;
+      });
+    // Direct `Db.subscribe` has historically returned only cancellation, so
+    // retain an internal rejection handler for callers that do not consume
+    // the readiness property. Framework bindings consume `ready` below via
+    // DbSubscriptionSource and surface it as their normal error state.
+    if (ready) void ready.catch(() => undefined);
     if (queryOptions.tier == null || queryOptions.tier === "local") {
-      callback(manager.seed([]));
+      deliver(manager.seed([]));
     }
     if (
       this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
@@ -2548,33 +2584,29 @@ export class Db {
           tier: "local",
           propagation: "local-only",
         });
-      const seedRows =
-        session == null
-          ? seedQuery()
-          : this.withRuntimeOperationContext({ session }, () => seedQuery());
-      void seedRows
-        .then((rows) => {
-          if (unsubscribed) return;
-          callback(manager.seed(rows));
-        })
-        .catch((error: unknown) => {
-          setTimeout(() => {
-            throw error;
-          }, 0);
-        });
+      const seedLocal = () => {
+        const seedRows =
+          session == null
+            ? seedQuery()
+            : this.withRuntimeOperationContext({ session }, () => seedQuery());
+        void seedRows
+          .then((rows) => {
+            if (unsubscribed) return;
+            deliver(manager.seed(rows));
+          })
+          .catch((error: unknown) => {
+            setTimeout(() => {
+              throw error;
+            }, 0);
+          });
+      };
+      if (initialReadiness) startLocalSeed = seedLocal;
+      else seedLocal();
     }
 
-    // Return unsubscribe function
-    return () => {
-      unsubscribed = true;
-      readyAbort.abort();
-      this.unregisterActiveQuerySubscriptionTrace(traceId);
-      if (activeSubscription !== null && activeSubscription.id >= 0) {
-        client.unsubscribe(activeSubscription.id);
-      }
-      activeSubscription = null;
-      manager.clear();
-    };
+    const handle = unsubscribe as SubscriptionHandle;
+    if (ready) Object.defineProperty(handle, "ready", { value: ready });
+    return handle;
   }
 
   /**
@@ -2797,7 +2829,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   const db =
     runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent"
       ? await Db.createWithBrowserWorker(resolvedConfig, runtimeSource as AnyRuntimeSource)
-      : Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
+      : await Db.createWithDirectConnection(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);
