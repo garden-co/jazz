@@ -247,13 +247,13 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         if (message?.type === "foreground-node-lease-error") {
           cleanup();
           port.close();
-          rejectPublic(new Error(message.message));
+          rejectPublic(deserializeBrowserRelayError(message.error));
           return;
         }
         if (message?.type === "foreground-node-lease-cancelled") {
           cleanup();
           port.close();
-          rejectPublic(message.error ? new Error(message.error) : timeoutError);
+          rejectPublic(message.error ? deserializeBrowserRelayError(message.error) : timeoutError);
           return;
         }
         if (message?.type !== "foreground-node-lease-ready") return;
@@ -320,7 +320,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         const result = event.data;
         if (result?.type !== "foreground-node-lease-result") return;
         cleanup();
-        if (result.error) reject(new Error(result.error));
+        if (result.error) reject(deserializeBrowserRelayError(result.error));
         else resolve();
       };
       const onMessageError = () => {

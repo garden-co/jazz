@@ -417,7 +417,9 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
           finishBootstrap();
           post(port, {
             type: "foreground-node-lease-error",
-            message: "Foreground node lease request did not match its worker probe",
+            error: serializeBrowserRelayError(
+              new Error("Foreground node lease request did not match its worker probe"),
+            ),
           } satisfies BrowserForegroundNodeLeaseAcquireResponse);
           closeBootstrapPort();
           return;
@@ -510,7 +512,11 @@ async function acquireForegroundNodeLease(
       // do not claim that cancellation made the node reusable.
       post(port, {
         type: "foreground-node-lease-cancelled",
-        error: `Shared browser foreground lease cancellation failed: ${asError(error).message}`,
+        error: serializeBrowserRelayError(
+          new Error("Shared browser foreground lease cancellation failed", {
+            cause: asError(error),
+          }),
+        ),
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
     } finally {
       cleanup();
