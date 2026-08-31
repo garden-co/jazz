@@ -1235,6 +1235,10 @@ where
                             }
                             self.auxiliary_pump.acknowledge_outbound(&message);
                         }
+                        // Subscription finalization acknowledges after it has
+                        // retired local/shared ownership and queued a final
+                        // Unsubscribe. Wire delivery begins only when this
+                        // connection owner drains that queue.
                         pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                         let claims = self.node.borrow().session_claims_with_revisions();
                         for (identity, claims, revision) in claims {
@@ -1362,6 +1366,10 @@ where
                                     }
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
+                                    // Local finalization may already have
+                                    // applied this retirement. Reapplying is
+                                    // idempotent, and the command remains in
+                                    // `pending` until the send succeeds.
                                     self.node.borrow_mut().apply_unsubscribe(*subscription);
                                     if let Err(error) =
                                         self.transport.send(SyncMessage::Unsubscribe {

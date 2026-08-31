@@ -364,6 +364,16 @@ where
             .settled_authoritative_receipt_counts_for_test()
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Hold the async node owner until this future is cancelled.
+    ///
+    /// This is a test-only suspension point for cancellation and contention
+    /// contracts that cannot be reproduced by borrowing the private node.
+    pub async fn hold_node_owner_for_test(&self) {
+        let _node = self.node.node.lock().await;
+        std::future::pending::<()>().await;
+    }
+
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
         if let Some(receipts) = self
@@ -699,7 +709,7 @@ where
         // exists. On success, replace it with one command carrying local and
         // upstream cleanup so Drop never touches the async node mutex.
         drop(local_cleanup.take());
-        let cleanup: Box<dyn FnOnce(Option<oneshot::Sender<()>>)> = {
+        let cleanup: SubscriptionCleanup = {
             register_upstream_subscription_owner(
                 &self.node.upstream_subscription_owners,
                 &state.borrow().upstream_subscription_handles,
@@ -709,17 +719,25 @@ where
             let state = Rc::clone(&state);
             Box::new(move |acknowledgement| {
                 closed.set(true);
+                let finalization_node = acknowledgement.as_ref().map(|_| Rc::clone(&node));
                 node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
                     state: Some(state),
                     opening_local: None,
                     acknowledgement,
                 });
+                finalization_node.map(|node| {
+                    Box::pin(async move {
+                        node.drain_subscription_finalizations().await?;
+                        Ok(())
+                    }) as SubscriptionFinalizationFuture
+                })
             })
         };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
             cleanup: Some(cleanup),
+            finalization: None,
             terminated: false,
         })
     }

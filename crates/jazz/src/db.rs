@@ -4147,11 +4147,21 @@ pub enum SubscriptionEvent {
     Closed,
 }
 
+type SubscriptionFinalizationFuture = Pin<Box<dyn Future<Output = Result<(), Error>>>>;
+type SubscriptionCleanup =
+    Box<dyn FnOnce(Option<oneshot::Sender<()>>) -> Option<SubscriptionFinalizationFuture>>;
+
+enum SubscriptionFinalization {
+    Pending(SubscriptionFinalizationFuture),
+    Failed { code: ErrorCode, message: String },
+}
+
 /// Stream of materialized subscription events.
 pub struct SubscriptionStream {
     receiver: UnboundedReceiver<SubscriptionEvent>,
     _state: Rc<RefCell<SubscriptionState>>,
-    cleanup: Option<Box<dyn FnOnce(Option<oneshot::Sender<()>>)>>,
+    cleanup: Option<SubscriptionCleanup>,
+    finalization: Option<SubscriptionFinalization>,
     terminated: bool,
 }
 
@@ -4182,26 +4192,59 @@ impl Drop for CleanupGuard {
 }
 
 impl SubscriptionStream {
-    /// Queue cancellation and wait until the node runtime has retired the
-    /// local maintained subscription and any upstream coverage ownership.
-    /// Dropping this future is safe: the command is queued before it awaits.
+    /// Queue cancellation, drive finalization under the node owner, and wait
+    /// until the local maintained subscription and any upstream coverage
+    /// ownership have been retired. The stream owns the in-flight completion,
+    /// so cancelling this caller future leaves a later `close` able to resume
+    /// and await the same finalization command.
     pub async fn close(&mut self) -> Result<(), Error> {
-        let Some(cleanup) = self.cleanup.take() else {
-            return Ok(());
+        if self.finalization.is_none() {
+            let Some(cleanup) = self.cleanup.take() else {
+                return Ok(());
+            };
+            // `close` is a terminal stream operation. Do this before awaiting so
+            // callers cannot observe an old buffered delta while finalization is
+            // suspended behind storage or the node mutex.
+            self.terminated = true;
+            self.receiver.close();
+            let (sender, receiver) = oneshot::channel();
+            let drain = cleanup(Some(sender));
+            self.finalization = Some(SubscriptionFinalization::Pending(Box::pin(async move {
+                if let Some(finalization) = drain {
+                    finalization.await?;
+                }
+                receiver.await.map_err(|_| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "subscription finalization acknowledgement was dropped",
+                    )
+                })
+            })));
+        }
+
+        let result = match self
+            .finalization
+            .as_mut()
+            .expect("close completion must exist after finalization starts")
+        {
+            SubscriptionFinalization::Pending(completion) => completion.as_mut().await,
+            SubscriptionFinalization::Failed { code, message } => {
+                return Err(Error::new(*code, message.clone()));
+            }
         };
-        // `close` is a terminal stream operation. Do this before awaiting so
-        // callers cannot observe an old buffered delta while finalization is
-        // suspended behind storage or the node mutex.
-        self.terminated = true;
-        self.receiver.close();
-        let (sender, receiver) = oneshot::channel();
-        cleanup(Some(sender));
-        receiver.await.map_err(|_| {
-            Error::new(
-                ErrorCode::Protocol,
-                "subscription finalization acknowledgement was dropped",
-            )
-        })
+        match result {
+            Ok(()) => {
+                self.finalization = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.finalization = Some(SubscriptionFinalization::Failed {
+                    code: error.code,
+                    message: error.message.clone(),
+                });
+                Err(error)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -4283,7 +4326,7 @@ impl Stream for SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            cleanup(None);
+            drop(cleanup(None));
         }
     }
 }
