@@ -242,11 +242,15 @@ events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `DurabilityTier` remains the protocol/core lattice and the write-settlement API.
 Bindings expose the separate, read-only `ReadTier` vocabulary:
 
-| `ReadTier`         | binding behavior                                                                                           | core lowering                                                                       |
-| ------------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `LocalFirst`       | return/evaluate local knowledge                                                                            | `DurabilityTier::Local`                                                             |
-| `Remote`           | wait for the ordinary remote/edge view                                                                     | legacy remote durability tier                                                       |
-| `RemoteIfPossible` | use local knowledge only after an application explicitly disconnects; otherwise wait exactly like `Remote` | local only for that explicit-offline start, otherwise legacy remote durability tier |
+| `ReadTier`         | binding behavior                                                                                                      | own local writes | core lowering                                                                       |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------- |
+| `LocalFirst`       | return/evaluate local knowledge                                                                                       | immediate        | `DurabilityTier::Local`                                                             |
+| `Remote`           | wait for the ordinary remote/edge view                                                                                | deferred         | legacy remote durability tier                                                       |
+| `RemoteIfPossible` | use local knowledge only after an application explicitly disconnects; otherwise use the same initial gate as `Remote` | immediate        | local only for that explicit-offline start, otherwise legacy remote durability tier |
+
+Bindings MUST infer the own-local-write policy from `ReadTier`; they MUST NOT
+expose `LocalUpdates` as a product query option. The low-level core `ReadOpts`
+contract retains `LocalUpdates` for internal transaction and migration paths.
 
 `RemoteIfPossible` does **not** infer offline state from a timeout, connection
 error, slow response, or an ordinary transport reconnect. A one-shot read
@@ -255,8 +259,8 @@ then atomically replaces that local native subscription with the remote one on
 reconnect; it never creates a second query path or replays a historical remote
 failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
 `DurabilityTier` unchanged during the migration. The native Rust facade has no
-public explicit-offline toggle, so its `RemoteIfPossible` is strict `Remote`
-until such a host boundary exists.
+public explicit-offline toggle, so its `RemoteIfPossible` always uses the remote
+initial gate while retaining the immediate own-write policy.
 
 Subscription finalization is also asynchronous ownership work. Dropping a
 stream MUST synchronously enqueue one idempotent finalization command without

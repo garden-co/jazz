@@ -99,7 +99,7 @@ describe("Db disconnect/reconnect", () => {
                 afterReconnect: reconnectRequested,
               });
             },
-            { tier, localUpdates: "immediate" },
+            { tier },
           ),
         );
 
@@ -177,7 +177,7 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "edge", localUpdates: "immediate" },
+          { tier: "edge" },
         ),
       );
 
@@ -245,7 +245,6 @@ describe("Db disconnect/reconnect", () => {
       const localRows = await withTimeout(
         db.all(todoByTitle(title), {
           tier: "local",
-          localUpdates: "immediate",
           propagation: "local-only",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
@@ -273,7 +272,7 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "edge", localUpdates: "immediate" },
+          { tier: "edge" },
         ),
       );
       await expectStillPending(
@@ -317,7 +316,7 @@ describe("Db disconnect/reconnect", () => {
           (rows) => {
             snapshots.push(rows);
           },
-          { tier: "edge", localUpdates: "immediate" },
+          { tier: "edge" },
         ),
       );
 
@@ -350,7 +349,6 @@ describe("Db disconnect/reconnect", () => {
       const localRowsWhileOffline = await withTimeout(
         db.all(todoByTitle(offlineTitle), {
           tier: "local",
-          localUpdates: "immediate",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: local-tier read for disconnected write did not resolve",
@@ -360,7 +358,6 @@ describe("Db disconnect/reconnect", () => {
       const peerRowsBeforeReconnect = await withTimeout(
         peer.all(todoByTitle(offlineTitle), {
           tier: "local",
-          localUpdates: "immediate",
           propagation: "local-only",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
@@ -394,7 +391,6 @@ describe("Db disconnect/reconnect", () => {
       const localRowsWhileOffline = await withTimeout(
         db.all(todoByTitle(serverOnlyTitle), {
           tier: "local",
-          localUpdates: "immediate",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: local-tier read while disconnected did not resolve",
@@ -500,7 +496,6 @@ describe("Db disconnect/reconnect", () => {
       const localRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(offlineTitle), {
           tier: "local",
-          localUpdates: "immediate",
         }),
         "worker mode: local-tier read for disconnected write did not resolve",
       );
@@ -509,7 +504,6 @@ describe("Db disconnect/reconnect", () => {
       const peerRowsBeforeReconnect = await withWorkerOperationTimeout(
         peer.all(todoByTitle(offlineTitle), {
           tier: "local",
-          localUpdates: "immediate",
           propagation: "local-only",
         }),
         "worker mode: peer local read before reconnect did not resolve",
@@ -542,7 +536,6 @@ describe("Db disconnect/reconnect", () => {
       const disconnectedLocalRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(serverOnlyTitle), {
           tier: "local",
-          localUpdates: "immediate",
         }),
         "worker mode: local-tier read while disconnected did not resolve",
       );
@@ -607,7 +600,7 @@ describe("Db disconnect/reconnect", () => {
       await db.disconnect();
 
       const title = "strict query FIFO";
-      const edgeRead = db.all(todoByTitle(title), { tier: "edge", localUpdates: "deferred" });
+      const edgeRead = db.all(todoByTitle(title), { tier: ReadTier.Remote });
       const laterWrite = db.insert(todos, { title, done: false });
       await withWorkerOperationTimeout(
         laterWrite.wait({ tier: "local" }),
@@ -678,7 +671,6 @@ describe("Db disconnect/reconnect", () => {
       const localRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(title), {
           tier: "local",
-          localUpdates: "immediate",
           propagation: "local-only",
         }),
         "worker mode: immediate local read while disconnected did not resolve",
@@ -686,8 +678,7 @@ describe("Db disconnect/reconnect", () => {
       expect(localRows.some((row) => row.title === title)).toBe(true);
 
       const deferredRead = db.all(todoByTitle(title), {
-        tier: "edge",
-        localUpdates: "deferred",
+        tier: ReadTier.Remote,
       });
       await expectStillPending(
         deferredRead,

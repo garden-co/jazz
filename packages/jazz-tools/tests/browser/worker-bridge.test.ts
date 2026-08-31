@@ -3698,7 +3698,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const rowAfterNullUpdate = await db.one(nullableApp.todos.where({ id: insertedTodo.id }), {
       tier: "local",
-      localUpdates: "immediate",
     });
     expect(rowAfterNullUpdate).not.toBeNull();
     expect(rowAfterNullUpdate?.description ?? null).toBeNull();

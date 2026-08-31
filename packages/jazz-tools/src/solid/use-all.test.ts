@@ -66,7 +66,6 @@ describe("solid/useAll", () => {
     const query = makeQuery();
     const options = {
       tier: "local" as const,
-      localUpdates: "deferred" as const,
       propagation: "local-only" as const,
     };
 

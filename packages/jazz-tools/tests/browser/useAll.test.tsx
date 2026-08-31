@@ -455,7 +455,7 @@ describe("useAll browser integration", () => {
       <JazzProvider client={client}>
         <UseAllProbe
           query={makeQuery<Todo>("todos", {})}
-          options={{ localUpdates: "deferred", propagation: "full" }}
+          options={{ propagation: "full" }}
           pick={(row) => row.title}
         />
       </JazzProvider>,

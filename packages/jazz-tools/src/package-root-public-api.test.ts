@@ -16,9 +16,19 @@ const removedQueryExecutionOptions: QueryExecutionOptions = {
   // @ts-expect-error propagate was removed; use propagation instead.
   propagate: false,
 };
+const removedLocalUpdatesOption: QueryExecutionOptions = {
+  // @ts-expect-error localUpdates is inferred from tier and is no longer configurable.
+  localUpdates: "deferred",
+};
 
 void canonicalQueryExecutionOptions;
 void removedQueryExecutionOptions;
+void removedLocalUpdatesOption;
+
+// @ts-expect-error LocalUpdatesMode was removed from the public runtime surface.
+import type { LocalUpdatesMode as RuntimeLocalUpdatesMode } from "./runtime/index.js";
+// @ts-expect-error LocalUpdatesMode was removed from the package-root surface.
+import type { LocalUpdatesMode as PackageRootLocalUpdatesMode } from "./index.js";
 
 // @ts-expect-error NativeRuntimeAdapter is intentionally not part of the public runtime surface.
 import type { NativeRuntimeAdapter as InternalNativeRuntimeAdapterExport } from "./runtime/index.js";

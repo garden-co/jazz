@@ -390,14 +390,14 @@ describe("react-core provider/hooks browser coverage", () => {
   it("RCB-B09: useAllSuspense accepts QueryOptions without changing suspense behavior", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
-    manager.register(BASE_QUERY, entry, { localUpdates: "deferred" });
+    manager.register(BASE_QUERY, entry, { propagation: "local-only" });
     const client = makeClient({ manager });
 
     render(
       <CaptureErrorBoundary>
         <React.Suspense fallback={<div data-testid="rows-fallback">loading-rows</div>}>
           <JazzProvider client={client}>
-            <UseAllSuspenseView query={BASE_QUERY} options={{ localUpdates: "deferred" }} />
+            <UseAllSuspenseView query={BASE_QUERY} options={{ propagation: "local-only" }} />
           </JazzProvider>
         </React.Suspense>
       </CaptureErrorBoundary>,
@@ -427,7 +427,7 @@ describe("react-core provider/hooks browser coverage", () => {
         data: [{ id: "b", title: "Deferred" }],
         error: null,
       }),
-      { localUpdates: "deferred" },
+      { propagation: "local-only" },
     );
     const client = makeClient({ manager });
 
@@ -441,7 +441,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
     render(
       <JazzProvider client={client}>
-        <UseAllView query={BASE_QUERY} options={{ localUpdates: "deferred" }} />
+        <UseAllView query={BASE_QUERY} options={{ propagation: "local-only" }} />
       </JazzProvider>,
     );
 

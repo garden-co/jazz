@@ -210,13 +210,11 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const key = harness.manager.makeQueryKey(query, {
         tier: "edge",
-        localUpdates: "deferred",
         propagation: "local-only",
       });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
           tier: "edge",
-          localUpdates: "deferred",
           propagation: "local-only",
         })}:${query._build()}`,
       );
@@ -225,18 +223,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U07c makeQueryKey changes when localUpdates or propagation changes", async () => {
+  it("SO-U07c makeQueryKey changes when tier or propagation changes", async () => {
     const harness = createUnitHarness("app-so-u07c");
     const query = makeQuery();
 
     try {
       const defaultKey = harness.manager.makeQueryKey(query);
-      const deferredKey = harness.manager.makeQueryKey(query, { localUpdates: "deferred" });
+      const edgeKey = harness.manager.makeQueryKey(query, { tier: "edge" });
       const localOnlyKey = harness.manager.makeQueryKey(query, { propagation: "local-only" });
 
-      expect(deferredKey).not.toBe(defaultKey);
+      expect(edgeKey).not.toBe(defaultKey);
       expect(localOnlyKey).not.toBe(defaultKey);
-      expect(localOnlyKey).not.toBe(deferredKey);
+      expect(localOnlyKey).not.toBe(edgeKey);
     } finally {
       await harness.manager.shutdown();
     }
@@ -274,7 +272,6 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const options = {
         tier: "global",
-        localUpdates: "deferred",
         propagation: "local-only",
       } satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);

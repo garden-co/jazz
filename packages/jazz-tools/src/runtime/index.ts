@@ -3,7 +3,6 @@ export {
   type LocalTransactionRecord,
   type MutationErrorEvent,
   type TransactionFate,
-  type LocalUpdatesMode,
   type PermissionAdvice,
   PersistedWriteRejectedError,
   loadWasmModule,
