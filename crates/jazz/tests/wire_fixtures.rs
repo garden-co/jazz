@@ -64,8 +64,17 @@ const BINDING_CODEC_GOLDEN_FIXTURE_PATH: &str = concat!(
 #[derive(Deserialize)]
 struct WireFrameArtifactCorpus {
     format: String,
-    error_frame_hex: String,
+    error_frames: Vec<WireFrameArtifactError>,
     rejections: Vec<WireFrameArtifactRejection>,
+}
+
+#[derive(Clone, Deserialize)]
+struct WireFrameArtifactError {
+    name: String,
+    frame_hex: String,
+    code: jazz::wire::WireErrorCode,
+    retry: jazz::wire::WireRetry,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -942,23 +951,59 @@ fn wire_frame_artifact_corpus_is_complete_and_rejections_fail_closed() {
         "the exhaustiveness receipt detects a planted new/unaccounted family"
     );
 
-    let error_bytes = parse_hex(&corpus.error_frame_hex);
-    jazz::wire::validate_frame_for_artifact_corpus(&error_bytes, negotiated_features)
-        .expect("the representative WireFrame::Error is a complete canonical frame");
-    assert_eq!(
-        jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"),
+    for error in &corpus.error_frames {
+        let error_bytes = parse_hex(&error.frame_hex);
+        jazz::wire::validate_frame_for_artifact_corpus(&error_bytes, negotiated_features)
+            .unwrap_or_else(|decode_error| {
+                panic!(
+                    "{} is a complete canonical error frame: {decode_error}",
+                    error.name
+                )
+            });
+        assert_eq!(
+            jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"),
+            WireFrame::Error(jazz::wire::WireError::new(
+                error.code,
+                error.retry,
+                error.message.clone(),
+            )),
+            "{} carries exact code, retry, and message fields",
+            error.name,
+        );
+        assert_eq!(
+            encode_frame(&jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"))
+                .expect("error frame re-encodes"),
+            error_bytes,
+            "{} has one canonical v1 spelling",
+            error.name,
+        );
+    }
+    let bootstrap = corpus
+        .error_frames
+        .iter()
+        .find(|error| error.name == "runtime bootstrap not ready")
+        .expect("not-ready error is frozen in the v1 corpus");
+    let mut planted_wrong_code = bootstrap.clone();
+    planted_wrong_code.code = jazz::wire::WireErrorCode::MalformedFrame;
+    assert_ne!(
+        jazz::wire::decode_frame(&parse_hex(&bootstrap.frame_hex)).expect("error frame decodes"),
         WireFrame::Error(jazz::wire::WireError::new(
-            jazz::wire::WireErrorCode::MalformedFrame,
-            jazz::wire::WireRetry::Never,
-            "fixture error",
+            planted_wrong_code.code,
+            planted_wrong_code.retry,
+            planted_wrong_code.message,
         )),
-        "the corpus carries an exact structured-error frame, not only a valid tag"
+        "the corpus receipt detects a planted wrong error code",
     );
-    assert_eq!(
-        encode_frame(&jazz::wire::decode_frame(&error_bytes).expect("error frame decodes"))
-            .expect("error frame re-encodes"),
-        error_bytes,
-        "the representative error has one canonical v1 spelling"
+    let mut planted_wrong_retry = bootstrap.clone();
+    planted_wrong_retry.retry = jazz::wire::WireRetry::Never;
+    assert_ne!(
+        jazz::wire::decode_frame(&parse_hex(&bootstrap.frame_hex)).expect("error frame decodes"),
+        WireFrame::Error(jazz::wire::WireError::new(
+            planted_wrong_retry.code,
+            planted_wrong_retry.retry,
+            planted_wrong_retry.message,
+        )),
+        "the corpus receipt detects a planted wrong retry field",
     );
     for rejection in &corpus.rejections {
         let rejection_features = rejection

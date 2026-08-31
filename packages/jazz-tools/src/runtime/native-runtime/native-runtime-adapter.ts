@@ -62,6 +62,7 @@ import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import {
   WebSocketCarrier,
+  isRetryablePreHelloWireError,
   peerIdentityForWebSocketAuth,
   type WebSocketNegotiation,
   wireAuthFailureReason,
@@ -89,6 +90,8 @@ import {
 export { encodeSchema } from "./schema-codec.js";
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
+const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
+const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
 const MAX_CORE_TICKS_PER_TURN = 4;
@@ -725,6 +728,10 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private nextServerConnectionEpoch = 1n;
   private serverEndpointUrl: string | null = null;
+  private serverAuthJson: string | null = null;
+  private serverReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private serverReconnectReject: ((error: Error) => void) | null = null;
+  private preHelloRetryCount = 0;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
@@ -1283,6 +1290,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.clear();
     this.writes.clear();
     this.serverConnectionGeneration += 1;
+    this.clearServerReconnectTimer();
     const connectionAttempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
     if (connectionAttempt) {
@@ -2197,11 +2205,12 @@ export class NativeRuntimeAdapter implements Runtime {
     // A new transport replaces the old one during a temporary reconnect. Server-tier
     // waits are still meaningful across that transition, so only an explicit runtime
     // shutdown is allowed to reject them.
-    void this.disconnect({ rejectWaiters: false });
+    void this.disconnect({ rejectWaiters: false, preservePreHelloRetry: true });
     const generation = ++this.serverConnectionGeneration;
     const transportIdentity = peerIdentityForWebSocketAuth(authJson, this.peerIdentity);
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
+    this.serverAuthJson = authJson;
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
       resolveTerminal = resolve;
@@ -2230,12 +2239,14 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       },
       onError: (error) => {
+        if (error.code === "not_ready" && error.retry === "later") return;
         this.handleServerTransportError(error, generation);
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
       },
       onTerminal: (error) => {
         if (!attempt) return;
+        if (error.code === "not_ready" && error.retry === "later") return;
         this.finishServerConnectionAttempt(attempt, new Error(error.message));
       },
     });
@@ -2262,6 +2273,7 @@ export class NativeRuntimeAdapter implements Runtime {
           carrier.close();
           return carrier;
         }
+        this.preHelloRetryCount = 0;
         const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
           throw contextualError("connecting the negotiated upstream transport", error);
         });
@@ -2297,11 +2309,16 @@ export class NativeRuntimeAdapter implements Runtime {
         return carrier;
       })
       .catch((error) => {
+        if (isRetryablePreHelloWireError(error)) {
+          const retry = this.retryPreHelloConnection(attempt);
+          if (retry) return retry;
+        }
         const failure = error instanceof Error ? error : new Error(errorMessage(error));
         this.finishServerConnectionAttempt(attempt, failure);
         throw attempt.outcome ?? failure;
       });
     this.serverCarrierPromise.catch((error) => {
+      if (isRetryablePreHelloWireError(error)) return;
       this.handleServerTransportError(error, generation);
     });
   }
@@ -2335,9 +2352,13 @@ export class NativeRuntimeAdapter implements Runtime {
     return features;
   }
 
-  async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
+  async disconnect(
+    options: { rejectWaiters?: boolean; preservePreHelloRetry?: boolean } = {},
+  ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverConnectionGeneration += 1;
+    this.clearServerReconnectTimer();
+    if (!options.preservePreHelloRetry) this.preHelloRetryCount = 0;
     const attempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
     if (attempt) {
@@ -2356,6 +2377,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const transport = this.serverTransport;
     this.serverTransport = null;
     this.serverEndpointUrl = null;
+    this.serverAuthJson = null;
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
@@ -3656,6 +3678,66 @@ export class NativeRuntimeAdapter implements Runtime {
     this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
+  }
+
+  /**
+   * A server may reject the first handshake while its authoritative catalogue
+   * is still bootstrapping. This is a protocol-level retry, not a failed
+   * upstream: keep remote waits pending and reconnect with bounded backoff.
+   */
+  private retryPreHelloConnection(
+    attempt: ServerConnectionAttempt,
+  ): Promise<WebSocketCarrier> | null {
+    if (
+      this.closed ||
+      attempt !== this.serverConnectionAttempt ||
+      attempt.generation !== this.serverConnectionGeneration ||
+      attempt.carrier !== this.serverCarrier ||
+      !this.serverEndpointUrl ||
+      !this.serverAuthJson
+    ) {
+      return null;
+    }
+    const url = this.serverEndpointUrl;
+    const authJson = this.serverAuthJson;
+    const delay = Math.min(
+      PRE_HELLO_RETRY_INITIAL_DELAY_MS * 2 ** this.preHelloRetryCount,
+      PRE_HELLO_RETRY_MAX_DELAY_MS,
+    );
+    this.preHelloRetryCount = Math.min(this.preHelloRetryCount + 1, 30);
+    this.serverConnectionGeneration += 1;
+    this.serverConnectionAttempt = null;
+    this.serverCarrier = null;
+    this.serverCarrierPromise = null;
+    this.resolveServerTransportWorkWaiters();
+    attempt.carrier.close();
+    return new Promise((resolve, reject) => {
+      this.serverReconnectReject = reject;
+      this.serverReconnectTimer = setTimeout(() => {
+        this.serverReconnectTimer = null;
+        this.serverReconnectReject = null;
+        if (this.closed || this.serverEndpointUrl !== url || this.serverAuthJson !== authJson) {
+          reject(new Error("server transport disconnected"));
+          return;
+        }
+        this.connect(url, authJson);
+        const reconnect = this.serverCarrierPromise;
+        if (!reconnect) {
+          reject(new Error("server transport reconnect was not started"));
+          return;
+        }
+        void reconnect.then(resolve, reject);
+      }, delay);
+    });
+  }
+
+  private clearServerReconnectTimer(): void {
+    if (this.serverReconnectTimer) {
+      clearTimeout(this.serverReconnectTimer);
+      this.serverReconnectTimer = null;
+    }
+    this.serverReconnectReject?.(new Error("server transport disconnected"));
+    this.serverReconnectReject = null;
   }
 
   private finishServerConnectionAttempt(attempt: ServerConnectionAttempt, error: Error): void {

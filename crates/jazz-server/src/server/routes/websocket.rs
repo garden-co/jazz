@@ -661,9 +661,9 @@ async fn handle_ws_connection(
         send_ws_error(
             &mut socket,
             WireError::new(
-                WireErrorCode::Internal,
+                WireErrorCode::NotReady,
                 WireRetry::Later,
-                "edge runtime is bootstrapping its authoritative catalogue; retry shortly",
+                "runtime is bootstrapping its authoritative catalogue; retry shortly",
             ),
         )
         .await;

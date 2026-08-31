@@ -339,6 +339,116 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("retries a typed not-ready error before hello without failing strict reads", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        if (typeof data === "string") return super.send(data);
+        if (sockets.length === 1 && isClientHelloBatch(data)) {
+          this.sent.push(data);
+          queueMicrotask(() => {
+            this.emitMessage(
+              encodeWebSocketFrameBatch([encodeWireError(6, 3, "catalogue bootstrapping")]),
+            );
+          });
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: (...args: unknown[]) => {
+              calls.push(args);
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await vi.advanceTimersByTimeAsync(25);
+    await waitForFakeWebSocketNegotiation();
+
+    await expect(read).resolves.toEqual([]);
+    expect(sockets).toHaveLength(2);
+    expect(calls).toHaveLength(1);
+    await runtime.close();
+    vi.useRealTimers();
+  });
+
+  it("cancels a pending pre-hello retry on disconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        if (typeof data === "string") return super.send(data);
+        if (isClientHelloBatch(data)) {
+          this.sent.push(data);
+          queueMicrotask(() => {
+            this.emitMessage(
+              encodeWebSocketFrameBatch([encodeWireError(6, 3, "catalogue bootstrapping")]),
+            );
+          });
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+    await runtime.disconnect();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(sockets).toHaveLength(1);
+    await runtime.close();
+    vi.useRealTimers();
+  });
+
   it("runs a strict relation query normally after server admission", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const calls: unknown[][] = [];

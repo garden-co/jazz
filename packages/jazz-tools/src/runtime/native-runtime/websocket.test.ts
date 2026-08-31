@@ -551,7 +551,7 @@ describe("websocket frame carrier", () => {
     expect(socket!.closed).toBe(true);
   });
 
-  it("rejects non-authentication errors before server hello", async () => {
+  it("surfaces terminal structured errors before server hello", async () => {
     let socket: MessageWebSocket | undefined;
     const errors: unknown[] = [];
     const carrier = new WebSocketCarrier({
@@ -572,8 +572,43 @@ describe("websocket frame carrier", () => {
       encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
     );
 
-    await expect(carrier.ready()).rejects.toThrow("semantic frame before server hello");
-    expect(errors).toEqual([]);
+    await expect(carrier.ready()).rejects.toThrow(
+      "websocket internal before server hello: conflicting commit unit",
+    );
+    expect(errors).toEqual([
+      { code: "internal", retry: "later", message: "conflicting commit unit" },
+    ]);
+    expect(socket!.closed).toBe(true);
+  });
+
+  it("preserves a typed retryable not-ready error before server hello", async () => {
+    let socket: MessageWebSocket | undefined;
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(6, 3, "catalogue bootstrapping")]),
+    );
+
+    await expect(carrier.ready()).rejects.toMatchObject({
+      name: "PreHelloWireError",
+      wireError: { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
+    });
+    expect(errors).toEqual([
+      { code: "not_ready", retry: "later", message: "catalogue bootstrapping" },
+    ]);
     expect(socket!.closed).toBe(true);
   });
 

@@ -15,6 +15,25 @@ export type WireError = {
   message: string;
 };
 
+/** A valid structured server error received before wire negotiation completed. */
+export class PreHelloWireError extends Error {
+  readonly wireError: WireError;
+
+  constructor(wireError: WireError) {
+    super(`websocket ${wireError.code} before server hello: ${wireError.message}`);
+    this.name = "PreHelloWireError";
+    this.wireError = wireError;
+  }
+}
+
+export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
+  return (
+    error instanceof PreHelloWireError &&
+    error.wireError.code === "not_ready" &&
+    error.wireError.retry === "later"
+  );
+}
+
 export type WebSocketNegotiation = {
   protocolVersion: number;
   features: number;
@@ -301,6 +320,9 @@ export class WebSocketCarrier {
             this.close();
             return;
           }
+          this.reportTerminal(error, new PreHelloWireError(error));
+          this.close();
+          return;
         }
         this.reportTerminal(
           {
@@ -519,6 +541,8 @@ function wireErrorCodeName(tag: number): string {
       return "backpressure";
     case 5:
       return "internal";
+    case 6:
+      return "not_ready";
     default:
       return `unknown_${tag}`;
   }

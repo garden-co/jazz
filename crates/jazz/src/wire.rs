@@ -296,6 +296,8 @@ pub enum WireErrorCode {
     Backpressure,
     /// Internal implementation error.
     Internal,
+    /// The runtime has not completed bootstrap yet; reconnect later.
+    NotReady,
 }
 
 /// Retry guidance for bindings and transports.
