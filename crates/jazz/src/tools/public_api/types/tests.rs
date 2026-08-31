@@ -331,6 +331,13 @@ fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
         #[serde(rename = "schemaLayoutVersion")]
         schema_layout_version: u16,
         cases: Vec<EnumHashCase>,
+        #[serde(rename = "payloadCases")]
+        payload_cases: Vec<PayloadEnumHashCase>,
+    }
+    #[derive(serde::Deserialize)]
+    struct PayloadEnumHashCase {
+        cases: Vec<EnumCaseDescriptor>,
+        hash: String,
     }
 
     let fixture: EnumHashFixture = serde_json::from_str(include_str!(
@@ -338,7 +345,7 @@ fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
     ))
     .expect("ordered enum hash fixture is valid JSON");
 
-    assert_eq!(fixture.schema_layout_version, 9);
+    assert_eq!(fixture.schema_layout_version, 10);
 
     let hashes: Vec<_> = fixture
         .cases
@@ -361,6 +368,37 @@ fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
     assert_ne!(
         hashes[0], hashes[1],
         "reordering variants changes durable tag meaning"
+    );
+
+    let payload_hashes: Vec<_> = fixture
+        .payload_cases
+        .iter()
+        .map(|case| {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("values").column(
+                    "value",
+                    ColumnType::EnumPayload {
+                        cases: case.cases.clone(),
+                    },
+                ))
+                .build();
+            let hash = SchemaHash::compute(&schema).to_hex();
+            assert_eq!(hash, case.hash, "payload fixture hash for {:?}", case.cases);
+            hash
+        })
+        .collect();
+
+    assert_ne!(
+        payload_hashes[0], payload_hashes[1],
+        "payload case order changes schema identity"
+    );
+    assert_ne!(
+        payload_hashes[0], payload_hashes[2],
+        "payload field nullability changes schema identity"
+    );
+    assert_ne!(
+        payload_hashes[2], payload_hashes[3],
+        "nested payload field structure changes schema identity"
     );
 }
 

@@ -174,8 +174,18 @@ without creating a second physical storage partition. Changing any storage-shape
 input yields a new `SchemaVersionId`. This content-addressing is what lets
 multiple storage schema versions coexist (ch. 10).
 
+Column-type encoding is recursive and tag-discriminated. In particular, a
+payload enum contributes its distinct type tag, declared case count and order,
+then each case's name, declared field count and order, and each field's name,
+recursive type, and nullability. Payload-field references, defaults, and merge
+metadata are not part of this inner type encoding. This exact byte layout is
+shared by the Rust and TypeScript structural hashers and is covered by their
+cross-runtime fixture; a change to any encoded payload schema component yields
+a different schema identity.
+
 _Further invariants._ `INV-DATA-7` — `SchemaVersionId` changes when a column's
-merge strategy changes.
+merge strategy changes. `INV-DATA-8` — payload-enum case and field structure is
+part of structural schema identity.
 
 ### 2.5 Rows, versions, and layers
 
