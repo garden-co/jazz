@@ -339,6 +339,18 @@ export type ScopeIsolationReceipt = {
   excludes: readonly ("a" | "b")[];
 };
 
+type ScopeReadTiming = {
+  readonly timeoutMs: number;
+  now(): number;
+  yieldTurn(): Promise<void>;
+};
+
+const DEVICE_SCOPE_READ_TIMING: ScopeReadTiming = {
+  timeoutMs: 5_000,
+  now: () => performance.now(),
+  yieldTurn: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+};
+
 /**
  * This deliberately accepts only the two compile-time fixture row names, not
  * a caller-selected query, path, or payload.  Native platform code remains
@@ -350,6 +362,7 @@ export async function proveForegroundScopeIsolation(
   codec: ForegroundByteCodec,
   receipt: ScopeIsolationReceipt,
   markFailure: (code: DeviceDiagnosticCode) => void = () => {},
+  readTiming: ScopeReadTiming = DEVICE_SCOPE_READ_TIMING,
 ): Promise<void> {
   let writer: ScopeForeground | undefined;
   try {
@@ -398,6 +411,7 @@ export async function proveForegroundScopeIsolation(
         (candidate) => containsUtf8(candidate, scopeFixtureTitle(receipt.write!)),
         undefined,
         openedWriter.consumeWake,
+        readTiming,
       );
     }
 
@@ -412,6 +426,7 @@ export async function proveForegroundScopeIsolation(
           receipt.contains.every((scope) => containsUtf8(candidate, scopeFixtureTitle(scope))),
         () => writer?.runtime.tick(),
         foreground.consumeWake,
+        readTiming,
       );
       markFailure("scope-isolation-assert-failed");
       for (const scope of receipt.contains) {
@@ -500,6 +515,7 @@ async function readTodos(
   ready: (rows: Uint8Array) => boolean = () => true,
   progressWriter: () => void = () => {},
   consumeWake: () => boolean = () => true,
+  timing: ScopeReadTiming = DEVICE_SCOPE_READ_TIMING,
 ): Promise<Uint8Array> {
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
@@ -507,18 +523,22 @@ async function readTodos(
   if (prepared.type !== "preparedQuery")
     throw new Error("scope isolation fixture could not prepare the todos query");
   let pendingOperation: number | undefined;
-  for (let attempts = 0; attempts < 96; attempts += 1) {
+  const deadline = timing.now() + timing.timeoutMs;
+  do {
     progressWriter();
     foreground.tick();
     // Async storage completion wakes the installed foreground through React
     // Native's CallInvoker. A synchronous tick loop starves that callback, so
     // each bounded attempt must hand control back to the app event loop.
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await timing.yieldTurn();
+    if (timing.now() >= deadline) break;
     if (pendingOperation !== undefined && !consumeWake()) continue;
+    if (timing.now() >= deadline) break;
     const response =
       pendingOperation === undefined
         ? execute({ type: "all", query: prepared.query })
         : execute({ type: "poll", operation: pendingOperation });
+    if (timing.now() >= deadline) break;
     if (response.type === "rows") {
       pendingOperation = undefined;
       if (ready(response.rows)) return response.rows;
@@ -529,8 +549,8 @@ async function readTodos(
       continue;
     }
     throw new Error("scope isolation fixture read returned an unexpected response");
-  }
-  throw new Error("scope isolation fixture read did not settle after bounded ticks");
+  } while (timing.now() < deadline);
+  throw new Error("scope isolation fixture read did not settle before its bounded deadline");
 }
 
 async function drainSubscription(
