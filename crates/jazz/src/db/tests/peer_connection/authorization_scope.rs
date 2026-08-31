@@ -533,6 +533,26 @@ fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
     );
 }
 
+// The server-only generation stamp and scope receipt are wire details that the
+// public query API intentionally hides, so this stays a narrow internal test.
+#[test]
+fn sibling_scope_receipt_uses_the_view_stamped_canonical_generation() {
+    let canonical_generation = PeerPayloadInventory {
+        authorization_progress: Some(7),
+        ..PeerPayloadInventory::default()
+    };
+    assert_eq!(
+        authorization_progress_for_view_receipt(&canonical_generation, 0),
+        7,
+        "a sibling receipt must use the canonical generation already stamped on its view"
+    );
+    assert_eq!(
+        authorization_progress_for_view_receipt(&PeerPayloadInventory::default(), 3),
+        3,
+        "an ordinary unstamped view keeps its usage-site generation"
+    );
+}
+
 #[test]
 fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_clause() {
     let subscription = |seed| SubscriptionKey {
@@ -1168,5 +1188,385 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
             .unwrap()
             .is_empty(),
         "a subscriber cannot grant itself an invite claim after host admission",
+    );
+}
+
+#[test]
+fn duplicate_usage_delivers_drained_canonical_delta_to_every_established_sibling_first() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc2, client_author, &schema);
+    let stale = row(0x63);
+    server
+        .insert_with_id("todos", stale, cells("live", false, owner))
+        .unwrap();
+
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let prepared = prepared(&client, &query);
+    let first_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let first_subscription = first_attachment.subscription();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![stale] {
+            break;
+        }
+    }
+
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let second_subscription = second_attachment.subscription();
+    client.tick().unwrap();
+    let mut second_opening_received = false;
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        second_opening_received = server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    ..
+                }) if *subscription == second_subscription
+            )
+        });
+        upstream.borrow_mut().tick().unwrap();
+        if second_opening_received {
+            break;
+        }
+    }
+    assert!(
+        second_opening_received,
+        "second usage must receive its own opening view before the client consumes it"
+    );
+    assert_ne!(first_subscription, second_subscription);
+    server_sent.borrow_mut().clear();
+
+    server
+        .update(
+            "todos",
+            stale,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    let fresh = row(0x64);
+    server
+        .insert_with_id("todos", fresh, cells("live", false, owner))
+        .unwrap();
+
+    let clone_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let clone_subscription = clone_attachment.subscription();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    reset_result_set: true,
+                    ..
+                }) if *subscription == clone_subscription
+            )
+        }) {
+            break;
+        }
+    }
+
+    let messages = server_sent.borrow();
+    let sibling_updates = [first_subscription, second_subscription].map(|sibling| {
+        messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| match message {
+                SyncMessage::ViewUpdate(payload) if payload.subscription == sibling => {
+                    Some((index, payload))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    let clone_updates = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| match message {
+            SyncMessage::ViewUpdate(payload) if payload.subscription == clone_subscription => {
+                Some((index, payload))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sibling_updates[0].len(), 1);
+    assert_eq!(sibling_updates[1].len(), 1);
+    assert_eq!(clone_updates.len(), 1);
+    let (clone_index, clone_update) = clone_updates[0];
+    for updates in &sibling_updates {
+        let (sibling_index, sibling_update) = updates[0];
+        assert!(
+            sibling_index < clone_index,
+            "every canonical sibling delta must precede completion of the new clone"
+        );
+        assert!(!sibling_update.reset_result_set);
+        assert_eq!(sibling_update.result_member_adds.len(), 1);
+        assert_eq!(
+            sibling_update.result_member_adds[0]
+                .as_real_row()
+                .unwrap()
+                .row_uuid,
+            fresh
+        );
+        assert_eq!(sibling_update.result_member_removes.len(), 1);
+        assert_eq!(
+            sibling_update.result_member_removes[0]
+                .as_real_row()
+                .unwrap()
+                .row_uuid,
+            stale
+        );
+        assert_eq!(
+            sibling_update.peer_payload_inventory.authorization_progress,
+            sibling_updates[0][0]
+                .1
+                .peer_payload_inventory
+                .authorization_progress,
+            "sibling fanout must stamp one canonical authorization generation"
+        );
+    }
+    assert!(
+        messages.iter().all(|message| !matches!(
+            message,
+            SyncMessage::AuthorizationScopeReceipt { subscription, .. }
+                if [first_subscription, second_subscription, clone_subscription]
+                    .contains(subscription)
+        )),
+        "ordinary query usages must not acquire unpaired authorization-scope receipts"
+    );
+    if clone_update.reset_result_set {
+        assert!(clone_update.result_member_removes.is_empty());
+    } else {
+        assert_eq!(clone_update.result_member_removes.len(), 1);
+        assert_eq!(
+            clone_update.result_member_removes[0]
+                .as_real_row()
+                .unwrap()
+                .row_uuid,
+            stale
+        );
+    }
+    assert_eq!(clone_update.result_member_adds.len(), 1);
+    assert_eq!(
+        clone_update.result_member_adds[0]
+            .as_real_row()
+            .unwrap()
+            .row_uuid,
+        fresh
+    );
+    drop(messages);
+
+    for _ in 0..32 {
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![fresh] {
+            break;
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![fresh],
+        "both established usages and the clone must converge"
+    );
+}
+
+#[test]
+fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc3, client_author, &schema);
+    let stale = row(0x65);
+    server
+        .insert_with_id("todos", stale, cells("live", false, owner))
+        .unwrap();
+
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos").filter(eq(col("title"), lit("live")));
+    let prepared = prepared(&client, &query);
+    let first_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let first_subscription = first_attachment.subscription();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![stale] {
+            break;
+        }
+    }
+    let second_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let second_subscription = second_attachment.subscription();
+    client.tick().unwrap();
+    let mut second_opening_received = false;
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        second_opening_received = server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    ..
+                }) if *subscription == second_subscription
+            )
+        });
+        upstream.borrow_mut().tick().unwrap();
+        if second_opening_received {
+            break;
+        }
+    }
+    assert!(
+        second_opening_received,
+        "second usage must receive its own opening view before the client consumes it"
+    );
+    server_sent.borrow_mut().clear();
+
+    server
+        .update(
+            "todos",
+            stale,
+            BTreeMap::from([("title".to_owned(), Value::String("gone".to_owned()))]),
+        )
+        .unwrap();
+    let fresh = row(0x66);
+    server
+        .insert_with_id("todos", fresh, cells("live", false, owner))
+        .unwrap();
+
+    crate::peer::fail_next_cloned_subscription_reset_for_test();
+    let failed_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let failed_subscription = failed_attachment.subscription();
+    client.tick().unwrap();
+    // `server_sent` is the upstream connection's live inbound queue. Keep the
+    // receiver idle until the subscription-addressed ordering is inspected.
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::SubscribeRejected { subscription, .. }
+                    if *subscription == failed_subscription
+            )
+        }) {
+            break;
+        }
+    }
+
+    let messages = server_sent.borrow();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::SubscribeRejected { .. }))
+            .count(),
+        1,
+        "the reset failure must reject only the new usage"
+    );
+    let rejection_index = messages
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                SyncMessage::SubscribeRejected {
+                    subscription,
+                    reason: SubscribeRejectReason::ServerFailure {
+                        code: SubscribeServerFailureCode::SchemaResolution,
+                    },
+                } if *subscription == failed_subscription
+            )
+        })
+        .expect("injected clone reset failure must reject only the new usage");
+    let mut sibling_authorization_progress = Vec::new();
+    for sibling in [first_subscription, second_subscription] {
+        let updates = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| match message {
+                SyncMessage::ViewUpdate(payload) if payload.subscription == sibling => {
+                    Some((index, payload))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            updates.len(),
+            1,
+            "each established sibling must receive the consumed canonical transition exactly once"
+        );
+        let (update_index, update) = updates[0];
+        assert!(update_index < rejection_index);
+        assert_eq!(update.result_member_adds.len(), 1);
+        assert_eq!(
+            update.result_member_adds[0].as_real_row().unwrap().row_uuid,
+            fresh
+        );
+        assert_eq!(update.result_member_removes.len(), 1);
+        assert_eq!(
+            update.result_member_removes[0]
+                .as_real_row()
+                .unwrap()
+                .row_uuid,
+            stale
+        );
+        sibling_authorization_progress.push(update.peer_payload_inventory.authorization_progress);
+    }
+    assert_eq!(
+        sibling_authorization_progress[0], sibling_authorization_progress[1],
+        "failure fanout must retain one canonical authorization generation"
+    );
+    assert!(
+        messages.iter().all(|message| !matches!(
+            message,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription,
+                ..
+            }) if *subscription == failed_subscription
+        )),
+        "the injected target reset failure must not fabricate a clone update"
+    );
+    assert!(
+        messages.iter().all(|message| !matches!(
+            message,
+            SyncMessage::AuthorizationScopeReceipt { subscription, .. }
+                if [first_subscription, second_subscription, failed_subscription]
+                    .contains(subscription)
+        )),
+        "ordinary query usages must not acquire unpaired authorization-scope receipts"
+    );
+    drop(messages);
+
+    for _ in 0..32 {
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![fresh] {
+            break;
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![fresh],
+        "established siblings must converge even though the new clone was rejected"
     );
 }
