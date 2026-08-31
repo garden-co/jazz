@@ -49,6 +49,8 @@ export interface DbForConnection {
   markUnauthenticated(reason: AuthFailureReason): void;
   clearAuthError(): void;
   onMutationError(event: MutationErrorEvent): void;
+  /** Enables Inspector-local reads after the worker's authenticated receipt. */
+  enableAuthenticatedInspectorLocalReads(physicalDbName: string): void;
 }
 
 /**

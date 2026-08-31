@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
+  BrowserInspectorControlEvent,
+  BrowserInspectorControlRequest,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
@@ -177,7 +179,12 @@ class TestPort {
     this.listeners.get(type)?.delete(listener);
   }
 
-  postMessage(message: BrowserSharedWorkerConnectResponse | BrowserFollowerPortEvent): void {
+  postMessage(
+    message:
+      | BrowserSharedWorkerConnectResponse
+      | BrowserFollowerPortEvent
+      | BrowserInspectorControlEvent,
+  ): void {
     if (message.type === "runtime-ready" || message.type === "runtime-error") {
       const waiter = this.outcomeWaiters.shift();
       if (waiter) waiter(message);
@@ -193,7 +200,12 @@ class TestPort {
     } else this.events.push(message);
   }
 
-  emitMessage(message: BrowserSharedWorkerConnectRequest | BrowserFollowerPortRequest): void {
+  emitMessage(
+    message:
+      | BrowserSharedWorkerConnectRequest
+      | BrowserFollowerPortRequest
+      | BrowserInspectorControlRequest,
+  ): void {
     for (const listener of this.listeners.get("message") ?? []) {
       listener({ data: message } as MessageEvent);
     }
@@ -285,6 +297,68 @@ describe("broker worker context initialization", () => {
     vi.resetModules();
     // The worker owns process-global state, so each case must evaluate a fresh module instance.
     await import("./jazz-broker-worker.js");
+  });
+
+  it("marks only control-port attached followers as Inspector peers", async () => {
+    const host = await connect(options("inspector-authenticated-root"), "host-tab");
+    expect(host.outcome).toEqual({ type: "runtime-ready" });
+    await initializeFollower(host.port, 1);
+
+    const control = new TestPort();
+    const controlOpened = host.port.waitForEvent(
+      (event) => event.type === "result" && event.id === 2,
+    );
+    host.port.emitMessage({
+      type: "open-inspector-control",
+      id: 2,
+      port: control as unknown as MessagePort,
+    });
+    await controlOpened;
+
+    const inspectorPeer = new TestPort();
+    control.emitMessage({
+      type: "attach-context",
+      id: 3,
+      contextKey: "inspector-authenticated-root",
+      tabId: "inspector-tab",
+      port: inspectorPeer as unknown as MessagePort,
+    });
+    const receipt = inspectorPeer.waitForEvent(
+      (event) => event.type === "result" && event.id === 4,
+    );
+    inspectorPeer.emitMessage({ type: "init", id: 4, sessionClaims: {} });
+    await expect(receipt).resolves.toMatchObject({
+      inspectorAttachmentPhysicalDbName: "inspector-authenticated-root",
+    });
+
+    // A regular worker connection has the same storage coordinate but cannot
+    // gain the receipt merely by knowing it.
+    const ordinary = await connect(options("inspector-authenticated-root"), "ordinary-tab");
+    await expect(ordinary.outcome).toEqual({ type: "runtime-ready" });
+    const ordinaryReceipt = ordinary.port.waitForEvent(
+      (event) => event.type === "result" && event.id === 5,
+    );
+    ordinary.port.emitMessage({ type: "init", id: 5, sessionClaims: {} });
+    await expect(ordinaryReceipt).resolves.not.toHaveProperty("inspectorAttachmentPhysicalDbName");
+
+    // A control port remains bound to the session that opened it. Selecting a
+    // context from a later/different auth session cannot reuse its authority.
+    const other = await connect(
+      { ...options("inspector-other-session"), authSessionKey: "other-session" },
+      "other-session-tab",
+    );
+    await initializeFollower(other.port, 6);
+    const staleAttach = control.waitForEvent((event) => event.type === "result" && event.id === 7);
+    control.emitMessage({
+      type: "attach-context",
+      id: 7,
+      contextKey: "inspector-other-session",
+      tabId: "stale-inspector-tab",
+      port: new TestPort() as unknown as MessagePort,
+    });
+    await expect(staleAttach).resolves.toMatchObject({
+      error: "Inspector context is no longer available",
+    });
   });
 
   it("recovers a rejected process-wide WASM load and retains the successful replacement", async () => {

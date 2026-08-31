@@ -155,7 +155,13 @@ export type BrowserFollowerPortEvent =
    * owns the one upstream server connection shared by all attached tabs.
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
-  | { type: "result"; id: number; error?: string }
+  | {
+      type: "result";
+      id: number;
+      error?: string;
+      /** Present only on an init reply for a worker-authenticated Inspector peer. */
+      inspectorAttachmentPhysicalDbName?: string;
+    }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }

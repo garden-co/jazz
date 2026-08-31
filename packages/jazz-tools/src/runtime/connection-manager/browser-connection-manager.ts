@@ -81,6 +81,11 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.connectionReady = connection.ready().then(
       () => {
         if (this.connection !== connection) return;
+        const inspectorPhysicalDbName =
+          connection.getAuthenticatedInspectorAttachmentPhysicalDbName?.();
+        if (inspectorPhysicalDbName) {
+          this.host.enableAuthenticatedInspectorLocalReads(inspectorPhysicalDbName);
+        }
         // The worker sends an initial transport-state event before resolving
         // follower init. Once this resolves, this manager has an authoritative
         // namespace-wide explicit-offline snapshot.

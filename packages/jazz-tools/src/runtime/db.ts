@@ -1454,6 +1454,7 @@ export class Db {
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
+  #authenticatedInspectorPhysicalDbName: string | null = null;
 
   /**
    * Protected constructor - use {@link createDb} in regular app code.
@@ -1476,26 +1477,28 @@ export class Db {
     // control handoff. Keep the resulting read policy inside this source: the
     // Inspector UI uses ordinary `useAll`, while no application-facing option
     // or package export can manufacture local-only reads.
-    const inspectorAttached =
+    const inspectorAttachmentRequested =
       config.runtimeSources?.browserWorkerPort !== undefined &&
       config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
-    const prepareQueryOptions = inspectorAttached
-      ? (options?: QueryOptions) => createInspectorLocalQueryOptions(options)
-      : undefined;
     dbSubscriptionSources.set(this, {
-      ...(prepareQueryOptions ? { prepareQueryOptions } : {}),
+      // Cache identity is reserved before the async worker receipt arrives so
+      // an Inspector entry can never share a host application's query cache.
+      // This marker is not authority: execution below strips it unless the
+      // worker subsequently authenticates this attachment.
+      ...(inspectorAttachmentRequested
+        ? {
+            prepareQueryOptions: (options?: QueryOptions) =>
+              createInspectorLocalQueryOptions(options),
+          }
+        : {}),
       all: (query, options) =>
-        this.allInternal(
-          query,
-          lowerPublicDbQueryOptions(prepareQueryOptions?.(options) ?? options),
-        ),
+        inspectorAttachmentRequested
+          ? this.allFromInspectorAttachment(query, options)
+          : this.allInternal(query, lowerPublicDbQueryOptions(options)),
       subscribeDelta: (query, callback, options, session) =>
-        this.subscribeDelta(
-          query,
-          callback,
-          lowerPublicDbQueryOptions(prepareQueryOptions?.(options) ?? options),
-          session,
-        ),
+        inspectorAttachmentRequested
+          ? this.subscribeFromInspectorAttachment(query, callback, options, session)
+          : this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options), session),
     });
   }
 
@@ -1515,7 +1518,61 @@ export class Db {
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       clearAuthError: () => this.authStateStore.clearError(),
       onMutationError: (event) => this.handleMutationError(event),
+      enableAuthenticatedInspectorLocalReads: (physicalDbName) =>
+        this.#enableAuthenticatedInspectorLocalReads(physicalDbName),
     };
+  }
+
+  #enableAuthenticatedInspectorLocalReads(physicalDbName: string): void {
+    // The configured coordinate is only selection metadata. It becomes
+    // authority only when the worker returns this exact root in the init
+    // receipt for a peer it created through Inspector control.
+    if (this.config.runtimeSources?.inspectorHostPhysicalDbName !== physicalDbName) return;
+    this.#authenticatedInspectorPhysicalDbName = physicalDbName;
+  }
+
+  private async inspectorAttachmentOptions<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<InternalDbQueryOptions> {
+    // Client construction starts the follower's init handshake. Do not decide
+    // the read tier from config/MessagePort shape: wait for the worker receipt.
+    this.getClient(query._schema);
+    await this.connection.ensureReady("local");
+    const selectedOptions = this.#authenticatedInspectorPhysicalDbName
+      ? createInspectorLocalQueryOptions(options)
+      : // Drop a source's cache-only marker when the worker did not issue an
+        // Inspector receipt. Symbols are deliberately non-enumerable.
+        options && { ...options };
+    return lowerPublicDbQueryOptions(selectedOptions) ?? {};
+  }
+
+  private async allFromInspectorAttachment<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<T[]> {
+    return this.allInternal(query, await this.inspectorAttachmentOptions(query, options));
+  }
+
+  private subscribeFromInspectorAttachment<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): SubscriptionHandle {
+    let inner: SubscriptionHandle | null = null;
+    let cancelled = false;
+    const ready = this.inspectorAttachmentOptions(query, options).then((prepared) => {
+      if (cancelled) return;
+      inner = this.subscribeDelta(query, callback, prepared, session);
+      return inner.ready;
+    });
+    const handle = (() => {
+      cancelled = true;
+      inner?.();
+    }) as SubscriptionHandle;
+    Object.defineProperty(handle, "ready", { value: ready });
+    return handle;
   }
 
   /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */

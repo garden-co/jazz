@@ -54,6 +54,40 @@ describe("BrowserConnectionManager.shutdown", () => {
 });
 
 describe("BrowserConnectionManager explicit transport transitions", () => {
+  it("enables Inspector-local reads only from the worker attachment receipt", async () => {
+    const connection = {
+      ready: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      getAuthenticatedInspectorAttachmentPhysicalDbName: vi.fn(
+        () => "jazz-inspector-authenticated-root",
+      ),
+    } as unknown as BrowserWorkerConnection;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: { createBrowserWorkerConnection: vi.fn(() => connection) },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+      enableAuthenticatedInspectorLocalReads: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+
+    await vi.waitFor(() =>
+      expect(host.enableAuthenticatedInspectorLocalReads).toHaveBeenCalledWith(
+        "jazz-inspector-authenticated-root",
+      ),
+    );
+  });
+
   it("serializes disconnect/reconnect and releases remote readiness after the last transition", async () => {
     const disconnectGate = deferred();
     const connection = {

@@ -137,7 +137,7 @@ describe("Db.one", () => {
     });
   });
 
-  it("mints local-only read options only for an Inspector control-port attachment", async () => {
+  it("does not mint Inspector-local reads from attachment-shaped config", async () => {
     const { client, query } = makeClient();
     const ordinary = new TestDb(client);
     expect(getDbSubscriptionSource(ordinary).prepareQueryOptions).toBeUndefined();
@@ -150,20 +150,22 @@ describe("Db.one", () => {
     });
     expect(getDbSubscriptionSource(hostCoordinateOnly).prepareQueryOptions).toBeUndefined();
 
-    const attached = new TestDb(client, {
+    const forgedAttachment = new TestDb(client, {
       appId: "db-one-inspector-attachment",
       runtimeSources: {
         browserWorkerPort: {} as MessagePort,
         inspectorHostPhysicalDbName: "jazz-inspector-authenticated-context",
       },
     });
-    const source = getDbSubscriptionSource(attached);
-    const options = source.prepareQueryOptions?.({ tier: "local-first" });
+    const source = getDbSubscriptionSource(forgedAttachment);
+    expect(source.prepareQueryOptions).toBeDefined();
+    const cacheOnlyMarker = source.prepareQueryOptions?.({ tier: "remote" });
+    expect(isInspectorLocalQueryOptions(cacheOnlyMarker)).toBe(true);
 
-    expect(isInspectorLocalQueryOptions(options)).toBe(true);
-    expect(options).toMatchObject({ tier: "local-first" });
-
-    await source.all!(app.todos.where({ done: false }), { tier: "remote" });
-    expect(query.mock.calls[0]?.[1]).toMatchObject({ tier: "local-only" });
+    // A matching port and physical coordinate are not authority. Only the
+    // worker's authenticated Inspector control-port receipt enables local
+    // reads, and ordinary caller config cannot manufacture that transition.
+    await source.all!(app.todos.where({ done: false }), cacheOnlyMarker);
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ tier: "remote" });
   });
 });
