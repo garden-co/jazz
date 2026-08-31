@@ -3463,6 +3463,21 @@ fn write_option(options: &JsValue, name: &str) -> Result<Option<JsValue>, JsValu
     Ok((!value.is_null() && !value.is_undefined()).then_some(value))
 }
 
+/// Whether a JavaScript write-options object *contains* a property.
+///
+/// This deliberately differs from [`write_option`]: for ordinary optional
+/// fields, `undefined` and `null` mean "no value".  Removed fields must be
+/// rejected by presence, though, so untyped callers cannot smuggle the old
+/// `{ branch: undefined }` shape through to a root-target upsert.  `Reflect`
+/// also gives proxies their normal JavaScript `has` semantics and propagates a
+/// throwing trap instead of silently choosing a target.
+fn has_write_option(options: &JsValue, name: &str) -> Result<bool, JsValue> {
+    if options.is_null() || options.is_undefined() {
+        return Ok(false);
+    }
+    js_sys::Reflect::has(options, &JsValue::from_str(name))
+}
+
 fn write_identity_option(options: &JsValue) -> Result<jazz::db::WriteIdentity, JsValue> {
     write_option(options, "author")?
         .map(|author| {
@@ -3526,61 +3541,23 @@ fn update_options_from_js(options: JsValue) -> Result<jazz::db::UpdateOptions, J
     })
 }
 
-fn legacy_upsert_branch_selector_from_js(value: JsValue) -> Result<BranchSelector, JsValue> {
-    if let Ok(selector) = serde_wasm_bindgen::from_value(value.clone()) {
-        return Ok(selector);
-    }
-    let raw: serde_json::Value = serde_wasm_bindgen::from_value(value).map_err(to_js_error)?;
-    let serde_json::Value::Object(values) = raw else {
-        return Err(JsValue::from_str(
-            "legacy upsert branch selector must be an object",
-        ));
-    };
-    if values.is_empty() {
-        return Err(JsValue::from_str(
-            "legacy upsert branch selector must contain at least one column",
-        ));
-    }
-    let values = values
-        .into_iter()
-        .map(|(column, value)| {
-            claim_value_from_json(value)
-                .map(|value| (column.clone(), value))
-                .map_err(|error| {
-                    JsValue::from_str(&format!(
-                        "invalid legacy upsert branch column {column}: {}",
-                        error
-                            .as_string()
-                            .unwrap_or_else(|| "invalid value".to_owned())
-                    ))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(BranchSelector::new(values))
-}
-
 fn upsert_options_from_js(options: JsValue) -> Result<jazz::db::UpsertOptions, JsValue> {
-    let branch = write_option(&options, "branch")?;
+    if has_write_option(&options, "branch")? {
+        return Err(JsValue::from_str(
+            "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view",
+        ));
+    }
     let head = write_option(&options, "head")?;
     let base = write_option(&options, "base")?;
-    let target = match (branch, head, base) {
-        (Some(branch), None, None) => jazz::db::WriteTarget::BranchView {
-            head: legacy_upsert_branch_selector_from_js(branch)?,
-            base: None,
-        },
-        (Some(_), _, _) => {
-            return Err(JsValue::from_str(
-                "upsert options must not combine legacy branch with head or base",
-            ));
-        }
-        (None, Some(head), base) => jazz::db::WriteTarget::BranchView {
+    let target = match (head, base) {
+        (Some(head), base) => jazz::db::WriteTarget::BranchView {
             head: serde_wasm_bindgen::from_value(head).map_err(to_js_error)?,
             base: base
                 .map(|base| serde_wasm_bindgen::from_value(base).map_err(to_js_error))
                 .transpose()?,
         },
-        (None, None, None) => Default::default(),
-        (None, None, Some(_)) => {
+        (None, None) => Default::default(),
+        (None, Some(_)) => {
             return Err(JsValue::from_str(
                 "branch view base requires a head selector",
             ));
@@ -4593,11 +4570,11 @@ mod dynamic_schema_view_tests {
         }
     }
 
-    /// Untyped callers using the former `{ branch }` shape still target that
-    /// branch as the head, while mixing old and new selectors fails closed.
+    /// Untyped callers cannot silently reinterpret the removed `{ branch }`
+    /// upsert shape as a branch-view head.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn legacy_javascript_upsert_branch_is_a_safe_head_alias() {
+    fn javascript_upsert_rejects_removed_branch_selector() {
         let selector = js_sys::Object::new();
         js_sys::Reflect::set(
             &selector,
@@ -4607,26 +4584,98 @@ mod dynamic_schema_view_tests {
         .expect("setting selector succeeds");
         let options = js_sys::Object::new();
         js_sys::Reflect::set(&options, &JsValue::from_str("branch"), &selector)
-            .expect("setting legacy branch succeeds");
+            .expect("setting removed branch shape succeeds before validation");
 
-        let parsed = upsert_options_from_js(options.clone().into())
-            .expect("legacy branch option remains supported");
-        assert_eq!(
-            parsed.target,
-            jazz::db::WriteTarget::BranchView {
-                head: BranchSelector::new([("branch", Value::String("draft".to_owned()))]),
-                base: None,
-            }
-        );
-
-        js_sys::Reflect::set(&options, &JsValue::from_str("head"), &selector)
-            .expect("setting new head succeeds");
-        let error = upsert_options_from_js(options.into())
-            .expect_err("legacy and branch-view options must not be ambiguous");
+        let error = upsert_options_from_js(options.clone().into())
+            .expect_err("the removed branch selector must not be reinterpreted as a head");
         assert!(error
             .as_string()
             .expect("parser errors are strings")
-            .contains("must not combine legacy branch with head or base"));
+            .contains("option `branch` is not supported; use `head`"));
+
+        // Presence—not the property's value—is the compatibility boundary.
+        // Untyped JavaScript often carries `undefined` through object spreads,
+        // and `null` must not turn that removed shape into a Root upsert.
+        for value in [JsValue::UNDEFINED, JsValue::NULL] {
+            let options = js_sys::Object::new();
+            js_sys::Reflect::set(&options, &JsValue::from_str("branch"), &value)
+                .expect("setting removed branch property succeeds before validation");
+            let error = upsert_options_from_js(options.into())
+                .expect_err("a present nullish removed property must be rejected");
+            assert!(error
+                .as_string()
+                .expect("parser errors are strings")
+                .contains("option `branch` is not supported; use `head`"));
+        }
+
+        // An inherited legacy key is still observable to JavaScript callers and
+        // must not bypass the removed-option guard.  `Reflect::has` handles
+        // the analogous Proxy `has` path and propagates a throwing trap.
+        let inherited = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &inherited,
+            &JsValue::from_str("branch"),
+            &JsValue::UNDEFINED,
+        )
+        .expect("setting inherited branch succeeds");
+        let options = js_sys::Object::create(&inherited);
+        let error = upsert_options_from_js(options.into())
+            .expect_err("an inherited removed property must be rejected");
+        assert!(error
+            .as_string()
+            .expect("parser errors are strings")
+            .contains("option `branch` is not supported; use `head`"));
+
+        let proxy_handler = js_sys::Object::new();
+        let has_branch = wasm_bindgen::closure::Closure::<dyn FnMut(JsValue, JsValue) -> bool>::new(
+            |_target: JsValue, key: JsValue| key.as_string().as_deref() == Some("branch"),
+        );
+        js_sys::Reflect::set(
+            &proxy_handler,
+            &JsValue::from_str("has"),
+            has_branch.as_ref().unchecked_ref(),
+        )
+        .expect("installing a Proxy has trap succeeds");
+        let proxy = js_sys::Proxy::new(&js_sys::Object::new(), &proxy_handler);
+        let error = upsert_options_from_js(proxy.into())
+            .expect_err("a Proxy-visible removed property must be rejected");
+        assert!(error
+            .as_string()
+            .expect("parser errors are strings")
+            .contains("option `branch` is not supported; use `head`"));
+
+        let canonical_head = serde_wasm_bindgen::to_value(&BranchSelector::new([(
+            "branch",
+            Value::String("draft".to_owned()),
+        )]))
+        .expect("branch selector serializes for the binding boundary");
+        let mixed_options = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &mixed_options,
+            &JsValue::from_str("branch"),
+            &JsValue::UNDEFINED,
+        )
+        .expect("setting removed branch succeeds");
+        js_sys::Reflect::set(&mixed_options, &JsValue::from_str("head"), &canonical_head)
+            .expect("setting canonical head succeeds");
+        assert!(
+            upsert_options_from_js(mixed_options.into()).is_err(),
+            "mixed canonical and removed shapes must reject before target selection"
+        );
+
+        let canonical_options = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &canonical_options,
+            &JsValue::from_str("head"),
+            &canonical_head,
+        )
+        .expect("setting canonical head succeeds");
+        assert!(matches!(
+            upsert_options_from_js(canonical_options.into())
+                .expect("head selector remains accepted")
+                .target,
+            jazz::db::WriteTarget::BranchView { .. }
+        ));
     }
 
     /// Binding read choices lower to the existing core tiers.
