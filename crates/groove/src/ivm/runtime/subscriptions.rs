@@ -787,11 +787,13 @@ fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 step,
                 frontier,
                 max_iters,
+                truncate_at_max_iters,
             } => {
                 child!(seed).hash(&mut hasher);
                 child!(step).hash(&mut hasher);
                 frontier.hash(&mut hasher);
                 max_iters.hash(&mut hasher);
+                truncate_at_max_iters.hash(&mut hasher);
             }
             GraphBuilder::Filter {
                 input,
@@ -988,14 +990,16 @@ fn graph_builders_equal(left: &GraphBuilder, right: &GraphBuilder) -> bool {
                     step: b,
                     frontier: c,
                     max_iters: d,
+                    truncate_at_max_iters: e,
                 },
                 GraphBuilder::Recursive {
                     seed: x,
                     step: y,
                     frontier: z,
                     max_iters: w,
+                    truncate_at_max_iters: v,
                 },
-            ) if c == z && d == w => {
+            ) if c == z && d == w && e == v => {
                 pending.extend([(a.as_ref(), x.as_ref()), (b.as_ref(), y.as_ref())])
             }
             (
@@ -2306,11 +2310,13 @@ fn replace_binding_shape(graph: &GraphBuilder, shape: &str) -> GraphBuilder {
                 step,
                 frontier,
                 max_iters,
+                truncate_at_max_iters,
             } => GraphBuilder::Recursive {
                 seed: child!(seed),
                 step: child!(step),
                 frontier: frontier.clone(),
                 max_iters: *max_iters,
+                truncate_at_max_iters: *truncate_at_max_iters,
             },
             GraphBuilder::Filter {
                 input,

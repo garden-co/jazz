@@ -182,6 +182,9 @@ pub enum GraphBuilder {
         step: Arc<GraphBuilder>,
         frontier: FrontierName,
         max_iters: usize,
+        /// A semantic depth bound truncates the next frontier; a fixpoint
+        /// safety limit reports non-convergence instead.
+        truncate_at_max_iters: bool,
     },
     Filter {
         input: Arc<GraphBuilder>,
@@ -538,11 +541,36 @@ impl GraphBuilder {
         frontier: impl Into<String>,
         max_iters: usize,
     ) -> Self {
+        Self::recursive_with_limit(seed, step, frontier, max_iters, false)
+    }
+
+    /// Build recursion whose iteration count is an observable depth cutoff.
+    ///
+    /// Unlike [`Self::recursive`]'s non-convergence guard, reaching this bound
+    /// discards the next frontier and returns every fact accumulated through
+    /// `max_iters` recursive steps.
+    pub fn recursive_bounded(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+    ) -> Self {
+        Self::recursive_with_limit(seed, step, frontier, max_iters, true)
+    }
+
+    fn recursive_with_limit(
+        seed: GraphBuilder,
+        step: GraphBuilder,
+        frontier: impl Into<String>,
+        max_iters: usize,
+        truncate_at_max_iters: bool,
+    ) -> Self {
         Self::Recursive {
             seed: Arc::new(seed),
             step: Arc::new(step),
             frontier: FrontierName(frontier.into()),
             max_iters,
+            truncate_at_max_iters,
         }
     }
 

@@ -428,6 +428,11 @@ pub(super) async fn resume_inputs_hydration_recompute(
         }
         PendingHydrationPhase::Step { frontier, sub_tick } => {
             if sub_tick > recursive.max_iters {
+                if recursive.truncate_at_max_iters {
+                    recursive_state.pending_hydration_mut().phase =
+                        PendingHydrationPhase::ReadyForArrangementHydration;
+                    return Ok(HydrationRecomputeProgress::ReadyForArrangementHydration);
+                }
                 return Err(IvmRuntimeError::RecursiveIterationLimit {
                     node,
                     max_iters: recursive.max_iters,
@@ -505,6 +510,7 @@ pub(super) async fn recursive_delta(
         || has_recompute_binding_delta
         || (!has_binding_deltas && recursive_state.is_empty())
         || !recursive_state.step_arrangements_hydrated()
+        || (recursive.truncate_at_max_iters && (has_table_delta || has_binding_deltas))
     {
         // Retractions are handled by full recompute + diff until we implement
         // DRed or DBSP-style nested negative deltas.
@@ -627,6 +633,9 @@ pub(super) async fn recursive_delta(
     let mut must_run_step = true;
     loop {
         if sub_tick > recursive.max_iters {
+            if recursive.truncate_at_max_iters {
+                break;
+            }
             return Err(IvmRuntimeError::RecursiveIterationLimit {
                 node,
                 max_iters: recursive.max_iters,

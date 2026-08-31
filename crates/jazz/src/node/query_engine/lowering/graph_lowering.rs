@@ -928,6 +928,7 @@ fn lower_recursive_relation_cached(
         lowered,
         None,
     )?;
+    let truncate_at_max_iters = matches!(relation.bound, RecursionBound::MaxDepth(_));
     let max_iters = match relation.bound {
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
         RecursionBound::MaxDepth(max_depth) => max_depth.max(1),
@@ -939,12 +940,21 @@ fn lower_recursive_relation_cached(
     }
     let fields = seed.fields.clone();
     Ok(LoweredRelationInput {
-        graph: GraphBuilder::recursive(
-            seed.graph,
-            step.graph,
-            relation.frontier.0.clone(),
-            max_iters,
-        ),
+        graph: if truncate_at_max_iters {
+            GraphBuilder::recursive_bounded(
+                seed.graph,
+                step.graph,
+                relation.frontier.0.clone(),
+                max_iters,
+            )
+        } else {
+            GraphBuilder::recursive(
+                seed.graph,
+                step.graph,
+                relation.frontier.0.clone(),
+                max_iters,
+            )
+        },
         root_source: Some(root_source.clone()),
         fields,
         nullable_fields: BTreeSet::new(),

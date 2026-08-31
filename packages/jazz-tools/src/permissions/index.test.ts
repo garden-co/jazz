@@ -1286,6 +1286,66 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("projects team keys through reachable_via recursion frontiers", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy, session }) => {
+      relation = policy.projects
+        .reachable_via(
+          "resource_access_edges",
+          "resource",
+          "team",
+          session.claims["sub"],
+          "team_team_edges",
+          "child_team",
+          "parent_team",
+        )
+        .seeded_by("user_team_edges", "user_id", "sub", "team");
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected reachable relation to be initialized.");
+    }
+
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Filter");
+    if (ir.type !== "Filter" || ir.input.type !== "Join") {
+      throw new Error("Expected filtered reachable access join.");
+    }
+    const gather = ir.input.left;
+    expect(gather.type).toBe("Gather");
+    if (gather.type !== "Gather") {
+      throw new Error("Expected reachable gather relation.");
+    }
+    expect(gather.seed).toMatchObject({
+      type: "Project",
+      columns: [
+        {
+          alias: "id",
+          expr: {
+            type: "Column",
+            column: { scope: "user_team_edges", column: "team" },
+          },
+        },
+      ],
+    });
+    expect(gather.step).toMatchObject({
+      type: "Project",
+      columns: [
+        {
+          alias: "id",
+          expr: {
+            type: "Column",
+            column: { scope: "team_team_edges", column: "parent_team" },
+          },
+        },
+      ],
+    });
+    if (gather.step.type !== "Project") {
+      throw new Error("Expected projected reachable recursion step.");
+    }
+    expect(gather.step.input.type).toBe("Filter");
+  });
+
   it("allows gather(...) to start from a same-table hop relation seed", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy }) => {
@@ -1349,20 +1409,23 @@ describe("permissions DSL", () => {
     }
     expect(ir.seed.type).toBe("Project");
     expect(ir.step.type).toBe("Project");
-    if (ir.step.type !== "Project" || ir.step.input.type !== "Join") {
-      throw new Error("Expected projected recursive step join.");
+    if (ir.step.type !== "Project" || ir.step.input.type !== "Filter") {
+      throw new Error("Expected projected scalar recursive step.");
     }
-    const stepJoin = ir.step.input;
-    expect(stepJoin.on[0]?.left).toEqual({
-      scope: "team_team_edges",
-      column: "parent_team",
-    });
-    expect(stepJoin.left.type).toBe("Filter");
-    if (stepJoin.left.type !== "Filter") {
-      throw new Error("Expected filtered step relation.");
-    }
-    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"scope":"team_team_edges"');
-    expect(JSON.stringify(stepJoin.left.predicate)).toContain('"column":"child_team"');
+    expect(ir.step.columns).toEqual([
+      {
+        alias: "id",
+        expr: {
+          type: "Column",
+          column: {
+            scope: "team_team_edges",
+            column: "parent_team",
+          },
+        },
+      },
+    ]);
+    expect(JSON.stringify(ir.step.input.predicate)).toContain('"scope":"team_team_edges"');
+    expect(JSON.stringify(ir.step.input.predicate)).toContain('"column":"child_team"');
   });
 
   it("allows gather(...) to start from a union of same-table relations", () => {

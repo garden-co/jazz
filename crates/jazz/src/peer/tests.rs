@@ -839,7 +839,6 @@ fn session_seed_write_policy_schema() -> JazzSchema {
         "team",
         &[],
         &[],
-        "teams",
         "teamMemberships",
         "member",
         "parent",
