@@ -2081,7 +2081,7 @@ function normalizeWhereObject(input: unknown, hasTypeColumn?: boolean): Record<s
   if (!isPlainObject(input)) {
     throw new Error("Expected a where-object condition.");
   }
-  if (!hasTypeColumn && isPolicyExpressionDiscriminator(input.type)) {
+  if (hasTypeColumn === false && isPolicyExpressionDiscriminator(input.type)) {
     throw new Error(
       `Unbranded permission condition with policy expression discriminator "${input.type}" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).`,
     );

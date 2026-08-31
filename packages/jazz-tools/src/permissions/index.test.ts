@@ -464,6 +464,38 @@ describe("permissions DSL", () => {
     );
   });
 
+  it("keeps session.where(...) generic when its input has a policy discriminator", () => {
+    const session = createSessionContext();
+
+    expect(() => session.where({ type: "True" })).not.toThrow();
+  });
+
+  it("keeps table relation where conditions generic for type discriminators", () => {
+    const withTypeColumn = definePermissions(documentApp, ({ policy }) => [
+      policy.projects.allowRead.where(
+        policy.exists(policy.documents.where({ type: "True" } as Record<string, unknown>)),
+      ),
+    ]);
+    const withoutTypeColumn = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where(
+        policy.exists(policy.projects.where({ type: "True" } as Record<string, unknown>)),
+      ),
+    ]);
+
+    expect(
+      toAssertionPolicyExprWithRelForTest(withTypeColumn.projects!.select?.using),
+    ).toMatchObject({
+      type: "ExistsRel",
+      rel: { type: "Filter" },
+    });
+    expect(
+      toAssertionPolicyExprWithRelForTest(withoutTypeColumn.todos!.select?.using),
+    ).toMatchObject({
+      type: "ExistsRel",
+      rel: { type: "Filter" },
+    });
+  });
+
   it("keeps non-discriminator type comparisons in nested table exists conditions", () => {
     const ordinaryTypeComparison = {
       type: "custom-row-kind",
@@ -1420,6 +1452,24 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation IR join.");
     }
     expect(using.rel.input.input.left.type).toBe("Gather");
+  });
+
+  it("keeps recursive relation starts generic for type discriminators", () => {
+    const compiled = definePermissions(app, ({ policy }) => {
+      const reachableTeams = policy.teams.gather({
+        start: { type: "True" } as Record<string, unknown>,
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+    });
+
+    expect(toAssertionPolicyExprWithRelForTest(compiled.todos!.select?.using)).toMatchObject({
+      type: "ExistsRel",
+      rel: { type: "Gather" },
+    });
   });
 
   it("composes nested table exists with recursive relation exists", () => {
