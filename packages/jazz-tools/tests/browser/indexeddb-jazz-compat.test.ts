@@ -156,13 +156,13 @@ describe("browser Jazz storage compatibility corpus", () => {
     // synced fixture; this is specifically the offline persistence boundary.
     const reopenedMain = await db.one(app.documents.where({ id: document.id }), {
       branch: "main",
-      tier: "local",
-      propagation: "local-only",
+      // @ts-expect-error `local-only` is an internal Inspector tier.
+      tier: "local-only",
     });
     const reopenedDraft = await db.one(app.documents.where({ id: document.id }), {
       branch: "draft",
-      tier: "local",
-      propagation: "local-only",
+      // @ts-expect-error `local-only` is an internal Inspector tier.
+      tier: "local-only",
     });
     expect(reopenedMain).toMatchObject({
       id: document.id,

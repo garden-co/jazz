@@ -419,13 +419,13 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with local-only propagation in overlay mode", () => {
+  it("subscribes with the internal local-only tier in overlay mode", () => {
     renderGrid();
 
     expect(mockUseAll).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({
-        propagation: "local-only",
+        tier: "local-only",
         visibility: "hidden_from_live_query_list",
       }),
     );

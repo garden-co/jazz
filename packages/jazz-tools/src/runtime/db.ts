@@ -26,7 +26,6 @@ import {
   type DurabilityTier,
   type QueryExecutionOptions,
   type InternalQueryExecutionOptions,
-  type QueryPropagation,
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
@@ -188,6 +187,10 @@ export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
   base?: BranchBase;
 };
 
+type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
+  tier?: InternalQueryExecutionOptions["tier"];
+};
+
 /** Package-internal subscription surface used by Jazz's UI bindings. */
 export interface DbSubscriptionSource {
   all?<T extends { id: string }>(
@@ -334,7 +337,7 @@ function normalizeBranchView(
 function nativeDbQueryOptions(
   schema: WasmSchema,
   tableName: string,
-  options?: QueryOptions,
+  options?: InternalDbQueryOptions,
 ): InternalQueryExecutionOptions {
   if (!options) return {};
   const { branch, base, ...rest } = options;
@@ -431,7 +434,7 @@ export interface ActiveQuerySubscriptionTrace {
   table: string;
   branches: string[];
   tier: DurabilityTier;
-  propagation: QueryPropagation;
+  propagation: "full" | "local-only";
   createdAt: string;
   stack?: string;
 }
@@ -1335,7 +1338,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const rows = await client.query(
+    const rows = await client.queryInternal(
       translateQuery(builderJson, planningSchema),
       {
         ...queryOptions,
@@ -2261,6 +2264,13 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    return this.allInternal(query, options);
+  }
+
+  private async allInternal<T>(
+    query: QueryBuilder<T>,
+    options?: InternalDbQueryOptions,
+  ): Promise<T[]> {
     const client = this.getClient(query._schema);
     // A newly attached browser-worker follower has no authoritative
     // namespace-wide explicit-offline state until its init handshake resolves.
@@ -2287,8 +2297,12 @@ export class Db {
     await this.ensureReady(effectiveTier);
     const rows =
       context || usesRelationTraversal
-        ? await client.query(wasmQuery, queryOptions, context?.readSession ?? context?.session)
-        : await client.query(wasmQuery, queryOptions);
+        ? await client.queryInternal(
+            wasmQuery,
+            queryOptions,
+            context?.readSession ?? context?.session,
+          )
+        : await client.queryInternal(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -2444,7 +2458,7 @@ export class Db {
       let installationComplete = false;
       let id: number;
       try {
-        id = client.subscribe(
+        id = client.subscribeInternal(
           wasmQuery,
           (delta) => {
             if (unsubscribed || activeSubscription?.generation !== generation) return;
@@ -2516,7 +2530,11 @@ export class Db {
     // the readiness property. Framework bindings consume `ready` below via
     // DbSubscriptionSource and surface it as their normal error state.
     if (ready) void ready.catch(() => undefined);
-    if (queryOptions.tier == null || queryOptions.tier === "local") {
+    if (
+      queryOptions.tier == null ||
+      queryOptions.tier === "local" ||
+      queryOptions.tier === "local-only"
+    ) {
       deliver(manager.seed([]));
     }
     if (
@@ -2575,15 +2593,15 @@ export class Db {
       !this.connection.shouldDeferSubscriptionStart(
         resolveReadTier(queryOptions.tier ?? "local"),
       ) &&
-      queryOptions.propagation !== "local-only" &&
+      resolveEffectiveQueryExecutionOptions(this.config, queryOptions).propagation !==
+        "local-only" &&
       resolveReadTier(queryOptions.tier ?? "local") !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
-        this.all(query, {
+        this.allInternal(query, {
           ...options,
-          tier: "local",
-          propagation: "local-only",
+          tier: "local-only",
         });
       const seedLocal = () => {
         const seedRows =

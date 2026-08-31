@@ -31,13 +31,7 @@ Transactions use `.wait(...)` and report errors in the same way as individual mu
 ## Read tiers
 
 Read choices control when the **first result** of a query or subscription is delivered.
-They are intentionally separate from write durability: write APIs and `wait({ tier })`
-continue to use local, edge, and global.
-
-| Option        | Values                                                  | Default         | What it does                                                                                                                                                                            |
-| ------------- | ------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`        | `"local-first"` \| `"remote"` \| `"remote-if-possible"` | runtime default | Product-level read choice, including how the subscription treats your own local writes. The older values remain available as legacy controls.                                           |
-| `propagation` | `"full"` \| `"local-only"`                              | `"full"`        | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication. |
+They are intentionally separate from write durability.
 
 New applications should use the product read choices `"local-first"`,
 `"remote"`, and `"remote-if-possible"`:

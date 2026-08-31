@@ -66,7 +66,7 @@ describe("solid/useAll", () => {
     const query = makeQuery();
     const options = {
       tier: "local" as const,
-      propagation: "local-only" as const,
+      visibility: "hidden_from_live_query_list" as const,
     };
 
     let dispose!: () => void;

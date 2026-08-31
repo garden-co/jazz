@@ -349,12 +349,18 @@ describe("react-core provider/hooks browser coverage", () => {
       data: [{ id: "a", title: "Edge" }],
       error: null,
     });
-    manager.register(BASE_QUERY, entry, { tier: "edge", propagation: "local-only" });
+    manager.register(BASE_QUERY, entry, {
+      tier: "edge",
+      visibility: "hidden_from_live_query_list",
+    });
     const client = makeClient({ manager });
 
     render(
       <JazzProvider client={client}>
-        <UseAllView query={BASE_QUERY} options={{ tier: "edge", propagation: "local-only" }} />
+        <UseAllView
+          query={BASE_QUERY}
+          options={{ tier: "edge", visibility: "hidden_from_live_query_list" }}
+        />
       </JazzProvider>,
     );
 
@@ -390,14 +396,17 @@ describe("react-core provider/hooks browser coverage", () => {
   it("RCB-B09: useAllSuspense accepts QueryOptions without changing suspense behavior", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
-    manager.register(BASE_QUERY, entry, { propagation: "local-only" });
+    manager.register(BASE_QUERY, entry, { visibility: "hidden_from_live_query_list" });
     const client = makeClient({ manager });
 
     render(
       <CaptureErrorBoundary>
         <React.Suspense fallback={<div data-testid="rows-fallback">loading-rows</div>}>
           <JazzProvider client={client}>
-            <UseAllSuspenseView query={BASE_QUERY} options={{ propagation: "local-only" }} />
+            <UseAllSuspenseView
+              query={BASE_QUERY}
+              options={{ visibility: "hidden_from_live_query_list" }}
+            />
           </JazzProvider>
         </React.Suspense>
       </CaptureErrorBoundary>,
@@ -427,7 +436,7 @@ describe("react-core provider/hooks browser coverage", () => {
         data: [{ id: "b", title: "Deferred" }],
         error: null,
       }),
-      { propagation: "local-only" },
+      { visibility: "hidden_from_live_query_list" },
     );
     const client = makeClient({ manager });
 
@@ -441,7 +450,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
     render(
       <JazzProvider client={client}>
-        <UseAllView query={BASE_QUERY} options={{ propagation: "local-only" }} />
+        <UseAllView query={BASE_QUERY} options={{ visibility: "hidden_from_live_query_list" }} />
       </JazzProvider>,
     );
 

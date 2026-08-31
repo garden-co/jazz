@@ -361,6 +361,16 @@ describe("public read tiers", () => {
   });
 });
 
+describe("internal read tiers", () => {
+  it("lowers local-only reads without exposing upstream propagation", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: "local-only" })).toMatchObject({
+      tier: "local",
+      localUpdates: "immediate",
+      propagation: "local-only",
+    });
+  });
+});
+
 describe("JazzClient schema access", () => {
   it("returns the schema from the client context", () => {
     const schema: WasmSchema = {
@@ -497,7 +507,7 @@ describe("JazzClient transaction query plumbing", () => {
     client.insertInternal("todos", {}, undefined, undefined, undefined, transactionId);
 
     await expect(
-      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      client.queryInternal(JSON.stringify({ relation_ir: { table: "todos" } }), {
         localUpdates: "deferred",
         openTransactionId: transactionId,
       }),

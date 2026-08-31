@@ -476,7 +476,7 @@ describe("useAll browser integration", () => {
     );
   });
 
-  it("supports local-only read propagation", async () => {
+  it("supports the internal local-only read tier", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("local-only"),
@@ -493,7 +493,10 @@ describe("useAll browser integration", () => {
     });
 
     await expect(
-      client.db.all(makeQuery<Todo>("todos", {}), { propagation: "local-only" }),
+      client.db.all(makeQuery<Todo>("todos", {}), {
+        // @ts-expect-error `local-only` is an internal Inspector tier.
+        tier: "local-only",
+      }),
     ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
   });
 

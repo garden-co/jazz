@@ -1099,8 +1099,14 @@ async function snapshotBobLocalExposure(
   privateMessageId: string,
 ): Promise<BobExposureSnapshot> {
   const [localChats, localMessages] = await Promise.all([
-    bob.all(app.chats, { tier: "local", propagation: "local-only" }),
-    bob.all(app.messages, { tier: "local", propagation: "local-only" }),
+    bob.all(app.chats, {
+      // @ts-expect-error `local-only` is an internal Inspector tier.
+      tier: "local-only",
+    }),
+    bob.all(app.messages, {
+      // @ts-expect-error `local-only` is an internal Inspector tier.
+      tier: "local-only",
+    }),
   ]);
 
   return {

@@ -10,7 +10,7 @@ import {
   type RowsChangeData,
   type SortColumn,
 } from "react-data-grid";
-import type { ColumnDescriptor, ColumnType, TableProxy, Value } from "jazz-tools";
+import type { ColumnDescriptor, ColumnType, QueryOptions, TableProxy, Value } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import type { DynamicTableRow } from "../../utility/generic-query-builder.js";
 import {
@@ -908,14 +908,16 @@ export function TableDataGrid() {
   // whole point is to show the host's local — possibly unsynced — data), so it
   // must not wait for an edge ack or force a server round-trip on reads.
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
-  const queryOptions = useMemo(
-    () =>
-      ({
-        propagation: runtime === "standalone" ? "full" : "local-only",
-        visibility: "hidden_from_live_query_list",
-      }) as const,
-    [runtime],
-  );
+  // @ts-expect-error `local-only` is reserved for the Jazz Inspector.
+  const queryOptions: QueryOptions = useMemo(() => {
+    if (runtime === "standalone") {
+      return { visibility: "hidden_from_live_query_list" };
+    }
+    return {
+      tier: "local-only",
+      visibility: "hidden_from_live_query_list",
+    };
+  }, [runtime]);
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.
   const isInitialLoading = queryResult.isLoading;
@@ -1799,7 +1801,7 @@ function RelationCell({
   schema: Record<string, { columns: ColumnDescriptor[] }>;
   relationTable: string;
   relationId: string;
-  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
+  queryOptions: QueryOptions;
 }) {
   const queryBuilder = useMemo(
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
@@ -1905,7 +1907,7 @@ function PlainTableView({
   gridColumns: GridColumn[];
   sorting: readonly SortColumn[];
   schema: Record<string, { columns: ColumnDescriptor[] }>;
-  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
+  queryOptions: QueryOptions;
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
   stagedInserts: StagedInsert[];

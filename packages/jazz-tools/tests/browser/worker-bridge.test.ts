@@ -2904,7 +2904,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (rows) => {
           snapshots.push(rows);
         },
-        { propagation: "local-only" },
+        {
+          // @ts-expect-error `local-only` is an internal Inspector tier.
+          tier: "local-only",
+        },
       ),
     );
 
@@ -2932,14 +2935,20 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await waitForCondition(
       async () => {
-        const rows = await dbB.all(allTodos, { propagation: "local-only" });
+        const rows = await dbB.all(allTodos, {
+          // @ts-expect-error `local-only` is an internal Inspector tier.
+          tier: "local-only",
+        });
         return rows.some((row) => row.title === "local-only-local-1");
       },
       8000,
       "local-only query should retrieve persisted IndexedDB rows after reopen",
     );
 
-    const snapshotsB = await dbB.all(allTodos, { propagation: "local-only" });
+    const snapshotsB = await dbB.all(allTodos, {
+      // @ts-expect-error `local-only` is an internal Inspector tier.
+      tier: "local-only",
+    });
     expect(snapshotsB.length).toBe(1);
     expect(snapshotsB[0].title).toBe("local-only-local-1");
   }, 60000);
@@ -2957,7 +2966,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (rows) => {
           snapshots.push(rows);
         },
-        { propagation: "local-only" },
+        {
+          // @ts-expect-error `local-only` is an internal Inspector tier.
+          tier: "local-only",
+        },
       ),
     );
 

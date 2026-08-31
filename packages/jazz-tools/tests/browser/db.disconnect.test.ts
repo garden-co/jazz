@@ -244,8 +244,8 @@ describe("Db disconnect/reconnect", () => {
       );
       const localRows = await withTimeout(
         db.all(todoByTitle(title), {
-          tier: "local",
-          propagation: "local-only",
+          // @ts-expect-error `local-only` is an internal Inspector tier.
+          tier: "local-only",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "local read did not reflect the delete",
@@ -357,8 +357,8 @@ describe("Db disconnect/reconnect", () => {
 
       const peerRowsBeforeReconnect = await withTimeout(
         peer.all(todoByTitle(offlineTitle), {
-          tier: "local",
-          propagation: "local-only",
+          // @ts-expect-error `local-only` is an internal Inspector tier.
+          tier: "local-only",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: peer local read before reconnect did not resolve",
@@ -503,8 +503,8 @@ describe("Db disconnect/reconnect", () => {
 
       const peerRowsBeforeReconnect = await withWorkerOperationTimeout(
         peer.all(todoByTitle(offlineTitle), {
-          tier: "local",
-          propagation: "local-only",
+          // @ts-expect-error `local-only` is an internal Inspector tier.
+          tier: "local-only",
         }),
         "worker mode: peer local read before reconnect did not resolve",
       );
@@ -670,8 +670,8 @@ describe("Db disconnect/reconnect", () => {
 
       const localRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(title), {
-          tier: "local",
-          propagation: "local-only",
+          // @ts-expect-error `local-only` is an internal Inspector tier.
+          tier: "local-only",
         }),
         "worker mode: immediate local read while disconnected did not resolve",
       );

@@ -251,6 +251,11 @@ Bindings expose the separate, read-only `ReadTier` vocabulary:
 Bindings MUST infer the own-local-write policy from `ReadTier`; they MUST NOT
 expose `LocalUpdates` as a product query option. The low-level core `ReadOpts`
 contract retains `LocalUpdates` for internal transaction and migration paths.
+Bindings also MUST NOT expose `Propagation` as a product query option. Product
+reads lower with `Propagation::Full`. The Inspector MAY use an internal
+`local-only` read tier that lowers to `DurabilityTier::Local`, immediate local
+updates, and `Propagation::LocalOnly`; that tier MUST NOT appear in the public
+binding `ReadTier` type.
 
 `RemoteIfPossible` does **not** infer offline state from a timeout, connection
 error, slow response, or an ordinary transport reconnect. A one-shot read
