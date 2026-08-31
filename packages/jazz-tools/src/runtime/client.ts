@@ -420,6 +420,38 @@ export interface QueryExecutionOptions {
   branch?: BranchView;
 }
 
+/**
+ * Copy the product-facing subset of query options before crossing a public
+ * JavaScript boundary.  TypeScript declarations are useful guidance, but a
+ * caller can always supply an object through `as any` (or plain JavaScript).
+ * In particular, transport propagation and own-write delivery are runtime
+ * controls, not product API switches.
+ *
+ * @internal Db uses the analogous conversion when it lowers typed builders.
+ */
+export function publicQueryExecutionOptions(
+  options?: QueryExecutionOptions,
+): QueryExecutionOptions | undefined {
+  if (!options) return undefined;
+  const candidate = options as { tier?: unknown; branch?: unknown };
+  const result: QueryExecutionOptions = {};
+  if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
+  if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
+  return result;
+}
+
+/** @internal `local-only` is deliberately excluded from the product surface. */
+export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
+  return (
+    value === ReadTier.LocalFirst ||
+    value === ReadTier.Remote ||
+    value === ReadTier.RemoteIfPossible ||
+    value === "local" ||
+    value === "edge" ||
+    value === "global"
+  );
+}
+
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
   tier?: InternalQueryReadTier;
@@ -1291,7 +1323,7 @@ export class JazzClient {
    * @returns Array of matching rows
    */
   async query(query: string, options?: QueryExecutionOptions, session?: Session): Promise<Row[]> {
-    return this.queryInternal(query, options, session);
+    return this.queryInternal(query, publicQueryExecutionOptions(options), session);
   }
 
   /** @internal */
@@ -1586,7 +1618,7 @@ export class JazzClient {
     options?: QueryExecutionOptions,
     session?: Session,
   ): number {
-    return this.subscribeInternal(query, callback, options, session);
+    return this.subscribeInternal(query, callback, publicQueryExecutionOptions(options), session);
   }
 
   /** @internal */

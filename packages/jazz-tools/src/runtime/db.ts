@@ -26,6 +26,7 @@ import {
   type DurabilityTier,
   type QueryExecutionOptions,
   type InternalQueryExecutionOptions,
+  isPublicQueryReadTier,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
   ReadTier,
@@ -186,9 +187,65 @@ export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
   base?: BranchBase;
 };
 
+// A module-private capability makes the Inspector's offline local reads an
+// explicit internal dependency. It is intentionally not representable by an
+// application-supplied object (including one cast through `any`).
+const INSPECTOR_LOCAL_READ_CAPABILITY = Symbol("jazz.inspectorLocalRead");
+
+/**
+ * Create options for the Jazz Inspector's deliberately local-only reads.
+ *
+ * This is exported through `jazz-tools/dev`, not the application query API.
+ * The returned capability is the only supported route to local-only query
+ * propagation; ordinary query options are copied at the Db boundary.
+ */
+export function createInspectorLocalQueryOptions(
+  options: Omit<QueryOptions, "tier"> = {},
+): QueryOptions {
+  const capabilityOptions: QueryOptions = { ...options };
+  Object.defineProperty(capabilityOptions, INSPECTOR_LOCAL_READ_CAPABILITY, {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return Object.freeze(capabilityOptions);
+}
+
+/** @internal Keep Inspector-local subscriptions distinct from product query cache entries. */
+export function isInspectorLocalQueryOptions(options?: QueryOptions): boolean {
+  return (
+    (options as { [INSPECTOR_LOCAL_READ_CAPABILITY]?: unknown } | undefined)?.[
+      INSPECTOR_LOCAL_READ_CAPABILITY
+    ] === true
+  );
+}
+
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   tier?: InternalQueryExecutionOptions["tier"];
 };
+
+/**
+ * Lower product options to the internal native-read controls. This is a
+ * runtime boundary, rather than merely a TypeScript one: JavaScript callers
+ * must not be able to select local-only propagation or a deferred own-write
+ * overlay by adding private fields to an options object.
+ */
+function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptions | undefined {
+  if (!options) return undefined;
+  const candidate = options as QueryOptions & {
+    tier?: unknown;
+    branch?: unknown;
+    base?: unknown;
+    [INSPECTOR_LOCAL_READ_CAPABILITY]?: unknown;
+  };
+  const lowered: InternalDbQueryOptions = {};
+  if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
+  if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
+  if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
+  if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
+  return lowered;
+}
 
 /** Package-internal subscription surface used by Jazz's UI bindings. */
 export interface DbSubscriptionSource {
@@ -1433,9 +1490,9 @@ export class Db {
     this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
     dbSubscriptionSources.set(this, {
-      all: (query, options) => this.all(query, options),
+      all: (query, options) => this.allInternal(query, lowerPublicDbQueryOptions(options)),
       subscribeDelta: (query, callback, options, session) =>
-        this.subscribeDelta(query, callback, options, session),
+        this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options), session),
     });
   }
 
@@ -2256,7 +2313,7 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    return this.allInternal(query, options);
+    return this.allInternal(query, lowerPublicDbQueryOptions(options));
   }
 
   private async allInternal<T>(
@@ -2341,7 +2398,7 @@ export class Db {
         }
         callback(update.all);
       },
-      options,
+      lowerPublicDbQueryOptions(options),
       session,
     );
   }
@@ -2381,7 +2438,7 @@ export class Db {
   private subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
-    options?: QueryOptions,
+    options?: InternalDbQueryOptions,
     session?: Session,
   ): SubscriptionHandle {
     // Constructing a browser follower starts its init handshake. Do that before

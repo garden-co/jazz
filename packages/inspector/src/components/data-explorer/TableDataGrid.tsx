@@ -12,6 +12,7 @@ import {
 } from "react-data-grid";
 import type { ColumnDescriptor, ColumnType, QueryOptions, TableProxy, Value } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
+import { inspectorLocalQueryOptions } from "jazz-tools/dev/inspector";
 import type { DynamicTableRow } from "../../utility/generic-query-builder.js";
 import {
   useEffect,
@@ -908,9 +909,8 @@ export function TableDataGrid() {
   // whole point is to show the host's local — possibly unsynced — data), so it
   // must not wait for an edge ack or force a server round-trip on reads.
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
-  // @ts-expect-error `local-only` is reserved for the Jazz Inspector.
   const queryOptions: QueryOptions = useMemo(() => {
-    return runtime === "standalone" ? {} : { tier: "local-only" };
+    return runtime === "standalone" ? {} : inspectorLocalQueryOptions();
   }, [runtime]);
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.

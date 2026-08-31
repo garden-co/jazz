@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
+import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
@@ -243,10 +244,7 @@ describe("Db disconnect/reconnect", () => {
         "local delete did not become visible",
       );
       const localRows = await withTimeout(
-        db.all(todoByTitle(title), {
-          // @ts-expect-error `local-only` is an internal Inspector tier.
-          tier: "local-only",
-        }),
+        db.all(todoByTitle(title), inspectorLocalQueryOptions()),
         LOCAL_OPERATION_TIMEOUT_MS,
         "local read did not reflect the delete",
       );
@@ -356,10 +354,7 @@ describe("Db disconnect/reconnect", () => {
       expect(localRowsWhileOffline.some((row) => row.title === offlineTitle)).toBe(true);
 
       const peerRowsBeforeReconnect = await withTimeout(
-        peer.all(todoByTitle(offlineTitle), {
-          // @ts-expect-error `local-only` is an internal Inspector tier.
-          tier: "local-only",
-        }),
+        peer.all(todoByTitle(offlineTitle), inspectorLocalQueryOptions()),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: peer local read before reconnect did not resolve",
       );
@@ -502,10 +497,7 @@ describe("Db disconnect/reconnect", () => {
       expect(localRows.some((row) => row.title === offlineTitle)).toBe(true);
 
       const peerRowsBeforeReconnect = await withWorkerOperationTimeout(
-        peer.all(todoByTitle(offlineTitle), {
-          // @ts-expect-error `local-only` is an internal Inspector tier.
-          tier: "local-only",
-        }),
+        peer.all(todoByTitle(offlineTitle), inspectorLocalQueryOptions()),
         "worker mode: peer local read before reconnect did not resolve",
       );
       expect(peerRowsBeforeReconnect).toEqual([]);
@@ -669,10 +661,7 @@ describe("Db disconnect/reconnect", () => {
       db.insert(todos, { title, done: true });
 
       const localRows = await withWorkerOperationTimeout(
-        db.all(todoByTitle(title), {
-          // @ts-expect-error `local-only` is an internal Inspector tier.
-          tier: "local-only",
-        }),
+        db.all(todoByTitle(title), inspectorLocalQueryOptions()),
         "worker mode: immediate local read while disconnected did not resolve",
       );
       expect(localRows.some((row) => row.title === title)).toBe(true);

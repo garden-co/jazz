@@ -1,5 +1,10 @@
 import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
-import type { DbSubscriptionSource, QueryBuilder, QueryOptions } from "./runtime/db.js";
+import {
+  isInspectorLocalQueryOptions,
+  type DbSubscriptionSource,
+  type QueryBuilder,
+  type QueryOptions,
+} from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 
 type UseAllStatePending<T> = {
@@ -539,9 +544,9 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {
-  if (!options) {
-    return "{}";
-  }
-
-  return JSON.stringify(options);
+  // The Inspector capability is deliberately non-enumerable, so it cannot be
+  // forwarded as an application option. Retain it in cache identity: otherwise
+  // an overlay query could share a full-propagation entry with the host app.
+  const serialized = JSON.stringify(options ?? {});
+  return isInspectorLocalQueryOptions(options) ? `inspector-local:${serialized}` : serialized;
 }

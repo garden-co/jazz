@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "./runtime/context.js";
-import type { QueryBuilder, QueryOptions, SubscriptionHandle } from "./runtime/db.js";
+import {
+  createInspectorLocalQueryOptions,
+  type QueryBuilder,
+  type QueryOptions,
+  type SubscriptionHandle,
+} from "./runtime/db.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,
@@ -618,6 +623,15 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     } finally {
       await harness.manager.shutdown();
     }
+  });
+
+  it("SO-U25a keeps an Inspector-local query separate from an equivalent product query", () => {
+    const harness = createUnitHarness();
+    const query = makeQuery();
+
+    expect(harness.manager.computeKey(query)).not.toBe(
+      harness.manager.computeKey(query, createInspectorLocalQueryOptions()),
+    );
   });
 
   it("SO-U25b computeKey alone leaves the key unregistered", async () => {

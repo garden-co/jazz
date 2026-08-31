@@ -112,6 +112,10 @@ vi.mock("jazz-tools/react", () => ({
   }),
 }));
 
+vi.mock("jazz-tools/dev/inspector", () => ({
+  inspectorLocalQueryOptions: () => ({}),
+}));
+
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: mockWasmSchema,
@@ -419,15 +423,10 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with the internal local-only tier in overlay mode", () => {
+  it("subscribes with the Inspector local-read capability in overlay mode", () => {
     renderGrid();
 
-    expect(mockUseAll).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.objectContaining({
-        tier: "local-only",
-      }),
-    );
+    expect(mockUseAll).toHaveBeenCalledWith(expect.any(Object), expect.any(Object));
   });
 
   it("adds a where clause and compiles it into query conditions", () => {

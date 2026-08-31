@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db, type QueryBuilder } from "./db.js";
+import { createDb, createInspectorLocalQueryOptions, type Db, type QueryBuilder } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const schema: WasmSchema = {
@@ -83,10 +83,11 @@ describe("Db devMode active query tracing", () => {
   it("does not report local-only subscriptions", async () => {
     const db = await makeDb(true);
 
-    const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
-      // @ts-expect-error `local-only` is an internal Inspector tier.
-      tier: "local-only",
-    });
+    const unsubscribe = db.subscribe(
+      makeQuery(),
+      () => undefined,
+      createInspectorLocalQueryOptions(),
+    );
 
     expect(db.getActiveQuerySubscriptions()).toEqual([]);
 

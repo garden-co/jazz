@@ -12,6 +12,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
+import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { createDb, type Db, type DbConfig } from "../../src/runtime/db.js";
 import {
@@ -154,16 +155,14 @@ describe("browser Jazz storage compatibility corpus", () => {
     // Reopen must materialize the durable local replica without depending on
     // a fresh remote-coverage round trip. The earlier edge read proves the
     // synced fixture; this is specifically the offline persistence boundary.
-    const reopenedMain = await db.one(app.documents.where({ id: document.id }), {
-      branch: "main",
-      // @ts-expect-error `local-only` is an internal Inspector tier.
-      tier: "local-only",
-    });
-    const reopenedDraft = await db.one(app.documents.where({ id: document.id }), {
-      branch: "draft",
-      // @ts-expect-error `local-only` is an internal Inspector tier.
-      tier: "local-only",
-    });
+    const reopenedMain = await db.one(
+      app.documents.where({ id: document.id }),
+      inspectorLocalQueryOptions({ branch: "main" }),
+    );
+    const reopenedDraft = await db.one(
+      app.documents.where({ id: document.id }),
+      inspectorLocalQueryOptions({ branch: "draft" }),
+    );
     expect(reopenedMain).toMatchObject({
       id: document.id,
       branch: "main",

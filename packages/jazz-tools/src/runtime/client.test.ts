@@ -359,6 +359,40 @@ describe("public read tiers", () => {
       localUpdates: "immediate",
     });
   });
+
+  it.each([
+    [ReadTier.LocalFirst, "local", undefined],
+    [ReadTier.Remote, "edge", JSON.stringify({ local_updates: "deferred" })],
+    [ReadTier.RemoteIfPossible, "edge", undefined],
+  ] as const)(
+    "keeps public %s reads full and derives their own-write policy",
+    async (tier, nativeTier, expectedOptionsJson) => {
+      const runtime = makeFakeRuntime();
+      runtime.query.mockResolvedValue([]);
+      runtime.createSubscription.mockReturnValue(7);
+      const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+      const injected = {
+        tier,
+        propagation: "local-only",
+        localUpdates: "immediate",
+        openTransactionId: "forged-open-transaction",
+        runtimeSettledTier: "global",
+      } as any;
+
+      await client.query('{"relation_ir":{"table":"todos"}}', injected);
+      const subscription = client.subscribe(
+        '{"relation_ir":{"table":"todos"}}',
+        () => {},
+        injected,
+      );
+
+      expect(runtime.query.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.query.mock.calls[0]?.[3]).toBe(expectedOptionsJson);
+      expect(runtime.createSubscription.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.createSubscription.mock.calls[0]?.[3]).toBe(expectedOptionsJson);
+      client.unsubscribe(subscription);
+    },
+  );
 });
 
 describe("internal read tiers", () => {

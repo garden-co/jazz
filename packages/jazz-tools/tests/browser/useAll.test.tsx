@@ -7,6 +7,7 @@ import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/d
 import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
 import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
 import { useAll } from "../../src/react-core/use-all.js";
+import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
 
 const schema: WasmSchema = {
   orgs: {
@@ -493,10 +494,7 @@ describe("useAll browser integration", () => {
     });
 
     await expect(
-      client.db.all(makeQuery<Todo>("todos", {}), {
-        // @ts-expect-error `local-only` is an internal Inspector tier.
-        tier: "local-only",
-      }),
+      client.db.all(makeQuery<Todo>("todos", {}), inspectorLocalQueryOptions()),
     ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
   });
 
