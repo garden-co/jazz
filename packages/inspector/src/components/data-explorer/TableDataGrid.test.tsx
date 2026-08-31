@@ -426,7 +426,6 @@ describe("TableDataGrid", () => {
       expect.any(Object),
       expect.objectContaining({
         tier: "local-only",
-        visibility: "hidden_from_live_query_list",
       }),
     );
   });

@@ -26,7 +26,6 @@ import {
   type DurabilityTier,
   type QueryExecutionOptions,
   type InternalQueryExecutionOptions,
-  type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
   ReadTier,
@@ -446,10 +445,6 @@ export interface LogoutOptions {
 type ActiveQuerySubscriptionTraceListener = (
   traces: readonly ActiveQuerySubscriptionTrace[],
 ) => void;
-
-type StoredActiveQuerySubscriptionTrace = ActiveQuerySubscriptionTrace & {
-  visibility: QueryVisibility;
-};
 
 type RuntimeQueryTracePayload = {
   table: string;
@@ -1413,10 +1408,7 @@ export class Db {
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
   private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
-  private readonly activeQuerySubscriptionTraces = new Map<
-    string,
-    StoredActiveQuerySubscriptionTrace
-  >();
+  private readonly activeQuerySubscriptionTraces = new Map<string, ActiveQuerySubscriptionTrace>();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
@@ -1780,9 +1772,9 @@ export class Db {
    * @internal
    */
   getActiveQuerySubscriptions(): ActiveQuerySubscriptionTrace[] {
-    return Array.from(this.activeQuerySubscriptionTraces.values())
-      .filter((trace) => trace.visibility === "public")
-      .map(({ visibility: _visibility, ...trace }) => cloneActiveQuerySubscriptionTrace(trace));
+    return Array.from(this.activeQuerySubscriptionTraces.values()).map((trace) =>
+      cloneActiveQuerySubscriptionTrace(trace),
+    );
   }
 
   /**
@@ -2673,6 +2665,9 @@ export class Db {
     }
 
     const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
+    if (resolvedOptions.propagation === "local-only") {
+      return null;
+    }
     const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 
@@ -2685,7 +2680,6 @@ export class Db {
       propagation: resolvedOptions.propagation,
       createdAt: new Date().toISOString(),
       stack: trimSubscriptionTraceStack(new Error().stack),
-      visibility: resolvedOptions.visibility ?? "public",
     });
     this.notifyActiveQuerySubscriptionTraceListeners();
 

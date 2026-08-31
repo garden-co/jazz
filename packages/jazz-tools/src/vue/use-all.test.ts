@@ -69,7 +69,7 @@ describe("vue/useAll", () => {
     const query = makeQuery();
     const options = {
       tier: "local" as const,
-      visibility: "hidden_from_live_query_list" as const,
+      branch: "draft",
     };
     const scope = effectScope();
     scope.run(() => useAll(query, options));

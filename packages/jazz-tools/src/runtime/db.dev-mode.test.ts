@@ -80,11 +80,12 @@ describe("Db devMode active query tracing", () => {
     stop();
   });
 
-  it("filters hidden subscriptions out of the inspector list", async () => {
+  it("does not report local-only subscriptions", async () => {
     const db = await makeDb(true);
 
     const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
-      visibility: "hidden_from_live_query_list",
+      // @ts-expect-error `local-only` is an internal Inspector tier.
+      tier: "local-only",
     });
 
     expect(db.getActiveQuerySubscriptions()).toEqual([]);
@@ -92,15 +93,14 @@ describe("Db devMode active query tracing", () => {
     unsubscribe();
   });
 
-  it("records the internal local-only tier", async () => {
+  it("records explicit public tier overrides", async () => {
     const db = await makeDb(true);
     const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
-      // @ts-expect-error `local-only` is an internal Inspector tier.
-      tier: "local-only",
+      tier: "edge",
     });
 
-    expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("local");
-    expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("local-only");
+    expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("edge");
+    expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("full");
 
     unsubscribe();
   });

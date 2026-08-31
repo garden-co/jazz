@@ -8,7 +8,6 @@ export {
   loadWasmModule,
   type DurabilityTier,
   ReadTier,
-  type QueryVisibility,
   type Row,
   type SubscriptionCallback,
   type StreamingValueChunk,

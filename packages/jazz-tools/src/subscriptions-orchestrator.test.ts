@@ -210,12 +210,12 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const key = harness.manager.makeQueryKey(query, {
         tier: "edge",
-        visibility: "hidden_from_live_query_list",
+        branch: "draft",
       });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
           tier: "edge",
-          visibility: "hidden_from_live_query_list",
+          branch: "draft",
         })}:${query._build()}`,
       );
     } finally {
@@ -223,20 +223,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U07c makeQueryKey changes when tier or visibility changes", async () => {
+  it("SO-U07c makeQueryKey changes when tier or branch changes", async () => {
     const harness = createUnitHarness("app-so-u07c");
     const query = makeQuery();
 
     try {
       const defaultKey = harness.manager.makeQueryKey(query);
       const edgeKey = harness.manager.makeQueryKey(query, { tier: "edge" });
-      const hiddenKey = harness.manager.makeQueryKey(query, {
-        visibility: "hidden_from_live_query_list",
-      });
+      const branchKey = harness.manager.makeQueryKey(query, { branch: "draft" });
 
       expect(edgeKey).not.toBe(defaultKey);
-      expect(hiddenKey).not.toBe(defaultKey);
-      expect(hiddenKey).not.toBe(edgeKey);
+      expect(branchKey).not.toBe(defaultKey);
+      expect(branchKey).not.toBe(edgeKey);
     } finally {
       await harness.manager.shutdown();
     }
@@ -274,7 +272,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const options = {
         tier: "global",
-        visibility: "hidden_from_live_query_list",
+        branch: "draft",
       } satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 

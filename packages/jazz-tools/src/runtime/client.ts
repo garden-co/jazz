@@ -394,16 +394,6 @@ type LocalUpdatesMode = "immediate" | "deferred";
  * @internal
  */
 type QueryPropagation = "full" | "local-only";
-/**
- * Whether this query should be shown in the inspector.
- * Useful for helpers and framework internals that create subscriptions
- * but should stay out of the DB inspector.
- *
- * Defaults to `"public"`.
- * @internal
- */
-export type QueryVisibility = "public" | "hidden_from_live_query_list";
-
 /** Named values selecting one exact branch-local row coordinate. */
 export interface BranchSelector {
   values: Record<string, Value>;
@@ -426,7 +416,6 @@ export interface QueryExecutionOptions {
    * @deprecated DurabilityTier values remain accepted with their old meaning.
    */
   tier?: QueryReadTier;
-  visibility?: QueryVisibility;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
 }
@@ -444,7 +433,6 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
-  visibility: QueryVisibility;
   branch?: BranchView;
 }
 
@@ -587,7 +575,6 @@ export function resolveEffectiveQueryExecutionOptions(
     tier: resolveReadTier(selectedTier),
     localUpdates: options?.localUpdates ?? resolveLocalUpdatesMode(selectedTier),
     propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
-    visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
 }

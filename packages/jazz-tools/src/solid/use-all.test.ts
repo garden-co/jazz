@@ -66,7 +66,7 @@ describe("solid/useAll", () => {
     const query = makeQuery();
     const options = {
       tier: "local" as const,
-      visibility: "hidden_from_live_query_list" as const,
+      branch: "draft",
     };
 
     let dispose!: () => void;

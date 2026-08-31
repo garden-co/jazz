@@ -910,13 +910,7 @@ export function TableDataGrid() {
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
   // @ts-expect-error `local-only` is reserved for the Jazz Inspector.
   const queryOptions: QueryOptions = useMemo(() => {
-    if (runtime === "standalone") {
-      return { visibility: "hidden_from_live_query_list" };
-    }
-    return {
-      tier: "local-only",
-      visibility: "hidden_from_live_query_list",
-    };
+    return runtime === "standalone" ? {} : { tier: "local-only" };
   }, [runtime]);
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.

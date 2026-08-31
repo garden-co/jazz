@@ -351,16 +351,13 @@ describe("react-core provider/hooks browser coverage", () => {
     });
     manager.register(BASE_QUERY, entry, {
       tier: "edge",
-      visibility: "hidden_from_live_query_list",
+      branch: "draft",
     });
     const client = makeClient({ manager });
 
     render(
       <JazzProvider client={client}>
-        <UseAllView
-          query={BASE_QUERY}
-          options={{ tier: "edge", visibility: "hidden_from_live_query_list" }}
-        />
+        <UseAllView query={BASE_QUERY} options={{ tier: "edge", branch: "draft" }} />
       </JazzProvider>,
     );
 
@@ -396,17 +393,14 @@ describe("react-core provider/hooks browser coverage", () => {
   it("RCB-B09: useAllSuspense accepts QueryOptions without changing suspense behavior", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
-    manager.register(BASE_QUERY, entry, { visibility: "hidden_from_live_query_list" });
+    manager.register(BASE_QUERY, entry, { branch: "draft" });
     const client = makeClient({ manager });
 
     render(
       <CaptureErrorBoundary>
         <React.Suspense fallback={<div data-testid="rows-fallback">loading-rows</div>}>
           <JazzProvider client={client}>
-            <UseAllSuspenseView
-              query={BASE_QUERY}
-              options={{ visibility: "hidden_from_live_query_list" }}
-            />
+            <UseAllSuspenseView query={BASE_QUERY} options={{ branch: "draft" }} />
           </JazzProvider>
         </React.Suspense>
       </CaptureErrorBoundary>,
@@ -436,7 +430,7 @@ describe("react-core provider/hooks browser coverage", () => {
         data: [{ id: "b", title: "Deferred" }],
         error: null,
       }),
-      { visibility: "hidden_from_live_query_list" },
+      { branch: "draft" },
     );
     const client = makeClient({ manager });
 
@@ -450,7 +444,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
     render(
       <JazzProvider client={client}>
-        <UseAllView query={BASE_QUERY} options={{ visibility: "hidden_from_live_query_list" }} />
+        <UseAllView query={BASE_QUERY} options={{ branch: "draft" }} />
       </JazzProvider>,
     );
 

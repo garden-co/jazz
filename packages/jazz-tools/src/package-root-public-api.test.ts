@@ -23,6 +23,10 @@ const removedPropagationOption: QueryExecutionOptions = {
   // @ts-expect-error propagation is an internal read-routing control.
   propagation: "local-only",
 };
+const removedVisibilityOption: QueryExecutionOptions = {
+  // @ts-expect-error local-only subscriptions are omitted from introspection automatically.
+  visibility: "hidden_from_live_query_list",
+};
 const internalLocalOnlyTier: QueryExecutionOptions = {
   // @ts-expect-error local-only is reserved for internal Inspector reads.
   tier: "local-only",
@@ -32,6 +36,7 @@ void canonicalQueryExecutionOptions;
 void removedQueryExecutionOptions;
 void removedLocalUpdatesOption;
 void removedPropagationOption;
+void removedVisibilityOption;
 void internalLocalOnlyTier;
 
 // @ts-expect-error LocalUpdatesMode was removed from the public runtime surface.
@@ -42,6 +47,10 @@ import type { LocalUpdatesMode as PackageRootLocalUpdatesMode } from "./index.js
 import type { QueryPropagation as RuntimeQueryPropagation } from "./runtime/index.js";
 // @ts-expect-error QueryPropagation was removed from the package-root surface.
 import type { QueryPropagation as PackageRootQueryPropagation } from "./index.js";
+// @ts-expect-error QueryVisibility was removed from the public runtime surface.
+import type { QueryVisibility as RuntimeQueryVisibility } from "./runtime/index.js";
+// @ts-expect-error QueryVisibility was removed from the package-root surface.
+import type { QueryVisibility as PackageRootQueryVisibility } from "./index.js";
 
 // @ts-expect-error NativeRuntimeAdapter is intentionally not part of the public runtime surface.
 import type { NativeRuntimeAdapter as InternalNativeRuntimeAdapterExport } from "./runtime/index.js";
