@@ -46,6 +46,13 @@ export interface RuntimeSourcesConfig {
   browserWorkerPort?: MessagePort;
 
   /**
+   * @internal Exact auth-scoped browser root published by a same-origin
+   * inspector host. This is display/selection metadata only; worker admission
+   * still derives and verifies its own namespace from the attached session.
+   */
+  inspectorHostPhysicalDbName?: string;
+
+  /**
    * @internal Verified identity forwarded by the same-origin inspector host.
    *
    * This is only admitted together with `browserWorkerPort`; the native runtime

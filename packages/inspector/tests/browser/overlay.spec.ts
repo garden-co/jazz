@@ -129,13 +129,12 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     await expect(runtimeSelect).toBeVisible({ timeout: 10_000 });
     const runtimeOptions = runtimeSelect.locator("option");
     await expect(runtimeOptions).toHaveCount(2);
-    const primaryContext = runtimeOptions.filter({ hasNotText: "inspector-secondary-context" });
-    const secondaryContext = runtimeOptions.filter({ hasText: "inspector-secondary-context" });
+    const primaryContext = runtimeOptions.filter({ hasText: "local-first" });
+    const secondaryContext = runtimeOptions.filter({ hasText: "external" });
     const primaryContextValue = await primaryContext.getAttribute("value");
     const secondaryContextValue = await secondaryContext.getAttribute("value");
     expect(primaryContextValue).toBeTruthy();
     expect(secondaryContextValue).toBeTruthy();
-
     await runtimeSelect.selectOption(primaryContextValue!);
     await inspector.getByRole("link", { name: "View todos data" }).click();
     await expect(inspector.getByText("First seeded todo")).toBeVisible({ timeout: 30_000 });
@@ -177,6 +176,12 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     });
 
     await reloadedInspector.getByLabel("Runtime context").selectOption(secondaryContextValue!);
+    // The periodic context refresh only replaces a missing selection. It must
+    // not undo an explicit later user choice in favour of the host default.
+    await page.waitForTimeout(1_100);
+    await expect(reloadedInspector.getByLabel("Runtime context")).toHaveValue(
+      secondaryContextValue!,
+    );
     await expect(reloadedInspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
       timeout: 10_000,
     });

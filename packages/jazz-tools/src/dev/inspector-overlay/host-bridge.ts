@@ -1,5 +1,5 @@
 import type { Db, DbConfig } from "../../runtime/db.js";
-import { resolvePersistentDbBaseName } from "../../runtime/db.js";
+import { resolveDefaultPersistentDbName, resolvePersistentDbBaseName } from "../../runtime/db.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   internalSessionFromVerifiedReservedJwtPayload,
@@ -14,7 +14,10 @@ import {
   type JazzInspectorHost,
 } from "./inspector-host-types.js";
 import { openAggregatedBrowserInspectorControlPort } from "./browser-control-registry.js";
-import { getDbInternalSession } from "../../runtime/db-internal-session.js";
+import {
+  getDbInternalSession,
+  setTrustedReservedSession,
+} from "../../runtime/db-internal-session.js";
 
 function overlayBrowserWorkerSession(
   config: DbConfig,
@@ -56,7 +59,7 @@ function buildOverlayDbConfig(
         ? { cookieSession: config.cookieSession }
         : {};
 
-  return {
+  const physicalConfig: DbConfig = {
     appId: config.appId,
     serverUrl: config.serverUrl,
     env: config.env,
@@ -66,9 +69,23 @@ function buildOverlayDbConfig(
     // the host's IndexedDB-backed runtime. Pass the original logical base so
     // the usual app/environment/auth derivation yields that exact same root.
     driver: { type: "persistent", dbName: resolvePersistentDbBaseName(config) },
+  };
+  // The handle is a same-origin capability created by an already admitted Db.
+  // Derive the exact auth-scoped physical root in the host realm, where the
+  // verified reserved session is available. A child iframe has a separate
+  // module realm and cannot observe this WeakMap capability itself.
+  setTrustedReservedSession(physicalConfig, browserWorkerSession);
+  const inspectorHostPhysicalDbName = resolveDefaultPersistentDbName(physicalConfig);
+  return {
+    ...physicalConfig,
     ...(browserWorkerSession
-      ? { runtimeSources: { browserWorkerSession: structuredClone(browserWorkerSession) } }
-      : {}),
+      ? {
+          runtimeSources: {
+            browserWorkerSession: structuredClone(browserWorkerSession),
+            inspectorHostPhysicalDbName,
+          },
+        }
+      : { runtimeSources: { inspectorHostPhysicalDbName } }),
   };
 }
 
