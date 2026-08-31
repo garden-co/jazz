@@ -5159,7 +5159,8 @@ mod tests {
                                                 },
                                                 op: RelPredicateCmpOp::Eq,
                                                 right: RelValueRef::SessionRef(vec![
-                                                    "user_id".to_owned(),
+                                                    "claims".to_owned(),
+                                                    "sub".to_owned(),
                                                 ]),
                                             },
                                         }),
