@@ -368,19 +368,24 @@ type InternalQueryReadTier = QueryReadTier | "local-only";
  * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
  * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
  * - With `"deferred"`, all delivery is held until the tier confirms.
- * @internal
+ * Default is `"immediate"`.
  */
-type LocalUpdatesMode = "immediate" | "deferred";
+export type LocalUpdatesMode = "immediate" | "deferred";
 /**
  * Controls where the subscription reads data from.
  *
  * - With `"full"`, the subscription is sent to upstream servers, which push matching data back.
  * - With `"local-only"`, only local storage is queried and no server communication happens.
- *
- * Defaults to `"full"`.
- * @internal
  */
-type QueryPropagation = "full" | "local-only";
+export type QueryPropagation = "full" | "local-only";
+/**
+ * Whether this query should be shown in the inspector.
+ * Useful for helpers and framework internals that create subscriptions
+ * but should stay out of the DB inspector.
+ * Defaults to `"public"`.
+ */
+export type QueryVisibility = "public" | "hidden_from_live_query_list";
+
 /** Named values selecting one exact branch-local row coordinate. */
 export interface BranchSelector {
   values: Record<string, Value>;
@@ -398,10 +403,7 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  /**
-   * Determines what data is returned for queries and subscriptions.
-   * @deprecated DurabilityTier values remain accepted with their old meaning.
-   */
+  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
   tier?: QueryReadTier;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
@@ -444,6 +446,7 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   tier?: InternalQueryReadTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
+  visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
   runtimeSettledTier?: DurabilityTier | null;
 };
@@ -452,6 +455,7 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
+  visibility: QueryVisibility;
   branch?: BranchView;
 }
 
@@ -557,8 +561,18 @@ interface WriteContextPayload {
 
 /**
  * Subscription callback type.
+ *
+ * The function form is retained for compatibility. Prefer
+ * {@link SubscriptionCallbacks} so terminal failures are handled explicitly;
+ * otherwise they are reported to `console.error`.
  */
 export type SubscriptionCallback = (delta: RuntimeSubscriptionDelta) => void;
+export interface SubscriptionCallbacks {
+  /** Called for each native subscription delta. */
+  onUpdate: SubscriptionCallback;
+  /** Called once when the native subscription or update callback fails. */
+  onError?: (error: Error) => void;
+}
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
@@ -592,19 +606,18 @@ export function resolveEffectiveQueryExecutionOptions(
   const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
   return {
     tier: resolveReadTier(selectedTier),
-    localUpdates: options?.localUpdates ?? resolveLocalUpdatesMode(selectedTier),
+    localUpdates:
+      options?.localUpdates ?? (selectedTier === ReadTier.Remote ? "deferred" : "immediate"),
     propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
+    visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
 }
 
-function resolveLocalUpdatesMode(tier: InternalQueryReadTier): LocalUpdatesMode {
-  return tier === ReadTier.Remote ? "deferred" : "immediate";
-}
-
 /** @internal Low-level runtimes retain the legacy three-tier wire contract. */
 export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
-  return tier === ReadTier.LocalFirst || tier === "local-only"
+  if (tier === "local-only") return "local";
+  return tier === ReadTier.LocalFirst
     ? "local"
     : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
       ? "edge"
@@ -853,6 +866,20 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
+  /** Facade-owned subscription releases, fenced against terminal reentrancy. */
+  private activeSubscriptionReleases = new Map<number, () => void>();
+
+  private registerSubscriptionRelease(handle: number, release: () => void): void {
+    this.activeSubscriptionReleases.set(handle, release);
+  }
+
+  private releaseSubscription(handle: number): void {
+    const release = this.activeSubscriptionReleases.get(handle);
+    // Subscription ids are opaque facade results. Once their owner is gone,
+    // duplicate public calls are intentionally no-ops rather than raw native
+    // unsubscriptions (which could double-release a terminal handle).
+    release?.();
+  }
 
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
@@ -1595,27 +1622,29 @@ export class JazzClient {
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param query JSON-encoded runtime query specification
-   * @param callback Called with delta whenever results change
+   * @param callbacks Delta callback, or callbacks object with terminal error handling.
+   * Legacy function-form subscriptions report terminal failures to `console.error`.
    * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
     query: string,
-    callback: SubscriptionCallback,
+    callbacks: SubscriptionCallback | SubscriptionCallbacks,
     options?: QueryExecutionOptions,
     session?: Session,
   ): number {
-    return this.subscribeInternal(query, callback, publicQueryExecutionOptions(options), session);
+    return this.subscribeInternal(query, callbacks, publicQueryExecutionOptions(options), session);
   }
 
   /** @internal */
   subscribeInternal(
     query: string,
-    callback: SubscriptionCallback,
+    callbacks: SubscriptionCallback | SubscriptionCallbacks,
     options?: InternalQueryExecutionOptions,
     session?: Session,
   ): number {
+    const { onUpdate, onError } =
+      typeof callbacks === "function" ? { onUpdate: callbacks, onError: undefined } : callbacks;
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession
@@ -1630,16 +1659,60 @@ export class JazzClient {
       optionsJson,
     );
 
+    let terminal = false;
+    let nativeHandleReleased = false;
+    const releaseNativeHandle = () => {
+      if (nativeHandleReleased) return;
+      nativeHandleReleased = true;
+      if (this.activeSubscriptionReleases.get(handle) === releaseSubscription) {
+        this.activeSubscriptionReleases.delete(handle);
+      }
+      this.runtime.unsubscribe(handle);
+    };
+    const releaseSubscription = () => {
+      // A public unsubscribe is terminal too: a queued native frame must not
+      // re-enter application callbacks after its owner has been released.
+      terminal = true;
+      releaseNativeHandle();
+    };
+    this.registerSubscriptionRelease(handle, releaseSubscription);
+    const terminate = (error: Error, unsubscribe: boolean) => {
+      if (terminal) return;
+      terminal = true;
+      if (unsubscribe) this.releaseSubscription(handle);
+      if (!onError) {
+        console.error("Unhandled Jazz subscription error", error);
+        return;
+      }
+      try {
+        onError(error);
+      } catch (callbackError) {
+        console.error("Jazz subscription error callback failed", callbackError);
+      }
+    };
+
     try {
       this.runtime.executeSubscription(handle, (result) => {
-        if (result instanceof Error) throw result;
-        callback(result);
+        if (terminal) return;
+        if (result instanceof Error) {
+          // A terminal callback means this facade owns the now-dead native
+          // handle. Release it even if the core stream has stopped producing.
+          terminate(result, true);
+          return;
+        }
+        try {
+          onUpdate(result);
+        } catch (error) {
+          // User callback failures must not escape through the native tick or
+          // leave a live source publishing behind the terminal notification.
+          terminate(error instanceof Error ? error : new Error(String(error)), true);
+        }
       });
     } catch (error) {
       // createSubscription already transferred ownership to this facade. If
       // callback installation fails synchronously, no caller can own the
       // handle because subscribe() has not returned it yet.
-      this.runtime.unsubscribe(handle);
+      this.releaseSubscription(handle);
       throw error;
     }
 
@@ -1652,7 +1725,7 @@ export class JazzClient {
    * @param subscriptionId ID returned from subscribe()
    */
   unsubscribe(subscriptionId: number): void {
-    this.runtime.unsubscribe(subscriptionId);
+    this.releaseSubscription(subscriptionId);
   }
 
   /**
