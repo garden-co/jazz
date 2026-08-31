@@ -50,7 +50,6 @@ function makeClient() {
   const beginTransaction = vi.fn(() => "00000000000070008000000000000001");
   const client = {
     getSchema: () => new Map(Object.entries(app.wasmSchema)),
-    query,
     queryInternal: query,
     beginTransaction,
     onMutationError: vi.fn(),

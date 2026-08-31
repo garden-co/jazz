@@ -43,12 +43,7 @@ function makeClient() {
     connectTransport: vi.fn(),
     disconnectTransport: vi.fn(async () => undefined),
     onMutationError: vi.fn(),
-    // Db uses the internal entrypoints after it has lowered product tiers.
-    // Keep the public aliases too so this double makes an accidental regression
-    // to the wrong boundary immediately visible in assertions below.
-    query: vi.fn(async () => []),
     queryInternal,
-    subscribe: vi.fn(),
     subscribeInternal,
     unsubscribe: vi.fn((id: number) => subscriptionCallbacks.delete(id)),
     shutdown: vi.fn(async () => undefined),
@@ -56,9 +51,7 @@ function makeClient() {
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;
     disconnectTransport: ReturnType<typeof vi.fn>;
-    query: ReturnType<typeof vi.fn>;
     queryInternal: ReturnType<typeof vi.fn>;
-    subscribe: ReturnType<typeof vi.fn>;
     subscribeInternal: ReturnType<typeof vi.fn>;
     unsubscribe: ReturnType<typeof vi.fn>;
     subscriptionCallbacks: Map<number, (delta: RuntimeSubscriptionDelta) => void>;
