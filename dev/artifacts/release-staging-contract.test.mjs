@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -13,7 +20,10 @@ const wasmFiles = ["jazz_wasm_bg.wasm", "jazz_wasm_bg.wasm.d.ts", "jazz_wasm.d.t
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 
 test("NAPI staging script parses as the executable CI runs", () => {
-  execFileSync(process.execPath, ["--check", join(repositoryRoot, "dev/artifacts/stage-napi-loader.mjs")]);
+  execFileSync(process.execPath, [
+    "--check",
+    join(repositoryRoot, "dev/artifacts/stage-napi-loader.mjs"),
+  ]);
 });
 
 test("release workflow uploads the sealed WASM provenance manifest", () => {
@@ -32,7 +42,9 @@ test("release workflow does not carry a local NAPI generation pointer into packa
     join(repositoryRoot, ".github/workflows/build-jazz-packages.yml"),
     "utf8",
   );
-  const loaderUpload = workflow.match(/name: jazz-napi-loader[\s\S]*?if-no-files-found: error/)?.[0];
+  const loaderUpload = workflow.match(
+    /name: jazz-napi-loader[\s\S]*?if-no-files-found: error/,
+  )?.[0];
   assert.ok(loaderUpload, "missing jazz-napi loader artifact upload");
   assert.doesNotMatch(loaderUpload, /crates\/jazz-napi\/native-binding\.pointer\.cjs/);
   assert.match(loaderUpload, /crates\/jazz-napi\/native-loader\.provenance\.json/);
@@ -46,7 +58,12 @@ const napiPlatformTargets = {
 
 function writeAssembledNapiLoader(
   root,
-  { loader = true, fingerprintReceipt = true, fingerprintValue = fingerprint, platforms = ["linux-x64-gnu"] } = {},
+  {
+    loader = true,
+    fingerprintReceipt = true,
+    fingerprintValue = fingerprint,
+    platforms = ["linux-x64-gnu"],
+  } = {},
 ) {
   const packageDir = join(root, "crates/jazz-napi");
   if (loader)
@@ -68,7 +85,10 @@ function writeAssembledNapiLoader(
       profile: "release",
       nativeArtifactFingerprint: fingerprintValue,
       artifacts: [
-        { file: "native-loader.cjs", sha256: createHash("sha256").update(loaderBytes).digest("hex") },
+        {
+          file: "native-loader.cjs",
+          sha256: createHash("sha256").update(loaderBytes).digest("hex"),
+        },
       ],
     }),
   );
