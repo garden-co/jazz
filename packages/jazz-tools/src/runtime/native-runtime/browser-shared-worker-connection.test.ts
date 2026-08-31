@@ -29,6 +29,7 @@ class DelayedLeasePort {
     private readonly probeDelayMs = 0,
     private readonly closing = false,
     private readonly busyMessage: string | null = null,
+    private readonly cancellationError: string | null = null,
   ) {}
 
   start(): void {}
@@ -89,7 +90,14 @@ class DelayedLeasePort {
       // Model the worker's acknowledgement only after it has dealt with an
       // allocation that races the cancellation request.
       if (this.acknowledgeCancellation) {
-        setTimeout(() => this.emit({ type: "foreground-node-lease-cancelled" }), 0);
+        setTimeout(
+          () =>
+            this.emit({
+              type: "foreground-node-lease-cancelled",
+              ...(this.cancellationError ? { error: this.cancellationError } : {}),
+            }),
+          0,
+        );
       }
       return;
     }
@@ -264,6 +272,46 @@ describe("browser SharedWorker realm identity", () => {
 
     await vi.runAllTimersAsync();
     expect(port.closed).toBe(true);
+  });
+
+  it("allows a new foreground after cancellation learns owner admission failed", async () => {
+    vi.useFakeTimers();
+    const rejectedPort = new DelayedLeasePort(
+      10_001,
+      true,
+      true,
+      0,
+      false,
+      null,
+      "IndexedDB admission rejected",
+    );
+    const retryPort = new DelayedLeasePort(0);
+    let workerCount = 0;
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = ++workerCount === 1 ? rejectedPort : retryPort;
+      },
+    );
+    const options = { dbName: "cancelled-owner-admission", storageOwner: "owner" };
+
+    const first = SharedBrowserForegroundNodeLease.acquire(options);
+    const firstRejected = expect(first).rejects.toThrow("did not issue a foreground node lease");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await firstRejected;
+    await vi.runAllTimersAsync();
+    expect(rejectedPort.closed).toBe(true);
+
+    // Receiving the terminal cancellation reply clears the per-root cleanup
+    // coalescer. The next foreground gets a new port instead of a permanent
+    // "cleanup is still pending" rejection.
+    const retry = SharedBrowserForegroundNodeLease.acquire(options);
+    await vi.runAllTimersAsync();
+    const lease = await retry;
+    expect(workerCount).toBe(2);
+    const retired = lease.retire();
+    await vi.runAllTimersAsync();
+    await retired;
   });
 
   it("skips a closing worker generation before issuing a durable lease request", async () => {

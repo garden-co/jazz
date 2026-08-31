@@ -27,7 +27,6 @@ import type {
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
-
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
 (Error as ErrorConstructor & { stackTraceLimit?: number }).stackTraceLimit = 50;
@@ -453,7 +452,7 @@ async function acquireForegroundNodeLease(
     port.removeEventListener("message", onMessage);
     port.removeEventListener("messageerror", onMessageError);
   };
-  const finishCancellation = async (): Promise<void> => {
+  const finishCancellation = async (admissionError?: unknown): Promise<void> => {
     if (settled) return;
     // The allocation can finish after the client has requested cancellation.
     // Never publish that identity. If it exists, retire it durably before
@@ -462,7 +461,23 @@ async function acquireForegroundNodeLease(
     // A lease-pool transaction may already be in flight while `lease` is
     // still null. Wait for it before acknowledging cancellation: it can
     // commit a durable identity after this message handler starts.
-    if (!owner) return;
+    // A cancel can arrive before physical-owner admission resolves. If that
+    // admission rejects, there is no owner or lease to retire, but the client
+    // still needs its terminal cancellation receipt to release the retained
+    // cleanup port. Do not leave this as a no-op: it permanently coalesces
+    // later foreground opens behind a cleanup that can never complete.
+    if (!owner) {
+      if (admissionError === undefined) return;
+      settled = true;
+      post(port, {
+        type: "foreground-node-lease-cancelled",
+        error: asError(admissionError).message,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+      cleanup();
+      port.close();
+      maybeCloseWorker();
+      return;
+    }
     await allocationPromise?.catch(() => undefined);
     if (settled) return;
     // During an IndexedDB open cancellation can arrive after the physical
@@ -502,12 +517,15 @@ async function acquireForegroundNodeLease(
       maybeCloseWorker();
     }
   };
-  const requestCancellation = () => {
+  const requestCancellation = (admissionError?: unknown) => {
     if (settled) return cancellationCompletion;
     cancellationRequested = true;
     // Before an owner exists, the admission continuation calls us again after
-    // it has opened the physical root. Do not memoize a no-op completion.
-    if (owner && !cancellationCompletion) cancellationCompletion = finishCancellation();
+    // it has opened the physical root. An admission rejection is the other
+    // terminal continuation and must produce the same one-shot receipt.
+    if ((owner || admissionError !== undefined) && !cancellationCompletion) {
+      cancellationCompletion = finishCancellation(admissionError);
+    }
     return cancellationCompletion;
   };
   const retire = async (): Promise<void> => {
@@ -647,7 +665,7 @@ async function acquireForegroundNodeLease(
     } satisfies BrowserForegroundNodeLeaseAcquireResponse);
   } catch (error) {
     if (cancellationRequested) {
-      await requestCancellation();
+      await requestCancellation(error);
       return;
     }
     cleanup();
