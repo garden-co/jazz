@@ -947,6 +947,154 @@ fn authorization_scope_replies_retry_fifo_after_backpressure() {
     assert!(subscriber.borrow().pending_control_responses.is_empty());
 }
 
+// The exact bounded-adapter refusal and retained control queue are internal
+// transport state; the public API only observes the eventual receipt.
+#[test]
+fn queued_sibling_authorization_receipt_survives_backpressure_exactly_once() {
+    let identity = AuthorSubject::for_test_bytes([0xc8; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema());
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let subscriber = server.accept_subscriber(
+        Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        }),
+        identity,
+    );
+    let subscription = SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x31; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x32; 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let response = SyncMessage::AuthorizationScopeReceipt {
+        subscription,
+        receipt: AuthorizationScopeReceipt {
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: [0x41; 32],
+                subject: identity,
+                claims_digest: [0x42; 32],
+                policy_digest: [0x43; 32],
+            },
+            authority: [0x5f; 16],
+            link: identity,
+            authority_epoch: 1,
+            claims_revision: 2,
+            policy_epoch: 3,
+            settled_through: GlobalTime(4),
+            authorization_progress: 5,
+        },
+    };
+    subscriber
+        .borrow_mut()
+        .pending_control_responses
+        .push_back(PendingSubscriberControlResponse::Direct(response.clone()));
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("the refused sibling receipt remains queued");
+    assert_eq!(
+        subscriber
+            .borrow()
+            .pending_control_responses
+            .front()
+            .map(PendingSubscriberControlResponse::message),
+        Some(&response)
+    );
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("capacity retry accepts the sibling receipt");
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("a later tick must not duplicate the accepted receipt");
+    assert_eq!(
+        outbound
+            .borrow()
+            .iter()
+            .filter(|message| *message == &response)
+            .count(),
+        1
+    );
+    assert!(subscriber.borrow().pending_control_responses.is_empty());
+}
+
+// Fate-observer routing is connection-internal and cannot be inspected through
+// the public query API, so exercise the same subscriber send helper used by
+// canonical sibling fanout.
+#[test]
+fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
+    let identity = AuthorSubject::for_test_bytes([0xc9; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema());
+    let node = server.node();
+    let mut peer = PeerState::new();
+    let (_receiver, mut transport) = duplex();
+    let local_fate_routes = Rc::new(RefCell::new(BTreeMap::new()));
+    let downstream_fates = Rc::new(RefCell::new(Vec::new()));
+    let tx_id = TxId::new(TxTime(7), NodeUuid::from_bytes([0x61; 16]));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 0,
+        made_by: identity,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    };
+    let subscription = SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x62; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x63; 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through: GlobalTime(0),
+        reset_result_set: false,
+        version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
+            tx,
+            versions: Vec::new(),
+            scope: VersionBundleScope::ViewScoped,
+            fate: Fate::Pending,
+            global_time: None,
+            durability: DurabilityTier::Local,
+        })],
+        peer_payload_inventory: PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    });
+
+    send_subscriber_with_sync_context(
+        &node,
+        &mut peer,
+        transport.as_mut(),
+        &local_fate_routes,
+        &downstream_fates,
+        update,
+    )
+    .expect("canonical sibling update is accepted");
+
+    let routes = local_fate_routes.borrow();
+    let route = routes
+        .get(&tx_id)
+        .and_then(|routes| routes.first())
+        .expect("pending carrier registers its transaction fate route");
+    assert!(Rc::ptr_eq(
+        &route
+            .queue
+            .upgrade()
+            .expect("downstream fate queue remains live"),
+        &downstream_fates,
+    ));
+}
+
 #[test]
 fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     // This stays internal because trust is authenticated by the host at the

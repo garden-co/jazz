@@ -530,6 +530,26 @@ fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
     );
 }
 
+// The server-only generation stamp and scope receipt are wire details that the
+// public query API intentionally hides, so this stays a narrow internal test.
+#[test]
+fn sibling_scope_receipt_uses_the_view_stamped_canonical_generation() {
+    let canonical_generation = PeerPayloadInventory {
+        authorization_progress: Some(7),
+        ..PeerPayloadInventory::default()
+    };
+    assert_eq!(
+        authorization_progress_for_view_receipt(&canonical_generation, 0),
+        7,
+        "a sibling receipt must use the canonical generation already stamped on its view"
+    );
+    assert_eq!(
+        authorization_progress_for_view_receipt(&PeerPayloadInventory::default(), 3),
+        3,
+        "an ordinary unstamped view keeps its usage-site generation"
+    );
+}
+
 #[test]
 fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_clause() {
     let subscription = |seed| SubscriptionKey {

@@ -3911,13 +3911,14 @@ where
                         }
                         let pending_initial =
                             std::mem::take(&mut group.pending_initial_subscribers);
-                        let mut established_subscribers = group
-                            .subscribers
-                            .difference(&pending_initial)
-                            .copied()
-                            .collect::<BTreeSet<_>>();
                         let serving_initial = !pending_initial.is_empty();
-                        for subscription in pending_initial {
+                        if serving_initial {
+                            let mut established_subscribers = group
+                                .subscribers
+                                .difference(&pending_initial)
+                                .copied()
+                                .collect::<BTreeSet<_>>();
+                            for subscription in pending_initial {
                             let cloning_existing = group.initialized
                                 || peer.has_maintained_subscription(group_subscription);
                             let reconciled = if cloning_existing {
@@ -4003,19 +4004,22 @@ where
                                                 &sibling_update,
                                             )
                                         });
-                                    send_with_sync_context(
+                                    send_subscriber_with_sync_context(
                                         &self.node,
                                         peer,
                                         self.transport.as_mut(),
+                                        &self.local_fate_routes,
+                                        &self.downstream_fates,
                                         sibling_update,
                                     )?;
                                     if let Some((subscription, receipt)) = receipt {
-                                        self.transport
-                                            .send(SyncMessage::AuthorizationScopeReceipt {
+                                        queue_direct_control(
+                                            &mut self.pending_control_responses,
+                                            SyncMessage::AuthorizationScopeReceipt {
                                                 subscription,
                                                 receipt,
-                                            })
-                                            .map_err(transport_error)?;
+                                            },
+                                        );
                                     }
                                     sent_view_update = true;
                                 }
@@ -4130,6 +4134,7 @@ where
                             }
                             sent_view_update = true;
                             established_subscribers.insert(subscription);
+                        }
                         }
                         if serving_initial {
                             continue;
@@ -4851,6 +4856,15 @@ where
     Ok(())
 }
 
+pub(super) fn authorization_progress_for_view_receipt(
+    peer_payload_inventory: &crate::protocol::PeerPayloadInventory,
+    usage_site_progress: u64,
+) -> u64 {
+    peer_payload_inventory
+        .authorization_progress
+        .unwrap_or(usage_site_progress)
+}
+
 fn authorization_scope_receipt_for_view<S>(
     node: &NodeState<S>,
     peer: &PeerState,
@@ -4865,6 +4879,7 @@ where
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
+        peer_payload_inventory,
         ..
     }) = update
     else {
@@ -4880,7 +4895,10 @@ where
             claims_revision: node.session_claim_revision(link_identity),
             policy_epoch: node.active_catalogue_seq(),
             settled_through: *settled_through,
-            authorization_progress: peer.authorization_progress_for_subscription(*subscription),
+            authorization_progress: authorization_progress_for_view_receipt(
+                peer_payload_inventory,
+                peer.authorization_progress_for_subscription(*subscription),
+            ),
         },
     ))
 }
@@ -5265,7 +5283,7 @@ where
     send_sync_message_chunked(transport, message)
 }
 
-fn send_subscriber_with_sync_context<S>(
+pub(super) fn send_subscriber_with_sync_context<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
