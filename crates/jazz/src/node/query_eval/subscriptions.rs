@@ -6,16 +6,14 @@
 
 use super::*;
 #[derive(Clone, Copy)]
-enum ShapeReclamation<'a> {
+enum ShapeReclamation {
     One(ShapeId),
-    Many(&'a BTreeSet<ShapeId>),
 }
 
-impl ShapeReclamation<'_> {
+impl ShapeReclamation {
     fn contains(self, shape_id: ShapeId) -> bool {
         match self {
             Self::One(reclaimed) => reclaimed == shape_id,
-            Self::Many(reclaimed) => reclaimed.contains(&shape_id),
         }
     }
 }
@@ -174,52 +172,87 @@ where
             return;
         }
         self.query.peer_shape_owners.remove(&shape_id);
-        if self.query.locally_registered_shapes.contains(&shape_id) {
-            return;
-        }
-        self.reclaim_shapes(ShapeReclamation::One(shape_id));
+        self.reclaim_shape_if_unowned(shape_id);
     }
 
     pub(crate) fn release_shapes_for_peer(&mut self, peer: u64) {
         let mut newly_unowned = BTreeSet::new();
-        let locally_registered_shapes = &self.query.locally_registered_shapes;
         self.query.peer_shape_owners.retain(|shape_id, owners| {
             owners.remove(&peer);
             if owners.is_empty() {
-                if !locally_registered_shapes.contains(shape_id) {
-                    newly_unowned.insert(*shape_id);
-                }
+                newly_unowned.insert(*shape_id);
                 false
             } else {
                 true
             }
         });
-        if !newly_unowned.is_empty() {
-            self.reclaim_shapes(ShapeReclamation::Many(&newly_unowned));
+        for shape_id in newly_unowned {
+            self.reclaim_shape_if_unowned(shape_id);
         }
     }
 
-    fn reclaim_shapes(&mut self, reclaimed: ShapeReclamation<'_>) {
+    /// Retain a shape while this node is actively serving it to one concrete
+    /// downstream publication.  Unlike `register_shape_for_peer`, this owner
+    /// is local process state and must be retired with the `PeerState` that
+    /// created it.
+    pub(crate) fn register_query_subscription_for_peer(
+        &mut self,
+        publication_owner: u64,
+        shape_id: ShapeId,
+        ast: ShapeAst,
+        subscribe: Subscribe,
+    ) -> Result<(), Error> {
+        let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
+        self.retain_validated_shape_registration(shape_id, ast, shape)?;
+        let subscription = subscribe.subscription;
+        self.apply_subscribe(subscribe)?;
+        self.query
+            .outbound_shape_owners
+            .entry(shape_id)
+            .or_default()
+            .insert((publication_owner, subscription));
+        Ok(())
+    }
+
+    /// Release one served publication's ownership.  A shape is reclaimed only
+    /// after the final local registration, inbound peer registration, and
+    /// outbound publication has gone away.
+    pub(crate) fn release_query_subscription_for_peer(
+        &mut self,
+        publication_owner: u64,
+        subscription: SubscriptionKey,
+    ) {
+        let shape_id = subscription.shape_id;
+        let Some(owners) = self.query.outbound_shape_owners.get_mut(&shape_id) else {
+            return;
+        };
+        if !owners.remove(&(publication_owner, subscription)) {
+            return;
+        }
+        let became_unowned = owners.is_empty();
+        if became_unowned {
+            self.query.outbound_shape_owners.remove(&shape_id);
+        }
+        self.reclaim_shape_if_unowned(shape_id);
+    }
+
+    fn reclaim_shape_if_unowned(&mut self, shape_id: ShapeId) {
+        if self.query.locally_registered_shapes.contains(&shape_id)
+            || self.query.peer_shape_owners.contains_key(&shape_id)
+            || self.query.outbound_shape_owners.contains_key(&shape_id)
+        {
+            return;
+        }
+        self.reclaim_shapes(ShapeReclamation::One(shape_id));
+    }
+
+    fn reclaim_shapes(&mut self, reclaimed: ShapeReclamation) {
         match reclaimed {
             ShapeReclamation::One(shape_id) => {
                 self.parking.parked_shape_registrations.remove(&shape_id);
                 self.parking.parked_binding_deltas.remove(&shape_id);
                 self.query.registered_shapes.remove(&shape_id);
                 self.query.registered_bindings.remove(&shape_id);
-            }
-            ShapeReclamation::Many(shape_ids) => {
-                self.parking
-                    .parked_shape_registrations
-                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
-                self.parking
-                    .parked_binding_deltas
-                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
-                self.query
-                    .registered_shapes
-                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
-                self.query
-                    .registered_bindings
-                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
             }
         }
         self.query
@@ -263,6 +296,14 @@ where
             .retain(|key, _| !reclaimed.contains(key.shape_id));
     }
 
+    #[cfg(test)]
+    pub(crate) fn outbound_shape_owner_count_for_test(&self, shape_id: ShapeId) -> usize {
+        self.query
+            .outbound_shape_owners
+            .get(&shape_id)
+            .map_or(0, BTreeSet::len)
+    }
+
     pub(in crate::node) fn apply_subscribe(&mut self, subscribe: Subscribe) -> Result<(), Error> {
         let Some(shape) = self
             .query
@@ -278,17 +319,6 @@ where
             return Ok(());
         };
         self.apply_known_shape_subscribe(&shape, subscribe)
-    }
-
-    pub(crate) fn register_query_subscription_for_peer(
-        &mut self,
-        shape_id: ShapeId,
-        ast: ShapeAst,
-        subscribe: Subscribe,
-    ) -> Result<(), Error> {
-        let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
-        self.retain_validated_shape_registration(shape_id, ast, shape)?;
-        self.apply_subscribe(subscribe)
     }
 
     fn drain_parked_binding_deltas_for_shape(&mut self, shape_id: ShapeId) -> Result<(), Error> {
@@ -410,7 +440,7 @@ where
         }
     }
 
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     /// Test-only count of live wire binding registrations. This is deliberately
     /// usage-site state, rather than the deduplicated evaluator count.
     pub fn registered_query_binding_count_for_test(&self) -> usize {

@@ -1658,6 +1658,70 @@ fn non_global_peer_query_subscriptions_use_maintained_path() {
         .unwrap();
 }
 
+/// A served publication is a local owner of its shape even though it did not
+/// arrive through the inbound `RegisterShape` stream.  Inbound registration
+/// teardown therefore must not reclaim the common shape (and its bindings or
+/// settled caches) while either a direct or reconnected peer still publishes
+/// it.  The last served owner still releases the shape so this pin cannot leak.
+#[test]
+fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x45));
+    let (shape, binding) = title_shape_binding("shared");
+    let subscription = subscription_key(&shape, &binding);
+    let edge_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    let edge_subscription = subscription_key_with_opts(&shape, &binding, &edge_opts);
+    let mut first_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x45; 16]));
+    let mut reconnected_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x46; 16]));
+
+    first_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    // Refreshing the same publication replaces, rather than duplicates, its
+    // owner record.
+    first_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    core.register_shape_for_peer(
+        0xfeed,
+        shape.shape_id(),
+        ShapeAst::from_validated(&shape),
+    )
+    .unwrap();
+    reconnected_peer
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, edge_opts)
+        .unwrap();
+    assert_eq!(
+        core.outbound_shape_owner_count_for_test(shape.shape_id()),
+        2,
+        "each independently served peer must own its live publication"
+    );
+
+    // This was the P1 order: an unrelated inbound peer becomes the last
+    // inbound owner and unsubscribes after an outbound publication is live.
+    core.release_shape_for_peer(0xfeed, shape.shape_id());
+    assert!(
+        core.registered_shape(shape.shape_id()).is_some(),
+        "a live outbound publication must retain its shared shape after inbound teardown"
+    );
+    assert_eq!(core.registered_query_binding_count_for_test(), 2);
+
+    first_peer.forget_subscription_with_node(&mut core, subscription);
+    assert!(
+        core.registered_shape(shape.shape_id()).is_some(),
+        "a second peer serving the same policy partition remains an owner"
+    );
+
+    reconnected_peer.forget_subscription_with_node(&mut core, edge_subscription);
+    assert!(
+        core.registered_shape(shape.shape_id()).is_none(),
+        "the final outbound owner must reclaim shape registrations and caches"
+    );
+    assert_eq!(core.registered_query_binding_count_for_test(), 0);
+}
+
 fn row_result_set(
     peer: &PeerState,
     subscription: SubscriptionKey,

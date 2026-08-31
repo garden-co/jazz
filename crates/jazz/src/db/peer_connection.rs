@@ -3160,7 +3160,7 @@ where
                         for subscription in group.subscribers {
                             node.apply_unsubscribe(subscription);
                             if subscription != group_subscription {
-                                peer.forget_subscription(subscription);
+                                peer.forget_subscription_with_node(&mut node, subscription);
                             }
                             served.remove(&subscription);
                             if let Some(purpose) = scope_purposes.remove(&subscription) {

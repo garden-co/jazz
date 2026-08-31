@@ -303,6 +303,7 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         node.register_query_subscription_for_peer(
+            self.publication_owner,
             shape.shape_id(),
             ShapeAst::from_validated(shape),
             Subscribe {
@@ -1554,7 +1555,6 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, subscription);
-        self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
         let previous_member_result_set = self
             .publication_states
             .get(&subscription)
@@ -1577,7 +1577,12 @@ impl PeerState {
                 .then_some(state.authorization_progress)
         });
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
+        // Retire the old publication before retaining its replacement.  The
+        // served policy helper creates a lightweight publication state, so
+        // registering first would make this teardown release the just-created
+        // outbound shape owner on an initial hydration too.
         self.forget_subscription_with_node(node, subscription);
+        self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
         if let Some(known_state) = known_state {
             self.downstream_known_states
                 .insert(subscription, known_state);
