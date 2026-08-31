@@ -12,7 +12,9 @@ use std::borrow::Cow;
 
 use crate::ids::{AuthorSubject, NodeUuid};
 use crate::protocol::SyncMessage;
-use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
+use crate::protocol_limits::{
+    MAX_WIRE_BATCH_FRAMES, validate_logical_message_len, validate_wire_frame_len,
+};
 
 /// Current Jazz wire protocol version.
 ///
@@ -464,6 +466,81 @@ where
     }
 }
 
+/// Decode one canonical WebSocket carrier of raw wire frames without first
+/// allocating an attacker-declared outer `Vec`.
+///
+/// A batch is postcard's `Vec<Vec<u8>>` spelling: a canonical outer count,
+/// followed by a canonical byte length and payload for each frame. The count
+/// and every frame length are admitted before their corresponding allocation;
+/// the carrier also has to consume its complete input. This is the shared
+/// boundary for every WebSocket adapter, so no adapter can accidentally use
+/// postcard's general-purpose `Vec` decoder before enforcing the protocol
+/// cardinality limit.
+pub fn decode_websocket_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    if validate_wire_frame_len(bytes.len()).is_err() {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+
+    let mut remaining = bytes;
+    let count = take_canonical_postcard_usize(&mut remaining)?;
+    if count == 0 || count > MAX_WIRE_BATCH_FRAMES {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        let frame_len = take_canonical_postcard_usize(&mut remaining)?;
+        if validate_wire_frame_len(frame_len).is_err() {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        if frame_len > remaining.len() {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        let (frame, tail) = remaining.split_at(frame_len);
+        frames.push(frame.to_vec());
+        remaining = tail;
+    }
+
+    if remaining.is_empty() {
+        Ok(frames)
+    } else {
+        Err(postcard::Error::DeserializeBadEncoding)
+    }
+}
+
+/// Encode one canonical, complete WebSocket carrier of raw wire frames.
+///
+/// The physical carrier ceiling includes postcard's outer count and each
+/// frame-length prefix, so a raw frame at the frame ceiling can still be too
+/// large to carry by itself.
+pub fn encode_websocket_frame_batch(frames: &[Vec<u8>]) -> Result<Vec<u8>, postcard::Error> {
+    if frames.is_empty()
+        || frames.len() > MAX_WIRE_BATCH_FRAMES
+        || frames
+            .iter()
+            .any(|frame| validate_wire_frame_len(frame.len()).is_err())
+    {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+
+    let encoded = to_allocvec(frames)?;
+    if validate_wire_frame_len(encoded.len()).is_err() {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    Ok(encoded)
+}
+
+fn take_canonical_postcard_usize(bytes: &mut &[u8]) -> Result<usize, postcard::Error> {
+    let source = *bytes;
+    let (value, remaining) = take_from_bytes::<usize>(source)?;
+    let consumed = source.len() - remaining.len();
+    if to_allocvec(&value)? != source[..consumed] {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+    *bytes = remaining;
+    Ok(value)
+}
+
 /// Decode a semantic message only when its required capabilities were
 /// negotiated for this link.
 pub fn decode_sync_message_for_features(
@@ -799,8 +876,11 @@ mod tests {
         VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons, expand_version_carriers,
     };
-    use crate::protocol_limits::{MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_WIRE_FRAME_BYTES};
-    use crate::query::{BindingId, Query, ShapeId};
+    use crate::protocol_limits::{
+        MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES,
+        MAX_WIRE_FRAME_BYTES,
+    };
+    use crate::query::{BindingId, Operand, Predicate, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
@@ -994,6 +1074,86 @@ mod tests {
     }
 
     #[test]
+    fn websocket_batch_decoder_bounds_and_canonicalizes_before_outer_allocation() {
+        // This stays internal because it verifies the untrusted WebSocket
+        // carrier before an adapter has accepted any frame bytes.
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            decode_websocket_frame_batch(&valid).expect("canonical batch decodes"),
+            vec![vec![0x42]],
+        );
+
+        assert!(
+            decode_websocket_frame_batch(&[0]).is_err(),
+            "empty batch rejects"
+        );
+
+        // The outer count is rejected while it is still only a postcard
+        // varint; no attacker-declared Vec<Vec<u8>> has been allocated.
+        let count_flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
+            .expect("encode count flood below physical byte cap");
+        assert!(
+            decode_websocket_frame_batch(&count_flood).is_err(),
+            "count flood rejects before element decoding"
+        );
+
+        // `postcard` accepts these overlong lengths, but the frozen carrier
+        // contract admits only the encoder's shortest spelling.
+        assert!(
+            decode_websocket_frame_batch(&[0x81, 0x00, 0x01, 0x42]).is_err(),
+            "noncanonical outer count rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x81, 0x00, 0x42]).is_err(),
+            "noncanonical frame length rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x80]).is_err(),
+            "truncated frame length rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x02, 0x42]).is_err(),
+            "truncated frame body rejects"
+        );
+
+        let mut oversized_frame = vec![0x01];
+        oversized_frame.extend(
+            postcard::to_allocvec(&(MAX_WIRE_FRAME_BYTES + 1))
+                .expect("encode oversized frame length"),
+        );
+        assert!(
+            decode_websocket_frame_batch(&oversized_frame).is_err(),
+            "oversized frame rejects before frame allocation"
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0);
+        assert!(
+            decode_websocket_frame_batch(&suffixed).is_err(),
+            "trailing carrier bytes reject"
+        );
+    }
+
+    #[test]
+    fn websocket_batch_encoder_accounts_for_postcard_carrier_prefixes() {
+        // 2^21 - 4 remains a three-byte postcard length, so the outer count
+        // plus length prefix exactly fill the 2 MiB physical carrier limit.
+        let largest_singleton = vec![0x42; MAX_WIRE_FRAME_BYTES - 4];
+        let encoded = encode_websocket_frame_batch(std::slice::from_ref(&largest_singleton))
+            .expect("largest singleton carrier fits exactly");
+        assert_eq!(encoded.len(), MAX_WIRE_FRAME_BYTES);
+        assert_eq!(
+            decode_websocket_frame_batch(&encoded).expect("decode exact carrier"),
+            vec![largest_singleton],
+        );
+
+        assert!(
+            encode_websocket_frame_batch(&[vec![0x42; MAX_WIRE_FRAME_BYTES]]).is_err(),
+            "a raw frame at the raw-frame ceiling cannot carry its postcard prefixes"
+        );
+    }
+
+    #[test]
     fn oversized_wire_frame_rejects_before_postcard_decode() {
         let oversized = vec![0_u8; MAX_WIRE_FRAME_BYTES + 1];
 
@@ -1098,6 +1258,120 @@ mod tests {
         assert!(
             decode_sync_message(&encoded).is_err(),
             "remote request cardinality must be bounded before storage work"
+        );
+    }
+
+    fn nested_policy_predicate(nodes: usize) -> Predicate {
+        assert!(nodes > 0);
+        (1..nodes).fold(
+            Predicate::IsNull(Operand::Column("owner".to_owned())),
+            |predicate, _| Predicate::Not(Box::new(predicate)),
+        )
+    }
+
+    fn wide_policy_predicate(nodes: usize) -> Predicate {
+        assert!(nodes > 0);
+        Predicate::All(
+            (1..nodes)
+                .map(|_| Predicate::IsNull(Operand::Column("owner".to_owned())))
+                .collect(),
+        )
+    }
+
+    fn register_shape_with_policy_predicate(predicate: Predicate) -> SyncMessage {
+        SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+            ast: ShapeAst::new(
+                Query::from("documents").filter(predicate),
+                SchemaVersionId::from_bytes([0x33; 16]),
+            ),
+            opts: RegisterShapeOptions::default(),
+        }
+    }
+
+    #[test]
+    fn policy_predicate_wire_decode_enforces_depth_and_total_node_boundaries() {
+        // This stays internal because postcard decode is the untrusted wire
+        // boundary; public query builders only construct already-owned trees.
+        let at_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
+            MAX_POLICY_EXPRESSION_DEPTH,
+        ));
+        let encoded = encode_sync_message(&at_depth_limit).expect("encode depth-limit policy");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("exact policy depth boundary remains valid"),
+            at_depth_limit
+        );
+
+        let over_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
+            MAX_POLICY_EXPRESSION_DEPTH + 1,
+        ));
+        let encoded =
+            encode_sync_message(&over_depth_limit).expect("encode over-depth policy fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "policy depth must be rejected while postcard is parsing"
+        );
+
+        let at_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
+            MAX_POLICY_EXPRESSION_NODES,
+        ));
+        let encoded = encode_sync_message(&at_node_limit).expect("encode node-limit policy");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("exact policy node boundary remains valid"),
+            at_node_limit
+        );
+
+        let over_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
+            MAX_POLICY_EXPRESSION_NODES + 1,
+        ));
+        let encoded =
+            encode_sync_message(&over_node_limit).expect("encode over-node policy fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "policy node count must be rejected while postcard is parsing"
+        );
+    }
+
+    #[test]
+    fn ordinary_policy_predicate_variants_keep_their_postcard_roundtrip() {
+        let operands = || {
+            (
+                Operand::Column("owner".to_owned()),
+                Operand::Param("subject".to_owned()),
+            )
+        };
+        let (eq_left, eq_right) = operands();
+        let (ne_left, ne_right) = operands();
+        let (gt_left, gt_right) = operands();
+        let (gte_left, gte_right) = operands();
+        let (lt_left, lt_right) = operands();
+        let (lte_left, lte_right) = operands();
+        let (contains_left, contains_right) = operands();
+        let predicate = Predicate::All(vec![
+            Predicate::Any(Vec::new()),
+            Predicate::Eq(eq_left, eq_right),
+            Predicate::Ne(ne_left, ne_right),
+            Predicate::In(
+                Operand::Column("team".to_owned()),
+                vec![Operand::Param("team".to_owned())],
+            ),
+            Predicate::Gt(gt_left, gt_right),
+            Predicate::Gte(gte_left, gte_right),
+            Predicate::Lt(lt_left, lt_right),
+            Predicate::Lte(lte_left, lte_right),
+            Predicate::Contains(contains_left, contains_right),
+            Predicate::EnumMatch {
+                column: "status".to_owned(),
+                case: "active".to_owned(),
+                payload: Box::new(Predicate::IsNull(Operand::Column("deleted_at".to_owned()))),
+            },
+        ]);
+        let message = register_shape_with_policy_predicate(predicate);
+        let encoded = encode_sync_message(&message).expect("encode ordinary policy variants");
+
+        assert_eq!(
+            decode_sync_message(&encoded).expect("decode ordinary policy variants"),
+            message
         );
     }
 

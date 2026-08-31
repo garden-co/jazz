@@ -66,12 +66,43 @@ fn install_enum_case_ids(
         .iter()
         .copied()
         .enumerate()
-        .map(|(ordinal, id)| GlobalScalarEnumCaseId {
-            id,
-            introducing_schema,
-            introducing_ordinal: ordinal as u8,
+        .map(|(ordinal, id)| {
+            Ok(GlobalScalarEnumCaseId {
+                id,
+                introducing_schema,
+                introducing_ordinal: u8::try_from(ordinal)
+                    .map_err(|_| Error::InvalidStoredValue("scalar enum tag exhausted"))?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, Error>>()?;
+    let shared = slot.len().min(expected.len());
+    if slot[..shared] != expected[..shared] || slot.len() > expected.len() {
+        return Err(Error::InvalidStoredValue(
+            "enum registry conflicts with authority identities",
+        ));
+    }
+    slot.extend(expected.into_iter().skip(slot.len()));
+    Ok(())
+}
+
+fn install_payload_enum_case_ids(
+    slot: &mut Vec<GlobalEnumCaseId>,
+    ids: &[crate::ids::GlobalPhysicalEnumVariantId],
+    introducing_schema: SchemaVersionId,
+) -> Result<(), Error> {
+    let expected = ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(ordinal, id)| {
+            Ok(GlobalEnumCaseId {
+                id,
+                introducing_schema,
+                introducing_ordinal: u32::try_from(ordinal)
+                    .map_err(|_| Error::InvalidStoredValue("payload enum tag exhausted"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     let shared = slot.len().min(expected.len());
     if slot[..shared] != expected[..shared] || slot.len() > expected.len() {
         return Err(Error::InvalidStoredValue(
@@ -154,7 +185,7 @@ fn hydrate_nested_scalar_enum_cases(
         }
         ValueType::Enum(schema) => {
             for (ordinal, case) in schema.cases.iter().enumerate() {
-                let identity = GlobalScalarEnumCaseId {
+                let identity = GlobalEnumCaseId {
                     id: *identities
                         .get(authored_path)
                         .and_then(|ids| ids.get(ordinal))
@@ -162,7 +193,9 @@ fn hydrate_nested_scalar_enum_cases(
                             "nested payload enum authority identity missing",
                         ))?,
                     introducing_schema,
-                    introducing_ordinal: ordinal as u8,
+                    introducing_ordinal: u32::try_from(ordinal).map_err(|_| {
+                        Error::InvalidStoredValue("nested payload enum tag exhausted")
+                    })?,
                 };
                 hydrate_nested_scalar_enum_cases(
                     &records::ValueType::Record(Box::new(case.payload.clone())),
@@ -179,7 +212,7 @@ fn hydrate_nested_scalar_enum_cases(
     Ok(())
 }
 
-fn global_case_path(path: &str, case: &GlobalScalarEnumCaseId) -> String {
+fn global_case_path(path: &str, case: &GlobalEnumCaseId) -> String {
     format!("{path}/case/{}", case.id.0.simple())
 }
 
@@ -192,7 +225,7 @@ fn hydrate_nested_payload_enum_cases(
     introducing_schema: SchemaVersionId,
     authored_path: &str,
     path: &str,
-    output: &mut BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+    output: &mut BTreeMap<String, Vec<GlobalEnumCaseId>>,
 ) -> Result<(), Error> {
     use records::ValueType;
     match value_type {
@@ -250,7 +283,7 @@ fn hydrate_nested_payload_enum_cases(
                     "nested payload enum authority identity width mismatch",
                 ));
             }
-            install_enum_case_ids(
+            install_payload_enum_case_ids(
                 output.entry(path.to_owned()).or_default(),
                 ids,
                 introducing_schema,
@@ -288,6 +321,7 @@ mod query_eval;
 mod recovery;
 mod source_resolution;
 mod views;
+pub(crate) use open_tx::TransactionBranchRowState;
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]
@@ -781,6 +815,27 @@ struct QueryServing {
     version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
+    /// Connection epochs retaining each peer-installed or peer-parked shape.
+    ///
+    /// One owner is recorded per peer regardless of repeated registration or
+    /// the number of read-view registrations sharing the shape.
+    peer_shape_owners: BTreeMap<ShapeId, BTreeSet<u64>>,
+    /// Shapes registered by the local runtime rather than a served peer.
+    ///
+    /// Local ownership pins a shared shape after the last remote owner leaves.
+    locally_registered_shapes: BTreeSet<ShapeId>,
+    /// Served publications retaining each shape, keyed by the peer-state
+    /// instance and concrete usage subscription that opened the publication.
+    ///
+    /// These are deliberately distinct from `peer_shape_owners`: the latter
+    /// tracks an inbound peer's `RegisterShape` lifetime, while this records
+    /// this node serving a downstream peer. Both kinds of owner may retain the
+    /// same shape concurrently.
+    outbound_shape_owners: BTreeMap<ShapeId, BTreeSet<(u64, SubscriptionKey)>>,
+    /// Served publications retaining each concrete binding view.  This keeps
+    /// one peer's retirement from leaving its binding receipts resident, while
+    /// still permitting multiple peer states to share an identical binding.
+    outbound_binding_owners: BTreeMap<SubscriptionKey, BTreeSet<u64>>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
     // A wire subscription is identified by its usage binding handle *and* read
     // view. The same canonical binding id may legitimately be registered at

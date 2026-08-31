@@ -20,7 +20,7 @@ use futures::SinkExt as _;
 use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::tools::Session;
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame,
@@ -891,11 +891,10 @@ async fn drain_ws_outbound(
 }
 
 fn decode_single_ws_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
-    let mut frames = decode_ws_frame_batch(bytes)?;
-    if frames.len() == 1 {
-        Ok(frames.remove(0))
-    } else {
-        postcard::from_bytes(bytes)
+    match decode_ws_frame_batch(bytes) {
+        Ok(mut frames) if frames.len() == 1 => Ok(frames.remove(0)),
+        Ok(_) => Err(postcard::Error::DeserializeBadEncoding),
+        Err(_) => jazz::wire::decode_frame(bytes),
     }
 }
 
@@ -908,19 +907,7 @@ fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error
 }
 
 fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    if bytes.len() > MAX_WIRE_FRAME_BYTES {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
-    }
-    let frames = jazz::wire::decode_postcard_exact::<Vec<Vec<u8>>>(bytes)?;
-    if frames.is_empty()
-        || frames.len() > MAX_WIRE_BATCH_FRAMES
-        || frames
-            .iter()
-            .any(|frame| validate_wire_frame_len(frame.len()).is_err())
-    {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
-    }
-    Ok(frames)
+    jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
 async fn send_ws_encoded_frames(
@@ -955,24 +942,23 @@ fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard:
     let mut batches = Vec::new();
     let mut current = Vec::new();
     for frame in frames {
-        if validate_wire_frame_len(frame.len()).is_err() {
-            return Err(postcard::Error::SerializeBufferFull);
-        }
         let mut candidate = current.clone();
         candidate.push(frame.clone());
-        let encoded = postcard::to_allocvec(&candidate)?;
-        if (current.len() >= MAX_WIRE_BATCH_FRAMES || encoded.len() > MAX_WIRE_FRAME_BYTES)
-            && !current.is_empty()
-        {
-            batches.push(postcard::to_allocvec(&current)?);
+        let candidate_fits = jazz::wire::encode_websocket_frame_batch(&candidate).is_ok();
+        if !candidate_fits && !current.is_empty() {
+            batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
             current.clear();
-        } else if encoded.len() > MAX_WIRE_FRAME_BYTES {
+            // A singleton has its own count and length prefixes. Validate the
+            // actual carrier after the flush instead of assuming a raw frame
+            // at the frame limit can fit by itself.
+            jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
+        } else if !candidate_fits {
             return Err(postcard::Error::SerializeBufferFull);
         }
         current.push(frame.clone());
     }
     if !current.is_empty() {
-        batches.push(postcard::to_allocvec(&current)?);
+        batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
     }
     Ok(batches)
 }
@@ -1012,6 +998,7 @@ mod tests {
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::NodeUuid;
     use jazz::protocol::SyncMessage;
+    use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
     use jazz::wire::{
@@ -1057,6 +1044,23 @@ mod tests {
         let batch = postcard::to_allocvec(&encoded).unwrap();
 
         assert_eq!(decode_ws_frame_batch(&batch).unwrap(), frames);
+    }
+
+    #[test]
+    fn raw_handshake_frame_consumes_the_complete_carrier() {
+        let frame = WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            current_wire_features(),
+        ));
+        let raw = encode_frame(&frame).expect("encode raw handshake frame");
+        assert_eq!(decode_single_ws_frame(&raw).unwrap(), frame);
+
+        let mut suffixed = raw;
+        suffixed.push(0);
+        assert!(
+            decode_single_ws_frame(&suffixed).is_err(),
+            "a raw frame plus a suffix must not acquire a second handshake interpretation"
+        );
     }
 
     #[test]
@@ -1881,6 +1885,29 @@ mod tests {
                 .expect("decode remaining bounded batch")
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn websocket_frame_batches_never_emit_a_carrier_over_the_physical_cap() {
+        let largest_singleton = vec![0x42; MAX_WIRE_FRAME_BYTES - 4];
+        let batches = encode_ws_frame_batches(std::slice::from_ref(&largest_singleton))
+            .expect("largest singleton carrier fits exactly");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), MAX_WIRE_FRAME_BYTES);
+        assert_eq!(
+            decode_ws_encoded_frame_batch(&batches[0]).expect("decode exact carrier"),
+            vec![largest_singleton],
+        );
+
+        let raw_limit = vec![0x42; MAX_WIRE_FRAME_BYTES];
+        assert!(
+            encode_ws_frame_batches(std::slice::from_ref(&raw_limit)).is_err(),
+            "raw limit frame alone cannot fit its carrier prefixes"
+        );
+        assert!(
+            encode_ws_frame_batches(&[vec![0x11], raw_limit]).is_err(),
+            "flushing an earlier frame must still validate the oversized singleton"
         );
     }
 

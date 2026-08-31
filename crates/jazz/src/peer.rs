@@ -10,9 +10,11 @@ mod delivery;
 use delivery::*;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
+use groove::records::Value;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
@@ -54,6 +56,10 @@ pub use subscription_state::{PeerEvictionPins, PeerRole};
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]
 pub struct PeerState {
+    /// Stable process-local identity used to release served-shape ownership.
+    /// It is intentionally not a wire identity: reconnecting a peer state
+    /// retains its publications, while a new peer state cannot release them.
+    publication_owner: u64,
     role: PeerRole,
     permission_identity: Option<AuthorSubject>,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
@@ -80,7 +86,14 @@ pub struct PeerState {
 impl Default for PeerState {
     fn default() -> Self {
         Self {
-            role: PeerRole::Relay,
+            publication_owner: NEXT_PUBLICATION_OWNER.fetch_add(1, Ordering::Relaxed),
+            // The default is a standalone, SYSTEM-scoped peer helper. A real
+            // relay can multiplex admitted sessions and must opt into the
+            // explicit `PeerState::relay()` role, where every served
+            // subscription is required to carry its immutable policy binding.
+            role: PeerRole::ClientLink {
+                identity: AuthorSubject::SYSTEM,
+            },
             permission_identity: None,
             shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,
@@ -95,6 +108,8 @@ impl Default for PeerState {
         }
     }
 }
+
+static NEXT_PUBLICATION_OWNER: AtomicU64 = AtomicU64::new(1);
 
 include!("peer/publication.rs");
 include!("peer/known_state.rs");

@@ -1,5 +1,6 @@
 import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
-import type { DbSubscriptionSource, QueryBuilder, QueryOptions } from "./runtime/db.js";
+import { type DbSubscriptionSource, type QueryBuilder, type QueryOptions } from "./runtime/db.js";
+import { isInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { Session } from "./runtime/context.js";
 
 type UseAllStatePending<T> = {
@@ -211,7 +212,7 @@ export class SubscriptionsOrchestrator {
    * {@link makeQueryKey} to register, and {@link getCacheEntry} to subscribe.
    */
   computeKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
-    return `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
+    return `${this.config.appId}:${serializeQueryOptions(this.prepareQueryOptions(options))}:${query._build()}`;
   }
 
   makeQueryKey<T extends { id: string }>(
@@ -219,10 +220,11 @@ export class SubscriptionsOrchestrator {
     options?: QueryOptions,
     snapshot?: T[],
   ): string {
-    const key = this.computeKey(query, options);
+    const preparedOptions = this.prepareQueryOptions(options);
+    const key = `${this.config.appId}:${serializeQueryOptions(preparedOptions)}:${query._build()}`;
     this.queryDefinitions.set(key, {
       query,
-      options,
+      options: preparedOptions,
       snapshot: snapshot ? [...snapshot] : undefined,
     });
     // A re-seed invalidates any memoised pre-entry snapshot state.
@@ -235,6 +237,10 @@ export class SubscriptionsOrchestrator {
     }
 
     return key;
+  }
+
+  private prepareQueryOptions(options?: QueryOptions): QueryOptions | undefined {
+    return this.db.prepareQueryOptions?.(options) ?? options;
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
@@ -386,42 +392,58 @@ export class SubscriptionsOrchestrator {
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     const generation = entry.generation;
+    const reject = (error: unknown) => {
+      if (entry.generation !== generation || entry.state.status === "rejected") return;
+      entry.state = { status: "rejected", data: undefined, error };
+      entry.rejectfulfilled(error);
+      for (const listener of Array.from(entry.listeners)) {
+        try {
+          listener.onError?.(error);
+        } catch (callbackError) {
+          console.error("Jazz subscription error callback failed", callbackError);
+        }
+      }
+      this.scheduleCleanup(entry);
+    };
     try {
       const subscription = this.db.subscribeDelta<T>(
         entry.query,
-        (delta) => {
-          if (entry.generation !== generation) return;
-          const wasPending = entry.state.status === "pending";
-          const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
-          applySubscriptionDelta(data, delta);
-          entry.state = {
-            status: "fulfilled",
-            data,
-            error: null,
-          };
+        {
+          onDelta: (delta) => {
+            if (entry.generation !== generation || entry.state.status === "rejected") return;
+            const wasPending = entry.state.status === "pending";
+            const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
+            applySubscriptionDelta(data, delta);
+            entry.state = {
+              status: "fulfilled",
+              data,
+              error: null,
+            };
 
-          if (wasPending) {
-            entry.resolvefulfilled(data);
-          }
-
-          for (const listener of Array.from(entry.listeners)) {
             if (wasPending) {
-              listener.onfulfilled?.(data);
-            } else if (delta.reset) {
-              listener.onReset?.();
-              listener.onfulfilled?.(data);
-            } else {
-              listener.onDelta?.(delta);
+              entry.resolvefulfilled(data);
             }
-          }
 
-          if (entry.listeners.size === 0) {
-            this.scheduleCleanup(entry);
-          }
+            for (const listener of Array.from(entry.listeners)) {
+              if (wasPending) {
+                listener.onfulfilled?.(data);
+              } else if (delta.reset) {
+                listener.onReset?.();
+                listener.onfulfilled?.(data);
+              } else {
+                listener.onDelta?.(delta);
+              }
+            }
 
-          if (wasPending && data.length === 0) {
-            this.scheduleEmptyRefresh(entry, generation, this.session ?? undefined);
-          }
+            if (entry.listeners.size === 0) {
+              this.scheduleCleanup(entry);
+            }
+
+            if (wasPending && data.length === 0) {
+              this.scheduleEmptyRefresh(entry, generation, this.session ?? undefined);
+            }
+          },
+          onError: reject,
         },
         entry.options,
         this.session ?? undefined,
@@ -429,29 +451,16 @@ export class SubscriptionsOrchestrator {
       entry.unsubscribe = subscription;
       if (subscription.ready) {
         void subscription.ready.catch((error: unknown) => {
-          // A newer subscription or a caller teardown owns its own result.
-          // Never let a stale browser-worker open failure reject a recreated
-          // query entry.
+          // `onError` may already have terminalized this generation before its
+          // admission promise rejects. Route both paths through the same
+          // guarded transition so listeners and suspense receive exactly one
+          // terminal error.
           if (entry.generation !== generation || entry.unsubscribe !== subscription) return;
-          entry.state = { status: "rejected", data: undefined, error };
-          entry.rejectfulfilled(error);
-          for (const listener of Array.from(entry.listeners)) {
-            listener.onError?.(error);
-          }
-          this.scheduleCleanup(entry);
+          reject(error);
         });
       }
     } catch (error) {
-      // Only a synchronous setup (protocol-level) failure from the delta source
-      // lands here and drives the entry to `rejected`. Data-level errors inside
-      // an established subscription flow through the subscription's own on-error
-      // channel and do not reject the entry; that separation is intentional.
-      entry.state = { status: "rejected", data: undefined, error };
-      entry.rejectfulfilled(error);
-      for (const listener of Array.from(entry.listeners)) {
-        listener.onError?.(error);
-      }
-      this.scheduleCleanup(entry);
+      reject(error);
     }
   }
 
@@ -539,9 +548,9 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {
-  if (!options) {
-    return "{}";
-  }
-
-  return JSON.stringify(options);
+  // The Inspector capability is deliberately non-enumerable, so it cannot be
+  // forwarded as an application option. Retain it in cache identity: otherwise
+  // an overlay query could share a full-propagation entry with the host app.
+  const serialized = JSON.stringify(options ?? {});
+  return isInspectorLocalQueryOptions(options) ? `inspector-local:${serialized}` : serialized;
 }

@@ -158,12 +158,12 @@ type NativeUpdateOptions = NativeWriteOptions & {
   base?: unknown;
 };
 
-type NativeUpsertOptions = NativeWriteOptions & {
-  branch?: unknown;
-};
+type NativeUpsertOptions = NativeUpdateOptions;
 
 type NativeDeleteOptions = NativeUpdateOptions;
-type NativeRestoreOptions = NativeUpsertOptions;
+type NativeRestoreOptions = NativeWriteOptions & {
+  branch?: unknown;
+};
 
 type NativeDb = {
   // Native runtime adapters may close synchronously or asynchronously and may
@@ -1659,9 +1659,11 @@ export class NativeRuntimeAdapter implements Runtime {
       attribution && !tx
         ? requireBackendAttributionAbi(this.db.upsertEncodedAttributed, "upsert")
         : undefined;
-    const existing = tx
-      ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
-      : this.readRow(table, rowId, writeIdentity);
+    const existing = branchView
+      ? true
+      : tx
+        ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
+        : this.readRow(table, rowId, writeIdentity);
     let cells: Uint8Array;
     try {
       cells = existing
@@ -1676,7 +1678,8 @@ export class NativeRuntimeAdapter implements Runtime {
         rowId,
         cells,
         {
-          branch: branchView?.head,
+          head: branchView?.head,
+          base: branchView?.base,
           updatedAtMs: updatedAtMs ?? undefined,
         },
       );
@@ -1695,7 +1698,8 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       return this.db.upsertEncoded(table, rowId, cells, {
         author: writeIdentity,
-        branch: branchView?.head,
+        head: branchView?.head,
+        base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
       });
     });

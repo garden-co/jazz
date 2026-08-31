@@ -1,3 +1,25 @@
+/// Namespace for edge authority support receivers retained by deferred fates.
+/// A canonical policy clause may be shared by several authenticated sessions,
+/// but each parked fate owns an immutable claims snapshot.
+const EDGE_SCOPE_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("9d5c71f0-7e3f-51b6-bb79-fab31a4ad793");
+
+fn edge_scope_subscription_key(
+    canonical: SubscriptionKey,
+    policy_binding: &(AuthorSubject, BTreeMap<String, Value>),
+) -> SubscriptionKey {
+    let identity = postcard::to_allocvec(&(canonical, policy_binding))
+        .expect("edge support usage identity is postcard encodable");
+    SubscriptionKey {
+        shape_id: canonical.shape_id,
+        binding_id: crate::query::BindingId(uuid::Uuid::new_v5(
+            &EDGE_SCOPE_SUBSCRIPTION_NAMESPACE,
+            &identity,
+        )),
+        read_view: canonical.read_view,
+    }
+}
+
 impl PeerState {
     /// Ingest a client mergeable commit unit at an edge boundary.
     ///
@@ -13,6 +35,7 @@ impl PeerState {
         versions: Vec<VersionRecord>,
         maintenance_now_ms: u64,
         admission_now_ms: u64,
+        policy_claims: BTreeMap<String, Value>,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: OrderedKvStorage + ReopenableStorage,
@@ -23,45 +46,46 @@ impl PeerState {
                 "edge fate deferral only supports mergeable commit units",
             ));
         }
+        if let Some(existing) = self.deferred_edge_fates.get(&tx.tx_id) {
+            // A deferred fate owns the exact policy snapshot that first
+            // parked it. Check retransmit identity before allocating any
+            // incoming-claims support: a refreshed session may retry these
+            // bytes, but it must neither replace A nor leak an unretained B
+            // receiver beside it.
+            let mut existing_versions = existing.versions.clone();
+            existing_versions.sort();
+            let mut incoming_versions = versions;
+            incoming_versions.sort();
+            if existing.tx != tx || existing_versions != incoming_versions {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            return Ok(PublicationOutcome::settled(Vec::new()));
+        }
         let permission_identity = self.identity();
         if let Some(scope_subscriptions) = self.unsettled_authority_scope_subscriptions(
             node,
             permission_identity,
+            policy_claims.clone(),
             &versions,
             Some(tx.tx_id),
             true,
         )
         .await?
         {
-            if let Some(existing) = self.deferred_edge_fates.get(&tx.tx_id) {
-                // The durable ingest path rejects two different commit units
-                // for one transaction id.  Deferred admission sits before that
-                // path, so retain the same conflict boundary here rather than
-                // silently treating a conflicting upload as a retransmit.
-                // Version order is transport-insignificant and is normalized
-                // by NodeState on eventual admission.
-                let mut existing_versions = existing.versions.clone();
-                existing_versions.sort();
-                let mut incoming_versions = versions;
-                incoming_versions.sort();
-                if existing.tx != tx || existing_versions != incoming_versions {
-                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                }
-            } else {
-                for subscription in &scope_subscriptions {
-                    self.retain_edge_scope_subscription(*subscription);
-                }
-                self.deferred_edge_fates.insert(
-                    tx.tx_id,
-                    DeferredEdgeFate {
-                        tx,
-                        versions,
-                        admission_now_ms,
-                        permission_identity,
-                        scope_subscriptions,
-                    },
-                );
+            for subscription in &scope_subscriptions {
+                self.retain_edge_scope_subscription(*subscription);
             }
+            self.deferred_edge_fates.insert(
+                tx.tx_id,
+                DeferredEdgeFate {
+                    tx,
+                    versions,
+                    admission_now_ms,
+                    permission_identity,
+                    policy_claims,
+                    scope_subscriptions,
+                },
+            );
             return Ok(PublicationOutcome::settled(Vec::new()));
         }
         node.ingest_edge_authority_mergeable_commit_unit_with_identity(
@@ -95,6 +119,7 @@ impl PeerState {
                 .unsettled_authority_scope_subscriptions(
                     node,
                     fate.permission_identity,
+                    fate.policy_claims,
                     &fate.versions,
                     Some(tx_id),
                     false,
@@ -168,6 +193,7 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         writer: AuthorSubject,
+        claims: BTreeMap<String, Value>,
         versions: &[VersionRecord],
         candidate_tx_id: TxId,
     ) -> Result<(), Error>
@@ -198,10 +224,25 @@ impl PeerState {
                 if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
                     continue;
                 }
+                let policy_binding = (writer, claims.clone());
+                let maintained = self
+                    .publication_states
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some());
+                if maintained
+                    && self.subscription_policy_binding(subscription) != Some(policy_binding.clone())
+                {
+                    // A canonical support key does not encode the session
+                    // snapshot. Reusing a receiver installed by an earlier
+                    // claim revision (or a sibling link) would prove this
+                    // commit under the wrong immutable policy binding.
+                    self.forget_subscription_with_node(node, subscription);
+                }
                 let (cut, progress) = if self
                     .publication_states
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
+                    && self.subscription_policy_binding(subscription) == Some(policy_binding)
                 {
                     (
                         node.committed_global_time(),
@@ -212,6 +253,7 @@ impl PeerState {
                         .rehydrate_authorization_support_query_for_identity(
                             node,
                             writer,
+                            claims.clone(),
                             subscription,
                             &shape,
                             &binding,
@@ -256,6 +298,7 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         writer: AuthorSubject,
+        claims: BTreeMap<String, Value>,
         versions: &[VersionRecord],
         candidate_tx_id: Option<TxId>,
         retained_scope_is_unsettled: bool,
@@ -283,11 +326,13 @@ impl PeerState {
                     .collect(),
             );
             for (shape, binding) in scope.subscriptions {
-                let subscription = SubscriptionKey {
+                let canonical_subscription = SubscriptionKey {
                     shape_id: shape.shape_id(),
                     binding_id: binding.binding_id(),
                     read_view: scope.options.read_view_key(),
                 };
+                let policy_binding = (writer, claims.clone());
+                let subscription = edge_scope_subscription_key(canonical_subscription, &policy_binding);
                 if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
                     // The compiler may reach the same canonical clause through
                     // more than one policy edge.  It remains one support
@@ -299,13 +344,28 @@ impl PeerState {
                         .edge_scope_subscription_refs
                         .contains_key(&subscription)
                 {
+                    if self.subscription_policy_binding(subscription) != Some(policy_binding.clone()) {
+                        return Err(Error::InvalidStoredValue(
+                            "retained edge support has a mismatched immutable policy binding",
+                        ));
+                    }
                     unsettled.push(subscription);
                     continue;
+                }
+                let maintained = self
+                    .publication_states
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some());
+                if maintained
+                    && self.subscription_policy_binding(subscription) != Some(policy_binding.clone())
+                {
+                    self.forget_subscription_with_node(node, subscription);
                 }
                 if self
                     .publication_states
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some())
+                    && self.subscription_policy_binding(subscription) == Some(policy_binding)
                 {
                     let _ = aggregate.apply(
                         subscription,
@@ -318,6 +378,7 @@ impl PeerState {
                     .rehydrate_authorization_support_query_for_identity(
                         node,
                         writer,
+                        claims.clone(),
                         subscription,
                         &shape,
                         &binding,
@@ -338,10 +399,10 @@ impl PeerState {
                     settled_through,
                     self.authorization_progress_for_subscription(subscription),
                 );
-                // This legacy direct-PeerState entry point is retained only
-                // for compatibility tests.  Db edge admission uses the
-                // authority-owned upstream receipt path; a caller already
-                // parked here still waits for its next drain turn.
+                // Edge callers retain this exact support key until their next
+                // drain turn. The caller supplied one immutable policy
+                // snapshot at ingress, so this opaque local allocation never
+                // reads identity-global claims while deferred.
                 unsettled.push(subscription);
             }
             if aggregate.bounds().is_none() {
@@ -351,11 +412,15 @@ impl PeerState {
                     .expected_support()
                     .iter()
                     .filter_map(|(shape_id, binding_id)| {
-                        let subscription = SubscriptionKey {
+                        let canonical_subscription = SubscriptionKey {
                             shape_id: *shape_id,
                             binding_id: *binding_id,
                             read_view: scope.options.read_view_key(),
                         };
+                        let subscription = edge_scope_subscription_key(
+                            canonical_subscription,
+                            &(writer, claims.clone()),
+                        );
                         (!unsettled.contains(&subscription)).then_some(subscription)
                     })
                     .collect::<Vec<_>>();

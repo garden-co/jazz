@@ -5,10 +5,70 @@
 
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    mutation_error_event, take_pending_mutation_error_delivery,
+    coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
 use crate::time::TxTime;
+
+/// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
+/// close future drops the lease, rather than the accepted operation.
+struct QueuedMutationLease<'a> {
+    queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+    active_leases: &'a Cell<usize>,
+    operation: Option<QueuedMutationOperation>,
+}
+
+impl<'a> QueuedMutationLease<'a> {
+    fn new(
+        queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+        active_leases: &'a Cell<usize>,
+        operation: QueuedMutationOperation,
+    ) -> Self {
+        active_leases.set(
+            active_leases
+                .get()
+                .checked_add(1)
+                .expect("queued mutation lease count overflow"),
+        );
+        Self {
+            queue,
+            active_leases,
+            operation: Some(operation),
+        }
+    }
+
+    fn operation(&self) -> &QueuedMutationOperation {
+        self.operation
+            .as_ref()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn operation_mut(&mut self) -> &mut QueuedMutationOperation {
+        self.operation
+            .as_mut()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn take(&mut self) -> QueuedMutationOperation {
+        self.operation
+            .take()
+            .expect("queued mutation lease must retain its operation")
+    }
+}
+
+impl Drop for QueuedMutationLease<'_> {
+    fn drop(&mut self) {
+        if let Some(operation) = self.operation.take() {
+            self.queue.borrow_mut().push_front(operation);
+        }
+        self.active_leases.set(
+            self.active_leases
+                .get()
+                .checked_sub(1)
+                .expect("queued mutation lease count underflow"),
+        );
+    }
+}
 
 /// Node-owned participant surface for upstream and subscriber connections.
 pub struct Node<S>
@@ -17,6 +77,7 @@ where
 {
     pub(super) node: SharedNodeState<S>,
     mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
+    close_owner: futures::lock::Mutex<()>,
     tx_time_reservation_clock: Rc<Cell<TxTime>>,
     node_uuid: NodeUuid,
     receives_commits_as_local: bool,
@@ -24,6 +85,9 @@ where
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
     queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
+    /// Operations temporarily popped by an owner future. They remain part of
+    /// FIFO shutdown work even while a cold await leaves the queue empty.
+    queued_mutation_active_leases: Cell<usize>,
     transaction_wait_observers: RefCell<Vec<TransactionWaitObserver>>,
     queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
     /// Rejections claimed by a waiter during the current owner turn. They
@@ -32,10 +96,14 @@ where
     deferred_rejection_discards: RefCell<BTreeSet<TxId>>,
     queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
     reserved_mutations: RefCell<BTreeSet<TxId>>,
+    pub(super) pending_transaction_abandonments: TransactionAbandonmentTombstones,
+    transaction_abandonments_closed: Cell<bool>,
+    transaction_abandonment_shutdown_pending: Cell<bool>,
     pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
     subscription_finalizations_closed: Cell<bool>,
+    subscription_runtime_retired: Cell<bool>,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) upstream_coverage_refcounts: UpstreamCoverageRefCounts,
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
@@ -101,6 +169,7 @@ where
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
             mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
+            close_owner: futures::lock::Mutex::new(()),
             tx_time_reservation_clock,
             node_uuid,
             receives_commits_as_local,
@@ -108,15 +177,20 @@ where
             outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             queued_mutations: RefCell::new(VecDeque::new()),
+            queued_mutation_active_leases: Cell::new(0),
             transaction_wait_observers: RefCell::new(Vec::new()),
             queued_mutation_failures: RefCell::new(BTreeMap::new()),
             deferred_rejection_discards: RefCell::new(BTreeSet::new()),
             queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
             reserved_mutations: RefCell::new(BTreeSet::new()),
+            pending_transaction_abandonments: Rc::new(RefCell::new(BTreeSet::new())),
+            transaction_abandonments_closed: Cell::new(false),
+            transaction_abandonment_shutdown_pending: Cell::new(false),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
             subscription_finalizations_closed: Cell::new(false),
+            subscription_runtime_retired: Cell::new(false),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
@@ -183,6 +257,13 @@ where
         }
     }
 
+    /// Serialize shutdown drains while keeping admission closure outside the
+    /// await. Cancellation releases ownership so another close caller can
+    /// resume the same idempotent drain and finalization sequence.
+    pub(super) async fn lock_close_owner(&self) -> futures::lock::MutexGuard<'_, ()> {
+        self.close_owner.lock().await
+    }
+
     pub(super) fn ensure_mutation_admission_open(&self) -> Result<(), Error> {
         if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Open {
             Ok(())
@@ -192,6 +273,16 @@ where
                 "database mutation owner is closing",
             ))
         }
+    }
+
+    pub(super) fn ensure_subscription_finalization_open(&self) -> Result<(), Error> {
+        if self.subscription_finalizations_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database subscription admission is closed",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn enqueue_mutation(
@@ -399,10 +490,15 @@ where
 
     pub(super) async fn drain_queued_mutations(&self) {
         loop {
-            let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+            let Some(operation) = self.queued_mutations.borrow_mut().pop_front() else {
                 return;
             };
-            let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+            let mut lease = QueuedMutationLease::new(
+                &self.queued_mutations,
+                &self.queued_mutation_active_leases,
+                operation,
+            );
+            let poisoned = lease.operation().open_tx_id.and_then(|open_tx_id| {
                 self.queued_open_transaction_failures
                     .borrow()
                     .get(&open_tx_id)
@@ -410,9 +506,9 @@ where
             });
             let result = match poisoned {
                 Some(error) => Err(error),
-                None => operation.future.as_mut().await,
+                None => lease.operation_mut().future.as_mut().await,
             };
-            self.finish_queued_mutation(operation, result);
+            self.finish_queued_mutation(lease.take(), result);
         }
     }
 
@@ -526,6 +622,14 @@ where
                 upload_unit,
             });
         self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    /// Whether a resident publication still needs its ordered durability turn.
+    /// This check is deliberately synchronous so a host's one bounded tick
+    /// does not spend its sole poll acquiring the publication-settler mutex
+    /// when there is no publication to advance.
+    pub(super) fn has_pending_local_publications(&self) -> bool {
+        !self.pending_local_publications.borrow().is_empty()
     }
 
     pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
@@ -715,6 +819,200 @@ where
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker())
     }
+    /// Lock the node for opening a transaction while the database still owns
+    /// transaction admission.
+    ///
+    /// `owner_operation_admitted` is true only for an operation already
+    /// retained by the binding owner before shutdown. Those operations must
+    /// drain in FIFO order before the final sweep. Every direct caller checks
+    /// the gate both before and after waiting for the node mutex.
+    ///
+    /// The tombstone check closes the corresponding race with an
+    /// already-linearized handle abandonment.
+    pub(super) async fn lock_for_transaction_open(
+        &self,
+        open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        if !owner_operation_admitted {
+            self.ensure_transaction_admission_open()?;
+        }
+        let mut node = self.node.lock().await;
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        Ok(node)
+    }
+
+    /// Lock the node for an operation on an existing transaction.
+    ///
+    /// A handle drop records its tombstone without waiting for this mutex.
+    /// Therefore even an operation already queued ahead of the maintenance tick
+    /// observes and retires the tombstone before it can stage, read, or commit.
+    /// Binding-owner operations accepted before shutdown may finish draining;
+    /// direct callers observe the closed gate after acquiring ownership.
+    pub(super) async fn lock_for_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        let mut node = self.node.lock().await;
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        Ok(node)
+    }
+
+    fn ensure_transaction_admission_open(&self) -> Result<(), Error> {
+        if self.transaction_abandonments_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database transaction admission is closed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_transaction_abandoned(&self, open_tx_id: OpenTransactionId) -> bool {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .insert(open_tx_id)
+    }
+
+    pub(super) fn clear_transaction_abandonment(&self, open_tx_id: OpenTransactionId) {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .remove(&open_tx_id);
+    }
+
+    fn reject_tombstoned_transaction_in(
+        &self,
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if !self
+            .pending_transaction_abandonments
+            .borrow()
+            .contains(&open_tx_id)
+        {
+            return Ok(());
+        }
+        let retirement = Self::abandon_transaction_for_maintenance(node, open_tx_id);
+        if retirement.is_ok() {
+            self.clear_transaction_abandonment(open_tx_id);
+        }
+        retirement?;
+        Err(transaction_abandoned(open_tx_id))
+    }
+
+    /// Abandon an RAII-owned transaction immediately when the node is
+    /// uncontended, otherwise leave its deduplicated tombstone for the next
+    /// transaction operation or asynchronous owner turn.
+    ///
+    /// This is synchronous and never waits for the node mutex.
+    pub(super) fn abandon_or_enqueue_transaction(&self, open_tx_id: OpenTransactionId) {
+        if self.transaction_abandonments_closed.get() {
+            // Shutdown owns every still-open transaction after closing this
+            // gate, so a late Drop has no separate maintenance to admit.
+            return;
+        }
+        if !self.mark_transaction_abandoned(open_tx_id) {
+            return;
+        }
+        if let Some(mut node) = self.node.try_lock() {
+            if Self::abandon_transaction_for_maintenance(&mut node, open_tx_id).is_ok() {
+                self.clear_transaction_abandonment(open_tx_id);
+            } else {
+                self.schedule_tick(TickUrgency::Immediate);
+            }
+            return;
+        }
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    fn abandon_transaction_for_maintenance(
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        match node.abandon_tx(open_tx_id) {
+            Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn drain_transaction_abandonments_in(&self, node: &mut NodeState<S>) -> Result<usize, Error> {
+        let abandonments = std::mem::take(&mut *self.pending_transaction_abandonments.borrow_mut());
+        let count = abandonments.len();
+        let mut first_error = None;
+        for open_tx_id in abandonments {
+            if let Err(error) = Self::abandon_transaction_for_maintenance(node, open_tx_id) {
+                self.pending_transaction_abandonments
+                    .borrow_mut()
+                    .insert(open_tx_id);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(count),
+        }
+    }
+
+    fn finish_transaction_abandonment_shutdown_in(
+        &self,
+        node: &mut NodeState<S>,
+    ) -> Result<usize, Error> {
+        let drain_result = self.drain_transaction_abandonments_in(node);
+        // Shutdown must not retire every open transaction until the FIFO owner
+        // has reached quiescence. A queued begin/stage/commit was admitted
+        // before close closed the gate, but may not have acquired the node
+        // lock yet. Sweeping it from an intervening ordinary tick would turn
+        // that accepted operation into a tombstoned transaction. Keep the
+        // shutdown sweep pending until its own queue has completely drained;
+        // a later owner turn or close will run this same idempotent sweep.
+        if self.transaction_abandonment_shutdown_pending.get()
+            && self.queued_mutations.borrow().is_empty()
+            && self.queued_mutation_active_leases.get() == 0
+        {
+            self.transaction_abandonment_shutdown_pending.set(false);
+            node.abandon_all_open_transactions();
+        }
+        drain_result
+    }
+
+    async fn drain_transaction_abandonments(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
+    }
+
+    /// Close transaction admission and transfer the final open-transaction
+    /// sweep to the node tick owner before the close future can suspend.
+    ///
+    /// If the caller cancels `Db::close` while it is waiting for the node
+    /// mutex, the scheduled tick still drains tombstones and terminalizes every
+    /// open transaction. Repeated close attempts and tick passes are benign.
+    pub(super) fn begin_transaction_abandonment_shutdown(&self) {
+        if self.transaction_abandonments_closed.replace(true) {
+            return;
+        }
+        self.transaction_abandonment_shutdown_pending.set(true);
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    pub(super) async fn finish_transaction_abandonment_shutdown(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
+    }
+
+    pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
+        self.transaction_abandonment_shutdown_pending.get()
+    }
 
     /// Enqueue a stream-finalization command without touching the async node
     /// mutex. This is the only operation a stream's `Drop` implementation may
@@ -725,13 +1023,14 @@ where
         mut command: PendingSubscriptionFinalization,
     ) {
         if self.subscription_finalizations_closed.get() {
-            // Db::close has synchronously retired every maintained view and
-            // connection before setting this gate. A late finalizer therefore
-            // owns no resident Groove or upstream state to clean up.
-            if let Some(acknowledgement) = command.acknowledgement.take() {
-                let _ = acknowledgement.send(());
+            if self.subscription_runtime_retired.get() {
+                // Terminal retirement already drained every maintained view
+                // and connection, so a late finalizer owns no resident work.
+                if let Some(acknowledgement) = command.acknowledgement.take() {
+                    let _ = acknowledgement.send(());
+                }
+                return;
             }
-            return;
         }
         self.pending_subscription_finalizations
             .borrow_mut()
@@ -830,6 +1129,9 @@ where
                 acknowledgement: None,
             });
         }
+        // Once admission closes, an abandoned close future must not be the
+        // sole owner capable of retiring the captured streams.
+        self.schedule_tick(TickUrgency::Immediate);
     }
 
     /// Release all connection and subscription bookkeeping after its backing
@@ -837,6 +1139,7 @@ where
     /// view or upstream ownership behind: the retirement pass drained them
     /// before close, and this removes the now-unusable runtime shell.
     pub(super) fn retire_subscription_runtime_after_close(&self) {
+        self.subscription_runtime_retired.set(true);
         self.subscriptions.borrow_mut().clear();
         self.connections.borrow_mut().clear();
         self.upstream_subscriptions.borrow_mut().clear();
@@ -852,6 +1155,10 @@ where
         self.pending_relay_subscription_rejections
             .borrow_mut()
             .clear();
+    }
+
+    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
+        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
@@ -873,6 +1180,11 @@ where
             self.schedule_tick(TickUrgency::Immediate);
         }
         Ok(pending.is_some() || retained)
+    }
+
+    #[cfg(test)]
+    pub(super) fn defer_rejection_discard_for_test(&self, tx_id: TxId) {
+        self.deferred_rejection_discards.borrow_mut().insert(tx_id);
     }
 
     /// Finish rejection acknowledgement after all wait observers woken by one
@@ -1146,6 +1458,14 @@ where
         self.transaction_wait_observers
             .borrow_mut()
             .splice(0..0, observers);
+    }
+
+    #[cfg(test)]
+    pub(super) fn enqueue_transaction_wait_observer_for_test(
+        &self,
+        observer: TransactionWaitObserver,
+    ) {
+        self.transaction_wait_observers.borrow_mut().push(observer);
     }
 
     pub(super) async fn drain_transaction_wait_observers(&self) {
@@ -1528,6 +1848,8 @@ where
             mutation_errors: Rc::clone(&self.mutation_errors),
             browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            #[cfg(test)]
+            fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
@@ -1779,6 +2101,8 @@ where
             mutation_errors: Rc::clone(&self.mutation_errors),
             browser_relay_recovered_tx_ids: Rc::clone(&self.browser_relay_recovered_tx_ids),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
+            #[cfg(test)]
+            fail_next_subscription_refresh: Cell::new(false),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
@@ -1928,6 +2252,7 @@ where
                     peer,
                     served,
                     coverage_groups,
+                    shape_registrations,
                     scope_purposes,
                     scope_aggregates,
                     authority_scope_hydrations,
@@ -1951,13 +2276,11 @@ where
                         }
                         peer.forget_subscription_with_node(
                             &mut node,
-                            SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: coverage.opts.read_view_key(),
-                            },
+                            coverage_group_subscription_key(&coverage),
                         );
                     }
+                    node.release_shapes_for_peer(connection_epoch);
+                    shape_registrations.clear();
                     scope_aggregates.clear();
                     authority_scope_hydrations.clear();
                     (None, None, None, retired)
@@ -2139,6 +2462,7 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
@@ -3215,7 +3539,7 @@ where
                                 &state_ref.snapshot,
                                 &state_ref.snapshot_index,
                             )?;
-                            let event = subscription_terminal_delta_event(
+                            let mut event = subscription_terminal_delta_event(
                                 snapshot_tier,
                                 settled,
                                 &state_ref.snapshot,
@@ -3223,6 +3547,22 @@ where
                                 &snapshot,
                                 &current_root_occurrences,
                             )?;
+                            let SubscriptionEvent::Delta {
+                                publishable,
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
+                                ..
+                            } = &mut event
+                            else {
+                                unreachable!("terminal snapshot diffs always emit deltas")
+                            };
+                            *publishable = state_ref.settled != settled
+                                || !added.is_empty()
+                                || !updated.is_empty()
+                                || !removed.is_empty()
+                                || !terminal_operations.is_empty();
                             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
                             state_ref.snapshot_index =
                                 relation_snapshot_index_with_root_occurrences(
@@ -3306,15 +3646,27 @@ where
                                     shape.query(),
                                     &state_ref.snapshot,
                                 )?;
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
                             if let SubscriptionEvent::Delta {
+                                reset,
+                                publishable,
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
                                 settled: event_settled,
                                 ..
                             } = &mut event
                             {
+                                *publishable = previous_settled != settled
+                                    || *reset
+                                    || !added.is_empty()
+                                    || !updated.is_empty()
+                                    || !removed.is_empty()
+                                    || !terminal_operations.is_empty();
                                 *event_settled = settled;
                             }
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
                             if state_ref.sender.unbounded_send(event).is_ok() {
                                 changed += 1;
                             }

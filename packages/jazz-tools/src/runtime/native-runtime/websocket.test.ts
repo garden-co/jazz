@@ -53,6 +53,51 @@ describe("websocket frame carrier", () => {
     );
   });
 
+  it("bounds and canonicalizes inbound websocket batches before retaining frames", () => {
+    expect(() => encodeWebSocketFrameBatch([])).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() =>
+      encodeWebSocketFrameBatch(Array.from({ length: 4097 }, () => new Uint8Array())),
+    ).toThrow("websocket frame batch exceeds frame-count limit of 4096");
+
+    // The count is intentionally not followed by any elements: this proves
+    // the carrier rejects it before an attacker-declared frame array is made.
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0x81, 0x20))).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0))).toThrow(
+      "websocket frame batch exceeds frame-count limit of 4096",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(0x81, 0, 1, 0x42))).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 0x81, 0, 0x42))).toThrow(
+      "postcard u64 is not minimally encoded",
+    );
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 2, 0x42))).toThrow(
+      "postcard bytes overflow",
+    );
+
+    // 2 MiB + 1, encoded in postcard's canonical varint form.
+    expect(() => decodeWebSocketFrameBatch(Uint8Array.of(1, 0x81, 0x80, 0x80, 1))).toThrow(
+      "websocket frame exceeds maximum length of 2097152 bytes",
+    );
+
+    const largestSingleton = new Uint8Array(2 * 1024 * 1024 - 4);
+    const exactCarrier = encodeWebSocketFrameBatch([largestSingleton]);
+    expect(exactCarrier.byteLength).toBe(2 * 1024 * 1024);
+    expect(decodeWebSocketFrameBatch(exactCarrier)).toEqual([largestSingleton]);
+
+    const rawLimit = new Uint8Array(2 * 1024 * 1024);
+    expect(() => encodeWebSocketFrameBatch([rawLimit])).toThrow(
+      "websocket frame batch exceeds maximum length of 2097152 bytes",
+    );
+    expect(() => encodeWebSocketFrameBatch([Uint8Array.of(0x11), rawLimit])).toThrow(
+      "websocket frame batch exceeds maximum length of 2097152 bytes",
+    );
+  });
+
   // This is intentionally transport-level: the public Db API cannot expose
   // individual WebSocket message boundaries, which are the limit being kept.
   it("splits a burst of wire frames into server-sized websocket messages", async () => {

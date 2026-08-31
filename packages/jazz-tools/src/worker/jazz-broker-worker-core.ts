@@ -3,6 +3,7 @@ import { loadWasmModule, type WasmModule } from "../runtime/client.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
 import {
   acquireBrowserPhysicalDatabaseEpoch,
+  BrowserPhysicalDatabaseBusyError,
   type BrowserPhysicalDatabaseEpoch,
 } from "../runtime/browser-physical-database-epoch.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
@@ -10,23 +11,23 @@ import {
   BrowserWorkerTransportPump,
   transferableFrames,
 } from "../runtime/native-runtime/browser-worker-transport.js";
-import type {
-  BrowserForegroundNodeLeaseAcquireRequest,
-  BrowserForegroundNodeLeaseAcquireResponse,
-  BrowserForegroundNodeLeaseCancelRequest,
-  BrowserForegroundNodeLeaseProbeRequest,
-  BrowserForegroundNodeLeasePortEvent,
-  BrowserForegroundNodeLeasePortRequest,
-  BrowserFollowerPortEvent,
-  BrowserFollowerPortRequest,
-  BrowserInspectorControlEvent,
-  BrowserInspectorControlRequest,
-  BrowserWorkerLifecycleTrace,
-  BrowserSharedWorkerConnectRequest,
-  BrowserSharedWorkerConnectResponse,
-  BrowserWorkerInitOptions,
+import {
+  serializeBrowserRelayError,
+  type BrowserForegroundNodeLeaseAcquireRequest,
+  type BrowserForegroundNodeLeaseAcquireResponse,
+  type BrowserForegroundNodeLeaseCancelRequest,
+  type BrowserForegroundNodeLeaseProbeRequest,
+  type BrowserForegroundNodeLeasePortEvent,
+  type BrowserForegroundNodeLeasePortRequest,
+  type BrowserFollowerPortEvent,
+  type BrowserFollowerPortRequest,
+  type BrowserInspectorControlEvent,
+  type BrowserInspectorControlRequest,
+  type BrowserWorkerLifecycleTrace,
+  type BrowserSharedWorkerConnectRequest,
+  type BrowserSharedWorkerConnectResponse,
+  type BrowserWorkerInitOptions,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
-
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
 (Error as ErrorConstructor & { stackTraceLimit?: number }).stackTraceLimit = 50;
@@ -55,6 +56,8 @@ type TabPeer = {
   flushPumpComplete: boolean;
   flushObserved: boolean;
   transportWaitAbort: AbortController;
+  /** True only for a port transferred through authenticated Inspector control. */
+  inspectorAttachment: boolean;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -366,7 +369,13 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
     ) {
       const message = messageEvent.data;
       if (workerTerminationScheduled) {
-        if (
+        // This is the inspector's acknowledged, intentionally one-way
+        // termination handoff. It is deliberately narrower than
+        // `pendingWorkerClose`: an ordinary idle close remains cancelable by
+        // the bootstrap reservation created in `onconnect`.
+        if (message?.type === "connect-runtime") {
+          post(port, { type: "worker-closing" } satisfies BrowserSharedWorkerConnectResponse);
+        } else if (
           message?.type === "probe-foreground-node-lease-worker" ||
           message?.type === "acquire-foreground-node-lease"
         ) {
@@ -410,7 +419,9 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
           finishBootstrap();
           post(port, {
             type: "foreground-node-lease-error",
-            message: "Foreground node lease request did not match its worker probe",
+            error: serializeBrowserRelayError(
+              new Error("Foreground node lease request did not match its worker probe"),
+            ),
           } satisfies BrowserForegroundNodeLeaseAcquireResponse);
           closeBootstrapPort();
           return;
@@ -446,7 +457,7 @@ async function acquireForegroundNodeLease(
     port.removeEventListener("message", onMessage);
     port.removeEventListener("messageerror", onMessageError);
   };
-  const finishCancellation = async (): Promise<void> => {
+  const finishCancellation = async (admissionError?: unknown): Promise<void> => {
     if (settled) return;
     // The allocation can finish after the client has requested cancellation.
     // Never publish that identity. If it exists, retire it durably before
@@ -455,7 +466,23 @@ async function acquireForegroundNodeLease(
     // A lease-pool transaction may already be in flight while `lease` is
     // still null. Wait for it before acknowledging cancellation: it can
     // commit a durable identity after this message handler starts.
-    if (!owner) return;
+    // A cancel can arrive before physical-owner admission resolves. If that
+    // admission rejects, there is no owner or lease to retire, but the client
+    // still needs its terminal cancellation receipt to release the retained
+    // cleanup port. Do not leave this as a no-op: it permanently coalesces
+    // later foreground opens behind a cleanup that can never complete.
+    if (!owner) {
+      if (admissionError === undefined) return;
+      settled = true;
+      post(port, {
+        type: "foreground-node-lease-cancelled",
+        error: serializeBrowserRelayError(admissionError),
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+      cleanup();
+      port.close();
+      maybeCloseWorker();
+      return;
+    }
     await allocationPromise?.catch(() => undefined);
     if (settled) return;
     // During an IndexedDB open cancellation can arrive after the physical
@@ -487,7 +514,11 @@ async function acquireForegroundNodeLease(
       // do not claim that cancellation made the node reusable.
       post(port, {
         type: "foreground-node-lease-cancelled",
-        error: `Shared browser foreground lease cancellation failed: ${asError(error).message}`,
+        error: serializeBrowserRelayError(
+          new Error("Shared browser foreground lease cancellation failed", {
+            cause: asError(error),
+          }),
+        ),
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
     } finally {
       cleanup();
@@ -495,12 +526,15 @@ async function acquireForegroundNodeLease(
       maybeCloseWorker();
     }
   };
-  const requestCancellation = () => {
+  const requestCancellation = (admissionError?: unknown) => {
     if (settled) return cancellationCompletion;
     cancellationRequested = true;
     // Before an owner exists, the admission continuation calls us again after
-    // it has opened the physical root. Do not memoize a no-op completion.
-    if (owner && !cancellationCompletion) cancellationCompletion = finishCancellation();
+    // it has opened the physical root. An admission rejection is the other
+    // terminal continuation and must produce the same one-shot receipt.
+    if ((owner || admissionError !== undefined) && !cancellationCompletion) {
+      cancellationCompletion = finishCancellation(admissionError);
+    }
     return cancellationCompletion;
   };
   const retire = async (): Promise<void> => {
@@ -558,7 +592,7 @@ async function acquireForegroundNodeLease(
         await retire().catch(() => undefined);
         post(port, {
           type: "foreground-node-lease-result",
-          error: asError(error).message,
+          error: serializeBrowserRelayError(error),
         } satisfies BrowserForegroundNodeLeasePortEvent);
         cleanup();
         port.close();
@@ -640,14 +674,24 @@ async function acquireForegroundNodeLease(
     } satisfies BrowserForegroundNodeLeaseAcquireResponse);
   } catch (error) {
     if (cancellationRequested) {
-      await requestCancellation();
+      await requestCancellation(error);
       return;
     }
     cleanup();
-    post(port, {
-      type: "foreground-node-lease-error",
-      message: asError(error).message,
-    } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    if (error instanceof BrowserPhysicalDatabaseBusyError) {
+      // A Web-Lock conflict means this request has not acquired a durable
+      // owner or lease identity. The page may retry it on the same generation;
+      // every other bootstrap error remains terminal and causal.
+      post(port, {
+        type: "foreground-node-lease-busy",
+        message: error.message,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    } else {
+      post(port, {
+        type: "foreground-node-lease-error",
+        error: serializeBrowserRelayError(error),
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    }
     port.close();
   }
 }
@@ -762,7 +806,7 @@ async function connectTab(
     // the bootstrap reservation before surfacing the terminal result so its
     // physical owner can be released without a follow-on admission race.
     finishBootstrap();
-    post(port, { type: "runtime-error", message: asError(error).message });
+    post(port, { type: "runtime-error", error: serializeBrowserRelayError(error) });
     port.close();
   }
 }
@@ -878,7 +922,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
       // tab runtime capable of rejecting an active remote wait.
       for (const peer of context.peers.values()) {
         if (!peer.subscriber || !peer.pump) continue;
-        post(peer.port, { type: "transport-error", message: error.message });
+        post(peer.port, { type: "transport-error", error: serializeBrowserRelayError(error) });
       }
     });
     if (options.logLevel === "trace") {
@@ -1067,7 +1111,12 @@ async function waitForServerConnection(
   }
 }
 
-function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): void {
+function attachTab(
+  context: RuntimeContext,
+  tabId: string,
+  port: MessagePort,
+  inspectorAttachment = false,
+): void {
   closeTab(context, tabId);
   let peer!: TabPeer;
   const onMessage = (event: MessageEvent<BrowserFollowerPortRequest>) => {
@@ -1086,6 +1135,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     flushPumpComplete: false,
     flushObserved: false,
     transportWaitAbort: new AbortController(),
+    inspectorAttachment,
     onMessage,
     onMessageError,
   };
@@ -1200,7 +1250,14 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           ensureServerConnection(peer.context);
         }
       });
-      result(peer, message.id);
+      result(
+        peer,
+        message.id,
+        undefined,
+        peer.inspectorAttachment
+          ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
+          : undefined,
+      );
       return;
     }
     if (message.type === "update-auth") {
@@ -1336,7 +1393,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         port.postMessage({
           type: "result",
           id: message.id,
-          error: "Worker still has live runtime contexts",
+          error: serializeBrowserRelayError(new Error("Worker still has live runtime contexts")),
         } satisfies BrowserInspectorControlEvent);
         return;
       }
@@ -1344,7 +1401,9 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         port.postMessage({
           type: "result",
           id: message.id,
-          error: "Worker still has pending bootstrap operations",
+          error: serializeBrowserRelayError(
+            new Error("Worker still has pending bootstrap operations"),
+          ),
         } satisfies BrowserInspectorControlEvent);
         return;
       }
@@ -1352,7 +1411,9 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         port.postMessage({
           type: "result",
           id: message.id,
-          error: "Worker still has pending or active foreground node leases",
+          error: serializeBrowserRelayError(
+            new Error("Worker still has pending or active foreground node leases"),
+          ),
         } satisfies BrowserInspectorControlEvent);
         return;
       }
@@ -1378,11 +1439,11 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       port.postMessage({
         type: "result",
         id: message.id,
-        error: "Inspector context is no longer available",
+        error: serializeBrowserRelayError(new Error("Inspector context is no longer available")),
       } satisfies BrowserInspectorControlEvent);
       return;
     }
-    attachTab(context, message.tabId, message.port);
+    attachTab(context, message.tabId, message.port, true);
     port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
   };
   const dispose = () => {
@@ -1397,19 +1458,23 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
   port.start();
 }
 
-function result(peer: TabPeer, id: number, error?: Error): void {
+function result(
+  peer: TabPeer,
+  id: number,
+  error?: Error,
+  receipt?: { inspectorAttachmentPhysicalDbName: string },
+): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
-  post(peer.port, { type: "result", id, ...(error ? { error: errorDetails(error) } : {}) });
-}
-
-function errorDetails(error: Error): string {
-  const cause = error.cause;
-  if (!(cause instanceof Error) || !cause.stack) return error.stack ?? error.message;
-  return `${error.stack ?? error.message}\nCaused by: ${cause.stack}`;
+  post(peer.port, {
+    type: "result",
+    id,
+    ...(error ? { error: serializeBrowserRelayError(error) } : {}),
+    ...receipt,
+  });
 }
 
 function failPeer(peer: TabPeer, error: Error): void {
-  post(peer.port, { type: "error", message: error.message });
+  post(peer.port, { type: "error", error: serializeBrowserRelayError(error) });
   closeTab(peer.context, peer.tabId);
 }
 

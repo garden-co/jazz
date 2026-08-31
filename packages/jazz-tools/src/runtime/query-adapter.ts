@@ -613,8 +613,8 @@ function gatherToRelExpr(
   if (!schema[gather.step_table]) {
     throw new Error(`Unknown gather step table "${gather.step_table}"`);
   }
-  if (!Number.isInteger(gather.max_depth) || gather.max_depth <= 0) {
-    throw new Error("gather(...) max_depth must be a positive integer.");
+  if (!Number.isInteger(gather.max_depth) || gather.max_depth < 0) {
+    throw new Error("gather(...) max_depth must be a non-negative integer.");
   }
 
   const stepHops = Array.isArray(gather.step_hops)

@@ -530,12 +530,16 @@ fn edge_acceptance_phase(
     let SyncMessage::CommitUnit { tx, versions } = delivered.message else {
         unreachable!();
     };
+    // This direct edge probe uses the unadmitted SYSTEM peer, whose immutable
+    // request snapshot is the empty claim object.
+    let policy_claims = BTreeMap::new();
     let outcome = block_on(PeerState::new().ingest_edge_mergeable_commit_unit(
         &mut edge.node,
         tx,
         versions,
         u64::MAX,
         u64::MAX,
+        policy_claims,
     ))
     .unwrap();
     let updates = settle_outcome(&mut edge.node, outcome).unwrap();

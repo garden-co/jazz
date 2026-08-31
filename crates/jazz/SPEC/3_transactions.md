@@ -40,7 +40,7 @@ Invariant digest:
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
-- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or edge broadcast; reopen MUST either recover the entire unit or suppress it.
+- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or edge broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
 
 ## Details
 
@@ -120,6 +120,16 @@ mixture such as history without currency, fate without versions, or a derived
 row that cannot be recreated from the recovered canonical state. This is the
 sync-core contract that the future asynchronous persistent instance preserves;
 an async completion/ack is not a second semantic commit.
+
+The commit result and observer refresh result are distinct after this boundary.
+Before persistence completes or ordered publication ownership transfers, failure
+returns no committed receipt and no subscription or peer update may escape. Once
+either condition holds, the caller receives the committed `TxId`/write receipt
+even if resident subscription refresh fails. The refresh failure belongs to the
+affected subscription error channel (or to retained node-owned retry work), not
+to the already-owned commit. Peer ingest follows the same rule: it retains
+publication ownership, preserves ordered post-settlement work, and reports
+refresh failure without causing the sender to retry an already-published unit.
 
 ### 3.3 Durability is not fate
 

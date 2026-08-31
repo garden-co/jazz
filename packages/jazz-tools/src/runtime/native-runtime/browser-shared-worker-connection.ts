@@ -3,22 +3,23 @@ import {
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
+import {
+  deserializeBrowserRelayError,
+  type BrowserSharedWorkerConnectRequest,
+  type BrowserSharedWorkerConnectResponse,
+  type BrowserForegroundNodeLeaseAcquireResponse,
+  type BrowserForegroundNodeLeasePortEvent,
+  type BrowserForegroundNodeLeasePortRequest,
+  type BrowserFollowerPortRequest,
+  type BrowserInspectorControlEvent,
+  type BrowserWorkerInitOptions,
+} from "./browser-worker-protocol.js";
 import type {
   ForegroundNodeLease,
   BrowserWorkerConnection,
   BrowserWorkerConnectionContext,
 } from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
-import type {
-  BrowserSharedWorkerConnectRequest,
-  BrowserSharedWorkerConnectResponse,
-  BrowserForegroundNodeLeaseAcquireResponse,
-  BrowserForegroundNodeLeasePortEvent,
-  BrowserForegroundNodeLeasePortRequest,
-  BrowserFollowerPortRequest,
-  BrowserInspectorControlEvent,
-  BrowserWorkerInitOptions,
-} from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
@@ -35,6 +36,15 @@ export type BrowserForegroundNodeLeaseOptions = Pick<
 // a shorter probe timeout. A realm that accepted termination explicitly says
 // it is closing so the client can safely advance to another generation.
 const FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS = 10_000;
+const MAX_SHARED_WORKER_GENERATION_ATTEMPTS = 8;
+const MAX_FOREGROUND_NODE_LEASE_BUSY_ATTEMPTS = 8;
+const FOREGROUND_NODE_LEASE_RETRY_INITIAL_DELAY_MS = 25;
+const FOREGROUND_NODE_LEASE_RETRY_MAX_DELAY_MS = 250;
+
+type ForegroundNodeLeaseAttemptOutcome =
+  | { type: "ready"; lease: SharedBrowserForegroundNodeLease }
+  | { type: "worker-closing" }
+  | { type: "busy"; message: string };
 
 /**
  * A timed-out admission must keep its port alive until the worker retires a
@@ -104,19 +114,55 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
     // destroying it. Probe before sending an allocation request so a realm
     // that explicitly reports it is closing can be skipped without creating
     // an orphan-risking durable operation in it.
+    const admissionDeadline = Date.now() + FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS;
     let generation = readWorkerGeneration(workerName);
-    for (let generationAttempt = 0; generationAttempt < 8; generationAttempt += 1) {
-      const worker = createWorker(`${workerName}:generation-${generation}`);
-      const lease = await this.acquireFromWorkerGeneration(
-        worker,
-        options,
-        cleanupKey,
-        crypto.randomUUID(),
-      );
-      if (lease) return lease;
-      generation = advanceWorkerGeneration(workerName, generation);
+    let busyAttempt = 0;
+    let lastBusyMessage: string | null = null;
+    for (
+      let generationAttempt = 0;
+      generationAttempt < MAX_SHARED_WORKER_GENERATION_ATTEMPTS;
+      generationAttempt += 1
+    ) {
+      while (true) {
+        const remainingAdmissionMs = admissionDeadline - Date.now();
+        if (remainingAdmissionMs <= 0) {
+          throw new Error(
+            lastBusyMessage ?? "Shared browser runtime did not issue a foreground node lease",
+          );
+        }
+        const worker = createWorker(`${workerName}:generation-${generation}`);
+        const outcome = await this.acquireFromWorkerGeneration(
+          worker,
+          options,
+          cleanupKey,
+          crypto.randomUUID(),
+          remainingAdmissionMs,
+        );
+        if (outcome.type === "ready") return outcome.lease;
+        if (outcome.type === "worker-closing") {
+          // Only an explicitly terminating realm sends this receipt. Idle
+          // close is still cancelable by its bootstrap reservation and never
+          // forces a generation jump.
+          generation = advanceWorkerGeneration(workerName, generation);
+          break;
+        }
+        lastBusyMessage = outcome.message;
+        busyAttempt += 1;
+        if (busyAttempt >= MAX_FOREGROUND_NODE_LEASE_BUSY_ATTEMPTS) {
+          throw new Error(lastBusyMessage);
+        }
+        const retryDelayMs = Math.min(
+          FOREGROUND_NODE_LEASE_RETRY_INITIAL_DELAY_MS * 2 ** (busyAttempt - 1),
+          FOREGROUND_NODE_LEASE_RETRY_MAX_DELAY_MS,
+          Math.max(0, admissionDeadline - Date.now()),
+        );
+        if (retryDelayMs <= 0) throw new Error(lastBusyMessage);
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+      }
     }
-    throw new Error("Shared browser foreground lease worker did not answer after closing");
+    throw new Error(
+      lastBusyMessage ?? "Shared browser foreground lease worker did not answer after closing",
+    );
   }
 
   private static acquireFromWorkerGeneration(
@@ -124,9 +170,10 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
     options: BrowserForegroundNodeLeaseOptions,
     cleanupKey: string,
     attemptId: string,
-  ): Promise<SharedBrowserForegroundNodeLease | null> {
+    timeoutMs: number,
+  ): Promise<ForegroundNodeLeaseAttemptOutcome> {
     const port = worker.port;
-    return new Promise<SharedBrowserForegroundNodeLease | null>((resolve, reject) => {
+    return new Promise<ForegroundNodeLeaseAttemptOutcome>((resolve, reject) => {
       let cancellationRequested = false;
       let publicResultSettled = false;
       let cleanupToken: symbol | null = null;
@@ -154,7 +201,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
           // retires any late lease; closing them here would recreate the orphan
           // race this cancellation protocol exists to prevent.
           rejectPublic(timeoutError);
-        }, FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS);
+        }, timeoutMs);
       const cleanup = () => {
         if (admissionTimeout) clearTimeout(admissionTimeout);
         admissionTimeout = null;
@@ -187,19 +234,26 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
           cleanup();
           port.close();
           publicResultSettled = true;
-          resolve(null);
+          resolve({ type: "worker-closing" });
+          return;
+        }
+        if (message?.type === "foreground-node-lease-busy") {
+          cleanup();
+          port.close();
+          publicResultSettled = true;
+          resolve({ type: "busy", message: message.message });
           return;
         }
         if (message?.type === "foreground-node-lease-error") {
           cleanup();
           port.close();
-          rejectPublic(new Error(message.message));
+          rejectPublic(deserializeBrowserRelayError(message.error));
           return;
         }
         if (message?.type === "foreground-node-lease-cancelled") {
           cleanup();
           port.close();
-          rejectPublic(message.error ? new Error(message.error) : timeoutError);
+          rejectPublic(message.error ? deserializeBrowserRelayError(message.error) : timeoutError);
           return;
         }
         if (message?.type !== "foreground-node-lease-ready") return;
@@ -214,15 +268,15 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
           return;
         }
         cleanup();
-        const result = new SharedBrowserForegroundNodeLease(
+        const lease = new SharedBrowserForegroundNodeLease(
           message.node.slice(),
           BigInt(message.confirmedTxTime),
           message.leaseId,
         );
-        result.worker = worker;
-        result.port = port;
+        lease.worker = worker;
+        lease.port = port;
         publicResultSettled = true;
-        resolve(result);
+        resolve({ type: "ready", lease });
       };
       const onMessageError = () => {
         cleanup();
@@ -266,7 +320,7 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         const result = event.data;
         if (result?.type !== "foreground-node-lease-result") return;
         cleanup();
-        if (result.error) reject(new Error(result.error));
+        if (result.error) reject(deserializeBrowserRelayError(result.error));
         else resolve();
       };
       const onMessageError = () => {
@@ -357,7 +411,8 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     createWorker: (name: string) => SharedWorker,
   ): Promise<void> {
     let generation = readWorkerGeneration(workerName);
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (let attempt = 0; attempt < MAX_SHARED_WORKER_GENERATION_ATTEMPTS; attempt += 1) {
+      if (this.closed) return;
       const generationName = `${workerName}:generation-${generation}`;
       const outcome = await this.connectOnce(
         runtime,
@@ -366,6 +421,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         generationName,
         createWorker,
       );
+      if (this.closed) return;
       if (outcome.error) throw outcome.error;
       if (outcome.connected) {
         this.connectedGeneration = generation;
@@ -402,11 +458,20 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         }
         if (event.data?.type === "runtime-error") {
           cleanup();
+          port.close();
+          if (this.worker === worker) this.worker = null;
           // Do not reject a bare MessagePort callback promise. A browser can
           // report that rejection before the caller's operation has observed
           // readiness. The outer, constructor-owned state machine turns this
           // into the same explicit error after it has installed containment.
-          resolve({ connected: false, error: new Error(event.data.message) });
+          resolve({ connected: false, error: deserializeBrowserRelayError(event.data.error) });
+          return;
+        }
+        if (event.data?.type === "worker-closing") {
+          cleanup();
+          port.close();
+          if (this.worker === worker) this.worker = null;
+          resolve({ connected: false });
           return;
         }
         if (event.data?.type !== "runtime-ready") return;
@@ -420,7 +485,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           resolve({ connected: true });
           return;
         }
-        this.connection = new MessagePortBrowserFollowerConnection(
+        const connection = new MessagePortBrowserFollowerConnection(
           runtime,
           port,
           options.sessionClaims,
@@ -435,17 +500,24 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           },
           options.logLevel === "trace",
         );
-        void this.connection.ready().then(
+        this.connection = connection;
+        void connection.ready().then(
           () => resolve({ connected: true }),
-          (error: unknown) =>
+          (error: unknown) => {
+            port.close();
+            if (this.connection === connection) this.connection = null;
+            if (this.worker === worker) this.worker = null;
             resolve({
               connected: false,
               error: error instanceof Error ? error : new Error(String(error)),
-            }),
+            });
+          },
         );
       };
       const onMessageError = () => {
         cleanup();
+        port.close();
+        if (this.worker === worker) this.worker = null;
         resolve({
           connected: false,
           error: new Error("Shared browser runtime port message error"),
@@ -459,12 +531,22 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       };
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);
-      port.postMessage({
-        type: "connect-runtime",
-        tabId: crypto.randomUUID(),
-        fingerprint,
-        options,
-      } satisfies BrowserSharedWorkerConnectRequest);
+      try {
+        port.postMessage({
+          type: "connect-runtime",
+          tabId: crypto.randomUUID(),
+          fingerprint,
+          options,
+        } satisfies BrowserSharedWorkerConnectRequest);
+      } catch (error) {
+        cleanup();
+        port.close();
+        if (this.worker === worker) this.worker = null;
+        resolve({
+          connected: false,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
     });
   }
 

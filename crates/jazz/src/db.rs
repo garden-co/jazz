@@ -42,7 +42,7 @@ use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
     LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
     PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, ViewUpdateParts,
+    RowProvenance, TransactionBranchRowState, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
@@ -57,7 +57,8 @@ use crate::protocol::{
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionRecord,
 };
 use crate::protocol_limits::{
-    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
+    MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_fetch_row_versions,
+    validate_known_state_declaration, validate_shape_registration_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -1461,6 +1462,10 @@ where
     // itself is an admission identity, not proof that a Db may forge external
     // row provenance.
     backend_attribution: bool,
+    #[cfg(test)]
+    fail_next_subscription_refresh: Rc<Cell<bool>>,
+    #[cfg(test)]
+    stall_next_subscription_refresh: Rc<Cell<bool>>,
 }
 
 /// Process-local, content-addressed identity for an exact typed schema view.
@@ -1573,6 +1578,7 @@ impl UploadRetryClock for MonotonicUploadRetryClock {
 
 type SharedUploadRetryClock = Rc<RefCell<Rc<dyn UploadRetryClock>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
+type TransactionAbandonmentTombstones = Rc<RefCell<BTreeSet<OpenTransactionId>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
 type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
@@ -1866,6 +1872,14 @@ enum SubscriberShapeRegistration {
     PendingCatalogueAdmission(RegisterShapeOptions),
     RejectedUnsupportedCapability(String),
 }
+impl SubscriberShapeRegistration {
+    fn owns_node_shape(&self) -> bool {
+        matches!(
+            self,
+            Self::Registered(_) | Self::PendingCatalogueAdmission(_)
+        )
+    }
+}
 
 fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value) -> Value {
     match (column_type, default) {
@@ -2075,12 +2089,28 @@ struct CoverageGroup {
     binding: Binding,
     /// Immutable context represented by this relay-only coverage key.
     policy_binding: (AuthorSubject, BTreeMap<String, Value>),
+    /// Where `policy_binding` came from at admission.
+    ///
+    /// A direct subscriber's binding is the trusted connection's current
+    /// authenticated snapshot, so claim refresh replaces it before the
+    /// maintained view is reopened. A delegated binding was asserted by the
+    /// trusted relay for this exact usage site and must remain immutable even
+    /// when the relay transport refreshes its own session. In particular, do
+    /// not infer this from the identity: SYSTEM is a valid delegated subject
+    /// in internal paths.
+    policy_binding_origin: CoveragePolicyBindingOrigin,
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
     initialized: bool,
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoveragePolicyBindingOrigin {
+    DirectAdmitted,
+    Delegated,
 }
 
 /// One propagated coverage group owned by one downstream relay connection.
@@ -2511,6 +2541,13 @@ impl Error {
     }
 }
 
+fn transaction_abandoned(open_tx_id: OpenTransactionId) -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        format!("transaction handle was abandoned: {open_tx_id}"),
+    )
+}
+
 fn row_already_deleted(row: RowUuid) -> Error {
     Error::new(
         ErrorCode::WriteRejected,
@@ -2902,7 +2939,7 @@ pub enum WriteIdentity {
     Attribution(AuthorSubject),
 }
 
-/// Exact branch selected by an insert, upsert, or restore.
+/// Exact branch selected by an insert or restore.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ExactWriteTarget {
     /// Write to the database's current root branch.
@@ -2921,7 +2958,7 @@ impl ExactWriteTarget {
     }
 }
 
-/// Root or head-over-base view selected by an update or delete.
+/// Root or head-over-base view selected by an update, upsert, or delete.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum WriteTarget {
     /// Write to the database's current root branch.
@@ -2965,8 +3002,8 @@ pub struct UpdateOptions {
 pub struct UpsertOptions {
     /// Standalone-write identity. Transactions use the identity chosen when opened.
     pub identity: WriteIdentity,
-    /// Exact branch receiving the insert or update.
-    pub target: ExactWriteTarget,
+    /// Root or branch view through which the upsert is applied.
+    pub target: WriteTarget,
     /// Explicit provenance timestamp, or the database clock when omitted.
     pub updated_at_ms: Option<u64>,
 }
@@ -3159,11 +3196,12 @@ where
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
         match options.target {
-            ExactWriteTarget::Root => {
-                self.db()
+            WriteTarget::Root => {
+                let exists = self
+                    .db()
                     .require_mergeable_transaction_upsert_visibility(self.tx_id(), table, row)
                     .await?;
-                if self.read(table, row).await?.is_some() {
+                if exists {
                     self.db()
                         .stage_mergeable_update(
                             self.tx_id(),
@@ -3186,10 +3224,19 @@ where
                         .await
                 }
             }
-            ExactWriteTarget::Branch(_) => Err(Error::new(
-                ErrorCode::Schema,
-                "branch upserts are not supported inside transactions",
-            )),
+            WriteTarget::BranchView { head, base } => {
+                self.db()
+                    .stage_mergeable_upsert_in_branch_view(
+                        self.tx_id(),
+                        table,
+                        head,
+                        base,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
         }
     }
 
@@ -3399,11 +3446,11 @@ where
 {
     db: &'a Db<S>,
     tx_id: OpenTransactionId,
-    /// Set once the transaction has been committed, so `Drop` does not then
-    /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
-    /// `abandon_transaction_handle` on an already-committed transaction — benign
-    /// only because `abandon_tx` tolerates an unknown id, and silent because the
-    /// result was discarded.
+    /// Set once the transaction has been committed, so `Drop` does not submit
+    /// redundant abandonment maintenance for an already-terminal id.
+    ///
+    /// Maintenance is idempotent, but successful commit owns the terminal
+    /// transition and should not enqueue cleanup behind unrelated node work.
     committed: bool,
 }
 
@@ -3471,7 +3518,7 @@ where
         if self.committed {
             return;
         }
-        let _ = self.db.abandon_transaction_handle(self.tx_id);
+        self.db.node.abandon_or_enqueue_transaction(self.tx_id);
     }
 }
 
@@ -3606,7 +3653,7 @@ where
         options: UpsertOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_target(&options.target)?;
+        ensure_exclusive_view_target(&options.target)?;
         self.db()
             .stage_exclusive_upsert(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
@@ -3696,7 +3743,7 @@ where
         if self.committed {
             return;
         }
-        let _ = self.db.abandon_exclusive_handle(self.tx_id);
+        self.db.node.abandon_or_enqueue_transaction(self.tx_id);
     }
 }
 
@@ -4154,11 +4201,21 @@ pub enum SubscriptionEvent {
     Closed,
 }
 
+type SubscriptionFinalizationFuture = Pin<Box<dyn Future<Output = Result<(), Error>>>>;
+type SubscriptionCleanup =
+    Box<dyn FnOnce(Option<oneshot::Sender<()>>) -> Option<SubscriptionFinalizationFuture>>;
+
+enum SubscriptionFinalization {
+    Pending(SubscriptionFinalizationFuture),
+    Failed { code: ErrorCode, message: String },
+}
+
 /// Stream of materialized subscription events.
 pub struct SubscriptionStream {
     receiver: UnboundedReceiver<SubscriptionEvent>,
     _state: Rc<RefCell<SubscriptionState>>,
-    cleanup: Option<Box<dyn FnOnce(Option<oneshot::Sender<()>>)>>,
+    cleanup: Option<SubscriptionCleanup>,
+    finalization: Option<SubscriptionFinalization>,
     terminated: bool,
 }
 
@@ -4189,26 +4246,59 @@ impl Drop for CleanupGuard {
 }
 
 impl SubscriptionStream {
-    /// Queue cancellation and wait until the node runtime has retired the
-    /// local maintained subscription and any upstream coverage ownership.
-    /// Dropping this future is safe: the command is queued before it awaits.
+    /// Queue cancellation, drive finalization under the node owner, and wait
+    /// until the local maintained subscription and any upstream coverage
+    /// ownership have been retired. The stream owns the in-flight completion,
+    /// so cancelling this caller future leaves a later `close` able to resume
+    /// and await the same finalization command.
     pub async fn close(&mut self) -> Result<(), Error> {
-        let Some(cleanup) = self.cleanup.take() else {
-            return Ok(());
+        if self.finalization.is_none() {
+            let Some(cleanup) = self.cleanup.take() else {
+                return Ok(());
+            };
+            // `close` is a terminal stream operation. Do this before awaiting so
+            // callers cannot observe an old buffered delta while finalization is
+            // suspended behind storage or the node mutex.
+            self.terminated = true;
+            self.receiver.close();
+            let (sender, receiver) = oneshot::channel();
+            let drain = cleanup(Some(sender));
+            self.finalization = Some(SubscriptionFinalization::Pending(Box::pin(async move {
+                if let Some(finalization) = drain {
+                    finalization.await?;
+                }
+                receiver.await.map_err(|_| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "subscription finalization acknowledgement was dropped",
+                    )
+                })
+            })));
+        }
+
+        let result = match self
+            .finalization
+            .as_mut()
+            .expect("close completion must exist after finalization starts")
+        {
+            SubscriptionFinalization::Pending(completion) => completion.as_mut().await,
+            SubscriptionFinalization::Failed { code, message } => {
+                return Err(Error::new(*code, message.clone()));
+            }
         };
-        // `close` is a terminal stream operation. Do this before awaiting so
-        // callers cannot observe an old buffered delta while finalization is
-        // suspended behind storage or the node mutex.
-        self.terminated = true;
-        self.receiver.close();
-        let (sender, receiver) = oneshot::channel();
-        cleanup(Some(sender));
-        receiver.await.map_err(|_| {
-            Error::new(
-                ErrorCode::Protocol,
-                "subscription finalization acknowledgement was dropped",
-            )
-        })
+        match result {
+            Ok(()) => {
+                self.finalization = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.finalization = Some(SubscriptionFinalization::Failed {
+                    code: error.code,
+                    message: error.message.clone(),
+                });
+                Err(error)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -4290,7 +4380,7 @@ impl Stream for SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            cleanup(None);
+            drop(cleanup(None));
         }
     }
 }

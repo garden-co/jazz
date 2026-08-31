@@ -176,6 +176,7 @@ struct ControlState {
     permits: usize,
     observed: Vec<TestStorageOperation>,
     poll_counts: BTreeMap<TestStorageOperation, usize>,
+    point_read_count: usize,
     waiters: Vec<Waker>,
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
 }
@@ -189,6 +190,7 @@ impl Default for ControlState {
             permits: 0,
             observed: Vec::new(),
             poll_counts: BTreeMap::new(),
+            point_read_count: 0,
             waiters: Vec::new(),
             failures: BTreeMap::new(),
         }
@@ -274,6 +276,16 @@ impl TestStorageControl {
 
     pub fn take_observed(&self) -> Vec<TestStorageOperation> {
         std::mem::take(&mut self.state.borrow_mut().observed)
+    }
+
+    /// Number of point reads requested from this storage handle, including
+    /// reads satisfied immediately from its retained resident state.
+    pub fn point_read_count(&self) -> usize {
+        self.state.borrow().point_read_count
+    }
+
+    fn record_point_read(&self) {
+        self.state.borrow_mut().point_read_count += 1;
     }
 
     /// Number of times an operation's controlled suspension point was polled.
@@ -434,6 +446,7 @@ where
     S: OrderedKvStorage,
 {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        self.control.record_point_read();
         if let Some(value) = self.resident.borrow().get(&cf, &key) {
             return Box::pin(async move { Ok(value) });
         }

@@ -156,7 +156,7 @@ function normalizeGather(value: unknown): BuiltGather | undefined {
   if (
     !isPlainObject(value) ||
     !Number.isInteger(maxDepth) ||
-    maxDepth <= 0 ||
+    maxDepth < 0 ||
     typeof value.step_table !== "string" ||
     typeof value.step_current_column !== "string"
   ) {

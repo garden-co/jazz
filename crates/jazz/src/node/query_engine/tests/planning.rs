@@ -285,7 +285,53 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
         },
     };
 
-    let mut resolver = FakeSourceResolver::default();
+    let mut logical_arg_by_request = request.clone();
+    let original_step = match logical_arg_by_request.input.shape.nodes.get(&relation_node) {
+        Some(RowSetExpr::RecursiveRelation { step, .. }) => step.clone(),
+        _ => panic!("expected recursive relation fixture"),
+    };
+    let step_arg_by = RowSetNodeId("step-arg-by".to_owned());
+    logical_arg_by_request.input.shape.nodes.insert(
+        step_arg_by.clone(),
+        RowSetExpr::Slice {
+            input: original_step,
+            partition_by: Vec::new(),
+            limit: Some(1),
+            offset: 0,
+            tie_breaker: Vec::new(),
+            rank_output: None,
+        },
+    );
+    let Some(RowSetExpr::RecursiveRelation { step, .. }) = logical_arg_by_request
+        .input
+        .shape
+        .nodes
+        .get_mut(&relation_node)
+    else {
+        panic!("expected recursive relation fixture");
+    };
+    *step = step_arg_by;
+    let mut rejecting_resolver = FakeSourceResolver {
+        current_rows_use_arg_by: true,
+        ..FakeSourceResolver::default()
+    };
+    let err = lower_query_program(logical_arg_by_request, &mut rejecting_resolver)
+        .expect_err("user-authored ArgBy recursion must fail during logical analysis");
+    assert!(
+        err.gaps.iter().any(|gap| format!("{gap:?}").contains(
+            "arg_max_by and arg_min_by are not supported inside recursive seed or step graphs"
+        )),
+        "{err:?}"
+    );
+    assert!(
+        rejecting_resolver.requests.is_empty(),
+        "logical recursion validation must run before current-row source expansion"
+    );
+
+    let mut resolver = FakeSourceResolver {
+        current_rows_use_arg_by: true,
+        ..FakeSourceResolver::default()
+    };
     let program =
         lower_query_program(request, &mut resolver).expect("recursive relation should lower");
 
@@ -340,6 +386,22 @@ fn recursive_relation_has_explicit_recursive_plan_and_relation_facts() {
                     if step_input_reads_frontier(input)
             )
     ));
+    let recursive_terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.relation_edges")
+        .expect("relation edge terminal");
+    let GraphBuilder::Recursive { step, .. } = &recursive_terminal.graph else {
+        panic!("expected recursive graph");
+    };
+    assert!(
+        graph_any(step, &|graph| matches!(
+            graph,
+            GraphBuilder::ArgMaxBy { .. }
+        )),
+        "current-row ArgBy introduced by source expansion must remain inside the recursive step"
+    );
     assert_eq!(
         program.lowered.parameters.user_params,
         BTreeMap::from([("route".to_owned(), ColumnType::String)])

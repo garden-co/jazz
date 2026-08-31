@@ -2345,15 +2345,14 @@ where
         } = options;
         self.reject_attributed_branch_target(
             identity,
-            matches!(target, ExactWriteTarget::Branch(_)),
+            matches!(target, WriteTarget::BranchView { .. }),
         )?;
         validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let branch = target.branch();
 
-        let (cells, parents, authored_columns) = match target {
-            ExactWriteTarget::Root => {
+        let (branch, cells, parents, authored_columns, verified_inherited_cells) = match target {
+            WriteTarget::Root => {
                 self.ensure_row_not_deleted(table, row).await?;
                 let exists = match identity {
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => self
@@ -2369,7 +2368,7 @@ where
                         .await?
                         .is_some(),
                 };
-                if exists {
+                let (cells, parents, authored_columns) = if exists {
                     let (cells, parent, authored_columns) = match identity {
                         WriteIdentity::Database | WriteIdentity::Attribution(_) => {
                             self.merge_existing_cells(table, row, cells).await?
@@ -2382,52 +2381,84 @@ where
                     (cells, parent.into_iter().collect(), Some(authored_columns))
                 } else {
                     (cells, Vec::new(), None)
-                }
+                };
+                (
+                    BranchSelector::default(),
+                    cells,
+                    parents,
+                    authored_columns,
+                    None,
+                )
             }
-            ExactWriteTarget::Branch(_) => {
+            WriteTarget::BranchView { head, base } => {
+                self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
+                    .await?;
                 let visible_to_session = match identity {
                     WriteIdentity::Session(author) => {
                         self.visible_branch_view_cells_for_identity(
-                            table, &branch, None, row, author,
+                            table,
+                            &head,
+                            base.as_ref(),
+                            row,
+                            author,
                         )
                         .await?
                     }
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => None,
                 };
+                let authored_columns = cells.keys().cloned().collect();
                 let mut node = self.node.node.lock().await;
-                let existing = node
-                    .visible_current_cells_in_branch(table, &branch, row)
-                    .await?;
-                let parent = if existing.is_some() {
-                    node.local_content_winner_tx_id_in_branch(table, &branch, row)
-                        .await?
-                } else {
-                    None
-                };
-                drop(node);
-                if let Some(mut existing) = existing {
-                    if matches!(identity, WriteIdentity::Session(_)) && visible_to_session.is_none()
-                    {
-                        return Err(read_for_write_denied("UPSERT", table));
-                    }
+                if let Some(mut current) = node
+                    .visible_current_cells_in_branch(table, &head, row)
+                    .await?
+                {
                     if cells.is_empty() {
                         return Err(Error::new(
                             ErrorCode::Schema,
                             "branch upsert update requires at least one authored column",
                         ));
                     }
-                    if let Some(visible_to_session) = visible_to_session {
-                        existing = visible_to_session;
+                    if matches!(identity, WriteIdentity::Session(_)) && visible_to_session.is_none()
+                    {
+                        return Err(read_for_write_denied("UPSERT", table));
                     }
-                    let authored_columns = cells.keys().cloned().collect();
-                    existing.extend(cells);
+                    if let Some(visible_to_session) = visible_to_session {
+                        current = visible_to_session;
+                    }
+                    let parent = node
+                        .local_content_winner_tx_id_in_branch(table, &head, row)
+                        .await?;
+                    drop(node);
+                    current.extend(cells);
                     (
-                        existing,
+                        head,
+                        current,
                         parent.into_iter().collect(),
                         Some(authored_columns),
+                        None,
+                    )
+                } else if let Some(inherited) = node
+                    .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                    .await?
+                {
+                    drop(node);
+                    if matches!(identity, WriteIdentity::Session(_)) && visible_to_session.is_none()
+                    {
+                        return Err(read_for_write_denied("UPSERT", table));
+                    }
+                    let verified_inherited_cells = inherited.clone();
+                    let mut inherited = visible_to_session.unwrap_or(inherited);
+                    inherited.extend(cells);
+                    (
+                        head,
+                        inherited,
+                        Vec::new(),
+                        Some(authored_columns),
+                        Some(verified_inherited_cells),
                     )
                 } else {
-                    (cells, Vec::new(), None)
+                    drop(node);
+                    (head, cells, Vec::new(), None, None)
                 }
             }
         };
@@ -2443,7 +2474,7 @@ where
             authored_columns,
             now_ms,
             branch,
-            None,
+            verified_inherited_cells,
         )
         .await
     }
@@ -2880,7 +2911,7 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let tx_id = published.tx_id;
         let local_tier = if self.node.defer_local_persistence.get() {
-            self.admit_deferred_local_publication(published, None)
+            self.finish_deferred_local_publication(published, None)
                 .await?;
             DurabilityTier::None
         } else {
@@ -2898,20 +2929,20 @@ where
         })
     }
 
-    /// Admit a local publication whose durable storage is owned by a later
-    /// runtime tick. The current-view refresh is part of admission, rather
-    /// than a property of one CRUD entry point: direct writes, mergeable
-    /// commits, and exclusive commits all become resident at this boundary.
-    pub(super) async fn admit_deferred_local_publication(
+    /// Transfer a published ordered slot into node ownership before resident
+    /// subscription refresh can suspend, fail, or be cancelled.
+    pub(super) async fn finish_deferred_local_publication(
         &self,
         published: PublishedTransaction,
         upload_unit: Option<SyncMessage>,
     ) -> Result<(), Error> {
-        // Publication is the synchronous visibility boundary. Refresh resident
-        // subscribers before returning, then let the host tick own suspendable
-        // persistence and later peer visibility.
-        self.refresh_subscriptions().await?;
         self.node.queue_local_publication(published, upload_unit);
+        if let Err(error) = self.refresh_subscriptions().await {
+            super::peer_connection::route_subscription_refresh_failure(
+                &self.node.subscriptions,
+                &error,
+            );
+        }
         Ok(())
     }
 
@@ -2927,10 +2958,6 @@ where
             } = outcome;
             loop {
                 if !publications.is_empty() {
-                    // Resident maintained terminals publish their immediate
-                    // local delta at the write boundary. Cold work is owned
-                    // by the scheduled runtime turn after this publication.
-                    self.refresh_subscriptions().await?;
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
                         persisted.push((publication.tx_id(), publication.persist().await));
@@ -2938,6 +2965,13 @@ where
                     let mut node = self.node.node.lock().await;
                     for (tx_id, persistence) in persisted {
                         node.settle_published_transaction(tx_id, persistence)?;
+                    }
+                    drop(node);
+                    if let Err(error) = self.refresh_subscriptions().await {
+                        super::peer_connection::route_subscription_refresh_failure(
+                            &self.node.subscriptions,
+                            &error,
+                        );
                     }
                 }
                 let Some(message) = post_settlement_work.pop_front() else {
@@ -3220,7 +3254,11 @@ where
         }
     }
 
-    async fn ensure_row_not_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+    pub(super) async fn ensure_row_not_deleted(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
         self.table_schema(table)?;
         let deleted = self
             .node
@@ -3231,6 +3269,31 @@ where
             .await?
             .is_some();
         if deleted {
+            Err(row_already_deleted(row))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) async fn ensure_branch_view_row_not_deleted(
+        &self,
+        table: &str,
+        head: &BranchSelector,
+        base: Option<&BranchViewBase>,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.table_schema(table)?;
+        let mut node = self.node.node.lock().await;
+        let has_deletion_winner = node
+            .local_deletion_winner_tx_id_in_branch(table, head, row)
+            .await?
+            .is_some();
+        let tombstone_hidden = has_deletion_winner
+            && node
+                .visible_current_cells_in_branch_view(table, head, base, row)
+                .await?
+                .is_none();
+        if tombstone_hidden {
             Err(row_already_deleted(row))
         } else {
             Ok(())

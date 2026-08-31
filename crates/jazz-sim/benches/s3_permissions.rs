@@ -2501,12 +2501,14 @@ fn edge_acceptance_phase(
     let SyncMessage::CommitUnit { tx, versions } = delivered_to_edge.message else {
         unreachable!();
     };
+    let policy_claims = raw_claims(client.peer.identity());
     let outcome = block_on(client.peer.ingest_edge_mergeable_commit_unit(
         &mut edge.node,
         tx.clone(),
         versions,
         u64::MAX,
         u64::MAX,
+        policy_claims,
     ))
     .unwrap();
     let first = settle_outcome(&mut edge.node, outcome).unwrap();
@@ -2598,7 +2600,9 @@ fn open_edge(
         node,
         _dir: dir,
         core_peer: PeerState::edge_client(author),
-        policy_peer: PeerState::relay(),
+        // The benchmark drives this policy reader directly. It is not a
+        // multiplexing relay connection and has one SYSTEM policy identity.
+        policy_peer: PeerState::new(),
     }
 }
 

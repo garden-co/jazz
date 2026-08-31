@@ -4,9 +4,10 @@ import type {
   BrowserFollowerConnectionContext,
 } from "../runtime-source.js";
 import { BrowserWorkerTransportPump, transferableFrames } from "./browser-worker-transport.js";
-import type {
-  BrowserFollowerPortEvent,
-  BrowserFollowerPortRequest,
+import {
+  deserializeBrowserRelayError,
+  type BrowserFollowerPortEvent,
+  type BrowserFollowerPortRequest,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { IndexedDbPageStore } from "../indexeddb-page-store.js";
@@ -32,6 +33,7 @@ type BrowserFollowerPortRpcRequest =
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
   private readonly pump: BrowserWorkerTransportPump;
   private readonly readyPromise: Promise<void>;
+  private inspectorAttachmentPhysicalDbName: string | null = null;
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private closed = false;
@@ -118,6 +120,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.readyPromise;
     if (this.failed) throw this.failed;
     if (this.closed) throw new Error("Browser follower connection is closed");
+  }
+
+  /** A worker-issued receipt, not caller-supplied authority. */
+  getAuthenticatedInspectorAttachmentPhysicalDbName(): string | null {
+    return this.inspectorAttachmentPhysicalDbName;
   }
 
   async waitForServerConnection(): Promise<void> {
@@ -242,7 +249,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Edge/Global waits and
       // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(new Error(message.message));
+      this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
       return;
     }
     if (message.type === "storage-reset") {
@@ -268,15 +275,18 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       return;
     }
     if (message.type === "error") {
-      this.fail(new Error(message.message));
+      this.fail(deserializeBrowserRelayError(message.error));
       return;
     }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
     if (message.error) {
-      pending.reject(new Error(`Browser worker ${pending.type} failed: ${message.error}`));
-    } else pending.resolve();
+      pending.reject(deserializeBrowserRelayError(message.error));
+    } else {
+      this.inspectorAttachmentPhysicalDbName ??= message.inspectorAttachmentPhysicalDbName ?? null;
+      pending.resolve();
+    }
   };
 
   private readonly onMessageError = (): void => {

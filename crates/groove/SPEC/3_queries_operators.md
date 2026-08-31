@@ -30,7 +30,14 @@ Invariant digest:
 - `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including `SELECT DISTINCT`, grouped/ordered/limited selects, non-inner joins, and non-`UNION ALL` set operations.
 - `INV-QUERY-18`: SQL inner joins MUST lower only equality column predicates, with `AND` forming multi-column join keys.
 - `INV-QUERY-19`: `BindingSourceOp` MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
-- `INV-QUERY-20`: `ArgMaxByOp` and `ArgMinByOp` MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly `group_cols + order_cols`; non-table inputs MUST use `group_cols + order_cols` as the comparison key.
+- `INV-QUERY-20`: `ArgMaxByOp` and `ArgMinByOp` MUST accept arbitrary upstream
+  graph inputs. Base-table inputs MUST have primary-key columns exactly
+  `group_cols + order_cols`; every plan shape MUST compare only that declared key
+  under the operator direction, then encoded full-record bytes ascending as the
+  deterministic final tie-breaker. Full-record bytes MUST independently key
+  multiplicity so distinct records tied on the comparison key remain
+  independently retractable; arbitrary payload field order MUST NOT be appended
+  to the declared comparison key.
 - `INV-QUERY-21`: `ArgMaxByOp` and `ArgMinByOp` MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
 - `INV-QUERY-22`: A query operator MUST NOT be advertised as executable unless
   the runtime can execute that operator for the advertised scope; executable
@@ -169,13 +176,28 @@ emits only the winner changes for groups touched by an input change (`ArgMaxByOp
 and `ArgMinByOp` in the reference implementation). These operators are
 executable and graph-only: each takes any single upstream graph input, including
 filtered, joined, or unioned inputs.
+They may consume a recursive node's output or occur inside a recursive seed or
+step graph. Jazz rejects user-authored logical recursion that would lower to
+ArgBy before current-row source resolution; internal ArgBy added by that source
+expansion remains executable. Recursive hydration applies the same deterministic
+winner ordering before facts enter the accumulated set (`INV-REC-13`, ch. 6).
 
 For base-table inputs, the table primary key must equal the group columns
 followed by the order columns, in that exact order (`group_cols + order_cols`).
-For non-table inputs, `group_cols + order_cols` is the comparison key used to
-select the winner (`INV-QUERY-20`). `ArgMaxBy` selects the greatest comparison
-key; `ArgMinBy` selects the least comparison key. Ties are deterministic because
-the comparison key is the declared primary-key/comparison-field sequence.
+For every plan shape, that declared key is the only key compared under the
+operator direction (`INV-QUERY-20`): `ArgMaxBy` selects the greatest key and
+`ArgMinBy` selects the least key. When distinct records have the same comparison
+key, encoded full-record bytes ascending are the final tie-breaker for both
+operators. Consequently, an exact-key tie selects the bytewise least full record
+even for `ArgMaxBy`; arrival order, iteration order, and arbitrary payload-field
+order do not extend or otherwise alter the declared comparison key.
+
+Multiplicity is keyed independently by encoded full-record bytes. Distinct
+records tied on the comparison key therefore remain separate candidates and can
+be retracted independently. A record is eligible while its consolidated
+multiplicity is positive, and a group emits one copy of its selected winner;
+changes that neither remove the winner nor select a different record emit no
+winner delta.
 
 The names are module labels, not taxonomy claims: despite their `op_types` home
 under "aggregate," they are winner-selection operators over graph input, not

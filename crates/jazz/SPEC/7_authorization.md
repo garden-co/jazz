@@ -348,6 +348,23 @@ seed reachability by projecting its own `id` column from rows where
 grant, revoke, or seed-column update flows through normal IVM deltas and updates
 maintained subscriptions without rehydrating the whole view.
 
+The canonical relation IR for a set-valued seed projects both the seed
+membership's group key and each filtered recursive edge's parent key as the
+scalar `id` frontier. The recursive step does not join the parent key back to
+the seed table: a reachable parent need not have its own seed-membership or
+output-table row. Seed and edge predicates are evaluated before their projected
+keys enter the frontier.
+
+Reachability deduplicates projected keys at every step, so cycles terminate.
+`MaxDepth(N)` is a semantic cutoff: the seed is depth zero, rows reached by
+exactly `N` edges are included, and an otherwise valid `N + 1` frontier is
+excluded without being treated as evaluator non-convergence. Consequently,
+`MaxDepth(0)` is seed-only and MUST NOT admit a one-hop authorization grant.
+The evaluator's independent fixpoint safety limit may still report genuine
+non-convergence. An empty seed is a live maintained relation, not a completed
+subscription; later seed grants, revokes, seed-key moves, filtered edge grants,
+and edge revokes produce ordinary maintained deltas.
+
 `inherits(parent_col)` is also an atom. A child row is readable when the parent
 row referenced by `parent_col` is readable under the parent's composed read
 policy. Missing or invisible parents fail closed. Parent-policy changes

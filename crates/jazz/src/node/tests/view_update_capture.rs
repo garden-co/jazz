@@ -873,7 +873,6 @@ fn recursive_rls_capture_schema() -> JazzSchema {
         "team",
         &[],
         &[],
-        "teams",
         "team_edges",
         "member",
         "parent",

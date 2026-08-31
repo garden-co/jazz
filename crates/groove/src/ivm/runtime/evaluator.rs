@@ -24,7 +24,7 @@ use std::rc::Rc;
 pub(super) enum OperatorState {
     Stateless,
     Join(JoinState),
-    SemiJoin(AntiJoinState),
+    SemiJoin(SemiJoinState),
     AntiJoin(AntiJoinState),
     TopBy(AsOf<TopByIncrementalState, SubTick>),
     Recursive(AsOf<RecursiveState, Tick>),
@@ -116,7 +116,7 @@ impl TopByIncrementalState {
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::Join(_) => OperatorState::Join(JoinState),
-        OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
+        OpType::SemiJoin(_) => OperatorState::SemiJoin(SemiJoinState::default()),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
         OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
@@ -867,14 +867,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_max_by.primary_key_field_indices,
+                        &arg_max_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_max_by.group_fields,
                             group_field_indices: &arg_max_by.group_field_indices,
-                            primary_key_field_indices: &arg_max_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_max_by.comparison_field_indices,
                             direction: ArgByDirection::Max,
                         },
                         output_desc,
@@ -885,14 +885,14 @@ impl TickEvaluator<'_> {
                     let input = self.update_unary_input(graph_node, node).await?;
                     let input = self.materialize_indirect_field_indices(
                         &input,
-                        &arg_min_by.primary_key_field_indices,
+                        &arg_min_by.comparison_field_indices,
                     )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
                             group_fields: &arg_min_by.group_fields,
                             group_field_indices: &arg_min_by.group_field_indices,
-                            primary_key_field_indices: &arg_min_by.primary_key_field_indices,
+                            comparison_field_indices: &arg_min_by.comparison_field_indices,
                             direction: ArgByDirection::Min,
                         },
                         output_desc,
@@ -1515,12 +1515,12 @@ impl TickEvaluator<'_> {
         let operator_key = self.operator_key(node)?;
         let operator = self
             .operator_states
-            .entry(operator_key)
+            .entry(operator_key.clone())
             .or_insert_with(|| operator_state_for(&OpType::SemiJoin(join.clone())));
         let OperatorState::SemiJoin(join_state) = operator else {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
-        let join_state = join_state.clone();
+        let mut join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
             self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
@@ -1541,7 +1541,7 @@ impl TickEvaluator<'_> {
                 .remove(&right_key)
                 .unwrap_or_default()
         };
-        let deltas = join_state.apply_semi(
+        let deltas = join_state.apply(
             &mut left_arrangement,
             &mut right_arrangement,
             join.left_descriptor,
@@ -1562,6 +1562,8 @@ impl TickEvaluator<'_> {
             self.insert_arrangement(right_key, right_arrangement);
         }
         self.insert_arrangement(left_key, left_arrangement);
+        self.operator_states
+            .insert(operator_key, OperatorState::SemiJoin(join_state));
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -1653,13 +1655,13 @@ impl TickEvaluator<'_> {
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let after = arg_by_winner_from_records(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records.clone(),
                 spec.direction,
             )?;
             let before = arg_by_winner_before_from_deltas(
                 output_desc,
-                spec.primary_key_field_indices,
+                spec.comparison_field_indices,
                 after_records,
                 group_deltas,
                 spec.direction,

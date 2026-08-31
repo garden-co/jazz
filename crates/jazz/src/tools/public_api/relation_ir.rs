@@ -115,6 +115,7 @@ pub enum JoinKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RecursionBound {
     Fixpoint,
+    /// Include the seed plus at most this many recursive steps. Zero is seed-only.
     MaxDepth(usize),
 }
 
