@@ -4,12 +4,18 @@ import { describe, expect, it } from "vitest";
 
 import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
-import { FEATURE_PAYLOAD_ZSTD } from "./websocket.js";
+import { FEATURE_PAYLOAD_ZSTD, decodeWireError } from "./websocket.js";
 
 type FrameFixture = { name: string; frame_hex: string };
 type ArtifactCorpus = {
   format: string;
-  error_frame_hex: string;
+  error_frames: Array<{
+    name: string;
+    frame_hex: string;
+    code: string;
+    retry: string;
+    message: string;
+  }>;
   rejections: Array<{ name: string; frame_hex: string; negotiated_features: string }>;
 };
 
@@ -26,16 +32,37 @@ type WasmArtifactFrameValidator = ArtifactFrameValidator & {
 // sends every complete Hello/message frame through both freshly generated artifacts,
 // not a JavaScript mirror of the Rust frame/payload/compression decoder.
 describe("wire frame artifact corpus", () => {
+  it("decodes every exact structured v1 error and rejects planted field drift", () => {
+    const corpus = artifactCorpus();
+    for (const error of corpus.error_frames) {
+      expect(decodeWireError(hexToBytes(error.frame_hex)), error.name).toEqual({
+        code: error.code,
+        retry: error.retry,
+        message: error.message,
+      });
+    }
+    const bootstrap = corpus.error_frames.find(
+      (error) => error.name === "runtime bootstrap not ready",
+    );
+    expect(bootstrap).toBeDefined();
+    expect(decodeWireError(hexToBytes(bootstrap!.frame_hex))).not.toEqual({
+      code: "malformed_frame",
+      retry: bootstrap!.retry,
+      message: bootstrap!.message,
+    });
+    expect(decodeWireError(hexToBytes(bootstrap!.frame_hex))).not.toEqual({
+      code: bootstrap!.code,
+      retry: "never",
+      message: bootstrap!.message,
+    });
+  });
+
   it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
     "executes every complete v1 frame and rejects malformed input through NAPI and WASM",
     async () => {
       const corpus = artifactCorpus();
       expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v1");
-      const accepted = [
-        ...rustHelloFixtures(),
-        ...rustMessageFixtures(),
-        { name: "structured error", frame_hex: corpus.error_frame_hex },
-      ];
+      const accepted = [...rustHelloFixtures(), ...rustMessageFixtures(), ...corpus.error_frames];
       const [napi, wasm] = await Promise.all([
         // This is a deliberately test-only export (`skip_typescript` in
         // napi-rs), so production declarations must not advertise it.
