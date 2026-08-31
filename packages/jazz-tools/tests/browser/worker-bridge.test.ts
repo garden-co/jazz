@@ -1743,14 +1743,17 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const inspectorControl = await dbBeforeRestart.openInspectorControlPort();
     inspectorControl.start();
-    const [initialContext] = (await listWorkerContexts(inspectorControl)).filter(
-      (context) => context.dbName === dbName,
-    );
+    const [initialContext] = await listWorkerContexts(inspectorControl);
     expect(initialContext).toBeDefined();
+    // Persistent browser roots are scoped by the auth session. Inspector
+    // contexts deliberately report that physical name, not the caller's raw
+    // driver.dbName; retain it only as an opaque same-root handle across the
+    // worker restart below.
+    const workerDbName = initialContext!.dbName;
     try {
       await dbBeforeRestart.shutdown();
       untrack(dbBeforeRestart);
-      await waitForWorkerContextRelease(inspectorControl, dbName);
+      await waitForWorkerContextRelease(inspectorControl, workerDbName);
       await terminateWorker(inspectorControl);
 
       const dbAfterAcknowledgement = track(await createPersistentDb(undefined));
@@ -1762,7 +1765,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const secondInspectorControl = await dbAfterAcknowledgement.openInspectorControlPort();
       secondInspectorControl.start();
       const [secondContext] = (await listWorkerContexts(secondInspectorControl)).filter(
-        (context) => context.dbName === dbName,
+        (context) => context.dbName === workerDbName,
       );
       expect(secondContext?.workerRealmId).not.toBe(initialContext?.workerRealmId);
       // The destroyed worker context rehydrated the settled local view, but the
@@ -1772,7 +1775,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
       await dbAfterAcknowledgement.shutdown();
       untrack(dbAfterAcknowledgement);
-      await waitForWorkerContextRelease(secondInspectorControl, dbName);
+      await waitForWorkerContextRelease(secondInspectorControl, workerDbName);
       await terminateWorker(secondInspectorControl);
 
       const dbAfterSecondRestart = track(await createPersistentDb(undefined));
@@ -1782,7 +1785,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const thirdInspectorControl = await dbAfterSecondRestart.openInspectorControlPort();
       thirdInspectorControl.start();
       const [thirdContext] = (await listWorkerContexts(thirdInspectorControl)).filter(
-        (context) => context.dbName === dbName,
+        (context) => context.dbName === workerDbName,
       );
       expect(thirdContext?.workerRealmId).not.toBe(secondContext?.workerRealmId);
       thirdInspectorControl.postMessage({
@@ -1822,12 +1825,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const inspectorBeforeRestart = await dbBeforeRestart.openInspectorControlPort();
     inspectorBeforeRestart.start();
-    const [contextBeforeRestart] = (await listWorkerContexts(inspectorBeforeRestart)).filter(
-      (context) => context.dbName === dbName,
-    );
+    const [contextBeforeRestart] = await listWorkerContexts(inspectorBeforeRestart);
+    expect(contextBeforeRestart).toBeDefined();
+    const workerDbName = contextBeforeRestart!.dbName;
     await dbBeforeRestart.shutdown();
     untrack(dbBeforeRestart);
-    await waitForWorkerContextRelease(inspectorBeforeRestart, dbName);
+    await waitForWorkerContextRelease(inspectorBeforeRestart, workerDbName);
     await terminateWorker(inspectorBeforeRestart);
 
     const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
@@ -1839,7 +1842,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const inspectorAfterRestart = await dbAfterRestart.openInspectorControlPort();
     inspectorAfterRestart.start();
     const [contextAfterRestart] = (await listWorkerContexts(inspectorAfterRestart)).filter(
-      (context) => context.dbName === dbName,
+      (context) => context.dbName === workerDbName,
     );
     expect(contextAfterRestart?.workerRealmId).not.toBe(contextBeforeRestart?.workerRealmId);
 
@@ -1860,7 +1863,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await dbAfterRestart.shutdown();
     untrack(dbAfterRestart);
-    await waitForWorkerContextRelease(inspectorAfterRestart, dbName);
+    await waitForWorkerContextRelease(inspectorAfterRestart, workerDbName);
     await terminateWorker(inspectorAfterRestart);
 
     const dbAfterSecondRestart = track(await createPersistentDb(undefined));
@@ -1869,7 +1872,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     inspectorAfterSecondRestart.start();
     const [contextAfterSecondRestart] = (
       await listWorkerContexts(inspectorAfterSecondRestart)
-    ).filter((context) => context.dbName === dbName);
+    ).filter((context) => context.dbName === workerDbName);
     expect(contextAfterSecondRestart?.workerRealmId).not.toBe(contextAfterRestart?.workerRealmId);
     inspectorAfterSecondRestart.postMessage({
       type: "close",
@@ -1916,9 +1919,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const firstInspector = await first.openInspectorControlPort();
     firstInspector.start();
+    const [firstContext] = await listWorkerContexts(firstInspector);
+    expect(firstContext).toBeDefined();
+    const workerDbName = firstContext!.dbName;
     await first.shutdown();
     untrack(first);
-    await waitForWorkerContextRelease(firstInspector, dbName);
+    await waitForWorkerContextRelease(firstInspector, workerDbName);
     await terminateWorker(firstInspector);
 
     const successor = track(await createPersistentDb(syncServer.serverUrl));
@@ -1960,7 +1966,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await successor.shutdown();
     untrack(successor);
-    await waitForWorkerContextRelease(successorInspector, dbName);
+    await waitForWorkerContextRelease(successorInspector, workerDbName);
     await terminateWorker(successorInspector);
 
     const later = track(await createPersistentDb(undefined));
