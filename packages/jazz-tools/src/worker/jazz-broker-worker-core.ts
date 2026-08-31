@@ -14,6 +14,7 @@ import type {
   BrowserForegroundNodeLeaseAcquireRequest,
   BrowserForegroundNodeLeaseAcquireResponse,
   BrowserForegroundNodeLeaseCancelRequest,
+  BrowserForegroundNodeLeaseProbeRequest,
   BrowserForegroundNodeLeasePortEvent,
   BrowserForegroundNodeLeasePortRequest,
   BrowserFollowerPortEvent,
@@ -88,6 +89,7 @@ type ForegroundLeaseOwner = {
   storageOwner: string;
   activeLeaseIds: Set<string>;
   pendingLeaseAllocations: number;
+  pendingLeaseFinalizations: number;
   allocationTail: Promise<void>;
 };
 
@@ -140,6 +142,11 @@ let pendingBootstrapOperations = 0;
 // deferred close needs an invalidatable token rather than an unconditional
 // `finally(() => close())`.
 let pendingWorkerClose: symbol | null = null;
+// Inspector-directed termination acknowledges before calling `close()` in a
+// later task so the reply can cross its MessagePort. Reject new ports in that
+// acknowledgement gap: admitting them into the doomed realm can otherwise
+// strand a foreground lease request with no terminal response.
+let workerTerminationScheduled = false;
 // The inspector-facing trace intentionally does not serialize this key. It
 // is only an in-worker capability boundary that prevents a later auth scope
 // from observing a prior scope's retained diagnostics for the same realm.
@@ -330,26 +337,66 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
     // first operation or failed it.
     pendingBootstrapOperations += 1;
     let bootstrapFinished = false;
+    let bootstrapPortClosed = false;
+    let probedLeaseAttemptId: string | null = null;
     const finishBootstrap = () => {
       if (bootstrapFinished) return;
       bootstrapFinished = true;
       pendingBootstrapOperations -= 1;
       maybeCloseWorker();
     };
-    const onBootstrapMessage = (
+    const detachBootstrapListeners = () => {
+      port.removeEventListener("message", onBootstrapMessage);
+      port.removeEventListener("messageerror", onBootstrapMessageError);
+    };
+    const closeBootstrapPort = () => {
+      if (bootstrapPortClosed) return;
+      bootstrapPortClosed = true;
+      detachBootstrapListeners();
+      finishBootstrap();
+      port.close();
+    };
+    function onBootstrapMessage(
       messageEvent: MessageEvent<
-        BrowserSharedWorkerConnectRequest | BrowserForegroundNodeLeaseAcquireRequest
+        | BrowserSharedWorkerConnectRequest
+        | BrowserForegroundNodeLeaseProbeRequest
+        | BrowserForegroundNodeLeaseAcquireRequest
+        | BrowserForegroundNodeLeaseCancelRequest
       >,
-    ) => {
+    ) {
       const message = messageEvent.data;
+      if (workerTerminationScheduled) {
+        if (
+          message?.type === "probe-foreground-node-lease-worker" ||
+          message?.type === "acquire-foreground-node-lease"
+        ) {
+          post(port, {
+            type: "foreground-node-lease-worker-closing",
+            attemptId: message.attemptId ?? "",
+          } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+        }
+        closeBootstrapPort();
+        return;
+      }
+      if (message?.type === "probe-foreground-node-lease-worker") {
+        probedLeaseAttemptId = message.attemptId;
+        post(port, {
+          type: "foreground-node-lease-worker-alive",
+          attemptId: message.attemptId,
+        } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+        return;
+      }
+      if (message?.type === "cancel-foreground-node-lease") {
+        closeBootstrapPort();
+        return;
+      }
       if (
         message?.type !== "connect-runtime" &&
         message?.type !== "acquire-foreground-node-lease"
       ) {
         return;
       }
-      port.removeEventListener("message", onBootstrapMessage);
-      port.removeEventListener("messageerror", onBootstrapMessageError);
+      detachBootstrapListeners();
       if (message.type === "connect-runtime") {
         recordWorkerLifecycle(
           "bootstrap-start",
@@ -359,15 +406,22 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
         post(port, { type: "worker-alive" });
         void connectTab(port, message, finishBootstrap);
       } else {
+        if (probedLeaseAttemptId !== null && message.attemptId !== probedLeaseAttemptId) {
+          finishBootstrap();
+          post(port, {
+            type: "foreground-node-lease-error",
+            message: "Foreground node lease request did not match its worker probe",
+          } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+          closeBootstrapPort();
+          return;
+        }
         recordWorkerLifecycle("lease-request", message.dbName, null);
         void acquireForegroundNodeLease(port, message).finally(finishBootstrap);
       }
-    };
-    const onBootstrapMessageError = () => {
-      port.removeEventListener("message", onBootstrapMessage);
-      finishBootstrap();
-      port.close();
-    };
+    }
+    function onBootstrapMessageError() {
+      closeBootstrapPort();
+    }
     port.addEventListener("message", onBootstrapMessage);
     port.addEventListener("messageerror", onBootstrapMessageError);
     port.start();
@@ -419,9 +473,8 @@ async function acquireForegroundNodeLease(
       return;
     }
     settled = true;
-    owner.activeLeaseIds.delete(lease.leaseId);
     try {
-      await owner.pageStore.retireForegroundNodeLease(lease.leaseId);
+      await retireForegroundNodeLease(owner, lease.leaseId);
       const testLeaseState = testHooks
         ? await testHooks.cancellationRetired(owner.pageStore, lease.node)
         : undefined;
@@ -453,9 +506,7 @@ async function acquireForegroundNodeLease(
   const retire = async (): Promise<void> => {
     if (settled || !lease || !owner) return;
     settled = true;
-    owner.activeLeaseIds.delete(lease.leaseId);
-    await owner.pageStore.retireForegroundNodeLease(lease.leaseId);
-    maybeCloseWorker();
+    await retireForegroundNodeLease(owner, lease.leaseId);
   };
   const onMessage = (
     event: MessageEvent<
@@ -544,6 +595,7 @@ async function acquireForegroundNodeLease(
           storageOwner: request.storageOwner,
           activeLeaseIds: new Set(),
           pendingLeaseAllocations: 0,
+          pendingLeaseFinalizations: 0,
           allocationTail: Promise.resolve(),
         };
         foregroundLeaseOwners.set(request.dbName, owner);
@@ -638,6 +690,28 @@ async function allocateForegroundNodeLease(
     // On success the active ID now retains the worker. On terminal failure no
     // port can finish handoff, so this balanced decrement may release an idle
     // physical owner. Other queued reservations remain counted independently.
+    maybeCloseWorker();
+  }
+}
+
+async function retireForegroundNodeLease(
+  owner: ForegroundLeaseOwner,
+  leaseId: string,
+): Promise<void> {
+  // Finalization becomes worker-owned synchronously, before the active marker
+  // is removed. This closes the gap where explicit worker termination could
+  // otherwise race a durable retirement that had not committed yet.
+  owner.pendingLeaseFinalizations += 1;
+  owner.activeLeaseIds.delete(leaseId);
+  try {
+    await owner.pageStore.retireForegroundNodeLease(leaseId);
+  } catch (error) {
+    // The durable lease remains active when retirement fails. Restore its
+    // in-memory marker so this realm continues to fail closed as well.
+    owner.activeLeaseIds.add(leaseId);
+    throw error;
+  } finally {
+    owner.pendingLeaseFinalizations -= 1;
     maybeCloseWorker();
   }
 }
@@ -1266,7 +1340,28 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         } satisfies BrowserInspectorControlEvent);
         return;
       }
-      port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
+      if (pendingBootstrapOperations > 0) {
+        port.postMessage({
+          type: "result",
+          id: message.id,
+          error: "Worker still has pending bootstrap operations",
+        } satisfies BrowserInspectorControlEvent);
+        return;
+      }
+      if (hasForegroundLeaseWork()) {
+        port.postMessage({
+          type: "result",
+          id: message.id,
+          error: "Worker still has pending or active foreground node leases",
+        } satisfies BrowserInspectorControlEvent);
+        return;
+      }
+      workerTerminationScheduled = true;
+      port.postMessage({
+        type: "result",
+        id: message.id,
+        workerTerminated: true,
+      } satisfies BrowserInspectorControlEvent);
       // Termination happens in a later task so the acknowledgement crosses the
       // MessagePort before this realm disappears. A subsequent connection's
       // bootstrap retry advances to a distinct SharedWorker generation.
@@ -1467,14 +1562,20 @@ function maybeCloseWorker(): void {
 }
 
 function workerHasLiveWork(): boolean {
-  const hasActiveForegroundLease = [...foregroundLeaseOwners.values()].some(
-    (owner) => owner.activeLeaseIds.size > 0 || owner.pendingLeaseAllocations > 0,
-  );
   return (
     contexts.size > 0 ||
     inspectorControlPorts.size > 0 ||
     pendingBootstrapOperations > 0 ||
-    hasActiveForegroundLease
+    hasForegroundLeaseWork()
+  );
+}
+
+function hasForegroundLeaseWork(): boolean {
+  return [...foregroundLeaseOwners.values()].some(
+    (owner) =>
+      owner.activeLeaseIds.size > 0 ||
+      owner.pendingLeaseAllocations > 0 ||
+      owner.pendingLeaseFinalizations > 0,
   );
 }
 

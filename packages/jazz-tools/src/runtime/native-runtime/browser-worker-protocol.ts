@@ -28,9 +28,21 @@ export interface BrowserSharedWorkerConnectRequest {
   options: BrowserWorkerInitOptions;
 }
 
+/**
+ * Liveness handshake sent before a foreground lease request. The worker must
+ * acknowledge this without touching durable state; only then may the client
+ * send the allocation request on the same port.
+ */
+export interface BrowserForegroundNodeLeaseProbeRequest {
+  type: "probe-foreground-node-lease-worker";
+  attemptId: string;
+}
+
 /** Lease-only bootstrap that runs before the foreground schema is known. */
 export interface BrowserForegroundNodeLeaseAcquireRequest {
   type: "acquire-foreground-node-lease";
+  /** Correlates this durable operation with its preceding liveness probe. */
+  attemptId?: string;
   dbName: string;
   /** Exact durable owner that must admit the physical root before lease issue. */
   storageOwner: string;
@@ -46,6 +58,15 @@ export interface BrowserForegroundNodeLeaseCancelRequest {
 }
 
 export type BrowserForegroundNodeLeaseAcquireResponse =
+  | {
+      type: "foreground-node-lease-worker-alive";
+      attemptId: string;
+    }
+  | {
+      /** The named realm accepted termination and must not admit durable work. */
+      type: "foreground-node-lease-worker-closing";
+      attemptId: string;
+    }
   | {
       type: "foreground-node-lease-ready";
       leaseId: string;
@@ -181,7 +202,13 @@ export type BrowserInspectorControlRequest =
 export type BrowserInspectorControlEvent =
   | { type: "contexts"; id: number; contexts: BrowserInspectorContext[] }
   | { type: "lifecycle-trace"; id: number; entries: BrowserWorkerLifecycleTrace[] }
-  | { type: "result"; id: number; error?: string };
+  | {
+      type: "result";
+      id: number;
+      error?: string;
+      /** The acknowledged realm is closing; future opens must use its successor. */
+      workerTerminated?: true;
+    };
 
 export type BrowserFollowerPortEvent =
   | { type: "frames"; frames: Uint8Array[] }

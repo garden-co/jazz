@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BrowserForegroundNodeLeaseAcquireRequest,
   BrowserForegroundNodeLeaseAcquireResponse,
+  BrowserForegroundNodeLeaseCancelRequest,
+  BrowserForegroundNodeLeasePortRequest,
+  BrowserForegroundNodeLeaseProbeRequest,
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
   BrowserInspectorControlEvent,
@@ -170,6 +173,13 @@ type ForegroundLeaseOutcome = Extract<
   { type: "foreground-node-lease-ready" | "foreground-node-lease-error" }
 >;
 
+type ForegroundLeaseProbeOutcome = Extract<
+  BrowserForegroundNodeLeaseAcquireResponse,
+  {
+    type: "foreground-node-lease-worker-alive" | "foreground-node-lease-worker-closing";
+  }
+>;
+
 type WorkerGlobal = typeof globalThis & {
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
   close?: Mock;
@@ -183,6 +193,9 @@ class TestPort {
   private readonly outcomeWaiters: Array<(outcome: RuntimeOutcome) => void> = [];
   private readonly leaseOutcomes: ForegroundLeaseOutcome[] = [];
   private readonly leaseOutcomeWaiters: Array<(outcome: ForegroundLeaseOutcome) => void> = [];
+  private readonly leaseProbeOutcomes: ForegroundLeaseProbeOutcome[] = [];
+  private readonly leaseProbeOutcomeWaiters: Array<(outcome: ForegroundLeaseProbeOutcome) => void> =
+    [];
   private readonly events: BrowserFollowerPortEvent[] = [];
   private readonly eventWaiters: Array<{
     predicate: (event: BrowserFollowerPortEvent) => boolean;
@@ -215,6 +228,15 @@ class TestPort {
     // connection outcome; tests only retain the latter two protocol classes.
     if (message.type === "worker-alive") return;
     if (
+      message.type === "foreground-node-lease-worker-alive" ||
+      message.type === "foreground-node-lease-worker-closing"
+    ) {
+      const waiter = this.leaseProbeOutcomeWaiters.shift();
+      if (waiter) waiter(message);
+      else this.leaseProbeOutcomes.push(message);
+      return;
+    }
+    if (
       message.type === "foreground-node-lease-ready" ||
       message.type === "foreground-node-lease-error"
     ) {
@@ -238,7 +260,10 @@ class TestPort {
   emitMessage(
     message:
       | BrowserSharedWorkerConnectRequest
+      | BrowserForegroundNodeLeaseProbeRequest
       | BrowserForegroundNodeLeaseAcquireRequest
+      | BrowserForegroundNodeLeaseCancelRequest
+      | BrowserForegroundNodeLeasePortRequest
       | BrowserFollowerPortRequest,
   ): void {
     for (const listener of this.listeners.get("message") ?? []) {
@@ -260,6 +285,18 @@ class TestPort {
     const waiter = deferred<ForegroundLeaseOutcome>();
     this.leaseOutcomeWaiters.push(waiter.resolve);
     return waiter.promise;
+  }
+
+  waitForLeaseProbeOutcome(): Promise<ForegroundLeaseProbeOutcome> {
+    const outcome = this.leaseProbeOutcomes.shift();
+    if (outcome) return Promise.resolve(outcome);
+    const waiter = deferred<ForegroundLeaseProbeOutcome>();
+    this.leaseProbeOutcomeWaiters.push(waiter.resolve);
+    return waiter.promise;
+  }
+
+  hasLeaseProbeOutcome(): boolean {
+    return this.leaseProbeOutcomes.length > 0;
   }
 
   waitForEvent(
@@ -314,6 +351,16 @@ function connectLease(request: BrowserForegroundNodeLeaseAcquireRequest): {
   const outcome = port.waitForLeaseOutcome();
   port.emitMessage(request);
   return { outcome, port };
+}
+
+function connectLeaseProbe(): { port: TestPort } {
+  const port = new TestPort();
+  const onconnect = (globalThis as WorkerGlobal).onconnect;
+  if (!onconnect) throw new Error("broker worker did not install its connect handler");
+  onconnect({ ports: [port as unknown as MessagePort] } as MessageEvent & {
+    ports: MessagePort[];
+  });
+  return { port };
 }
 
 function enabledTelemetryOptions(dbName: string): BrowserWorkerInitOptions {
@@ -373,6 +420,22 @@ async function readLifecycle(
   });
 }
 
+async function terminateInspector(
+  port: MessagePort,
+  id: number,
+): Promise<Extract<BrowserInspectorControlEvent, { type: "result" }>> {
+  return new Promise((resolve, reject) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "result" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve(event.data);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "terminate-worker", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
 describe("broker worker context initialization", () => {
   beforeEach(async () => {
     mocks.reset();
@@ -404,6 +467,173 @@ describe("broker worker context initialization", () => {
       type: "runtime-ready",
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledTimes(2);
+  });
+
+  it("acknowledges a lease probe before touching its durable root", async () => {
+    const attemptId = "probe-before-durable-admission";
+    const initOptions = options("probe-before-durable-admission");
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId,
+    });
+
+    await expect(probeOutcome).resolves.toEqual({
+      type: "foreground-node-lease-worker-alive",
+      attemptId,
+    });
+    expect(mocks.openPageStore).not.toHaveBeenCalled();
+
+    const leaseOutcome = port.waitForLeaseOutcome();
+    port.emitMessage({
+      type: "acquire-foreground-node-lease",
+      attemptId,
+      dbName: initOptions.dbName,
+      storageOwner: initOptions.storageOwner,
+    });
+    await expect(leaseOutcome).resolves.toEqual(
+      expect.objectContaining({ type: "foreground-node-lease-ready" }),
+    );
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+  });
+
+  it("does not admit a lease probe after worker termination is acknowledged", async () => {
+    const initOptions = options("terminate-before-successor-probe");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+    const inspector = await openInspector(first.port, 2);
+
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    first.port.emitMessage({ type: "close", id: 3, releaseContext: true });
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+    await expect(terminateInspector(inspector, 4)).resolves.toEqual({
+      type: "result",
+      id: 4,
+      workerTerminated: true,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect((globalThis as WorkerGlobal).close).toHaveBeenCalledOnce();
+
+    const successor = connectLeaseProbe();
+    const closing = successor.port.waitForLeaseProbeOutcome();
+    successor.port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "probe-after-termination-ack",
+    });
+
+    await expect(closing).resolves.toEqual({
+      type: "foreground-node-lease-worker-closing",
+      attemptId: "probe-after-termination-ack",
+    });
+    expect(successor.port.close).toHaveBeenCalledOnce();
+    inspector.close();
+  });
+
+  it("rejects termination while preconnected lease bootstraps remain pending", async () => {
+    const initOptions = options("terminate-preconnected-lease-bootstrap");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+    const inspector = await openInspector(first.port, 2);
+
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    first.port.emitMessage({ type: "close", id: 3, releaseContext: true });
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+
+    // Both ports connect before termination. One has not sent its first
+    // message; the other has received a liveness response but has not yet
+    // requested durable allocation.
+    const firstMessageAfterTermination = connectLeaseProbe();
+    const acquireAfterTermination = connectLeaseProbe();
+    const alive = acquireAfterTermination.port.waitForLeaseProbeOutcome();
+    acquireAfterTermination.port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "alive-before-termination",
+    });
+    await expect(alive).resolves.toEqual({
+      type: "foreground-node-lease-worker-alive",
+      attemptId: "alive-before-termination",
+    });
+    const durableOpenCount = mocks.openPageStore.mock.calls.length;
+
+    await expect(terminateInspector(inspector, 4)).rejects.toThrow(
+      "Worker still has pending bootstrap operations",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    firstMessageAfterTermination.port.emitMessage({
+      type: "cancel-foreground-node-lease",
+    });
+    acquireAfterTermination.port.emitMessage({
+      type: "cancel-foreground-node-lease",
+    });
+    expect(firstMessageAfterTermination.port.close).toHaveBeenCalledOnce();
+    expect(acquireAfterTermination.port.close).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledTimes(durableOpenCount);
+    expect(
+      mocks.pageStores.some((store) => store.acquireForegroundNodeLease.mock.calls.length > 0),
+    ).toBe(false);
+
+    await terminateInspector(inspector, 5);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect((globalThis as WorkerGlobal).close).toHaveBeenCalledOnce();
+    inspector.close();
+  });
+
+  it("only terminates after in-flight and active foreground leases are retired", async () => {
+    const initOptions = options("terminate-during-lease-admission");
+    const first = await connect(initOptions, "first-tab");
+    await initializeFollower(first.port, 1);
+    const inspector = await openInspector(first.port, 2);
+
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    first.port.emitMessage({ type: "close", id: 3, releaseContext: true });
+    await closed;
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+
+    const pageStore = mocks.pageStores[0]!;
+    const physicalOwnerAdmission = deferred<typeof pageStore>();
+    mocks.openPageStore.mockImplementationOnce(() => physicalOwnerAdmission.promise);
+    const leaseDbName = `${initOptions.dbName}-lease-root`;
+    const lease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: leaseDbName,
+      storageOwner: initOptions.storageOwner,
+    });
+    await vi.waitFor(() => expect(mocks.openPageStore).toHaveBeenCalledTimes(2));
+
+    await expect(terminateInspector(inspector, 4)).rejects.toThrow(
+      "Worker still has pending bootstrap operations",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    physicalOwnerAdmission.resolve(pageStore);
+    await expect(lease.outcome).resolves.toEqual(
+      expect.objectContaining({ type: "foreground-node-lease-ready" }),
+    );
+    await expect(terminateInspector(inspector, 5)).rejects.toThrow(
+      "Worker still has pending or active foreground node leases",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    const durableRetirement = deferred<void>();
+    pageStore.retireForegroundNodeLease.mockImplementationOnce(() => durableRetirement.promise);
+    lease.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(pageStore.retireForegroundNodeLease).toHaveBeenCalledOnce());
+    await expect(terminateInspector(inspector, 6)).rejects.toThrow(
+      "Worker still has pending or active foreground node leases",
+    );
+    expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+
+    durableRetirement.resolve();
+    await vi.waitFor(() => expect(lease.port.close).toHaveBeenCalledOnce());
+
+    await terminateInspector(inspector, 7);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect((globalThis as WorkerGlobal).close).toHaveBeenCalledOnce();
+    inspector.close();
   });
 
   it("cancels an idle worker close when a successor bootstrap arrives during physical release", async () => {

@@ -16,6 +16,7 @@ import type {
   BrowserForegroundNodeLeasePortEvent,
   BrowserForegroundNodeLeasePortRequest,
   BrowserFollowerPortRequest,
+  BrowserInspectorControlEvent,
   BrowserWorkerInitOptions,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -28,11 +29,11 @@ export type BrowserForegroundNodeLeaseOptions = Pick<
 // Acquiring a lease is deliberately the first operation on a persistent
 // browser root. On a cold browser profile that means starting the worker,
 // acquiring the Web Lock, opening IndexedDB, checking the durable owner, and
-// committing the lease receipt. This is I/O admission, not a heartbeat: the
-// one-second worker-bootstrap probe used by reconnecting followers is too
-// short for it under a contended CI/browser process. Keep this bounded so a
-// genuinely wedged worker still fails visibly, but give durable admission the
-// same order-of-magnitude budget as the public browser readiness receipts.
+// committing the lease receipt. This is I/O admission, not a heartbeat. Keep
+// the complete probe-and-admission operation bounded so a genuinely wedged
+// worker still fails visibly, but do not guess that a busy realm is dead from
+// a shorter probe timeout. A realm that accepted termination explicitly says
+// it is closing so the client can safely advance to another generation.
 const FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS = 10_000;
 
 /**
@@ -98,17 +99,38 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
               type: "module",
               name,
             });
-    // Lease acquisition and the schema/runtime connection enter this exact
-    // physical SharedWorker realm. Both generation-qualify the base name so a
-    // realm that has begun closing can be retired without creating a second
-    // durable owner for the same IndexedDB.
-    const worker = createWorker(`${workerName}:generation-${readWorkerGeneration(workerName)}`);
+    // A named SharedWorker constructor can still attach to a realm after that
+    // realm has acknowledged termination but before the browser has finished
+    // destroying it. Probe before sending an allocation request so a realm
+    // that explicitly reports it is closing can be skipped without creating
+    // an orphan-risking durable operation in it.
+    let generation = readWorkerGeneration(workerName);
+    for (let generationAttempt = 0; generationAttempt < 8; generationAttempt += 1) {
+      const worker = createWorker(`${workerName}:generation-${generation}`);
+      const lease = await this.acquireFromWorkerGeneration(
+        worker,
+        options,
+        cleanupKey,
+        crypto.randomUUID(),
+      );
+      if (lease) return lease;
+      generation = advanceWorkerGeneration(workerName, generation);
+    }
+    throw new Error("Shared browser foreground lease worker did not answer after closing");
+  }
+
+  private static acquireFromWorkerGeneration(
+    worker: SharedWorker,
+    options: BrowserForegroundNodeLeaseOptions,
+    cleanupKey: string,
+    attemptId: string,
+  ): Promise<SharedBrowserForegroundNodeLease | null> {
     const port = worker.port;
-    port.start();
-    const lease = await new Promise<SharedBrowserForegroundNodeLease>((resolve, reject) => {
+    return new Promise<SharedBrowserForegroundNodeLease | null>((resolve, reject) => {
       let cancellationRequested = false;
       let publicResultSettled = false;
       let cleanupToken: symbol | null = null;
+      let admissionTimeout: ReturnType<typeof setTimeout> | null = null;
       const timeoutError = new Error(
         "Shared browser runtime did not issue a foreground node lease",
       );
@@ -117,23 +139,25 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
         publicResultSettled = true;
         reject(error);
       };
-      const timeout = setTimeout(() => {
-        // Do not close the port immediately. The worker might be between the
-        // durable allocation and its ready reply; it must observe this cancel
-        // and retire such a lease before this acquire rejects. Otherwise a
-        // merely slow cold open would burn one node identity per timeout.
-        cancellationRequested = true;
-        cleanupToken = Symbol("foreground-lease-cleanup");
-        pendingForegroundLeaseCleanups.set(cleanupKey, cleanupToken);
-        port.postMessage({ type: "cancel-foreground-node-lease" });
-        // Public startup remains bounded. The open port and listeners stay
-        // alive in the background until the worker observes cancellation and
-        // retires any late lease; closing them here would recreate the orphan
-        // race this cancellation protocol exists to prevent.
-        rejectPublic(timeoutError);
-      }, FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS);
+      const beginAdmissionTimeout = () =>
+        setTimeout(() => {
+          // Do not close the port immediately. The worker might be between the
+          // durable allocation and its ready reply; it must observe this cancel
+          // and retire such a lease before this acquire rejects. Otherwise a
+          // merely slow cold open would burn one node identity per timeout.
+          cancellationRequested = true;
+          cleanupToken = Symbol("foreground-lease-cleanup");
+          pendingForegroundLeaseCleanups.set(cleanupKey, cleanupToken);
+          port.postMessage({ type: "cancel-foreground-node-lease" });
+          // Public startup remains bounded. The open port and listeners stay
+          // alive in the background until the worker observes cancellation and
+          // retires any late lease; closing them here would recreate the orphan
+          // race this cancellation protocol exists to prevent.
+          rejectPublic(timeoutError);
+        }, FOREGROUND_NODE_LEASE_ADMISSION_TIMEOUT_MS);
       const cleanup = () => {
-        clearTimeout(timeout);
+        if (admissionTimeout) clearTimeout(admissionTimeout);
+        admissionTimeout = null;
         // A successful concurrent admission never owned this retained cleanup.
         // Only its timeout owner may clear the shared key; otherwise it could
         // let a third caller accumulate another orphan-risking port.
@@ -148,6 +172,24 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
       };
       const onMessage = (event: MessageEvent<BrowserForegroundNodeLeaseAcquireResponse>) => {
         const message = event.data;
+        if (message?.type === "foreground-node-lease-worker-alive") {
+          if (message.attemptId !== attemptId || admissionTimeout === null) return;
+          port.postMessage({
+            type: "acquire-foreground-node-lease",
+            attemptId,
+            dbName: options.dbName,
+            storageOwner: options.storageOwner,
+          });
+          return;
+        }
+        if (message?.type === "foreground-node-lease-worker-closing") {
+          if (message.attemptId !== attemptId) return;
+          cleanup();
+          port.close();
+          publicResultSettled = true;
+          resolve(null);
+          return;
+        }
         if (message?.type === "foreground-node-lease-error") {
           cleanup();
           port.close();
@@ -189,13 +231,13 @@ export class SharedBrowserForegroundNodeLease implements ForegroundNodeLease {
       };
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);
+      port.start();
+      admissionTimeout = beginAdmissionTimeout();
       port.postMessage({
-        type: "acquire-foreground-node-lease",
-        dbName: options.dbName,
-        storageOwner: options.storageOwner,
+        type: "probe-foreground-node-lease-worker",
+        attemptId,
       });
     });
-    return lease;
   }
 
   async returnWithHighWater(highWater: bigint): Promise<void> {
@@ -250,6 +292,8 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
+  private readonly workerName: string;
+  private connectedGeneration: number | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -271,6 +315,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     // separate workers and caches while same-scope tabs share one realm.
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
+    this.workerName = workerName;
     const createWorker =
       runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
         ? (name: string) =>
@@ -323,6 +368,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       );
       if (outcome.error) throw outcome.error;
       if (outcome.connected) {
+        this.connectedGeneration = generation;
         return;
       }
       generation = advanceWorkerGeneration(workerName, generation);
@@ -474,8 +520,25 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   async openInspectorControlPort(): Promise<MessagePort> {
     await this.ready();
     if (!this.connection) throw new Error("Shared browser runtime is not connected");
-    return this.connection.openInspectorControlPort();
+    const port = await this.connection.openInspectorControlPort();
+    const generation = this.connectedGeneration;
+    if (generation !== null) {
+      installWorkerTerminationGenerationHandoff(port, this.workerName, generation);
+    }
+    return port;
   }
+}
+
+/** @internal Keeps an acknowledged inspector restart out of its closing realm. */
+export function installWorkerTerminationGenerationHandoff(
+  port: MessagePort,
+  workerName: string,
+  generation: number,
+): void {
+  port.addEventListener("message", (event: MessageEvent<BrowserInspectorControlEvent>) => {
+    if (event.data?.type !== "result" || event.data.workerTerminated !== true) return;
+    advanceWorkerGeneration(workerName, generation);
+  });
 }
 
 function readWorkerGeneration(workerName: string): number {
