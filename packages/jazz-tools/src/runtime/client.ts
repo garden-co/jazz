@@ -526,6 +526,12 @@ interface WriteContextPayload {
  * Subscription callback type.
  */
 export type SubscriptionCallback = (delta: RuntimeSubscriptionDelta) => void;
+export interface SubscriptionCallbacks {
+  /** Called for each native subscription delta. */
+  onUpdate: SubscriptionCallback;
+  /** Called once the native subscription terminates with an error. */
+  onError?: (error: Error) => void;
+}
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
@@ -1553,16 +1559,18 @@ export class JazzClient {
    * Subscribe to a query and receive updates when results change.
    *
    * @param query JSON-encoded runtime query specification
-   * @param callback Called with delta whenever results change
+   * @param callbacks Delta callback, or callbacks object with terminal error handling
    * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
     query: string,
-    callback: SubscriptionCallback,
+    callbacks: SubscriptionCallback | SubscriptionCallbacks,
     options?: QueryExecutionOptions,
     session?: Session,
   ): number {
+    const { onUpdate, onError } =
+      typeof callbacks === "function" ? { onUpdate: callbacks, onError: undefined } : callbacks;
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession
@@ -1579,8 +1587,11 @@ export class JazzClient {
 
     try {
       this.runtime.executeSubscription(handle, (result) => {
-        if (result instanceof Error) throw result;
-        callback(result);
+        if (result instanceof Error) {
+          onError?.(result);
+          return;
+        }
+        onUpdate(result);
       });
     } catch (error) {
       // createSubscription already transferred ownership to this facade. If

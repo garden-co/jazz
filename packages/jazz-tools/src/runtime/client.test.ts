@@ -165,6 +165,25 @@ describe("JazzClient subscription ownership", () => {
     expect(runtime.unsubscribe).toHaveBeenCalledOnce();
     expect(runtime.unsubscribe).toHaveBeenCalledWith(41);
   });
+  it("delivers established runtime failures through the subscription error callback", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("subscription stream failed");
+    runtime.createSubscription.mockReturnValue(42);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      onUpdate(failure, null);
+    });
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const callback = vi.fn();
+    const onError = vi.fn();
+
+    expect(() =>
+      client.subscribe('{"table":"todos"}', { onUpdate: callback, onError }),
+    ).not.toThrow();
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(failure);
+  });
 });
 
 describe("JazzClient native session boundary", () => {

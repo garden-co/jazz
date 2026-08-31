@@ -386,42 +386,54 @@ export class SubscriptionsOrchestrator {
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     const generation = entry.generation;
+    const reject = (error: unknown) => {
+      if (entry.generation !== generation || entry.state.status === "rejected") return;
+      entry.state = { status: "rejected", data: undefined, error };
+      entry.rejectfulfilled(error);
+      for (const listener of Array.from(entry.listeners)) {
+        listener.onError?.(error);
+      }
+      this.scheduleCleanup(entry);
+    };
     try {
       const subscription = this.db.subscribeDelta<T>(
         entry.query,
-        (delta) => {
-          if (entry.generation !== generation) return;
-          const wasPending = entry.state.status === "pending";
-          const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
-          applySubscriptionDelta(data, delta);
-          entry.state = {
-            status: "fulfilled",
-            data,
-            error: null,
-          };
+        {
+          onDelta: (delta) => {
+            if (entry.generation !== generation || entry.state.status === "rejected") return;
+            const wasPending = entry.state.status === "pending";
+            const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
+            applySubscriptionDelta(data, delta);
+            entry.state = {
+              status: "fulfilled",
+              data,
+              error: null,
+            };
 
-          if (wasPending) {
-            entry.resolvefulfilled(data);
-          }
-
-          for (const listener of Array.from(entry.listeners)) {
             if (wasPending) {
-              listener.onfulfilled?.(data);
-            } else if (delta.reset) {
-              listener.onReset?.();
-              listener.onfulfilled?.(data);
-            } else {
-              listener.onDelta?.(delta);
+              entry.resolvefulfilled(data);
             }
-          }
 
-          if (entry.listeners.size === 0) {
-            this.scheduleCleanup(entry);
-          }
+            for (const listener of Array.from(entry.listeners)) {
+              if (wasPending) {
+                listener.onfulfilled?.(data);
+              } else if (delta.reset) {
+                listener.onReset?.();
+                listener.onfulfilled?.(data);
+              } else {
+                listener.onDelta?.(delta);
+              }
+            }
 
-          if (wasPending && data.length === 0) {
-            this.scheduleEmptyRefresh(entry, generation, this.session ?? undefined);
-          }
+            if (entry.listeners.size === 0) {
+              this.scheduleCleanup(entry);
+            }
+
+            if (wasPending && data.length === 0) {
+              this.scheduleEmptyRefresh(entry, generation, this.session ?? undefined);
+            }
+          },
+          onError: reject,
         },
         entry.options,
         this.session ?? undefined,
@@ -442,16 +454,7 @@ export class SubscriptionsOrchestrator {
         });
       }
     } catch (error) {
-      // Only a synchronous setup (protocol-level) failure from the delta source
-      // lands here and drives the entry to `rejected`. Data-level errors inside
-      // an established subscription flow through the subscription's own on-error
-      // channel and do not reject the entry; that separation is intentional.
-      entry.state = { status: "rejected", data: undefined, error };
-      entry.rejectfulfilled(error);
-      for (const listener of Array.from(entry.listeners)) {
-        listener.onError?.(error);
-      }
-      this.scheduleCleanup(entry);
+      reject(error);
     }
   }
 

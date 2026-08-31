@@ -186,6 +186,19 @@ export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
   base?: BranchBase;
 };
+/**
+ * Callbacks for a live query subscription.
+ *
+ * Use the object form when terminal subscription errors need to be observed,
+ * including deferred-start and replacement failures. After `onError` runs,
+ * that generation will not publish further deltas.
+ */
+export interface DbSubscriptionCallbacks<T extends { id: string }> {
+  /** Called whenever the query result changes. */
+  onDelta: (delta: SubscriptionDelta<T>) => void;
+  /** Called once when the active subscription generation terminates with an error. */
+  onError?: (error: Error) => void;
+}
 
 /** Package-internal subscription surface used by Jazz's UI bindings. */
 export interface DbSubscriptionSource {
@@ -196,7 +209,7 @@ export interface DbSubscriptionSource {
   ): Promise<T[]> | T[];
   subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
-    callback: (delta: SubscriptionDelta<T>) => void,
+    callbacks: ((delta: SubscriptionDelta<T>) => void) | DbSubscriptionCallbacks<T>,
     options?: QueryOptions,
     session?: Session,
   ): SubscriptionHandle;
@@ -2351,7 +2364,8 @@ export class Db {
    * - `delta`: Ordered list of row-level changes (see `RowDelta`)
    *
    * @param query QueryBuilder instance
-   * @param callback Called with delta whenever results change
+   * @param callbacks Called with deltas and, in object form, terminal subscription errors
+   * @param options Optional read durability options
    * @returns Unsubscribe function
    *
    * @example
@@ -2373,10 +2387,12 @@ export class Db {
    */
   private subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
-    callback: (delta: SubscriptionDelta<T>) => void,
+    callbacks: ((delta: SubscriptionDelta<T>) => void) | DbSubscriptionCallbacks<T>,
     options?: QueryOptions,
     session?: Session,
   ): SubscriptionHandle {
+    const { onDelta, onError } =
+      typeof callbacks === "function" ? { onDelta: callbacks, onError: undefined } : callbacks;
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
@@ -2412,7 +2428,7 @@ export class Db {
         bufferedDeltas.push(delta);
         return;
       }
-      callback(delta);
+      onDelta(delta);
     };
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform);
@@ -2426,56 +2442,137 @@ export class Db {
       options?.tier === ReadTier.Remote || options?.tier === ReadTier.RemoteIfPossible;
     if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const context = this.getRuntimeOperationContext();
-    type NativeSubscription = { id: number; generation: number };
+    type NativeSubscription = {
+      id: number | null;
+      installing: boolean;
+      terminalError: Error | null;
+      terminalDelivered: boolean;
+      retired: boolean;
+      nativeUnsubscribed: boolean;
+      predecessor: NativeSubscription | null;
+    };
     let activeSubscription: NativeSubscription | null = null;
-    let nextSubscriptionGeneration = 1;
     let unsubscribed = false;
     const readyAbort = new AbortController();
-    const startNativeSubscription = (subscriptionOptions = queryOptions, replace = false) => {
-      if (unsubscribed || (!replace && activeSubscription !== null)) return null;
-      const generation = nextSubscriptionGeneration++;
-      const previous = activeSubscription;
-      // Select the new stream before entering the native call because a runtime
-      // may synchronously publish its opening snapshot from subscribe(). A
-      // callback retained by a retired runtime is rejected by this generation.
-      activeSubscription = { id: -1, generation };
+    const retireNativeSubscription = (subscription: NativeSubscription) => {
+      subscription.retired = true;
+      const id = subscription.id;
+      if (id === null || subscription.nativeUnsubscribed) return;
+      subscription.nativeUnsubscribed = true;
+      client.unsubscribe(id);
+    };
+    const completeTerminalization = (subscription: NativeSubscription) => {
+      // A native runtime may fail from inside subscribe(). Record the terminal
+      // outcome immediately, but wait for subscribe() to return its handle
+      // before detaching and notifying the owner.
+      if (subscription.installing) return;
+      const terminalError = subscription.terminalError;
+      if (terminalError === null || subscription.terminalDelivered) return;
+      subscription.terminalDelivered = true;
+      if (activeSubscription === subscription) {
+        activeSubscription = null;
+      }
+      retireNativeSubscription(subscription);
+      if (subscription.predecessor !== null) {
+        retireNativeSubscription(subscription.predecessor);
+        subscription.predecessor = null;
+      }
+      readyAbort.abort();
+      this.unregisterActiveQuerySubscriptionTrace(traceId);
+      manager.clear();
+      onError?.(terminalError);
+    };
+    const terminalizeSubscription = (subscription: NativeSubscription, error: unknown) => {
+      if (unsubscribed || activeSubscription !== subscription || subscription.terminalDelivered) {
+        return;
+      }
+      subscription.terminalError ??= error instanceof Error ? error : new Error(String(error));
+      completeTerminalization(subscription);
+    };
+    const createSubscriptionGeneration = (
+      predecessor: NativeSubscription | null = null,
+    ): NativeSubscription => {
+      const subscription: NativeSubscription = {
+        id: null,
+        installing: false,
+        terminalError: null,
+        terminalDelivered: false,
+        retired: false,
+        nativeUnsubscribed: false,
+        predecessor,
+      };
+      activeSubscription = subscription;
+      return subscription;
+    };
+    const startNativeSubscription = (
+      subscription: NativeSubscription,
+      subscriptionOptions = queryOptions,
+    ) => {
+      if (
+        unsubscribed ||
+        activeSubscription !== subscription ||
+        subscription.retired ||
+        subscription.terminalError !== null
+      ) {
+        return null;
+      }
       const openingDeltas: Parameters<SubscriptionManager<T>["handleDelta"]>[0][] = [];
-      let installationComplete = false;
-      let id: number;
+      subscription.installing = true;
       try {
-        id = client.subscribe(
+        subscription.id = client.subscribe(
           wasmQuery,
-          (delta) => {
-            if (unsubscribed || activeSubscription?.generation !== generation) return;
-            if (!installationComplete) {
-              openingDeltas.push(delta);
-              return;
-            }
-            handleDelta(delta);
+          {
+            onUpdate: (delta) => {
+              if (
+                unsubscribed ||
+                activeSubscription !== subscription ||
+                subscription.terminalError !== null
+              ) {
+                return;
+              }
+              if (subscription.installing) {
+                openingDeltas.push(delta);
+                return;
+              }
+              try {
+                handleDelta(delta);
+              } catch (error) {
+                terminalizeSubscription(subscription, error);
+              }
+            },
+            onError: (error) => {
+              terminalizeSubscription(subscription, error);
+            },
           },
           subscriptionOptions,
           context?.readSession ?? context?.session ?? session,
         );
       } catch (error) {
-        activeSubscription = previous;
-        throw error;
+        subscription.installing = false;
+        terminalizeSubscription(subscription, error);
+        return null;
       }
-      const subscription = { id, generation };
-      activeSubscription = subscription;
-      installationComplete = true;
-      if (unsubscribed) {
-        client.unsubscribe(id);
-        activeSubscription = null;
+      subscription.installing = false;
+      if (unsubscribed || activeSubscription !== subscription || subscription.retired) {
+        retireNativeSubscription(subscription);
+        return null;
+      }
+      if (subscription.terminalError !== null) {
+        completeTerminalization(subscription);
         return null;
       }
       try {
-        for (const delta of openingDeltas) handleDelta(delta);
+        for (const delta of openingDeltas) {
+          if (activeSubscription !== subscription || subscription.terminalError !== null) break;
+          handleDelta(delta);
+        }
       } catch (error) {
-        client.unsubscribe(id);
-        activeSubscription = previous;
-        throw error;
+        terminalizeSubscription(subscription, error);
+        return null;
       }
-      return subscription;
+      return unsubscribed || activeSubscription !== subscription || subscription.retired
+        ? null
+        : subscription;
     };
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
@@ -2483,11 +2580,16 @@ export class Db {
       queryOptions,
     );
     const unsubscribe = () => {
+      if (unsubscribed) return;
       unsubscribed = true;
       readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
-      if (activeSubscription !== null && activeSubscription.id >= 0) {
-        client.unsubscribe(activeSubscription.id);
+      if (activeSubscription !== null) {
+        retireNativeSubscription(activeSubscription);
+        if (activeSubscription.predecessor !== null) {
+          retireNativeSubscription(activeSubscription.predecessor);
+          activeSubscription.predecessor = null;
+        }
       }
       activeSubscription = null;
       bufferedDeltas.length = 0;
@@ -2498,13 +2600,13 @@ export class Db {
         if (unsubscribed || this.isShuttingDown) return;
         deliveryReady = true;
         for (const delta of bufferedDeltas.splice(0)) {
-          callback(delta);
+          onDelta(delta);
         }
         startLocalSeed?.();
       })
       .catch((error: unknown) => {
         if (unsubscribed || this.isShuttingDown) return;
-        // The worker admitted no durable runtime.  Dispose the locally
+        // The worker admitted no durable runtime. Dispose the locally
         // registered native subscription before surfacing that initiating
         // operation's error through the handle/orchestrator.
         unsubscribe();
@@ -2515,8 +2617,13 @@ export class Db {
     // the readiness property. Framework bindings consume `ready` below via
     // DbSubscriptionSource and surface it as their normal error state.
     if (ready) void ready.catch(() => undefined);
+    const initialSubscription = createSubscriptionGeneration();
     if (queryOptions.tier == null || queryOptions.tier === "local") {
-      deliver(manager.seed([]));
+      try {
+        deliver(manager.seed([]));
+      } catch (error) {
+        terminalizeSubscription(initialSubscription, error);
+      }
     }
     if (
       this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
@@ -2526,15 +2633,13 @@ export class Db {
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
       void this.ensureReady(resolveReadTier(queryOptions.tier ?? "local"), readyAbort.signal)
-        .then(() => startNativeSubscription())
+        .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
-          setTimeout(() => {
-            throw error;
-          }, 0);
+          terminalizeSubscription(initialSubscription, error);
         });
     } else {
-      startNativeSubscription();
+      startNativeSubscription(initialSubscription);
     }
     // A remote-if-possible subscription opened during an explicit disconnect
     // truthfully starts from local state, then replaces that native stream with
@@ -2544,23 +2649,24 @@ export class Db {
       void this.connection
         .waitForReconnect(readyAbort.signal)
         .then(async () => {
-          if (unsubscribed || readyAbort.signal.aborted) return;
+          if (unsubscribed || readyAbort.signal.aborted || activeSubscription === null) return;
           await this.ensureReady("edge", readyAbort.signal);
-          if (unsubscribed || readyAbort.signal.aborted) return;
+          if (unsubscribed || readyAbort.signal.aborted || activeSubscription === null) return;
           const retired = activeSubscription;
-          // Keep the local stream live while the remote authority is not ready.
-          // Installing the replacement changes the accepted callback generation
-          // atomically; only then is the retired local stream detached.
-          const replacement = startNativeSubscription({ ...queryOptions, tier: "edge" }, true);
-          if (retired && replacement?.generation !== retired.generation) {
-            client.unsubscribe(retired.id);
+          // Selecting the replacement generation retires callbacks from the
+          // local stream atomically. The local handle itself remains attached
+          // until replacement installation either succeeds or terminalizes.
+          const replacement = createSubscriptionGeneration(retired);
+          if (
+            startNativeSubscription(replacement, { ...queryOptions, tier: "edge" }) === replacement
+          ) {
+            retireNativeSubscription(retired);
+            replacement.predecessor = null;
           }
         })
         .catch((error: unknown) => {
-          if (!unsubscribed && !readyAbort.signal.aborted)
-            setTimeout(() => {
-              throw error;
-            }, 0);
+          if (unsubscribed || readyAbort.signal.aborted || activeSubscription === null) return;
+          terminalizeSubscription(activeSubscription, error);
         });
     }
     if (
@@ -2595,9 +2701,8 @@ export class Db {
             deliver(manager.seed(rows));
           })
           .catch((error: unknown) => {
-            setTimeout(() => {
-              throw error;
-            }, 0);
+            if (unsubscribed || activeSubscription === null) return;
+            terminalizeSubscription(activeSubscription, error);
           });
       };
       if (initialReadiness) startLocalSeed = seedLocal;

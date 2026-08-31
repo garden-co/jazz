@@ -29,6 +29,7 @@ export {
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
+  type DbSubscriptionCallbacks,
   type LogoutOptions,
   Transaction,
   type TransactionKind,
