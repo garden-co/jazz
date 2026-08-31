@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
-import { deploy as deployCatalogue } from "./catalogue.js";
+import { deploy as deployCatalogue, resolveStoredStructuralSchemaIdentity } from "./catalogue.js";
 import { legacyByteaStructuralSchemaHash, structuralSchemaHash } from "./schema-utils.js";
 
 const tempRoots: string[] = [];
@@ -274,6 +274,151 @@ describe("legacy Bytea catalogue identity", () => {
       forward: [],
     });
     expect(result.permissions).toBeUndefined();
+  });
+  it("connects matching legacy and corrected identities when both are already stored", async () => {
+    const schema = s.defineApp({
+      files: s.table({
+        payload: s.bytes(),
+      }),
+    }).wasmSchema;
+    const legacyHash = legacyByteaStructuralSchemaHash(schema);
+    const currentHash = structuralSchemaHash(schema);
+    let migrationBody: Record<string, unknown> | undefined;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [currentHash, legacyHash] }), {
+            status: 200,
+          });
+        }
+        if (
+          url.endsWith(`/apps/${APP_ID}/schema/${currentHash}`) ||
+          url.endsWith(`/apps/${APP_ID}/schema/${legacyHash}`)
+        ) {
+          return new Response(JSON.stringify({ schema: { tables: schema }, publishedAt: 1 }), {
+            status: 200,
+          });
+        }
+        if (url.includes(`/apps/${APP_ID}/admin/schema-connectivity`)) {
+          return new Response(JSON.stringify({ connected: false }), { status: 200 });
+        }
+        if (url.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          migrationBody = JSON.parse(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              objectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+              fromHash: legacyHash,
+              toHash: currentHash,
+            }),
+            { status: 201 },
+          );
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const result = await deployCatalogue({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      schema,
+    });
+
+    expect(result.schema).toEqual({ hash: currentHash, status: "already-stored" });
+    expect(result.migration).toEqual({
+      fromHash: legacyHash,
+      toHash: currentHash,
+      status: "published",
+      objectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    });
+    expect(migrationBody).toEqual({
+      fromHash: legacyHash,
+      toHash: currentHash,
+      forward: [],
+    });
+  });
+});
+
+describe("stored schema identity lookup", () => {
+  it("checks historical candidates in bounded concurrent batches", async () => {
+    const schema = s.defineApp({
+      todos: s.table({
+        title: s.string(),
+      }),
+    }).wasmSchema;
+    const historicalHashes = Array.from({ length: 10 }, (_, index) =>
+      index.toString(16).padStart(64, "0"),
+    );
+    const matchingHash = historicalHashes.at(-1)!;
+    let activeLookups = 0;
+    let maximumActiveLookups = 0;
+    let startedLookups = 0;
+    let releaseFirstBatch!: () => void;
+    const firstBatchGate = new Promise<void>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+    let reportFirstBatchStarted!: () => void;
+    const firstBatchStarted = new Promise<void>((resolve) => {
+      reportFirstBatchStarted = resolve;
+    });
+    let reportSecondBatchStarted!: () => void;
+    const secondBatchStarted = new Promise<void>((resolve) => {
+      reportSecondBatchStarted = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: historicalHashes }), { status: 200 });
+        }
+
+        const hash = historicalHashes.find((candidate) =>
+          url.endsWith(`/apps/${APP_ID}/schema/${candidate}`),
+        );
+        if (!hash) throw new Error(`Unexpected fetch: ${url}`);
+
+        activeLookups += 1;
+        startedLookups += 1;
+        maximumActiveLookups = Math.max(maximumActiveLookups, activeLookups);
+        if (startedLookups === 8) reportFirstBatchStarted();
+        if (startedLookups === historicalHashes.length) reportSecondBatchStarted();
+        if (startedLookups <= 8) await firstBatchGate;
+        activeLookups -= 1;
+
+        return new Response(
+          JSON.stringify({
+            schema: { tables: hash === matchingHash ? schema : {} },
+            publishedAt: 1,
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    const resolving = resolveStoredStructuralSchemaIdentity(
+      APP_ID,
+      SERVER_URL,
+      ADMIN_SECRET,
+      schema,
+    );
+    await firstBatchStarted;
+
+    expect(startedLookups).toBe(8);
+    expect(activeLookups).toBe(8);
+    releaseFirstBatch();
+    await secondBatchStarted;
+
+    await expect(resolving).resolves.toEqual({
+      hash: matchingHash,
+      format: "historical",
+    });
+    expect(startedLookups).toBe(historicalHashes.length);
+    expect(maximumActiveLookups).toBe(8);
   });
 });
 

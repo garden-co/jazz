@@ -294,54 +294,108 @@ export function schemaTransitionRequiresRowTransform(
   );
 }
 
+const STORED_SCHEMA_LOOKUP_BATCH_SIZE = 8;
+
 export type StoredStructuralSchemaIdentity = {
   hash: string;
   format: "current" | "legacy-bytea" | "historical";
 };
 
+type StoredStructuralSchemaResolution = {
+  identity: StoredStructuralSchemaIdentity | null;
+  matchingLegacyByteaHash: string | null;
+};
+
+async function storedSchemaMatches(
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+  wasmSchema: WasmSchema,
+  hash: string,
+): Promise<boolean> {
+  const stored = await fetchStoredWasmSchema(serverUrl, {
+    appId,
+    adminSecret,
+    schemaHash: hash,
+  });
+  return wasmSchemasEqual(stored.schema, wasmSchema);
+}
+
 /**
- * Resolves the durable catalogue identity that owns a stored schema payload.
+ * Resolves the stored identity and any distinct matching legacy Bytea identity.
  *
- * The current hash is preferred. The historical Bytea/Double-collision hash is
- * then resolved explicitly, without treating it as an alias for the current
- * identity. Callers that publish a release must publish the current identity
- * and connect a legacy result with a normal catalogue migration edge.
+ * The current and historical Bytea/Double-collision identities are checked
+ * together so deploy can establish the required compatibility edge when both
+ * exist. Remaining historical identities are checked in bounded concurrent
+ * batches, preserving catalogue order without serialising every network read.
  */
+async function resolveStoredStructuralSchema(
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+  wasmSchema: WasmSchema,
+): Promise<StoredStructuralSchemaResolution> {
+  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
+  const currentHash = await computeSchemaHash(wasmSchema);
+  const legacyByteaHash = legacyByteaStructuralSchemaHash(wasmSchema);
+  const hasCurrent = hashes.includes(currentHash);
+  const hasLegacy = legacyByteaHash !== currentHash && hashes.includes(legacyByteaHash);
+  const [currentMatches, legacyMatches] = await Promise.all([
+    hasCurrent
+      ? storedSchemaMatches(appId, serverUrl, adminSecret, wasmSchema, currentHash)
+      : false,
+    hasLegacy
+      ? storedSchemaMatches(appId, serverUrl, adminSecret, wasmSchema, legacyByteaHash)
+      : false,
+  ]);
+
+  if (currentMatches) {
+    return {
+      identity: { hash: currentHash, format: "current" },
+      matchingLegacyByteaHash: legacyMatches ? legacyByteaHash : null,
+    };
+  }
+  if (legacyMatches) {
+    return {
+      identity: { hash: legacyByteaHash, format: "legacy-bytea" },
+      matchingLegacyByteaHash: legacyByteaHash,
+    };
+  }
+
+  let nextHashIndex = 0;
+  while (nextHashIndex < hashes.length) {
+    const batch: string[] = [];
+    while (nextHashIndex < hashes.length && batch.length < STORED_SCHEMA_LOOKUP_BATCH_SIZE) {
+      const hash = hashes[nextHashIndex++]!;
+      if (hash !== currentHash && hash !== legacyByteaHash) {
+        batch.push(hash);
+      }
+    }
+    if (batch.length === 0) continue;
+
+    const matches = await Promise.all(
+      batch.map((hash) => storedSchemaMatches(appId, serverUrl, adminSecret, wasmSchema, hash)),
+    );
+    const matchingIndex = matches.indexOf(true);
+    if (matchingIndex !== -1) {
+      return {
+        identity: { hash: batch[matchingIndex]!, format: "historical" },
+        matchingLegacyByteaHash: null,
+      };
+    }
+  }
+
+  return { identity: null, matchingLegacyByteaHash: null };
+}
+
+/** Resolves the preferred durable catalogue identity for a stored schema payload. */
 export async function resolveStoredStructuralSchemaIdentity(
   appId: string,
   serverUrl: string,
   adminSecret: string,
   wasmSchema: WasmSchema,
 ): Promise<StoredStructuralSchemaIdentity | null> {
-  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
-  const currentHash = await computeSchemaHash(wasmSchema);
-  const legacyByteaHash = legacyByteaStructuralSchemaHash(wasmSchema);
-  const candidates: StoredStructuralSchemaIdentity[] = [];
-
-  if (hashes.includes(currentHash)) {
-    candidates.push({ hash: currentHash, format: "current" });
-  }
-  if (legacyByteaHash !== currentHash && hashes.includes(legacyByteaHash)) {
-    candidates.push({ hash: legacyByteaHash, format: "legacy-bytea" });
-  }
-  for (const hash of hashes) {
-    if (hash !== currentHash && hash !== legacyByteaHash) {
-      candidates.push({ hash, format: "historical" });
-    }
-  }
-
-  for (const candidate of candidates) {
-    const stored = await fetchStoredWasmSchema(serverUrl, {
-      appId,
-      adminSecret,
-      schemaHash: candidate.hash,
-    });
-    if (wasmSchemasEqual(stored.schema, wasmSchema)) {
-      return candidate;
-    }
-  }
-
-  return null;
+  return (await resolveStoredStructuralSchema(appId, serverUrl, adminSecret, wasmSchema)).identity;
 }
 
 export async function resolveStoredStructuralSchemaHash(
@@ -577,12 +631,13 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     collectWarning(warnings, diagnostic.message);
   }
 
-  const storedIdentity = await resolveStoredStructuralSchemaIdentity(
-    options.appId,
-    options.serverUrl,
-    options.adminSecret,
-    wasmSchema,
-  );
+  const { identity: storedIdentity, matchingLegacyByteaHash: legacySchemaHash } =
+    await resolveStoredStructuralSchema(
+      options.appId,
+      options.serverUrl,
+      options.adminSecret,
+      wasmSchema,
+    );
   const storedSchemaHash =
     storedIdentity && storedIdentity.format !== "legacy-bytea" ? storedIdentity.hash : null;
 
@@ -606,25 +661,25 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   }
 
   let migration: DeployResult["migration"];
-  if (storedIdentity?.format === "legacy-bytea" && storedIdentity.hash !== schema.hash) {
+  if (legacySchemaHash && legacySchemaHash !== schema.hash) {
     const { connected } = await fetchSchemaConnectivity(options.serverUrl, {
       appId: options.appId,
       adminSecret: options.adminSecret,
-      fromHash: storedIdentity.hash,
+      fromHash: legacySchemaHash,
       toHash: schema.hash,
     });
 
     migration = connected
       ? {
           status: "already-connected",
-          fromHash: storedIdentity.hash,
+          fromHash: legacySchemaHash,
           toHash: schema.hash,
         }
       : await pushMigration({
           appId: options.appId,
           serverUrl: options.serverUrl,
           adminSecret: options.adminSecret,
-          fromHash: storedIdentity.hash,
+          fromHash: legacySchemaHash,
           toHash: schema.hash,
         });
   }
