@@ -164,6 +164,10 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     await expect(reloadedInspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
       timeout: 30_000,
     });
+    // A reload has no per-frame selected-context state. It must reconnect to
+    // the host context, not choose an arbitrary sibling based on provider
+    // registration order.
+    await expect(reloadedInspector.getByLabel("Runtime context")).toHaveValue(primaryContextValue!);
     await reloadedInspector.getByRole("link", { name: "View todos data" }).click();
     const reloadedWritableRow = reloadedInspector.locator('[role="row"]').filter({
       has: reloadedInspector.getByRole("gridcell", { name: writableRowTitle, exact: true }),

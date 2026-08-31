@@ -35,6 +35,33 @@ function runtimeContextsEqual(
   );
 }
 
+/**
+ * A reload has no user-selected context to restore. Prefer the runtime that
+ * published the host handle rather than treating registration order as an
+ * identity: sibling providers can register in either order (notably under
+ * React StrictMode), and an inspector opened for the host should reconnect to
+ * that host's own persistent context by default.
+ */
+function defaultRuntimeContextKey(contexts: InspectorRuntimeContext[]): string | null {
+  const hostConfig = readInspectorHostConfig();
+  const hostDbName = hostConfig?.driver?.type === "persistent" ? hostConfig.driver.dbName : null;
+  // `driver.dbName` is the caller-selected logical base; inspected contexts
+  // expose the auth-scoped physical root derived from that base. The physical
+  // scope begins with this exact delimiter, so do not use an unbounded prefix
+  // match (for example, `app` must not choose `app-preview`).
+  const hostPhysicalPrefix = hostDbName ? `${hostDbName}::jazz-browser-v1::` : null;
+  return (
+    contexts.find(
+      (context) =>
+        context.appId === hostConfig?.appId &&
+        hostPhysicalPrefix !== null &&
+        context.dbName.startsWith(hostPhysicalPrefix),
+    )?.key ??
+    contexts[0]?.key ??
+    null
+  );
+}
+
 class InspectorConnectionErrorBoundary extends Component<
   { children: ReactNode },
   { error: Error | null }
@@ -93,7 +120,7 @@ export function InspectorApp() {
             activeSession = next;
             setSession(next);
             setContexts(next.contexts);
-            setSelectedKey(next.contexts[0]!.key);
+            setSelectedKey(defaultRuntimeContextKey(next.contexts));
             return;
           }
           next?.close();
@@ -119,7 +146,7 @@ export function InspectorApp() {
         setSelectedKey((current) =>
           current && next.some((context) => context.key === current)
             ? current
-            : (next[0]?.key ?? null),
+            : defaultRuntimeContextKey(next),
         );
       });
     }, 1_000);
