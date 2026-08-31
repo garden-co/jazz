@@ -706,9 +706,14 @@ fn drain_db_route(
             continue;
         };
         let start = Instant::now();
-        let outcome =
-            block_on(edge_peer.ingest_edge_mergeable_commit_unit(edge, tx, versions, u64::MAX))
-                .unwrap();
+        let outcome = block_on(edge_peer.ingest_edge_mergeable_commit_unit(
+            edge,
+            tx,
+            versions,
+            u64::MAX,
+            u64::MAX,
+        ))
+        .unwrap();
         settle_outcome(edge, outcome).unwrap();
         edge_acceptance
             .record(start.elapsed().as_micros() as u64)

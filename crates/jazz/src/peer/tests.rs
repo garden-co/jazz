@@ -911,7 +911,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let (_missing_dir, mut missing_edge) = open_node_with_schema(node(0xa5), schema.clone());
     let mut missing_peer = PeerState::edge_client(writer);
     let missing_outcome = missing_peer
-        .ingest_edge_mergeable_commit_unit(&mut missing_edge, tx.clone(), versions.clone(), 10)
+        .ingest_edge_mergeable_commit_unit(&mut missing_edge, tx.clone(), versions.clone(), 10, 10)
         .expect("missing policy claim must fail closed, not abort edge ingest");
     let missing_updates = missing_edge
         .persist_and_settle_outcome(missing_outcome)
@@ -994,7 +994,7 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let mut peer = PeerState::edge_client(writer);
 
     let outcome = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10)
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10, 10)
         .expect("missing prepared seed claim must be a deferred empty support proof");
     let updates = edge.persist_and_settle_outcome(outcome).unwrap();
     assert!(updates.is_empty());
@@ -1016,19 +1016,19 @@ fn deferred_edge_ingest_rejects_a_conflicting_retransmit() {
     let mut peer = PeerState::edge_client(writer);
 
     let _ = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10)
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10, 10)
         .expect("missing support claim parks the first commit unit");
     assert_eq!(peer.deferred_edge_fate_count(), 1);
 
     let _ = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10)
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10, 10)
         .expect("an identical deferred retransmit remains idempotent");
     assert_eq!(peer.deferred_edge_fate_count(), 1);
 
     let mut conflicting = tx.clone();
     conflicting.n_total_writes = conflicting.n_total_writes.saturating_add(1);
     assert!(matches!(
-        peer.ingest_edge_mergeable_commit_unit(&mut edge, conflicting, versions, 10)
+        peer.ingest_edge_mergeable_commit_unit(&mut edge, conflicting, versions, 10, 10)
             .resolve(),
         Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == tx.tx_id
     ));
@@ -1090,6 +1090,72 @@ fn open_node_with_schema(
 fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
     let schema = schema();
     open_node_with_schema(node_uuid, schema)
+}
+
+/// Permission-scope cache retention is maintenance, not authority admission.
+/// The receipt drives the public edge-ingest path because a direct eviction
+/// call would not prove that ingress keeps the two clocks separate.
+#[test]
+fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
+    let schema = session_seed_write_policy_schema();
+    let writer = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xa7), schema.clone());
+    let (tx, versions) = resource_commit_unit(&mut writer_node, writer, row(0xa8));
+    let (_edge_dir, mut edge) = open_node_with_schema(node(0xa9), schema);
+    let mut peer = PeerState::edge_client(writer);
+    let subscription = SubscriptionKey {
+        shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(7)),
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(8)),
+        read_view: Default::default(),
+    };
+    let ttl_ms = edge_scope_ttl_ms();
+    assert!(ttl_ms > 0, "this receipt requires the normal positive edge-scope TTL");
+
+    peer.retain_edge_scope_subscription(subscription);
+    peer.release_edge_scope_subscription(&mut edge, subscription, 100);
+    assert_eq!(
+        peer.idle_edge_scope_subscriptions.get(&subscription),
+        Some(&100),
+        "release records the monotonic maintenance instant"
+    );
+
+    // The missing support claim intentionally parks this write before HLC
+    // validation. That lets the receipt inject an extreme authority clock and
+    // assert that it is retained only as the deferred admission timestamp.
+    let first_outcome = peer.ingest_edge_mergeable_commit_unit(
+        &mut edge,
+        tx.clone(),
+        versions.clone(),
+        100 + ttl_ms - 1,
+        u64::MAX,
+    )
+    .expect("missing support defers the edge write");
+    let first_updates = edge.persist_and_settle_outcome(first_outcome).unwrap();
+    assert!(first_updates.is_empty(), "a deferred write has no fate yet");
+    assert!(
+        peer.idle_edge_scope_subscriptions.contains_key(&subscription),
+        "an authority wall-clock jump cannot immediately evict a still-fresh scope"
+    );
+    assert_eq!(
+        peer.deferred_edge_fates[&tx.tx_id].admission_now_ms,
+        u64::MAX,
+        "the deferred fate retains the separately supplied HLC admission time"
+    );
+
+    let retry_outcome = peer.ingest_edge_mergeable_commit_unit(
+        &mut edge,
+        tx,
+        versions,
+        100 + ttl_ms,
+        u64::MAX,
+    )
+    .expect("an identical deferred retransmit remains admissible");
+    let retry_updates = edge.persist_and_settle_outcome(retry_outcome).unwrap();
+    assert!(retry_updates.is_empty(), "the retry remains deferred without support");
+    assert!(
+        !peer.idle_edge_scope_subscriptions.contains_key(&subscription),
+        "the monotonic TTL evicts the idle scope at its boundary"
+    );
 }
 
 fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {

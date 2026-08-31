@@ -315,7 +315,7 @@ fn edge_ingest(
     install_uuid_sub_claim(node, peer.identity());
     block_on(async {
         let outcome = peer
-            .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms)
+            .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms, now_ms)
             .await
             .unwrap();
         node.persist_and_settle_outcome(outcome).await.unwrap()

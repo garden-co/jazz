@@ -249,7 +249,10 @@ impl CachedPeerQueryPlan {
 pub(super) struct DeferredEdgeFate {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
-    pub(super) now_ms: u64,
+    /// Wall-clock authority time captured when the client upload arrived.
+    /// Deferred admission deliberately preserves this security boundary rather
+    /// than treating time spent awaiting permission support as client slack.
+    pub(super) admission_now_ms: u64,
     pub(super) permission_identity: AuthorSubject,
     pub(super) scope_subscriptions: Vec<SubscriptionKey>,
 }

@@ -535,6 +535,7 @@ fn edge_acceptance_phase(
         tx,
         versions,
         u64::MAX,
+        u64::MAX,
     ))
     .unwrap();
     let updates = settle_outcome(&mut edge.node, outcome).unwrap();

@@ -2505,6 +2505,7 @@ fn edge_acceptance_phase(
         tx.clone(),
         versions,
         u64::MAX,
+        u64::MAX,
     ))
     .unwrap();
     let first = settle_outcome(&mut edge.node, outcome).unwrap();

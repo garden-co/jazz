@@ -339,6 +339,7 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
                 tx,
                 versions,
                 u64::MAX,
+                u64::MAX,
             ))
             .expect("edge ingest");
             let updates =
@@ -1179,6 +1180,7 @@ fn run_edge_actor(
                     &mut edge_node,
                     tx,
                     versions,
+                    now_ms,
                     now_ms,
                 ))
                 .expect("edge ingest");

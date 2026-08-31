@@ -232,6 +232,7 @@ fn deliver_client_unit(
             tx,
             versions,
             u64::MAX,
+            u64::MAX,
         ))
         .unwrap();
         settle_outcome(&mut client.edge, outcome).unwrap();

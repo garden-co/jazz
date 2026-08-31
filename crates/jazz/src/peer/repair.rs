@@ -11,12 +11,13 @@ impl PeerState {
         node: &mut NodeState<S>,
         tx: Transaction,
         versions: Vec<VersionRecord>,
-        now_ms: u64,
+        maintenance_now_ms: u64,
+        admission_now_ms: u64,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: OrderedKvStorage + ReopenableStorage,
     {
-        self.evict_idle_edge_scope_subscriptions(node, now_ms);
+        self.evict_idle_edge_scope_subscriptions(node, maintenance_now_ms);
         if tx.kind != TxKind::Mergeable {
             return Err(Error::UnsupportedCommitUnit(
                 "edge fate deferral only supports mergeable commit units",
@@ -55,7 +56,7 @@ impl PeerState {
                     DeferredEdgeFate {
                         tx,
                         versions,
-                        now_ms,
+                        admission_now_ms,
                         permission_identity,
                         scope_subscriptions,
                     },
@@ -66,7 +67,7 @@ impl PeerState {
         node.ingest_edge_authority_mergeable_commit_unit_with_identity(
             tx,
             versions,
-            now_ms,
+            admission_now_ms,
             permission_identity,
         )
         .await
@@ -77,12 +78,12 @@ impl PeerState {
     pub async fn drain_deferred_edge_fates<S>(
         &mut self,
         node: &mut NodeState<S>,
-        now_ms: u64,
+        maintenance_now_ms: u64,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: OrderedKvStorage + ReopenableStorage,
     {
-        self.evict_idle_edge_scope_subscriptions(node, now_ms);
+        self.evict_idle_edge_scope_subscriptions(node, maintenance_now_ms);
         let deferred = self
             .deferred_edge_fates
             .iter()
@@ -105,13 +106,13 @@ impl PeerState {
             }
             self.deferred_edge_fates.remove(&tx_id);
             for subscription in fate.scope_subscriptions {
-                self.release_edge_scope_subscription(node, subscription, now_ms);
+                self.release_edge_scope_subscription(node, subscription, maintenance_now_ms);
             }
             updates.extend(
                 node.ingest_edge_authority_mergeable_commit_unit_with_identity(
                     fate.tx,
                     fate.versions,
-                    fate.now_ms,
+                    fate.admission_now_ms,
                     fate.permission_identity,
                 )
                 .await?,

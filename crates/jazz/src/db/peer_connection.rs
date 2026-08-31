@@ -19,6 +19,25 @@ use super::*;
 const RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("ae3eb9f7-65cc-528d-8f3e-a772fb6f68fe");
 
+/// Wall-clock time used exclusively for authority admission checks.
+///
+/// This must not use `UploadRetryClock`: that clock is deliberately monotonic
+/// and process-relative so retry backoff is unaffected by wall-clock changes,
+/// whereas transaction HLC physical components are Unix milliseconds.
+fn authority_admission_now_ms() -> Result<u64, Error> {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_err(|_| Error::new(ErrorCode::Protocol, "authority clock precedes Unix epoch"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| {
+            Error::new(
+                ErrorCode::Protocol,
+                "authority clock exceeds u64 milliseconds",
+            )
+        })
+}
+
 fn relay_upstream_subscription_key(
     connection_epoch: u64,
     downstream: SubscriptionKey,
@@ -133,7 +152,7 @@ pub(super) fn dispatch_admitted_subscriber_message<'a, S>(
     edge_fate_routes: &'a EdgeFateRoutes,
     local_fate_routes: &'a LocalFateRoutes,
     downstream_fates: &'a PendingDownstreamFates,
-    now_ms: u64,
+    maintenance_now_ms: u64,
     message: SyncMessage,
 ) -> Pin<Box<dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a>>
 where
@@ -271,9 +290,16 @@ where
                     }]));
                 }
 
+                let authority_now_ms = authority_admission_now_ms()?;
                 let mut node = node.lock().await;
                 let outcome = peer
-                    .ingest_edge_mergeable_commit_unit(&mut node, tx, versions, now_ms)
+                    .ingest_edge_mergeable_commit_unit(
+                        &mut node,
+                        tx,
+                        versions,
+                        maintenance_now_ms,
+                        authority_now_ms,
+                    )
                     .await
                     .map_err(Error::from)?;
                 let (responses, publications, post_settlement_work) = outcome.into_parts();
@@ -3716,7 +3742,7 @@ where
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
-                            let now_ms = self.upload_retry_clock.borrow().now_ms();
+                            let maintenance_now_ms = self.upload_retry_clock.borrow().now_ms();
                             let outcome = dispatch_admitted_subscriber_message(
                                 &self.node,
                                 peer,
@@ -3726,7 +3752,7 @@ where
                                 &self.edge_fate_routes,
                                 &self.local_fate_routes,
                                 &self.downstream_fates,
-                                now_ms,
+                                maintenance_now_ms,
                                 other,
                             )
                             .await?;
