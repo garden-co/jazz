@@ -12,7 +12,9 @@ use std::borrow::Cow;
 
 use crate::ids::{AuthorSubject, NodeUuid};
 use crate::protocol::SyncMessage;
-use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
+use crate::protocol_limits::{
+    MAX_WIRE_BATCH_FRAMES, validate_logical_message_len, validate_wire_frame_len,
+};
 
 /// Current Jazz wire protocol version.
 ///
@@ -462,6 +464,81 @@ where
     } else {
         Ok(value)
     }
+}
+
+/// Decode one canonical WebSocket carrier of raw wire frames without first
+/// allocating an attacker-declared outer `Vec`.
+///
+/// A batch is postcard's `Vec<Vec<u8>>` spelling: a canonical outer count,
+/// followed by a canonical byte length and payload for each frame. The count
+/// and every frame length are admitted before their corresponding allocation;
+/// the carrier also has to consume its complete input. This is the shared
+/// boundary for every WebSocket adapter, so no adapter can accidentally use
+/// postcard's general-purpose `Vec` decoder before enforcing the protocol
+/// cardinality limit.
+pub fn decode_websocket_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    if validate_wire_frame_len(bytes.len()).is_err() {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+
+    let mut remaining = bytes;
+    let count = take_canonical_postcard_usize(&mut remaining)?;
+    if count == 0 || count > MAX_WIRE_BATCH_FRAMES {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        let frame_len = take_canonical_postcard_usize(&mut remaining)?;
+        if validate_wire_frame_len(frame_len).is_err() {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        if frame_len > remaining.len() {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        let (frame, tail) = remaining.split_at(frame_len);
+        frames.push(frame.to_vec());
+        remaining = tail;
+    }
+
+    if remaining.is_empty() {
+        Ok(frames)
+    } else {
+        Err(postcard::Error::DeserializeBadEncoding)
+    }
+}
+
+/// Encode one canonical, complete WebSocket carrier of raw wire frames.
+///
+/// The physical carrier ceiling includes postcard's outer count and each
+/// frame-length prefix, so a raw frame at the frame ceiling can still be too
+/// large to carry by itself.
+pub fn encode_websocket_frame_batch(frames: &[Vec<u8>]) -> Result<Vec<u8>, postcard::Error> {
+    if frames.is_empty()
+        || frames.len() > MAX_WIRE_BATCH_FRAMES
+        || frames
+            .iter()
+            .any(|frame| validate_wire_frame_len(frame.len()).is_err())
+    {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+
+    let encoded = to_allocvec(frames)?;
+    if validate_wire_frame_len(encoded.len()).is_err() {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    Ok(encoded)
+}
+
+fn take_canonical_postcard_usize(bytes: &mut &[u8]) -> Result<usize, postcard::Error> {
+    let source = *bytes;
+    let (value, remaining) = take_from_bytes::<usize>(source)?;
+    let consumed = source.len() - remaining.len();
+    if to_allocvec(&value)? != source[..consumed] {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+    *bytes = remaining;
+    Ok(value)
 }
 
 /// Decode a semantic message only when its required capabilities were
@@ -993,6 +1070,86 @@ mod tests {
             decode_sync_message(&nonminimal_payload),
             Err(postcard::Error::DeserializeBadEncoding),
             "the frozen semantic codec admits only canonical varints"
+        );
+    }
+
+    #[test]
+    fn websocket_batch_decoder_bounds_and_canonicalizes_before_outer_allocation() {
+        // This stays internal because it verifies the untrusted WebSocket
+        // carrier before an adapter has accepted any frame bytes.
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            decode_websocket_frame_batch(&valid).expect("canonical batch decodes"),
+            vec![vec![0x42]],
+        );
+
+        assert!(
+            decode_websocket_frame_batch(&[0]).is_err(),
+            "empty batch rejects"
+        );
+
+        // The outer count is rejected while it is still only a postcard
+        // varint; no attacker-declared Vec<Vec<u8>> has been allocated.
+        let count_flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
+            .expect("encode count flood below physical byte cap");
+        assert!(
+            decode_websocket_frame_batch(&count_flood).is_err(),
+            "count flood rejects before element decoding"
+        );
+
+        // `postcard` accepts these overlong lengths, but the frozen carrier
+        // contract admits only the encoder's shortest spelling.
+        assert!(
+            decode_websocket_frame_batch(&[0x81, 0x00, 0x01, 0x42]).is_err(),
+            "noncanonical outer count rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x81, 0x00, 0x42]).is_err(),
+            "noncanonical frame length rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x80]).is_err(),
+            "truncated frame length rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x02, 0x42]).is_err(),
+            "truncated frame body rejects"
+        );
+
+        let mut oversized_frame = vec![0x01];
+        oversized_frame.extend(
+            postcard::to_allocvec(&(MAX_WIRE_FRAME_BYTES + 1))
+                .expect("encode oversized frame length"),
+        );
+        assert!(
+            decode_websocket_frame_batch(&oversized_frame).is_err(),
+            "oversized frame rejects before frame allocation"
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0);
+        assert!(
+            decode_websocket_frame_batch(&suffixed).is_err(),
+            "trailing carrier bytes reject"
+        );
+    }
+
+    #[test]
+    fn websocket_batch_encoder_accounts_for_postcard_carrier_prefixes() {
+        // 2^21 - 4 remains a three-byte postcard length, so the outer count
+        // plus length prefix exactly fill the 2 MiB physical carrier limit.
+        let largest_singleton = vec![0x42; MAX_WIRE_FRAME_BYTES - 4];
+        let encoded = encode_websocket_frame_batch(std::slice::from_ref(&largest_singleton))
+            .expect("largest singleton carrier fits exactly");
+        assert_eq!(encoded.len(), MAX_WIRE_FRAME_BYTES);
+        assert_eq!(
+            decode_websocket_frame_batch(&encoded).expect("decode exact carrier"),
+            vec![largest_singleton],
+        );
+
+        assert!(
+            encode_websocket_frame_batch(&[vec![0x42; MAX_WIRE_FRAME_BYTES]]).is_err(),
+            "a raw frame at the raw-frame ceiling cannot carry its postcard prefixes"
         );
     }
 

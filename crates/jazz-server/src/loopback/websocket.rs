@@ -19,7 +19,6 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use jazz::db::DbIdentity;
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::schema::JazzSchema;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::Mutex as TokioMutex;
@@ -663,43 +662,35 @@ fn encode_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Er
     let mut batches = Vec::new();
     let mut current = Vec::new();
     for frame in frames {
-        if validate_wire_frame_len(frame.len()).is_err() {
-            return Err(postcard::Error::SerializeBufferFull);
-        }
         let mut candidate = current.clone();
         candidate.push(frame.clone());
-        let encoded = postcard::to_allocvec(&candidate)?;
-        if encoded.len() > MAX_WIRE_FRAME_BYTES && !current.is_empty() {
-            batches.push(postcard::to_allocvec(&current)?);
+        let candidate_fits = jazz::wire::encode_websocket_frame_batch(&candidate).is_ok();
+        if !candidate_fits && !current.is_empty() {
+            batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
             current.clear();
-        } else if encoded.len() > MAX_WIRE_FRAME_BYTES {
+            // A singleton has its own count and length prefixes. Validate the
+            // actual carrier after the flush instead of assuming a raw frame
+            // at the frame limit can fit by itself.
+            jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
+        } else if !candidate_fits {
             return Err(postcard::Error::SerializeBufferFull);
         }
         current.push(frame.clone());
     }
     if !current.is_empty() {
-        batches.push(postcard::to_allocvec(&current)?);
+        batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
     }
     Ok(batches)
 }
 
 fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    if bytes.len() > MAX_WIRE_FRAME_BYTES {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
-    }
-    let frames: Vec<Vec<u8>> = jazz::wire::decode_postcard_exact(bytes)?;
-    if frames
-        .iter()
-        .any(|frame| validate_wire_frame_len(frame.len()).is_err())
-    {
-        return Err(postcard::Error::DeserializeUnexpectedEnd);
-    }
-    Ok(frames)
+    jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES};
 
     #[test]
     fn frame_batch_decoder_consumes_the_complete_carrier() {
@@ -757,6 +748,60 @@ mod tests {
             admitted.author,
             AuthorSubject::from_canonical(&format!(r#"["urn:jazz:static-bearer","{sub}"]"#))
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn frame_batch_decoder_rejects_empty_and_count_floods() {
+        let empty = postcard::to_allocvec(&Vec::<Vec<u8>>::new()).expect("encode empty batch");
+        assert!(decode_frame_batch(&empty).is_err());
+
+        let flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
+            .expect("encode count flood below physical byte cap");
+        assert!(flood.len() <= MAX_WIRE_FRAME_BYTES);
+        assert!(decode_frame_batch(&flood).is_err());
+    }
+
+    #[test]
+    fn frame_batches_split_at_protocol_frame_count_cap() {
+        let frames = vec![vec![0x42]; MAX_WIRE_BATCH_FRAMES + 1];
+        let batches = encode_frame_batches(&frames).expect("split bounded frame count");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            decode_frame_batch(&batches[0])
+                .expect("decode first bounded batch")
+                .len(),
+            MAX_WIRE_BATCH_FRAMES
+        );
+        assert_eq!(
+            decode_frame_batch(&batches[1])
+                .expect("decode remaining bounded batch")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn frame_batches_never_emit_a_carrier_over_the_physical_cap() {
+        let largest_singleton = vec![0x42; MAX_WIRE_FRAME_BYTES - 4];
+        let batches = encode_frame_batches(std::slice::from_ref(&largest_singleton))
+            .expect("largest singleton carrier fits exactly");
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), MAX_WIRE_FRAME_BYTES);
+        assert_eq!(
+            decode_frame_batch(&batches[0]).expect("decode exact carrier"),
+            vec![largest_singleton],
+        );
+
+        let raw_limit = vec![0x42; MAX_WIRE_FRAME_BYTES];
+        assert!(
+            encode_frame_batches(std::slice::from_ref(&raw_limit)).is_err(),
+            "raw limit frame alone cannot fit its carrier prefixes"
+        );
+        assert!(
+            encode_frame_batches(&[vec![0x11], raw_limit]).is_err(),
+            "flushing an earlier frame must still validate the oversized singleton"
         );
     }
 }

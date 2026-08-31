@@ -97,22 +97,60 @@ export const CLIENT_WIRE_FEATURES =
 const MAX_WEBSOCKET_BATCH_BYTES = 1 << 20;
 const POSTCARD_FRAME_LENGTH_RESERVE = 5;
 const POSTCARD_BATCH_LENGTH_RESERVE = 5;
+// Keep these fixed protocol limits aligned with jazz::protocol_limits. The
+// browser implementation cannot import the Rust core, so this boundary spells
+// them out beside the matching postcard carrier decoder.
+const MAX_WIRE_FRAME_BYTES = 2 * 1024 * 1024;
+const MAX_WIRE_BATCH_FRAMES = 4_096;
 
 export function webSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
 }
 
 export function encodeWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
+  assertWebSocketFrameBatch(frames);
   const writer = new PostcardWriter();
   writer.vec((itemWriter, index) => itemWriter.bytes(frames[index]!), frames.length);
-  return writer.finish();
+  const batch = writer.finish();
+  if (batch.byteLength > MAX_WIRE_FRAME_BYTES) {
+    throw new Error(
+      `websocket frame batch exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`,
+    );
+  }
+  return batch;
 }
 
 export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
+  if (batch.byteLength > MAX_WIRE_FRAME_BYTES) {
+    throw new Error(
+      `websocket frame batch exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`,
+    );
+  }
   const reader = new PostcardReader(batch);
-  const frames = reader.readVec((itemReader) => itemReader.bytes());
+  const count = reader.u64();
+  if (count === 0 || count > MAX_WIRE_BATCH_FRAMES) {
+    throw new Error(`websocket frame batch exceeds frame-count limit of ${MAX_WIRE_BATCH_FRAMES}`);
+  }
+
+  // Do not use `readVec`: its Array.from({ length }) allocates against the
+  // untrusted count before a protocol adapter can apply this carrier limit.
+  const frames: Uint8Array[] = [];
+  for (let index = 0; index < count; index += 1) {
+    frames.push(reader.bytesAtMost(MAX_WIRE_FRAME_BYTES, "websocket frame"));
+  }
   assertReaderDone(reader, "websocket frame batch");
   return frames;
+}
+
+function assertWebSocketFrameBatch(frames: readonly Uint8Array[]): void {
+  if (frames.length === 0 || frames.length > MAX_WIRE_BATCH_FRAMES) {
+    throw new Error(`websocket frame batch exceeds frame-count limit of ${MAX_WIRE_BATCH_FRAMES}`);
+  }
+  for (const frame of frames) {
+    if (frame.byteLength > MAX_WIRE_FRAME_BYTES) {
+      throw new Error(`websocket frame exceeds maximum length of ${MAX_WIRE_FRAME_BYTES} bytes`);
+    }
+  }
 }
 
 export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Array {
@@ -260,7 +298,11 @@ export class WebSocketCarrier {
     let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
     for (const frame of frames) {
       const frameBytes = frame.byteLength + POSTCARD_FRAME_LENGTH_RESERVE;
-      if (batch.length > 0 && batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES) {
+      if (
+        batch.length > 0 &&
+        (batch.length >= MAX_WIRE_BATCH_FRAMES ||
+          batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES)
+      ) {
         this.socket.send(encodeWebSocketFrameBatch(batch));
         batch = [];
         batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
