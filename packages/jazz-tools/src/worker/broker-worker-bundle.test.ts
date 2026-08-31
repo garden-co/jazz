@@ -36,6 +36,10 @@ describe("broker worker packaging", () => {
       expect(source).not.toMatch(/\bfrom\s*["']\.\.?\//);
       expect(source).not.toMatch(/\bimport\s*\(\s*["']\.\.?\//);
       expect(source).toMatch(/onconnect/);
+      // The cancellation-race scheduler belongs to the browser test entry,
+      // not a same-origin client-visible production worker protocol.
+      expect(source).not.toContain("foreground-node-lease-test-allocated");
+      expect(source).not.toContain("testDelayAfterLeaseAllocationMs");
       await expect(access(wasmOutfile)).resolves.toBeUndefined();
       expect((await stat(wasmOutfile)).size).toBeGreaterThan(0);
     } finally {

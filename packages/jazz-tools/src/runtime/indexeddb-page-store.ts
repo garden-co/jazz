@@ -324,7 +324,7 @@ export class IndexedDbPageStore {
       await done;
       if (value === undefined) return "missing";
       const pool = decodeForegroundNodeLeasePool(value);
-      const nodeKey = bytesKey(node);
+      const nodeKey = bytesKey(nodeBytesToBuffer(node));
       if (pool.active.some((lease) => bytesKey(lease.node) === nodeKey)) return "active";
       if (pool.reusable.some((lease) => bytesKey(lease.node) === nodeKey)) return "reusable";
       if (pool.retired.some((retired) => bytesKey(retired) === nodeKey)) return "retired";

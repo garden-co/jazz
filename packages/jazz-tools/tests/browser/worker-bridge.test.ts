@@ -300,10 +300,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       secret: generateAuthSecret(),
     });
     const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
-    const testCapability = crypto.randomUUID();
-    const workerUrl = new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url);
-    workerUrl.searchParams.set("jazzForegroundLeaseTestCapability", testCapability);
-    const worker = new SharedWorker(workerUrl, {
+    const worker = new SharedWorker(new URL("./jazz-broker-worker-test.ts", import.meta.url), {
       type: "module",
       name: `${workerName}:generation-0`,
     });
@@ -349,7 +346,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
             dbName,
             storageOwner,
             testDelayAfterLeaseAllocationMs: 250,
-            testCapability,
           });
         }),
         5_000,
@@ -414,14 +410,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
             }
           };
           port.addEventListener("message", onMessage);
-          // These fields are syntactically valid protocol input, but without
-          // the random capability encoded in a test worker URL they are inert.
+          // The production worker has no hook installation, so this
+          // test-only scheduling field is inert even when a raw client sends it.
           port.postMessage({
             type: "acquire-foreground-node-lease",
             dbName,
             storageOwner,
             testDelayAfterLeaseAllocationMs: 1_000,
-            testCapability: crypto.randomUUID(),
           });
         }),
         5_000,

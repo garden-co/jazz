@@ -36,8 +36,6 @@ export interface BrowserForegroundNodeLeaseAcquireRequest {
   storageOwner: string;
   /** @internal Browser-only scheduling seam for the real worker receipt. */
   testDelayAfterLeaseAllocationMs?: number;
-  /** @internal Unforgeable capability carried by the test worker URL. */
-  testCapability?: string;
 }
 
 /** Cancel a lease bootstrap that has not been handed to a foreground yet. */
