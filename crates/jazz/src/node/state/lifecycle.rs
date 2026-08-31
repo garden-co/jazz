@@ -2029,6 +2029,7 @@ where
         // introduction provenance.  Validate that each stored provenance
         // triple resolves through the authority's physical manifest before a
         // recovered mapping can reach that rebuild boundary.
+        validate_scalar_enum_case_provenance(&physical_mappings, &schema_version_aliases)?;
         validate_payload_enum_case_provenance(&physical_mappings, &schema_version_aliases)?;
         let mut current_write_schema = CurrentWriteSchema {
             revision: 0,

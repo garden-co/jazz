@@ -252,6 +252,118 @@ pub(super) fn validate_payload_enum_case_provenance(
     Ok(())
 }
 
+/// Scalar enum tags have the same physical-ordering boundary as payload
+/// enums.  Their compact `u8` tag is rebuilt from this registry, so decoded
+/// introduction coordinates must be manifest-backed before any descriptor is
+/// reconstructed.
+pub(super) fn validate_scalar_enum_case_provenance(
+    mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    if mappings.keys().any(|schema| !aliases.contains_key(schema)) {
+        return Err(Error::InvalidStoredValue(
+            "scalar enum registry provenance schema alias is missing",
+        ));
+    }
+    for mapping in mappings.values() {
+        for table in mapping.tables.values() {
+            for (column_id, cases) in &table.scalar_enum_cases {
+                validate_scalar_enum_case_provenance_for_column(
+                    mappings,
+                    aliases,
+                    table.table_id,
+                    *column_id,
+                    cases,
+                )?;
+            }
+            for (column_id, paths) in &table.nested_scalar_enum_cases {
+                for cases in paths.values() {
+                    validate_scalar_enum_case_provenance_for_column(
+                        mappings,
+                        aliases,
+                        table.table_id,
+                        *column_id,
+                        cases,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_scalar_enum_case_provenance_for_column(
+    mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    table_id: PhysicalTableId,
+    column_id: PhysicalColumnId,
+    cases: &[GlobalScalarEnumCaseId],
+) -> Result<(), Error> {
+    for case in cases {
+        let Some(origin) = mappings.get(&case.introducing_schema) else {
+            return Err(Error::InvalidStoredValue(
+                "scalar enum registry case provenance references an unknown schema",
+            ));
+        };
+        let ordinal = usize::from(case.introducing_ordinal);
+        let matches_authority = origin.tables.iter().any(|(table_name, table)| {
+            table.table_id == table_id
+                && table.columns.iter().any(|(column_name, candidate_column)| {
+                    *candidate_column == column_id
+                        && origin
+                            .identities
+                            .tables
+                            .get(table_name)
+                            .and_then(|identity_table| identity_table.columns.get(column_name))
+                            .is_some_and(|identity_column| {
+                                identity_column
+                                    .enum_variants
+                                    .values()
+                                    .any(|variants| variants.get(ordinal) == Some(&case.id))
+                            })
+                })
+        });
+        if !matches_authority {
+            return Err(Error::InvalidStoredValue(
+                "scalar enum registry case provenance disagrees with authority identities",
+            ));
+        }
+        let earliest_authority = mappings
+            .iter()
+            .filter(|(_, candidate)| {
+                candidate.tables.iter().any(|(table_name, table)| {
+                    table.table_id == table_id
+                        && table.columns.iter().any(|(column_name, candidate_column)| {
+                            *candidate_column == column_id
+                                && candidate
+                                    .identities
+                                    .tables
+                                    .get(table_name)
+                                    .and_then(|identity_table| {
+                                        identity_table.columns.get(column_name)
+                                    })
+                                    .is_some_and(|identity_column| {
+                                        identity_column.enum_variants.values().any(|variants| {
+                                            variants.iter().any(|id| id == &case.id)
+                                        })
+                                    })
+                        })
+                })
+            })
+            .min_by_key(|(schema, _)| aliases[schema])
+            .map(|(schema, _)| *schema)
+            .ok_or(Error::InvalidStoredValue(
+                "scalar enum registry case provenance disagrees with authority identities",
+            ))?;
+        if earliest_authority != case.introducing_schema {
+            return Err(Error::InvalidStoredValue(
+                "scalar enum registry case provenance does not name its introduction",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_payload_enum_case_provenance_for_column(
     mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
     aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,

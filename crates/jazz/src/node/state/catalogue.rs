@@ -419,6 +419,7 @@ self.database.finish_persistence(persisted)?;
             pending.publication.schema.id,
             self.next_schema_version_alias()?,
         );
+        validate_scalar_enum_case_provenance(&candidate_mappings, &candidate_aliases)?;
         validate_payload_enum_case_provenance(&candidate_mappings, &candidate_aliases)
     }
 

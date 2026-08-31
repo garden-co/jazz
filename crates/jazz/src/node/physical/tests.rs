@@ -301,6 +301,56 @@ mod variant_case_tests {
     }
 
     #[test]
+    fn scalar_case_provenance_binds_direct_and_nested_registries_to_manifest_coordinates() {
+        // Internal recovery-boundary test: compact scalar tags use the same
+        // provenance ordering as payload tags, including recursively lowered
+        // occurrences.
+        let origin = schema(9);
+        let direct_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(91));
+        let nested_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(92));
+        let mut mapping = mapping(9, &[("state", 1)]);
+        mapping.identities.tables.get_mut("entries").unwrap().columns
+            .get_mut("state").unwrap().enum_variants = BTreeMap::from([
+            ("root".to_owned(), vec![direct_id]),
+            ("root/record/detail".to_owned(), vec![nested_id]),
+        ]);
+        let table = mapping.tables.get_mut("entries").unwrap();
+        table.scalar_enum_cases.insert(
+            PhysicalColumnId(1),
+            vec![GlobalScalarEnumCaseId {
+                id: direct_id,
+                introducing_schema: origin,
+                introducing_ordinal: 0,
+            }],
+        );
+        table.nested_scalar_enum_cases.insert(
+            PhysicalColumnId(1),
+            BTreeMap::from([(
+                "root/record/detail".to_owned(),
+                vec![GlobalScalarEnumCaseId {
+                    id: nested_id,
+                    introducing_schema: origin,
+                    introducing_ordinal: 0,
+                }],
+            )]),
+        );
+        let mut mappings = BTreeMap::from([(origin, mapping)]);
+        let aliases = BTreeMap::from([(origin, SchemaVersionAlias(1))]);
+        validate_scalar_enum_case_provenance(&mappings, &aliases)
+            .expect("canonical direct and nested scalar provenance is accepted");
+
+        mappings.get_mut(&origin).unwrap().tables.get_mut("entries").unwrap()
+            .nested_scalar_enum_cases.get_mut(&PhysicalColumnId(1)).unwrap()
+            .get_mut("root/record/detail").unwrap()[0].introducing_ordinal = 1;
+        assert!(matches!(
+            validate_scalar_enum_case_provenance(&mappings, &aliases),
+            Err(Error::InvalidStoredValue(
+                "scalar enum registry case provenance disagrees with authority identities"
+            ))
+        ));
+    }
+
+    #[test]
     fn nested_enum_epoch_accepts_only_append_only_case_growth() {
         let value_type = |variants: &[&str]| {
             records::ValueType::EnumTag(
@@ -1157,6 +1207,19 @@ mod variant_case_tests {
         JazzSchema::new(&public).expect("wide scalar schema compiles")
     }
 
+    fn public_two_case_scalar_schema() -> JazzSchema {
+        let public = PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("events").column(
+                "status",
+                PublicColumnType::ScalarEnum {
+                    name: "status".to_owned(),
+                    variants: vec!["draft".to_owned(), "published".to_owned()],
+                },
+            ))
+            .build();
+        JazzSchema::new(&public).expect("two-case scalar schema compiles")
+    }
+
     fn wide_scalar_sibling_publication(
         base: &JazzSchema,
         source_identities: &PhysicalIdentityManifest,
@@ -1431,6 +1494,93 @@ mod variant_case_tests {
                 "payload enum registry case provenance disagrees with authority identities"
             )
         ));
+    }
+
+    #[test]
+    fn reopen_rejects_reordered_scalar_case_uuids_with_forged_provenance() {
+        // Internal durable-boundary receipt: canonical scalar-registry bytes
+        // with swapped UUID meanings must fail before compact tags are rebuilt.
+        let schema = public_two_case_scalar_schema();
+        let node_uuid = NodeUuid::from_bytes([0x9b; 16]);
+        let dir = tempfile::tempdir().expect("create scalar provenance receipt directory");
+        let mut node = open_receipt_node(dir.path(), node_uuid, &schema);
+        let schema_id = schema.version_id();
+        let mut corrupt = node.catalogue.physical_mappings[&schema_id].clone();
+        let status = corrupt.tables["events"].columns["status"];
+        let cases = corrupt.tables.get_mut("events").unwrap()
+            .scalar_enum_cases.get_mut(&status).unwrap();
+        assert_eq!(cases.len(), 2, "fixture has two canonical scalar cases");
+        cases.swap(0, 1);
+        cases[0].introducing_ordinal = 0;
+        cases[1].introducing_ordinal = 1;
+        overwrite_schema_mapping(&mut node, schema_id, &corrupt);
+        crate::db::block_on(node.close()).expect("close corrupted scalar receipt storage");
+        drop(node);
+
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(dir.path(), &refs).expect("reopen corrupted storage");
+        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
+            Ok(_) => panic!("forged scalar provenance must fail before descriptor rebuild"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            Error::InvalidStoredValue(
+                "scalar enum registry case provenance disagrees with authority identities"
+            )
+        ));
+    }
+
+    #[test]
+    fn scalar_case_provenance_preserves_canonical_lineage_growth_through_reopen() {
+        let base = public_wide_scalar_schema(None);
+        let evolved_schema = public_wide_scalar_schema(Some("archived"));
+        let evolved = SchemaVersion::new(evolved_schema);
+        let node_uuid = NodeUuid::from_bytes([0x9c; 16]);
+        let dir = tempfile::tempdir().expect("create scalar lineage receipt directory");
+        let mut node = open_receipt_node(dir.path(), node_uuid, &base);
+        let source_identities = node.catalogue.physical_mappings[&base.version_id()]
+            .identities
+            .clone();
+        let publication = wide_scalar_sibling_publication(&base, &source_identities, evolved.clone());
+        let expected_id = publication.physical_identities.tables["events"].columns["status"]
+            .enum_variants["root"][255];
+        node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+            author: AuthorSubject::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(publication),
+        })
+        .expect("publish canonical scalar lineage");
+        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorSubject::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .expect("select evolved scalar write schema");
+        let physical = &node.catalogue.physical_mappings[&evolved.id].tables["events"];
+        let status = physical.columns["status"];
+        assert_eq!(physical.scalar_enum_cases[&status].len(), 256);
+        assert_eq!(physical.scalar_enum_cases[&status][255].id, expected_id);
+        assert_eq!(
+            physical.scalar_enum_cases[&status][255].introducing_ordinal,
+            255
+        );
+
+        crate::db::block_on(node.close()).expect("close scalar lineage receipt storage");
+        drop(node);
+        let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
+        let physical = &reopened.catalogue.physical_mappings[&evolved.id].tables["events"];
+        let status = physical.columns["status"];
+        assert_eq!(physical.scalar_enum_cases[&status].len(), 256);
+        assert_eq!(physical.scalar_enum_cases[&status][255].id, expected_id);
+        assert_eq!(
+            physical.scalar_enum_cases[&status][255].introducing_ordinal,
+            255
+        );
+        crate::db::block_on(reopened.close()).expect("close reopened scalar lineage receipt storage");
     }
 
     #[test]
