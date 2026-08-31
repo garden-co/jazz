@@ -46,6 +46,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
             subscription: usage_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
     assert_eq!(
@@ -291,6 +292,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
             subscription: duplicate_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
     assert_eq!(
@@ -800,6 +802,7 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
             &mut core,
             SyncMessage::FetchRowVersions {
                 requests: missing.clone(),
+                delegated_session: None,
             },
         )
         .unwrap();

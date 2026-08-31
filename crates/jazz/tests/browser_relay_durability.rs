@@ -13,7 +13,7 @@ use jazz::db::{
 use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::node::CurrentRow;
+use jazz::node::{CommitUnitTrust, CurrentRow};
 use jazz::protocol::{
     RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
@@ -498,7 +498,12 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
 
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let write = main_thread
         .insert(
@@ -817,7 +822,12 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let (writer_transport, core_writer_transport) = duplex();
     let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
     let _core_writer = core.accept_subscriber(
@@ -1193,6 +1203,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }))
             .expect("subscribe with distinct wire key");
     }
@@ -1258,6 +1269,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }))
             .expect("subscribe with a fresh rejected wire key");
         for _ in 0..3 {
@@ -1288,6 +1300,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
             subscription: first,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .expect("resubscribe a previously rejected wire key");
     for _ in 0..3 {
@@ -1481,7 +1494,12 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1566,7 +1584,12 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -1653,7 +1676,12 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let (seed_transport, core_seed_transport) = duplex();
     let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
     let _core_seed = core.accept_subscriber(core_seed_transport, alice);
@@ -1866,7 +1894,12 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let query = main_thread
         .prepare_query(
@@ -1988,7 +2021,12 @@ fn assert_cold_browser_relay_structured_reset_materializes_ordered_sender_facts(
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let query = main_thread
         .prepare_query(
@@ -2154,7 +2192,12 @@ fn reopened_browser_tab_hydrates_from_worker_authority_state() {
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let first_query = first_tab
         .prepare_query(&first_tab.table("todos"))
         .expect("prepare first-tab Edge query");
@@ -2288,7 +2331,12 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
     let (worker_upstream_transport, core_worker_transport) = duplex();
     let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_worker_subscriber = core.accept_subscriber(core_worker_transport, alice);
+    let core_worker_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_worker_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let exact_query = Query::from("todos")
         .order_by("title", OrderDirection::Asc)
         .offset(1);
@@ -2377,7 +2425,12 @@ fn reopened_persistent_worker_stale_membership_does_not_settle_fresh_edge_one_sh
     let (reopened_upstream_transport, reopened_core_transport) = duplex();
     let _reopened_upstream =
         block_on(reopened_worker.connect_upstream(reopened_upstream_transport));
-    let _reopened_core_subscriber = core.accept_subscriber(reopened_core_transport, alice);
+    let _reopened_core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        reopened_core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let reopened_query = reopened_tab
         .prepare_query(&exact_query)
         .expect("prepare reopened Edge query");
@@ -2457,7 +2510,12 @@ fn browser_worker_write_only_exact_edge_write_uses_one_ordinary_relay_projection
     let _worker_subscriber = worker.accept_subscriber(worker_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let row_id = jazz::ids::RowUuid::from_bytes([0xc6; 16]);
     let exact_query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row_id.0))));
@@ -2585,7 +2643,12 @@ fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let query = main_thread
         .prepare_query(
@@ -2895,7 +2958,12 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     for offset in 1..=5 {
         let query = main_thread
@@ -2990,7 +3058,12 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let _worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let _core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -3054,7 +3127,12 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
 
     let (worker_upstream_transport, core_transport) = duplex();
     let worker_upstream = jazz::db::block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_subscriber = core.accept_subscriber(core_transport, alice);
+    let core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
     let base = worker
         .insert(
             "todos",
@@ -3478,7 +3556,12 @@ fn reopened_worker_forgets_recovered_foreground_marker_after_global_acceptance()
     let worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
     let (worker_upstream_transport, core_transport) = duplex();
     let worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
-    let core_subscriber = core.accept_subscriber(core_transport, alice);
+    let core_subscriber = core.accept_subscriber_with_claims_and_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
 
     worker.tick().expect("replay recovered foreground write");
     successor

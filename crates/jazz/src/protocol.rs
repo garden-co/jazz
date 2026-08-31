@@ -118,6 +118,9 @@ pub enum SyncMessage {
     FetchRowVersions {
         /// Exact version identities requested by the receiver.
         requests: Vec<RowVersionRef>,
+        /// Policy snapshot that made the originating subscription/view update
+        /// visible. Only a trusted relay may delegate this to its upstream.
+        delegated_session: Option<DelegatedSessionBinding>,
     },
     /// Repair-lane response carrying canonical row-version payloads.
     RowVersionPayloads {
@@ -1687,6 +1690,21 @@ pub struct CoverageKey {
     pub binding_id: BindingId,
     /// Registration options that affect the view or its upstream routing.
     pub opts: RegisterShapeOptions,
+    /// Exact logical policy context for a relay-multiplexed coverage group.
+    /// Empty for direct/local coverage, whose transport is already singular.
+    pub policy_binding: Option<PolicyBindingKey>,
+}
+
+/// Collision-safe canonical identity of a subscription policy snapshot.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PolicyBindingKey {
+    /// Logical session subject selected at subscription admission.
+    pub identity: AuthorSubject,
+    /// Canonical postcard bytes of the claims map; retained rather than hashed
+    /// so distinct snapshots can never share coverage on a hash collision.
+    pub canonical_claims: Vec<u8>,
 }
 
 /// Versioned query AST carried by shape registration.
@@ -2370,6 +2388,25 @@ pub struct Subscribe {
     pub values: Vec<Value>,
     /// Optional fast known-state declaration for this usage-site subscription.
     pub known_state: Option<KnownStateDeclaration>,
+    /// Session policy context delegated by a trusted relay.
+    ///
+    /// Only a server-to-server relay link admitted as `SYSTEM` may carry this
+    /// field. Ordinary subscriber connections are authenticated by their
+    /// transport session instead and must never self-assert it.
+    pub delegated_session: Option<DelegatedSessionBinding>,
+}
+
+/// Immutable policy context attached to one relayed subscription.
+///
+/// This is intentionally a subscription-local snapshot rather than a lookup
+/// by identity: two active sessions may share an identity but carry different
+/// provider claims.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct DelegatedSessionBinding {
+    /// Identity whose `session` values the subscription may evaluate.
+    pub identity: AuthorSubject,
+    /// Already-admitted claims for that identity.
+    pub claims: BTreeMap<String, Value>,
 }
 
 /// Known-state declaration echoed by a subscriber on resubscribe.

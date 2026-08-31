@@ -848,6 +848,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 &mut node,
                 SyncMessage::FetchRowVersions {
                     requests: missing.clone(),
+                    delegated_session: None,
                 },
             )
             .expect("serve normal-member message include/order repair payloads");

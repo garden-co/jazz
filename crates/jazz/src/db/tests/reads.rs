@@ -1540,6 +1540,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -1569,6 +1570,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 

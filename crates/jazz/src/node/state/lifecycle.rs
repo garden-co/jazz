@@ -890,6 +890,17 @@ where
             .collect()
     }
 
+    /// Return the admitted claims for one directly terminated session.
+    ///
+    /// This is intentionally for non-multiplexed local helpers only. Relayed
+    /// serving carries an immutable snapshot with each request instead.
+    pub(crate) fn session_claims_for(&self, identity: AuthorSubject) -> BTreeMap<String, Value> {
+        self.session_claims
+            .get(&identity)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Gate session-scoped serving until an authority has installed its
     /// permissions head. Local/offline nodes stay ready by default.
     pub(crate) fn set_permissions_ready(&mut self, ready: bool) {

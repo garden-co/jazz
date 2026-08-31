@@ -19,6 +19,13 @@ use super::*;
 const RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("ae3eb9f7-65cc-528d-8f3e-a772fb6f68fe");
 
+/// Namespace for the maintained receiver owned by one policy-partitioned
+/// coverage group. The ordinary canonical binding id remains stable for direct
+/// coverage; relayed policy snapshots need a distinct runtime receiver even
+/// when their query bindings are identical.
+const COVERAGE_GROUP_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("19fdc830-2dd8-5876-ae31-a8f526512ac5");
+
 /// Wall-clock time used exclusively for authority admission checks.
 ///
 /// This must not use `UploadRetryClock`: that clock is deliberately monotonic
@@ -52,6 +59,25 @@ fn relay_upstream_subscription_key(
             &identity,
         )),
         read_view: upstream_read_view,
+    }
+}
+
+fn coverage_group_subscription_key(coverage: &CoverageKey) -> SubscriptionKey {
+    let binding_id = coverage
+        .policy_binding
+        .as_ref()
+        .map_or(coverage.binding_id, |policy| {
+            let identity = postcard::to_allocvec(&(coverage.binding_id, policy))
+                .expect("coverage policy identity is postcard encodable");
+            BindingId(uuid::Uuid::new_v5(
+                &COVERAGE_GROUP_SUBSCRIPTION_NAMESPACE,
+                &identity,
+            ))
+        });
+    SubscriptionKey {
+        shape_id: coverage.shape_id,
+        binding_id,
+        read_view: coverage.opts.read_view_key(),
     }
 }
 
@@ -321,11 +347,21 @@ where
                 if tx.kind == TxKind::Mergeable
                     && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
             {
+                // A trusted relay authenticates its transport as SYSTEM (or a
+                // backend), but the terminal authorization proof belongs to
+                // the transaction's already-validated permission subject.
+                // Using the transport identity here recompiled `session.*`
+                // policy predicates under SYSTEM after a relayed commit.
+                let permission_subject = match ingest_context.trust {
+                    CommitUnitTrust::Session => ingest_context.identity,
+                    CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
+                    CommitUnitTrust::TrustedAdmin => ingest_context.identity,
+                };
                 {
                     let mut node = node.lock().await;
                     peer.prove_terminal_commit_authorization(
                         &mut node,
-                        ingest_context.identity,
+                        permission_subject,
                         &versions,
                         tx.tx_id,
                     )
@@ -562,7 +598,7 @@ pub(super) struct UpstreamConnectionState {
     /// Kept separately from the paired repair payload so a bounded wire
     /// adapter cannot lose the one-shot request between detecting a missing
     /// version and recording the ViewUpdate that needs it.
-    pub(super) pending_row_version_fetches: VecDeque<Vec<crate::protocol::RowVersionRef>>,
+    pub(super) pending_row_version_fetches: VecDeque<PendingRowVersionFetch>,
     pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
     pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
     pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
@@ -708,6 +744,15 @@ pub(super) struct PendingRowVersionRepair {
     pub(super) authority_receipt_eligible: bool,
 }
 
+/// One repair request remains bound to the exact policy snapshot that made
+/// its source view update visible. It must never be coalesced with another
+/// subscriber's request merely because the row-version references coincide.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PendingRowVersionFetch {
+    pub(super) requests: Vec<crate::protocol::RowVersionRef>,
+    pub(super) policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
+}
+
 /// Per-connection resume state for a served subscriber.
 ///
 /// Bindings keep this after a disconnect and pass it into
@@ -841,16 +886,14 @@ where
                     coverage.clone(),
                     group.shape.clone(),
                     group.binding.clone(),
+                    group.policy_binding.clone(),
                     group.subscribers.iter().copied().collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>();
-        for (coverage, shape, binding, subscribers) in groups {
-            let maintained_subscription = SubscriptionKey {
-                shape_id: coverage.shape_id,
-                binding_id: coverage.binding_id,
-                read_view: coverage.opts.read_view_key(),
-            };
+        for (coverage, shape, binding, policy_binding, subscribers) in groups {
+            let maintained_subscription = coverage_group_subscription_key(&coverage);
+            peer.set_subscription_policy_binding(maintained_subscription, policy_binding);
             let update = {
                 let mut node = self.node.lock().await;
                 let mut node = node.scoped_active_session_claims(
@@ -1071,16 +1114,14 @@ where
                     coverage.clone(),
                     group.shape.clone(),
                     group.binding.clone(),
+                    group.policy_binding.clone(),
                     group.subscribers.iter().copied().collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>();
-        for (coverage, shape, binding, subscribers) in groups {
-            let group_subscription = SubscriptionKey {
-                shape_id: coverage.shape_id,
-                binding_id: coverage.binding_id,
-                read_view: coverage.opts.read_view_key(),
-            };
+        for (coverage, shape, binding, policy_binding, subscribers) in groups {
+            let group_subscription = coverage_group_subscription_key(&coverage);
+            peer.set_subscription_policy_binding(group_subscription, policy_binding);
             let update = {
                 let mut node = self.node.lock().await;
                 let mut node = node.scoped_active_session_claims(
@@ -1231,10 +1272,19 @@ where
             }) => {
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
-                        if let Some(requests) = pending_row_version_fetches.front().cloned() {
+                        if let Some(request) = pending_row_version_fetches.front().cloned() {
+                            let delegated_session = (request.policy_binding.0
+                                != AuthorSubject::SYSTEM)
+                                .then_some(crate::protocol::DelegatedSessionBinding {
+                                    identity: request.policy_binding.0,
+                                    claims: request.policy_binding.1,
+                                });
                             if let Err(error) = self
                                 .transport
-                                .send(SyncMessage::FetchRowVersions { requests })
+                                .send(SyncMessage::FetchRowVersions {
+                                    requests: request.requests,
+                                    delegated_session,
+                                })
                             {
                                 if handle_transport_backpressure(
                                     &self.node,
@@ -1351,6 +1401,15 @@ where
                                         subscription: pending_subscription.subscription,
                                         values,
                                         known_state,
+                                        delegated_session: pending_subscription
+                                            .policy_binding
+                                            .clone()
+                                            .map(|(identity, claims)| {
+                                                crate::protocol::DelegatedSessionBinding {
+                                                    identity,
+                                                    claims,
+                                                }
+                                            }),
                                     };
                                     #[cfg(feature = "sync-autopsy")]
                                     sync_autopsy::record(format!(
@@ -2016,7 +2075,19 @@ where
                                         summarize_subscription_key(subscription),
                                         missing.len()
                                     ));
-                                    pending_row_version_fetches.push_back(missing.clone());
+                                    let policy_binding = self
+                                        .relay_upstream_subscription_owners
+                                        .borrow()
+                                        .get(&subscription)
+                                        .map(|owner| owner.policy_binding.clone())
+                                        .ok_or_else(|| Error::new(
+                                            ErrorCode::Protocol,
+                                            "row-version repair lost its subscription policy binding",
+                                        ))?;
+                                    pending_row_version_fetches.push_back(PendingRowVersionFetch {
+                                        requests: missing.clone(),
+                                        policy_binding,
+                                    });
                                     pending_row_version_repairs.push_back(
                                         PendingRowVersionRepair {
                                             requests: missing,
@@ -2779,11 +2850,7 @@ where
                         );
                     }
                     if let Some(group) = coverage_groups.remove(&rejection.coverage) {
-                        let group_subscription = SubscriptionKey {
-                            shape_id: rejection.coverage.shape_id,
-                            binding_id: rejection.coverage.binding_id,
-                            read_view: rejection.coverage.opts.read_view_key(),
-                        };
+                        let group_subscription = coverage_group_subscription_key(&rejection.coverage);
                         let mut node = self.node.borrow_mut();
                         // `group_subscription` owns the one shared maintained
                         // evaluator. The individual subscribers are still
@@ -3167,6 +3234,25 @@ where
                             // so a commit uploaded on this same connection does not carry the
                             // inactive Subscribe arm on a normal two-megabyte executor stack.
                             let should_continue = Box::pin(async {
+                            let subscription_has_delegated_session = subscribe.delegated_session.is_some();
+                            let session_claim_binding = match subscribe.delegated_session.clone() {
+                                None => session_claim_binding.clone(),
+                                Some(delegated) => {
+                                    let delegated_link_is_trusted = ingest_context.trust
+                                        == CommitUnitTrust::TrustedBackend
+                                        && ingest_context.identity == AuthorSubject::SYSTEM;
+                                    if !delegated_link_is_trusted
+                                        || delegated.identity == AuthorSubject::SYSTEM
+                                    {
+                                        // A session must be authenticated by its transport unless
+                                        // this is the dedicated core-facing relay link. Never let
+                                        // a client self-assert a broader query policy context.
+                                        drop_peer_request(&self.node);
+                                        return Ok::<bool, Error>(true);
+                                    }
+                                    Some((delegated.identity, delegated.claims))
+                                }
+                            };
                             if let Err(message) =
                                 validate_known_state_declaration(&subscribe.known_state)
                             {
@@ -3263,7 +3349,20 @@ where
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
-                            let coverage = coverage_key(&shape, &binding, opts.clone());
+                            let subscription_policy_binding = session_claim_binding
+                                .as_ref()
+                                .expect("subscriber claims")
+                                .clone();
+                            let mut coverage = coverage_key(&shape, &binding, opts.clone());
+                            if peer.role() == PeerRole::Relay || subscription_has_delegated_session {
+                                coverage.policy_binding = Some(crate::protocol::PolicyBindingKey {
+                                    identity: subscription_policy_binding.0,
+                                    canonical_claims: postcard::to_allocvec(
+                                        &subscription_policy_binding.1,
+                                    )
+                                    .expect("claims map is canonical postcard"),
+                                });
+                            }
                             if served_current_rows.contains_key(&subscription) {
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
@@ -3349,7 +3448,7 @@ where
                                     &shape,
                                     &binding,
                                     opts.tier,
-                                    subscriber_permission_subject(*ingest_context),
+                                    subscription_policy_binding.0,
                                     &opts.read_view,
                                     QueryAuthorizationMode::TrustedServing,
                                 )
@@ -3373,11 +3472,7 @@ where
                                 flush_subscriber_controls_or_stop!(self, peer);
                                 return Ok(true);
                             }
-                            let group_subscription = SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: coverage.opts.read_view_key(),
-                            };
+                            let group_subscription = coverage_group_subscription_key(&coverage);
                             let local_subscriber = *local_receiver;
                             let upstream_opts = if local_subscriber {
                                 let mut opts = upstream_register_shape_options(
@@ -3437,6 +3532,17 @@ where
                             // withhold delivery pending upstream settlement, but
                             // the cursor retains the same usage-site ownership.
                             peer.declare_known_state(subscription, known_state.clone());
+                            peer.set_subscription_policy_binding(
+                                subscription,
+                                subscription_policy_binding.clone(),
+                            );
+                            // The group key owns the maintained evaluator;
+                            // install the same admitted snapshot before any
+                            // owner-loop rehydrate or delta can touch it.
+                            peer.set_subscription_policy_binding(
+                                group_subscription,
+                                subscription_policy_binding.clone(),
+                            );
                             let outcome = self
                                 .node
                                 .lock()
@@ -3501,6 +3607,7 @@ where
                                     CoverageGroup {
                                         shape: shape.clone(),
                                         binding: binding.clone(),
+                                        policy_binding: subscription_policy_binding.clone(),
                                         subscribers: BTreeSet::new(),
                                         pending_initial_subscribers: BTreeSet::new(),
                                         initialized: false,
@@ -3516,6 +3623,7 @@ where
                                 let owner = RelayUpstreamSubscriptionOwner {
                                     downstream_connection_epoch: connection_epoch,
                                     coverage: coverage.clone(),
+                                    policy_binding: group.policy_binding.clone(),
                                     downstream_subscriptions: BTreeSet::from([subscription]),
                                 };
                                 self.relay_upstream_subscription_owners
@@ -3588,7 +3696,11 @@ where
                                             shape: shape.clone(),
                                             binding,
                                             opts: group.upstream_opts.clone(),
-                                            identity: peer.link_identity(),
+                                            // The relay's transport identity is SYSTEM/backend,
+                                            // but each multiplexed subscription carries the
+                                            // caller's admitted policy context.
+                                            identity: group.policy_binding.0,
+                                            policy_binding: Some(group.policy_binding.clone()),
                                         },
                                     ),
                                 );
@@ -3635,11 +3747,7 @@ where
                                         let upstream_subscription = group.upstream_subscription;
                                         let propagated_upstream =
                                             group.upstream_opts.propagate_upstream;
-                                        let group_subscription = SubscriptionKey {
-                                            shape_id: coverage.shape_id,
-                                            binding_id: coverage.binding_id,
-                                            read_view: coverage.opts.read_view_key(),
-                                        };
+                                        let group_subscription = coverage_group_subscription_key(&coverage);
                                         // A coverage group owns a maintained Groove receiver.
                                         // Forgetting only the peer-side cursor leaves that
                                         // receiver dormant in the shared runtime; a later
@@ -3672,15 +3780,41 @@ where
                                 }
                             }
                         }
-                        SyncMessage::FetchRowVersions { requests } => {
+                        SyncMessage::FetchRowVersions {
+                            requests,
+                            delegated_session,
+                        } => {
                             if let Err(message) = validate_fetch_row_versions(&requests) {
                                 let _ = message;
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let repair_policy_binding = match delegated_session {
+                                None => session_claim_binding.clone(),
+                                Some(delegated) => {
+                                    let delegated_link_is_trusted = ingest_context.trust
+                                        == CommitUnitTrust::TrustedBackend
+                                        && ingest_context.identity == AuthorSubject::SYSTEM;
+                                    if !delegated_link_is_trusted
+                                        || delegated.identity == AuthorSubject::SYSTEM
+                                    {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
+                                    Some((delegated.identity, delegated.claims))
+                                }
+                            };
                             let responses = {
                                 let mut node = self.node.lock().await;
-                                peer.serve_row_versions(&mut node, &requests).await?
+                                peer.serve_row_versions(
+                                    &mut node,
+                                    &requests,
+                                    repair_policy_binding.ok_or_else(|| Error::new(
+                                        ErrorCode::Protocol,
+                                        "row-version repair has no direct session policy binding",
+                                    ))?,
+                                )
+                                .await?
                             };
                             for response in responses {
                                 queue_sync_context_control(
@@ -3921,11 +4055,11 @@ where
                 {
                     let mut serve_again = false;
                     for (coverage, group) in coverage_groups.iter_mut() {
-                        let group_subscription = SubscriptionKey {
-                            shape_id: coverage.shape_id,
-                            binding_id: coverage.binding_id,
-                            read_view: coverage.opts.read_view_key(),
-                        };
+                        let group_subscription = coverage_group_subscription_key(coverage);
+                        peer.set_subscription_policy_binding(
+                            group_subscription,
+                            group.policy_binding.clone(),
+                        );
                         let settled_handoff = group.awaiting_upstream_settlement
                             && self.node.borrow().has_settled_result_set(BindingViewKey {
                                 shape_id: group.shape.shape_id(),
@@ -4677,6 +4811,7 @@ where
             subscription,
             values,
             known_state: None,
+            delegated_session: None,
         });
         peer.declare_known_state(subscription, None);
         let update = {
@@ -5124,7 +5259,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
             format!("FateUpdate tx={tx_id:?} fate={fate:?}")
         }
-        SyncMessage::FetchRowVersions { requests } => {
+        SyncMessage::FetchRowVersions { requests, .. } => {
             format!("FetchRowVersions requests={}", requests.len())
         }
         SyncMessage::RowVersionPayloads { version_bundles } => {
