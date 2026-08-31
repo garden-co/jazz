@@ -11,6 +11,9 @@ import { providerReceipt } from "./vitest-receipts.mjs";
  * when a test actually exercises an edge/core topology.
  */
 export default defineConfig({
+  // Keep this separate from the topology project's cache: CI deliberately
+  // overlaps the package's Node and browser partitions.
+  cacheDir: "node_modules/.vite-record-player-provider",
   optimizeDeps: {
     include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
   },

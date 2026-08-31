@@ -27,6 +27,10 @@ function jazzBrowserTopologyLog(
 }
 
 export default defineConfig({
+  // The workspace browser partition runs this project while the package's unit
+  // and provider projects run in the Node partition. They must not concurrently
+  // replace Vite's optimized-dependency cache while Chromium imports a test.
+  cacheDir: "node_modules/.vite-record-player-topology",
   resolve: {
     alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
   },

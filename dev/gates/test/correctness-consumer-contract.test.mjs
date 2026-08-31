@@ -42,6 +42,9 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
 });
 
 const recordPlayerConfig = "examples/record-player/apps/next-betterauth/vitest.config.browser.ts";
+const recordPlayerProviderConfig =
+  "examples/record-player/apps/next-betterauth/vitest.config.provider.ts";
+const recordPlayerUnitConfig = "examples/record-player/apps/next-betterauth/vitest.config.unit.ts";
 const recordPlayerPort = 63318;
 const recordPlayerApiPort = new RegExp(`api:\\s*\\{\\s*port:\\s*${recordPlayerPort}\\b`);
 
@@ -76,8 +79,19 @@ test("parallel RecordPlayer browser topology owns a unique strict Vitest API por
   assertRecordPlayerPortIsUnique(trackedVitestConfigs());
 });
 
+test("parallel RecordPlayer Vitest projects own disjoint Vite caches", () => {
+  const topology = read(recordPlayerConfig);
+  const provider = read(recordPlayerProviderConfig);
+  const unit = read(recordPlayerUnitConfig);
+  assert.match(topology, /cacheDir:\s*["']node_modules\/.vite-record-player-topology["']/);
+  assert.match(provider, /cacheDir:\s*["']node_modules\/.vite-record-player-provider["']/);
+  assert.match(unit, /cacheDir:\s*["']node_modules\/.vite-record-player-unit["']/);
+  const packageJson = JSON.parse(read("examples/record-player/apps/next-betterauth/package.json"));
+  assert.match(packageJson.scripts["test:unit"], /--config vitest\.config\.unit\.ts/);
+});
+
 test("the uniqueness check rejects a duplicate in a non-browser Vitest config", () => {
-  const nonBrowserConfig = "examples/record-player/apps/next-betterauth/vitest.config.provider.ts";
+  const nonBrowserConfig = recordPlayerProviderConfig;
   assert.throws(
     () =>
       assertRecordPlayerPortIsUnique([recordPlayerConfig, nonBrowserConfig], (path) =>
