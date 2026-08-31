@@ -24,7 +24,7 @@ use std::rc::Rc;
 pub(super) enum OperatorState {
     Stateless,
     Join(JoinState),
-    SemiJoin(AntiJoinState),
+    SemiJoin(SemiJoinState),
     AntiJoin(AntiJoinState),
     TopBy(AsOf<TopByIncrementalState, SubTick>),
     Recursive(AsOf<RecursiveState, Tick>),
@@ -116,7 +116,7 @@ impl TopByIncrementalState {
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::Join(_) => OperatorState::Join(JoinState),
-        OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
+        OpType::SemiJoin(_) => OperatorState::SemiJoin(SemiJoinState::default()),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
         OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
@@ -1515,12 +1515,12 @@ impl TickEvaluator<'_> {
         let operator_key = self.operator_key(node)?;
         let operator = self
             .operator_states
-            .entry(operator_key)
+            .entry(operator_key.clone())
             .or_insert_with(|| operator_state_for(&OpType::SemiJoin(join.clone())));
         let OperatorState::SemiJoin(join_state) = operator else {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
-        let join_state = join_state.clone();
+        let mut join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
             self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
@@ -1541,7 +1541,7 @@ impl TickEvaluator<'_> {
                 .remove(&right_key)
                 .unwrap_or_default()
         };
-        let deltas = join_state.apply_semi(
+        let deltas = join_state.apply(
             &mut left_arrangement,
             &mut right_arrangement,
             join.left_descriptor,
@@ -1562,6 +1562,8 @@ impl TickEvaluator<'_> {
             self.insert_arrangement(right_key, right_arrangement);
         }
         self.insert_arrangement(left_key, left_arrangement);
+        self.operator_states
+            .insert(operator_key, OperatorState::SemiJoin(join_state));
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,

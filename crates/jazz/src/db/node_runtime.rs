@@ -3209,7 +3209,7 @@ where
                                 &state_ref.snapshot,
                                 &state_ref.snapshot_index,
                             )?;
-                            let event = subscription_terminal_delta_event(
+                            let mut event = subscription_terminal_delta_event(
                                 snapshot_tier,
                                 settled,
                                 &state_ref.snapshot,
@@ -3217,6 +3217,22 @@ where
                                 &snapshot,
                                 &current_root_occurrences,
                             )?;
+                            let SubscriptionEvent::Delta {
+                                publishable,
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
+                                ..
+                            } = &mut event
+                            else {
+                                unreachable!("terminal snapshot diffs always emit deltas")
+                            };
+                            *publishable = state_ref.settled != settled
+                                || !added.is_empty()
+                                || !updated.is_empty()
+                                || !removed.is_empty()
+                                || !terminal_operations.is_empty();
                             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
                             state_ref.snapshot_index =
                                 relation_snapshot_index_with_root_occurrences(
@@ -3300,15 +3316,27 @@ where
                                     shape.query(),
                                     &state_ref.snapshot,
                                 )?;
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
                             if let SubscriptionEvent::Delta {
+                                reset,
+                                publishable,
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
                                 settled: event_settled,
                                 ..
                             } = &mut event
                             {
+                                *publishable = previous_settled != settled
+                                    || *reset
+                                    || !added.is_empty()
+                                    || !updated.is_empty()
+                                    || !removed.is_empty()
+                                    || !terminal_operations.is_empty();
                                 *event_settled = settled;
                             }
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
                             if state_ref.sender.unbounded_send(event).is_ok() {
                                 changed += 1;
                             }

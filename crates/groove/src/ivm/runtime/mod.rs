@@ -50,7 +50,7 @@ mod state;
 mod terminal;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
-use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
+use join::{AntiJoinState, ArrangementState, JoinState, SemiJoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveState, hydrate_recursive_arrangements, recursive_delta, recursive_read_tables,
