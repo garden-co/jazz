@@ -9,6 +9,28 @@ use super::node_runtime::{
     route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
 };
 use super::*;
+pub(super) fn route_subscription_refresh_failure(
+    subscriptions: &SubscriptionList,
+    error: &Error,
+) -> usize {
+    eprintln!("jazz subscription refresh failed: {error}");
+    let mut delivered = 0;
+    for state in subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+        let state = state.borrow();
+        if state.closed.get() {
+            continue;
+        }
+        let event = SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        };
+        if state.sender.unbounded_send(event).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
+}
 
 /// Namespace for relay-owned usage-site subscription handles.
 ///
@@ -134,15 +156,7 @@ where
     loop {
         if !publications.is_empty() {
             published_any = true;
-            if refresh {
-                changed += refresh_subscriptions_in(
-                    node,
-                    subscriptions,
-                    active_authority_view_receipts,
-                    progress_waker,
-                )
-                .await?;
-            }
+
             let mut persisted = Vec::with_capacity(publications.len());
             for publication in &publications {
                 persisted.push((publication.tx_id(), publication.persist().await));
@@ -150,6 +164,20 @@ where
             let mut state = node.lock().await;
             for (tx_id, persistence) in persisted {
                 state.settle_published_transaction(tx_id, persistence)?;
+            }
+            drop(state);
+            if refresh {
+                changed += match refresh_subscriptions_in(
+                    node,
+                    subscriptions,
+                    active_authority_view_receipts,
+                    progress_waker,
+                )
+                .await
+                {
+                    Ok(changed) => changed,
+                    Err(error) => route_subscription_refresh_failure(subscriptions, &error),
+                };
             }
         }
         let Some(message) = post_settlement_work.pop_front() else {
@@ -433,6 +461,8 @@ where
     pub(super) mutation_errors: SharedMutationErrors,
     pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
+    #[cfg(test)]
+    pub(super) fail_next_subscription_refresh: Cell<bool>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
     pub(super) observed_session_claim_revision: Cell<u64>,
     /// Fresh non-resumable epoch binding authorization receipts to this link.
@@ -3039,13 +3069,7 @@ where
                         .await?;
                     }
                     if applied {
-                        stats.subscription_events += refresh_subscriptions_in(
-                            &self.node,
-                            &self.subscriptions,
-                            &self.active_authority_view_receipts,
-                            progress_waker.as_ref(),
-                        )
-                        .await?;
+
                         let mut persisted = Vec::with_capacity(publications.len());
                         for publication in &publications {
                             persisted.push((publication.tx_id(), publication.persist().await));
@@ -3054,22 +3078,46 @@ where
                         for (tx_id, persistence) in persisted {
                             node.settle_published_transaction(tx_id, persistence)?;
                         }
-                        let authoritative_reset_deferred = node.has_pending_authoritative_reset();
                         drop(node);
-                        if authoritative_reset_deferred {
-                            // The pre-persistence refresh deliberately retained
-                            // this reset while its publication was ambiguous.
-                            // Settlement makes it publishable; complete that
-                            // lifecycle here instead of waiting for unrelated
-                            // query or transport activity to wake subscribers.
-                            stats.subscription_events += refresh_subscriptions_in(
-                                &self.node,
-                                &self.subscriptions,
-                                &self.active_authority_view_receipts,
-                                progress_waker.as_ref(),
-                            )
-                            .await?;
-                        }
+                        // Durable application is complete at this boundary. A
+                        // refresh failure belongs to the resident subscriptions;
+                        // returning it would discard this tick's progress receipt
+                        // and make the already-consumed batch eligible for replay.
+                        let refresh_result = {
+                            #[cfg(test)]
+                            {
+                                if self.fail_next_subscription_refresh.replace(false) {
+                                    Err(Error::new(
+                                        ErrorCode::Protocol,
+                                        "injected subscription refresh failure",
+                                    ))
+                                } else {
+                                    refresh_subscriptions_in(
+                                        &self.node,
+                                        &self.subscriptions,
+                                        &self.active_authority_view_receipts,
+                                        progress_waker.as_ref(),
+                                    )
+                                    .await
+                                }
+                            }
+                            #[cfg(not(test))]
+                            {
+                                refresh_subscriptions_in(
+                                    &self.node,
+                                    &self.subscriptions,
+                                    &self.active_authority_view_receipts,
+                                    progress_waker.as_ref(),
+                                )
+                                .await
+                            }
+                        };
+                        stats.subscription_events += match refresh_result {
+                            Ok(changed) => changed,
+                            Err(error) => {
+                                route_subscription_refresh_failure(&self.subscriptions, &error)
+                            }
+                        };
                         stats.remote_sync_applied += 1;
                         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                         self.subscriber_dirty_epoch.set(next);
@@ -4362,13 +4410,19 @@ where
                     return Ok(true);
                 }
                 if needs_subscription_refresh {
-                    stats.subscription_events += refresh_subscriptions_in(
+                    stats.subscription_events += match refresh_subscriptions_in(
                         &self.node,
                         &self.subscriptions,
                         &self.active_authority_view_receipts,
                         progress_waker.as_ref(),
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(changed) => changed,
+                        Err(error) => {
+                            route_subscription_refresh_failure(&self.subscriptions, &error)
+                        }
+                    };
                 }
                 if applied_inbound && !scheduled_follow_up {
                     schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn);

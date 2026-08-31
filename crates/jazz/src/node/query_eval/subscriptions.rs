@@ -619,13 +619,6 @@ where
         std::mem::take(&mut self.query.pending_authoritative_reset_binding_views)
     }
 
-    pub(crate) fn has_pending_authoritative_reset(&self) -> bool {
-        !self
-            .query
-            .pending_authoritative_reset_binding_views
-            .is_empty()
-    }
-
     pub(crate) fn take_pending_terminal_operations(
         &mut self,
         binding_view_key: BindingViewKey,

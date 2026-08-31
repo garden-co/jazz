@@ -1462,6 +1462,10 @@ where
     // itself is an admission identity, not proof that a Db may forge external
     // row provenance.
     backend_attribution: bool,
+    #[cfg(test)]
+    fail_next_subscription_refresh: Rc<Cell<bool>>,
+    #[cfg(test)]
+    stall_next_subscription_refresh: Rc<Cell<bool>>,
 }
 
 /// Process-local, content-addressed identity for an exact typed schema view.

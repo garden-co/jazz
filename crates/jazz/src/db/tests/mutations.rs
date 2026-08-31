@@ -3535,3 +3535,252 @@ fn default_insert_keeps_subject_and_made_by_equal() {
     assert_eq!(tx.made_by, owner);
     assert_eq!(prepared_read(&db, &db.table("todos")).len(), 1);
 }
+
+fn queued_local_publication(db: &Db<RocksDbStorage>, expects_upload_unit: bool) -> TxId {
+    let publications = db.node.pending_local_publications.borrow();
+    assert_eq!(
+        publications.len(),
+        1,
+        "publication must cross into node ownership before refresh returns"
+    );
+    let publication = publications.front().unwrap();
+    assert_eq!(publication.upload_unit.is_some(), expects_upload_unit);
+    publication.published.tx_id()
+}
+
+fn cancel_during_subscription_refresh<F, T>(
+    db: &Db<RocksDbStorage>,
+    future: F,
+    expects_upload_unit: bool,
+) -> TxId
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    db.stall_next_subscription_refresh.set(true);
+    let mut future = Box::pin(future);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    for _ in 0..128 {
+        match future.as_mut().poll(&mut context) {
+            Poll::Pending => {}
+            Poll::Ready(Ok(_)) => {
+                panic!("commit completed instead of stalling in subscription refresh")
+            }
+            Poll::Ready(Err(error)) => {
+                panic!("commit failed before stalled subscription refresh: {error}")
+            }
+        }
+        if !db.node.pending_local_publications.borrow().is_empty() {
+            let tx_id = queued_local_publication(db, expects_upload_unit);
+            drop(future);
+            return tx_id;
+        }
+    }
+    panic!("publication never transferred to the node-owned persistence queue")
+}
+
+fn settle_cancelled_local_publication(db: &Db<RocksDbStorage>, tx_id: TxId) {
+    block_on(db.tick()).unwrap();
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.write_state(tx_id).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            global_time: None,
+        },
+        "a cancelled caller must not abandon node-owned persistence"
+    );
+}
+fn assert_internal_subscription_refresh_failure(subscription: &mut SubscriptionStream) {
+    let event = block_on(subscription.next_raw()).expect("refresh failure event");
+    assert_eq!(
+        event,
+        SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            },
+        }
+    );
+}
+
+#[test]
+fn deferred_write_refresh_error_returns_committed_handle_and_keeps_persistence_owned() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let db = open_db(0xa2, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let _opening = block_on(subscription.next_raw()).unwrap();
+
+    db.fail_next_subscription_refresh.set(true);
+    let write = block_on(db.insert(
+        "todos",
+        cells("persist me", false, owner),
+        Default::default(),
+    ))
+    .expect("publication-owned write must return its handle");
+
+    let published = queued_local_publication(&db, false);
+    assert_eq!(published, write.mergeable_tx_id());
+    assert_internal_subscription_refresh_failure(&mut subscription);
+    settle_cancelled_local_publication(&db, published);
+    assert_eq!(
+        block_on(write.wait(DurabilityTier::Local)).unwrap(),
+        published
+    );
+}
+
+#[test]
+fn persisted_write_refresh_error_returns_committed_handle() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let db = open_db(0xa6, owner, &schema);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let _opening = block_on(subscription.next_raw()).unwrap();
+
+    db.fail_next_subscription_refresh.set(true);
+    let write = block_on(db.insert(
+        "todos",
+        cells("already persisted", false, owner),
+        Default::default(),
+    ))
+    .expect("persisted write must not report observer refresh as commit failure");
+
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.write_state(write.mergeable_tx_id()).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            global_time: None,
+        }
+    );
+    assert_internal_subscription_refresh_failure(&mut subscription);
+}
+
+#[test]
+fn deferred_local_publications_persist_and_enqueue_in_publication_order_once() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let db = open_db(0xa7, owner, &schema);
+    db.set_deferred_local_persistence(true);
+
+    let first = block_on(db.insert(
+        "todos",
+        cells("first ordered publication", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let second = block_on(db.insert(
+        "todos",
+        cells("second ordered publication", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx_ids = [first.mergeable_tx_id(), second.mergeable_tx_id()];
+    assert_eq!(
+        db.node
+            .pending_local_publications
+            .borrow()
+            .iter()
+            .map(|publication| publication.published.tx_id())
+            .collect::<Vec<_>>(),
+        tx_ids
+    );
+
+    block_on(db.tick()).unwrap();
+    assert!(db.node.pending_local_publications.borrow().is_empty());
+    assert_eq!(
+        db.node
+            .outbox
+            .borrow()
+            .iter()
+            .map(|upload| upload.tx_id)
+            .collect::<Vec<_>>(),
+        tx_ids
+    );
+    for tx_id in tx_ids {
+        assert_eq!(
+            db.write_state(tx_id).unwrap(),
+            WriteState {
+                fate: Fate::Pending,
+                durability: DurabilityTier::Local,
+                global_time: None,
+            }
+        );
+    }
+
+    block_on(db.tick()).unwrap();
+    assert_eq!(db.node.outbox.borrow().len(), 2);
+}
+
+#[test]
+fn deferred_mergeable_handle_refresh_cancellation_keeps_persistence_owned() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let db = open_db(0xa3, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    block_on(db.mergeable_tx_ref(open).insert(
+        "todos",
+        cells("mergeable handle", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+
+    let published =
+        cancel_during_subscription_refresh(&db, db.commit_mergeable_handle(open), false);
+    settle_cancelled_local_publication(&db, published);
+}
+
+#[test]
+fn deferred_exclusive_refresh_cancellation_keeps_persistence_owned() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let db = open_db(0xa4, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.exclusive_tx_ref(open).insert(
+        "todos",
+        cells("exclusive handle", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+
+    let published = cancel_during_subscription_refresh(&db, db.commit_exclusive_handle(open), true);
+    settle_cancelled_local_publication(&db, published);
+}
+
+#[test]
+fn deferred_write_still_refreshes_resident_subscriptions_before_returning() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let db = open_db(0xa5, owner, &schema);
+    db.set_deferred_local_persistence(true);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let _opening = block_on(subscription.next_raw()).unwrap();
+
+    let write = block_on(db.insert(
+        "todos",
+        cells("resident refresh", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        queued_local_publication(&db, false),
+        write.mergeable_tx_id()
+    );
+    let event = block_on(subscription.next_raw()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("successful deferred write must publish a resident delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), write.row_uuid());
+}

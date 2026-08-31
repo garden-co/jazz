@@ -64,6 +64,8 @@ Invariant digest:
   fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
   replay that transient foreground error to a peer attached later.
 
+- `INV-API-35`: Once a local mutation is durably persisted or its ordered publication is owned by the node runtime, the mutation API MUST return its committed `WriteHandle`/`TxId`; a later resident-subscription refresh failure MUST be emitted through the subscription error channel and MUST NOT be returned as a generic mutation or peer-ingest failure.
+
 ## Details
 
 ### 13.1 Two audiences
@@ -350,6 +352,16 @@ yet observed. In particular, a `Global` wait requires the conjunction
 `GlobalTime`; a hydrated or propagated `Global` durability claim without the
 other two facts does not complete it (`INV-API-15`, ch. 3).
 
+Mutation acceptance ends at publication ownership, not observer delivery
+(`INV-API-35`). A pre-publication validation or persistence failure returns an
+error and emits no observer update. After persistence succeeds, or after a
+deferred publication enters the node-owned ordered queue, the API returns the
+committed handle/transaction id. If subscription refresh then fails, each
+affected stream receives its existing `Rejected::ServerFailure` event while the
+write receipt remains successful. Cancellation cannot reclaim a queued
+publication; the node retries its front publication in order before releasing
+later publications or upstream upload work.
+
 Each single-call write creates **one mergeable transaction**. `mergeable_tx()`
 groups multiple facade writes under one `TxId`; the resulting commit unit carries
 `n_total_writes` equal to the number of grouped versions (`INV-API-26`).
@@ -464,7 +476,10 @@ directions; relay/edge/core peer roles remain below the facade (ch. 9).
 `PeerConnection::tick` sends each unannounced subscription once
 (`RegisterShape` then `Subscribe`, `INV-API-19`), uploads each local commit
 once (`INV-API-20`), drains inbound messages, applies them, and refreshes
-registered subscriptions (ch. 8).
+registered subscriptions (ch. 8). An ingest publication is persisted and its
+ordered post-settlement work remains owned before that refresh runs. Refresh
+failure is delivered to subscription owners and does not turn successful ingest
+into a retryable peer failure (`INV-API-35`, `INV-TX-25`).
 
 Bindings that schedule `Db::tick()` in a background client driver own the
 driver's lifecycle. They classify a returned error before deciding whether to
