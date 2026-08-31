@@ -216,7 +216,19 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
     assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &legacy));
     assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &None));
 
+    let default_peer = PeerState::default();
+    let direct_peer = PeerState::new();
+    assert_eq!(
+        default_peer.role(),
+        PeerRole::ClientLink {
+            identity: AuthorSubject::SYSTEM,
+        },
+        "Default must be the standalone SYSTEM helper, never an implicit relay"
+    );
+    assert_eq!(direct_peer.role(), default_peer.role());
+
     let relay = PeerState::relay();
+    assert_eq!(relay.role(), PeerRole::Relay);
     assert!(relay.fast_cursor_authorization_matches(subscription, &legacy));
 }
 
@@ -411,6 +423,9 @@ fn maintained_subscription_fast_cursor_skips_covered_members_and_sends_only_newe
         ..canonical
     };
     let mut peer = PeerState::relay();
+    for subscription in [canonical, fully_covered, partially_covered] {
+        peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
+    }
     peer.rehydrate_query_for_subscription_with_opts(
         &mut core,
         canonical,
@@ -506,13 +521,25 @@ fn served_subscription_paths_fail_closed_when_a_relay_binding_is_removed() {
     // The explicitly named standalone/direct helper remains the only identity
     // fallback: it terminates one identity and has no multiplexed relay state.
     let alice = AuthorSubject::for_test_bytes([0x9a; 16]);
+    let (_dir, mut core) = open_node_with_uuid(node(0x9c));
+    let claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::Uuid(alice.test_uuid()),
+    )]);
+    core.set_test_provider_claims(alice, claims.clone());
     let mut direct = PeerState::client_link(alice);
     direct
-        .ensure_direct_internal_subscription_policy_binding(subscription)
+        .ensure_direct_internal_subscription_policy_binding(&core, subscription)
         .unwrap();
     assert_eq!(
         direct.served_subscription_policy_binding(subscription).unwrap(),
-        (alice, BTreeMap::new())
+        (alice, claims.clone())
+    );
+    core.set_test_provider_claims(alice, BTreeMap::new());
+    assert_eq!(
+        direct.served_subscription_policy_binding(subscription).unwrap(),
+        (alice, claims),
+        "direct helper captures claims once; later identity-cache mutation cannot retarget it"
     );
 }
 
@@ -3503,7 +3530,9 @@ fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
             Value::String("match".to_owned()),
         )]))
         .unwrap();
-    let mut peer = PeerState::new();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::relay();
+    peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
     peer.set_ship_complete_exclusive_payloads(true);
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
@@ -4070,7 +4099,9 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
     let (_core_dir, mut core) = open_node_with_uuid(node(0x98));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x99));
     let (shape, binding) = title_shape_binding("match");
-    let mut peer = PeerState::new();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::relay();
+    peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
     peer.set_ship_complete_exclusive_payloads(true);
 
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
@@ -4461,6 +4492,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     let subscription = core.whole_table_subscription_key("docs").unwrap();
 
     let mut relay = PeerState::relay();
+    // A relay can multiplex sessions, so even this direct helper receipt
+    // supplies the policy snapshot explicitly rather than falling back to the
+    // relay's SYSTEM transport identity.
+    relay.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
     let relay_update = relay.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&relay, subscription).is_some());
     assert_eq!(relay.maintained_subscription_view_metrics().hits_out, 1);

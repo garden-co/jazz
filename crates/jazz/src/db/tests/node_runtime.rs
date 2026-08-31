@@ -2070,6 +2070,44 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
 }
 
 #[test]
+fn current_rows_uses_its_connection_claim_snapshot_not_the_author_cache() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let admitted = BTreeMap::from([(
+        crate::query::provider_claim_key("session"),
+        Value::String("admitted".to_owned()),
+    )]);
+    let stale = BTreeMap::from([(
+        crate::query::provider_claim_key("session"),
+        Value::String("stale sibling".to_owned()),
+    )]);
+    let (_client_transport, server_transport) = duplex();
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, author, admitted.clone());
+
+    // Simulate another connection for the same subject updating the legacy
+    // identity-keyed compatibility cache after this link was authenticated.
+    server.node().borrow_mut().set_session_claims(author, stale);
+    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+
+    let subscription = server
+        .node()
+        .borrow()
+        .whole_table_subscription_key("todos")
+        .unwrap();
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        panic!("current-rows server connection must remain a subscriber link");
+    };
+    assert_eq!(
+        state.peer.subscription_policy_binding(subscription),
+        Some((author, admitted)),
+        "whole-table serving must use the exact session claims admitted on this connection"
+    );
+}
+
+#[test]
 fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);

@@ -81,7 +81,13 @@ pub struct PeerState {
 impl Default for PeerState {
     fn default() -> Self {
         Self {
-            role: PeerRole::Relay,
+            // The default is a standalone, SYSTEM-scoped peer helper. A real
+            // relay can multiplex admitted sessions and must opt into the
+            // explicit `PeerState::relay()` role, where every served
+            // subscription is required to carry its immutable policy binding.
+            role: PeerRole::ClientLink {
+                identity: AuthorSubject::SYSTEM,
+            },
             permission_identity: None,
             shipped_complete_tx_payloads: BTreeSet::new(),
             ship_complete_exclusive_payloads: false,

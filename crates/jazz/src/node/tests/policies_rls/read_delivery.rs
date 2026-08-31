@@ -1093,6 +1093,8 @@ fn system_identity_read_policy_sees_everything() {
     commit_core_owner_fixture(&mut core, row(1), user(0xa1), "a row", 10);
     commit_core_owner_fixture(&mut core, row(2), user(0xb2), "b row", 11);
     let mut peer = PeerState::new();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row(1), row(2)]));
@@ -1119,6 +1121,8 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
 
     let mut relay = PeerState::relay();
     assert_eq!(relay.identity(), AuthorSubject::SYSTEM);
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    relay.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
     assert_view_update_only_references_rows(
         &relay.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([row(1)]),

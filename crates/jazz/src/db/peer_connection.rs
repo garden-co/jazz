@@ -1003,6 +1003,12 @@ where
     /// refresh it on later ticks.
     pub async fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
         self.tick().await?;
+        // This is an owner-loop admission path, not a standalone peer helper.
+        // Capture the exact claims accepted for this connection before opening
+        // its maintained view; the author-keyed NodeState cache is only a
+        // compatibility input and may already contain a sibling session's
+        // claims for the same subject.
+        let session_claim_binding = self.subscriber_session_claim_binding();
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
             served,
@@ -1012,6 +1018,8 @@ where
         else {
             return Ok(());
         };
+        let session_claim_binding =
+            session_claim_binding.expect("subscriber link has session claims");
         let subscription = self.node.borrow().whole_table_subscription_key(table)?;
         if let Some(existing_table) = served_current_rows.get(&subscription) {
             if existing_table == table {
@@ -1028,6 +1036,7 @@ where
                 "whole-table subscription key is already owned by an ordinary subscription",
             ));
         }
+        peer.set_subscription_policy_binding(subscription, session_claim_binding);
         let update = {
             let mut node = self.node.lock().await;
             peer.current_rows_update(&mut node, table).await?

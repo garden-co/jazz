@@ -90,14 +90,20 @@ impl PeerState {
         self.announced_catalogue_fingerprint = Some(fingerprint);
     }
 
-    /// Construct a permanent relay peer.
+    /// Construct a standalone SYSTEM-scoped peer.
+    ///
+    /// This is suitable for direct/no-waker helpers. Network relays must use
+    /// [`Self::relay`] so a missing admitted policy binding fails closed.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Construct a permanent relay peer.
     pub fn relay() -> Self {
-        Self::default()
+        Self {
+            role: PeerRole::Relay,
+            ..Self::default()
+        }
     }
 
     /// Construct a peer link that terminates one client author identity.
@@ -184,18 +190,36 @@ impl PeerState {
     /// Standalone no-waker helpers serve one peer identity directly. Their
     /// owner is not a multiplexing transport, so this explicit identity
     /// fallback is sound. Owner-loop paths bypass this helper and fail closed.
-    fn ensure_direct_internal_subscription_policy_binding(
+    fn ensure_direct_internal_subscription_policy_binding<S>(
         &mut self,
+        node: &NodeState<S>,
         subscription: SubscriptionKey,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        S: OrderedKvStorage,
+    {
+        // A caller that has already supplied a usage-site snapshot may use
+        // the shared rehydrate helpers for either direct or relay serving.
+        // Only the fallback below is restricted to a direct, single-session
+        // peer.
+        if self.subscription_policy_binding(subscription).is_some() {
+            return Ok(());
+        }
         if self.role == PeerRole::Relay {
             return Err(Error::InvalidStoredValue(
                 "relay subscription requires an explicit immutable policy binding",
             ));
         }
-        if self.subscription_policy_binding(subscription).is_none() {
-            self.set_subscription_policy_binding(subscription, (self.identity(), BTreeMap::new()));
-        }
+        // A direct peer terminates exactly one session, so it may take a
+        // one-time immutable snapshot from this node's admitted session
+        // state.  The snapshot is intentionally installed only when the
+        // usage site is first opened: later claim changes are handled by
+        // the owner loop rebuilding its explicitly bound views.
+        let identity = self.identity();
+        self.set_subscription_policy_binding(
+            subscription,
+            (identity, node.session_claims_for(identity)),
+        );
         Ok(())
     }
 
@@ -261,6 +285,13 @@ impl PeerState {
             binding_id: binding.binding_id(),
             read_view: opts.read_view_key(),
         };
+        // `current_rows_update` is the direct-peer counterpart to
+        // `rehydrate_query_with_opts`: it opens a served maintained view, so
+        // it needs the same explicit direct-peer binding before that view can
+        // evaluate policy.  In particular, do not make the maintained-view
+        // code infer a fallback identity: owner-loop and relay callers must
+        // still have installed the admitted subscriber snapshot themselves.
+        self.ensure_direct_internal_subscription_policy_binding(node, subscription)?;
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, &shape, &binding)?;
         let needs_prepare = self
@@ -1387,7 +1418,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.ensure_direct_internal_subscription_policy_binding(subscription)?;
+        self.ensure_direct_internal_subscription_policy_binding(node, subscription)?;
         self.rehydrate_query_for_subscription_with_opts_and_waker(
             node,
             subscription,
@@ -1557,7 +1588,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.ensure_direct_internal_subscription_policy_binding(target_subscription)?;
+        self.ensure_direct_internal_subscription_policy_binding(node, target_subscription)?;
         self.rehydrate_query_for_subscription_from_maintained_subscription_and_waker(
             node,
             maintained_subscription,
