@@ -4,6 +4,7 @@ import {
   createSessionContext,
   relationExistsToPolicy,
   relationToIr,
+  type PermissionExpressionInput,
   type PermissionRelation,
 } from "./index.js";
 import type { PolicyExpr } from "../schema.js";
@@ -49,6 +50,20 @@ interface Project {
 interface ProjectWhere {
   id?: string;
   ownerId?: string;
+}
+
+interface Document {
+  id: string;
+  type: string;
+  title: string;
+  projectId: string;
+}
+
+interface DocumentWhere {
+  id?: string;
+  type?: string;
+  title?: string;
+  projectId?: string;
 }
 
 interface TodoShare {
@@ -166,6 +181,13 @@ class TodoShareQueryBuilder {
 class ProjectQueryBuilder {
   declare readonly _rowType: Project;
   where(_input: ProjectWhere): ProjectQueryBuilder {
+    return this;
+  }
+}
+
+class DocumentQueryBuilder {
+  declare readonly _rowType: Document;
+  where(_input: DocumentWhere): DocumentQueryBuilder {
     return this;
   }
 }
@@ -329,6 +351,32 @@ const appWithoutSchema = {
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
 };
 
+const documentApp = {
+  documents: new DocumentQueryBuilder(),
+  projects: new ProjectQueryBuilder(),
+  wasmSchema: {
+    documents: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "type", column_type: { type: "Text" }, nullable: false },
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "projectId",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "projects",
+        },
+      ],
+    },
+    projects: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Uuid" }, nullable: false },
+      ],
+    },
+  },
+};
+
 const socialApp = {
   profiles: new ProfileQueryBuilder(),
   people: new PersonQueryBuilder(),
@@ -391,6 +439,107 @@ describe("permissions DSL", () => {
     ).toThrow(
       /Generated relation name "owner" is ambiguous on table "todos".*"todos.ownerId".*"todos.owner_id"/,
     );
+  });
+
+  it("treats a type column as row data inside compound conditions", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf }) => [
+      policy.documents.allowRead.where(allOf([{ type: "True" }, { title: "Visible" }])),
+    ]);
+
+    expect(compiled.documents!.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "True" },
+        },
+        {
+          type: "Cmp",
+          column: "title",
+          op: "Eq",
+          value: { type: "Literal", value: "Visible" },
+        },
+      ],
+    });
+  });
+
+  it("uses raw() to opt into a policy atom on a table with a type column", () => {
+    const compiled = definePermissions(documentApp, ({ policy, raw }) => [
+      policy.documents.allowRead.where(raw({ type: "True" })),
+    ]);
+
+    expect(compiled.documents!.select?.using).toEqual({ type: "True" });
+  });
+
+  it("preserves DSL branding through public condition input annotations", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, raw }) => {
+      const reusableCondition: PermissionExpressionInput = allOf([
+        { type: "True" },
+        raw({ type: "True" }),
+      ]);
+
+      return [policy.documents.allowRead.where(reusableCondition)];
+    });
+
+    expect(compiled.documents!.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "True" },
+        },
+        { type: "True" },
+      ],
+    });
+  });
+
+  it("composes a type-column row predicate with isCreator", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, isCreator }) => [
+      policy.documents.allowRead.where(allOf([{ type: "Cmp" }, isCreator])),
+    ]);
+
+    expect(compiled.documents!.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "Cmp" },
+        },
+        creatorCondition,
+      ],
+    });
+  });
+
+  it("composes a type-column row predicate with allowedTo", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, allowedTo }) => [
+      policy.documents.allowUpdate.where(
+        allOf([{ type: "Inherits" }, allowedTo.update("projectId")]),
+      ),
+    ]);
+
+    expect(compiled.documents!.update?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "type",
+          op: "Eq",
+          value: { type: "Literal", value: "Inherits" },
+        },
+        {
+          type: "Inherits",
+          operation: "Update",
+          via_column: "projectId",
+        },
+      ],
+    });
+    expect(compiled.documents!.update?.with_check).toEqual(compiled.documents!.update?.using);
   });
 
   it("compiles read/insert/update/delete policies", () => {
@@ -2082,8 +2231,8 @@ describe("permissions DSL", () => {
       },
     };
 
-    const compiled = definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.where(manualExistsExpr),
+    const compiled = definePermissions(app, ({ policy, raw }) => [
+      policy.todos.allowRead.where(raw(manualExistsExpr)),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual(manualExistsExpr);
@@ -2101,8 +2250,8 @@ describe("permissions DSL", () => {
     };
 
     expect(() =>
-      definePermissions(app, ({ policy }) => [
-        policy.todos.allowRead.where(invalidManualExistsExpr),
+      definePermissions(app, ({ policy, raw }) => [
+        policy.todos.allowRead.where(raw(invalidManualExistsExpr)),
       ]),
     ).toThrow(/available fk columns: todoId/i);
   });

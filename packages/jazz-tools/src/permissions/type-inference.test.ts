@@ -1,5 +1,13 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { createSessionContext, definePermissions } from "./index.js";
+import {
+  createSessionContext,
+  definePermissions,
+  type PermissionExpression,
+  type PermissionExpressionInput,
+  type RowContext,
+  type RowRefValue,
+} from "./index.js";
+import type { PolicyExpr } from "../schema.js";
 
 interface Todo {
   id: string;
@@ -171,13 +179,20 @@ const app = {
 
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
-    definePermissions(app, ({ policy, anyOf, allowedTo, session, isCreator }) => {
-      expectTypeOf(session.claims["sub"].path).toEqualTypeOf<string[]>();
+    definePermissions(app, ({ policy, anyOf, allowedTo, raw, session, isCreator }) => {
       expectTypeOf(session.claims["sub"].path).toEqualTypeOf<string[]>();
       expectTypeOf(session.user.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.claims["role"]!.path).toEqualTypeOf<string[]>();
-      expectTypeOf(isCreator).toMatchTypeOf<Parameters<typeof anyOf>[0][number]>();
+      expectTypeOf(isCreator).toEqualTypeOf<PermissionExpressionInput>();
+      expectTypeOf(anyOf([])).toEqualTypeOf<PermissionExpressionInput>();
+      expectTypeOf(allowedTo.read("projectId")).toEqualTypeOf<PermissionExpressionInput>();
 
+      const manualExpression: PolicyExpr = { type: "True" };
+      expectTypeOf(raw(manualExpression)).toEqualTypeOf<PermissionExpression>();
+      if (false) {
+        // @ts-expect-error Raw policy IR must be explicitly branded with raw().
+        policy.todos.allowRead.where(manualExpression);
+      }
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.claims["sub"] },
         step: ({ current }) =>
@@ -214,6 +229,48 @@ describe("permissions type inference", () => {
           "resource_access_edges.grant_role": "viewer",
         }),
       ];
+    });
+  });
+
+  it("supports reusable helpers annotated with the public condition input type", () => {
+    definePermissions(app, ({ policy, allOf, anyOf, allowedTo, isCreator, raw, session }) => {
+      const policyAtom = (): PermissionExpressionInput => allowedTo.read("projectId");
+      const creatorAtom: PermissionExpressionInput = isCreator;
+
+      const legacyRawHelper = (): PolicyExpr => ({ type: "True" });
+      const rawAtom = (): PermissionExpression => raw(legacyRawHelper());
+
+      const compound = (): PermissionExpressionInput => allOf([{ done: false }, policyAtom()]);
+
+      const tableExists = (todo: RowContext<Todo>): PermissionExpressionInput =>
+        policy.projects.exists.where({ id: todo.projectId });
+
+      const relationExists = (todo: RowContext<Todo>): PermissionExpressionInput =>
+        policy.exists(policy.projects.where({ id: todo.projectId }));
+
+      const sessionPredicate = (): PermissionExpressionInput =>
+        session.where({ "claims.role": "manager" });
+
+      const conditionObject = (todo: RowContext<Todo>): { ownerId: RowRefValue } => ({
+        ownerId: todo.ownerId,
+      });
+
+      const reusableCondition = (todo: RowContext<Todo>): PermissionExpressionInput =>
+        anyOf([
+          creatorAtom,
+          rawAtom(),
+          compound(),
+          tableExists(todo),
+          relationExists(todo),
+          sessionPredicate(),
+        ]);
+
+      if (false) {
+        // @ts-expect-error PolicyExpr-returning helpers must migrate through raw().
+        policy.todos.allowRead.where(legacyRawHelper());
+      }
+
+      return [policy.todos.allowRead.where(reusableCondition)];
     });
   });
 
@@ -276,7 +333,7 @@ describe("SessionContext — typed authMode", () => {
   it("authMode compiles as a leaf Session field", () => {
     const session = createSessionContext();
     const condition = session.where({ authMode: "local-first" });
-    expectTypeOf(condition).toMatchTypeOf<{ __jazzPermissionKind: "session-where" }>();
+    expectTypeOf(condition).toEqualTypeOf<PermissionExpressionInput>();
   });
 
   it("authMode accepts union of the three modes", () => {
