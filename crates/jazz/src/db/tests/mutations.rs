@@ -3605,6 +3605,9 @@ fn assert_internal_subscription_refresh_failure(subscription: &mut SubscriptionS
     );
 }
 
+/// A deferred local writer transfers its publication to the node queue before
+/// its affected subscription refresh fails; a sibling stream still receives
+/// its delta, and the later runtime tick persists the queued write.
 #[test]
 fn deferred_write_refresh_error_returns_committed_handle_and_keeps_persistence_owned() {
     let schema = owner_write_schema();
@@ -3633,6 +3636,9 @@ fn deferred_write_refresh_error_returns_committed_handle_and_keeps_persistence_o
     );
 }
 
+/// A synchronous local writer persists before refreshing subscriptions: the
+/// affected stream becomes terminal with its original error, while its sibling
+/// keeps receiving later deltas without turning either write into a failure.
 #[test]
 fn persisted_write_refresh_error_returns_committed_handle() {
     let schema = owner_write_schema();
@@ -3662,6 +3668,9 @@ fn persisted_write_refresh_error_returns_committed_handle() {
     assert_internal_subscription_refresh_failure(&mut subscription);
 }
 
+/// One deferred local writer publishes two transactions; the node runtime must
+/// persist and enqueue both exactly once, in authoring order, before a later
+/// idle tick can revisit the outbox.
 #[test]
 fn deferred_local_publications_persist_and_enqueue_in_publication_order_once() {
     let schema = owner_write_schema();
@@ -3718,6 +3727,9 @@ fn deferred_local_publications_persist_and_enqueue_in_publication_order_once() {
     assert_eq!(db.node.outbox.borrow().len(), 2);
 }
 
+/// Causal flow: a mergeable transaction enters the node-owned deferred queue,
+/// its subscriber refresh stalls, and the caller future is cancelled. The next
+/// node tick must still persist the exact queued transaction.
 #[test]
 fn deferred_mergeable_handle_refresh_cancellation_keeps_persistence_owned() {
     let schema = owner_write_schema();
@@ -3738,6 +3750,9 @@ fn deferred_mergeable_handle_refresh_cancellation_keeps_persistence_owned() {
     settle_cancelled_local_publication(&db, published);
 }
 
+/// Causal flow: an exclusive transaction transfers its upload-bearing
+/// publication to the deferred queue, refresh stalls, then its caller is
+/// cancelled. The node tick must retain and persist that exact publication.
 #[test]
 fn deferred_exclusive_refresh_cancellation_keeps_persistence_owned() {
     let schema = owner_write_schema();
@@ -3757,6 +3772,9 @@ fn deferred_exclusive_refresh_cancellation_keeps_persistence_owned() {
     settle_cancelled_local_publication(&db, published);
 }
 
+/// A deferred local writer and its resident subscriber share one runtime: the
+/// write must queue durability work and still deliver the visible subscription
+/// delta before the write call returns.
 #[test]
 fn deferred_write_still_refreshes_resident_subscriptions_before_returning() {
     let schema = owner_write_schema();
