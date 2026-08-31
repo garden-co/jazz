@@ -340,9 +340,10 @@ overlay, allowing a session to upsert a branch row it inserted or upserted
 earlier in the same transaction.
 
 Low-level JavaScript upsert options use `{ head, base? }` for a branch view.
-For compatibility, the former `{ branch }` shape is an exact alias for
-`{ head: branch }`; it cannot be combined with either `head` or `base`.
-Ambiguous combinations and `base` without `head` are rejected before the
+`branch` is not an upsert selector: callers use it only for exact branch-target
+operations such as insert and restore. An upsert with a `branch` property is
+rejected by property presence—including `branch: undefined` or `branch: null`—
+and an upsert containing `base` without `head` is rejected before the
 root/default target can be selected.
 
 Rust `UpsertOptions::target` now uses `WriteTarget` rather than
