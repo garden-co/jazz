@@ -896,6 +896,7 @@ fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
         let exclusive_id = exclusive.tx_id;
 
         let mut observer_release = None;
+        let mut queued_mutation_release = None;
         let mut node_guard = None;
         let mut close_owner_guard = None;
         match wait {
@@ -903,15 +904,19 @@ fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
                 close_owner_guard = Some(db.node.lock_close_owner().await);
             }
             CloseCancellationWait::QueuedMutationDrain => {
+                let (release, blocked) = futures::channel::oneshot::channel();
                 db.node
                     .enqueue_transaction_operation(
                         mergeable_id,
                         Box::pin(async {
-                            std::future::pending::<()>().await;
+                            blocked
+                                .await
+                                .expect("the cancelled close retains the queued mutation");
                             Ok(())
                         }),
                     )
                     .unwrap();
+                queued_mutation_release = Some(release);
             }
             CloseCancellationWait::TransactionWaitObserverDrain => {
                 let (release, blocked) = futures::channel::oneshot::channel();
@@ -952,6 +957,16 @@ fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
             release
                 .send(())
                 .expect("the pending observer remains owned by node maintenance");
+        }
+        if let Some(release) = queued_mutation_release {
+            // Cancelling while close owns this FIFO lease intentionally leaves
+            // the final sweep pending. Release the retained operation, then
+            // let an ordinary maintenance turn drain it before asserting the
+            // sweep. This preserves the pre-sweep cancellation coverage
+            // without treating an active lease as quiescence.
+            release
+                .send(())
+                .expect("the pending mutation remains owned by node maintenance");
         }
         drop(node_guard);
         drop(close_owner_guard);
