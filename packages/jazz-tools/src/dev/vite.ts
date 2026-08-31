@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
-import { loadEnvFileIntoProcessEnv } from "./env-file.js";
+import { resolve } from "node:path";
+import { loadEnvFileIntoProcessEnv, resolveViteEnvDir, type ViteEnvConfig } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
 import { wireInspectorOverlay, type OverlayDevServer } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
@@ -56,6 +57,8 @@ export interface ViteDevServer {
     root: string;
     command: string;
     mode?: string;
+    /** Vite resolves this from the user config before configureServer runs. */
+    envDir?: string | false;
     env?: Record<string, string>;
     server?: {
       port?: number;
@@ -82,9 +85,9 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   });
   let envLoaded = false;
 
-  async function ensureEnvLoaded(root: string, mode: string): Promise<void> {
+  async function ensureEnvLoaded(envDir: string | false, mode: string): Promise<void> {
     if (envLoaded) return;
-    await loadEnvFileIntoProcessEnv(root, mode);
+    await loadEnvFileIntoProcessEnv(envDir, mode);
     envLoaded = true;
   }
 
@@ -94,6 +97,8 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
     config(
       config: {
         root?: string;
+        envDir?: ViteEnvConfig["envDir"];
+        envFile?: ViteEnvConfig["envFile"];
         ssr?: { external?: true | string[] };
         optimizeDeps?: { exclude?: string[] };
       },
@@ -116,14 +121,16 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       if (env?.command !== "serve" || options.server === false) {
         return merged;
       }
-      const root = config.root ?? process.cwd();
-      return ensureEnvLoaded(root, env.mode ?? "development").then(() => {
-        runtime.prepareEnv({
-          ...options,
-          schemaDir: options.schemaDir ?? root,
-        });
-        return merged;
-      });
+      const root = resolve(config.root ?? process.cwd());
+      return ensureEnvLoaded(resolveViteEnvDir(root, config), env.mode ?? "development").then(
+        () => {
+          runtime.prepareEnv({
+            ...options,
+            schemaDir: options.schemaDir ?? root,
+          });
+          return merged;
+        },
+      );
     },
 
     async configureServer(viteServer: ViteDevServer) {
@@ -137,7 +144,10 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       // so the managed runtime's env-driven cloud-mode check would otherwise
       // never fire. The config hook normally loads them first; this is the
       // fallback for direct callers that skip that hook.
-      await ensureEnvLoaded(viteServer.config.root, viteServer.config.mode ?? "development");
+      await ensureEnvLoaded(
+        viteServer.config.envDir ?? viteServer.config.root,
+        viteServer.config.mode ?? "development",
+      );
 
       const schemaDir = options.schemaDir ?? viteServer.config.root;
 

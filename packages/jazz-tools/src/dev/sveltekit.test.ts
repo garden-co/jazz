@@ -200,13 +200,16 @@ describe("jazzSvelteKit", () => {
     expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe("http://127.0.0.1:19990");
   });
 
-  it("uses the config hook production mode when loading env files", async () => {
+  it("uses the config hook's resolved shared envDir in production serve mode", async () => {
     const appId = "00000000-0000-0000-0000-000000000122";
-    const root = await tempRoots.create("jazz-sveltekit-mode-env-test-");
+    const monorepoRoot = await tempRoots.create("jazz-sveltekit-mode-env-test-");
+    const root = join(monorepoRoot, "apps", "web");
+    const sharedEnvDir = join(monorepoRoot, "env");
     await mkdir(join(root, "src", "lib"), { recursive: true });
+    await mkdir(sharedEnvDir, { recursive: true });
     await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
     await writeFile(
-      join(root, ".env.production.local"),
+      join(sharedEnvDir, ".env.production.local"),
       [
         `PUBLIC_JAZZ_APP_ID=${appId}`,
         "PUBLIC_JAZZ_SERVER_URL=http://production.example",
@@ -231,11 +234,46 @@ describe("jazzSvelteKit", () => {
       c: Record<string, unknown>,
       e?: { command: "serve" | "build"; mode?: string },
     ) => unknown;
-    await config({ root }, { command: "serve", mode: "production" });
+    await config({ root, envDir: "../../env" }, { command: "serve", mode: "production" });
 
     expect(startSpy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBe(appId);
     expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe("http://production.example");
+  });
+
+  it("does not load env files when the config hook receives envFile:false", async () => {
+    const root = await tempRoots.create("jazz-sveltekit-env-file-disabled-test-");
+    await mkdir(join(root, "src", "lib"), { recursive: true });
+    await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+    await writeFile(
+      join(root, ".env"),
+      [
+        "PUBLIC_JAZZ_APP_ID=00000000-0000-0000-0000-000000000126",
+        "PUBLIC_JAZZ_SERVER_URL=http://should-not-load.example",
+        "JAZZ_ADMIN_SECRET=should-not-load",
+        "",
+      ].join("\n"),
+    );
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000127",
+      port: 19988,
+      url: "http://127.0.0.1:19988",
+      dataDir: undefined as unknown as string,
+      adminSecret: "local-admin",
+      backendSecret: "local-backend",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const plugin = jazzSvelteKit();
+    const config = plugin.config as (
+      c: Record<string, unknown>,
+      e?: { command: "serve" | "build"; mode?: string },
+    ) => unknown;
+    await config({ root, envFile: false }, { command: "serve", mode: "development" });
+
+    expect(startSpy).toHaveBeenCalledOnce();
   });
 
   it("never restarts the dev server (env is injected in the config hook instead)", async () => {

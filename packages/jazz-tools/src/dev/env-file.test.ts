@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadEnvFileIntoProcessEnv } from "./env-file.js";
+import { loadEnvFileIntoProcessEnv, resolveViteEnvDir } from "./env-file.js";
 import { createTempRootTracker } from "./test-helpers.js";
 
 const tempRoots = createTempRootTracker();
@@ -95,5 +95,16 @@ describe("loadEnvFileIntoProcessEnv", () => {
 
     expect(process.env.JAZZ_BUG_121_FILE_PRECEDENCE).toBe("production-local");
     expect(process.env.JAZZ_BUG_121_MODE_ONLY).toBe("production");
+  });
+
+  it("resolves Vite relative and absolute envDir values, and honors envFile:false", async () => {
+    const root = await tempRoots.create("jazz-env-dir-root-");
+    const absolute = await tempRoots.create("jazz-env-dir-absolute-");
+
+    expect(resolveViteEnvDir(root, { envDir: "../shared-env" })).toBe(
+      join(root, "..", "shared-env"),
+    );
+    expect(resolveViteEnvDir(root, { envDir: absolute })).toBe(absolute);
+    expect(resolveViteEnvDir(root, { envDir: absolute, envFile: false })).toBe(false);
   });
 });
