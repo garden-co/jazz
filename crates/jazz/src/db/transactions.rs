@@ -391,7 +391,6 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
-        self.ensure_row_not_deleted(table, row).await?;
         self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
             .await
     }
