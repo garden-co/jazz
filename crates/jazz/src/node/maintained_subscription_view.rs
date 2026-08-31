@@ -627,6 +627,14 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
+    /// Current memberships that have crossed the result/content witness
+    /// boundary and are therefore safe to expose to a subscription consumer.
+    /// Cold runtime recovery uses this complete set to reconcile a retained
+    /// downstream membership without reopening the just-hydrated view.
+    pub(crate) fn published_result_members(&self) -> &BTreeSet<ResultMemberEntry> {
+        &self.published_result_members
+    }
+
     /// Returns the collector's current recursive row for one changed root.
     ///
     /// The incremental update builder uses this to replace just that root.

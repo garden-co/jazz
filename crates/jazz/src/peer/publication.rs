@@ -965,6 +965,7 @@ impl PeerState {
         let mut allow_storage_witness_fallback = false;
         let mut observed_result_delta_batches = 0_usize;
         let mut requires_authoritative_membership_reconcile = false;
+        let mut initial_deletion_witness = false;
         let mut terminal_operations = Vec::new();
         {
             let Some(maintained_subscription_view) = self
@@ -978,11 +979,13 @@ impl PeerState {
                 match maintained_subscription_view.subscription.try_recv() {
                     Ok(deltas) => {
                         // A completed cold hydration delivers its complete
-                        // snapshot through this same receiver. That snapshot
-                        // already establishes the current member set below;
-                        // a static deletion witness in it is not an
-                        // incremental membership transition and must not
-                        // recursively reopen this subscription.
+                        // snapshot through this same receiver. A static
+                        // deletion witness in it is not an incremental
+                        // membership transition and must not recursively
+                        // reopen this subscription. It can, however, prove
+                        // that a retained downstream member is now absent;
+                        // below we diff this hydrated view's complete exposed
+                        // membership against that retained state.
                         let initial_snapshot = !maintained_subscription_view.initial_received;
                         maintained_subscription_view.initial_received = true;
                         self.metrics.maintained_subscription_view.delta_batches_in += 1;
@@ -994,7 +997,10 @@ impl PeerState {
                                 &maintained_subscription_view.tables,
                                 &node.node_aliases,
                             )?;
-                        if !initial_snapshot {
+                        if initial_snapshot {
+                            initial_deletion_witness |=
+                                transitions.requires_authoritative_membership_reconcile;
+                        } else {
                             observed_result_delta_batches +=
                                 transitions.observed_result_delta_batches;
                             requires_authoritative_membership_reconcile |=
@@ -1029,6 +1035,25 @@ impl PeerState {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,
                 }
+            }
+        }
+        if initial_deletion_witness {
+            let hydrated_members = self
+                .publication_states
+                .get(&subscription)
+                .and_then(|state| state.maintained_subscription_view.as_ref())
+                .map(|view| view.maintained.published_result_members())
+                .ok_or(Error::InvalidStoredValue(
+                    "initial maintained subscription snapshot missing after receive",
+                ))?;
+            for member in previous_member_result_set.union(hydrated_members) {
+                states.insert(
+                    member.clone(),
+                    (
+                        previous_member_result_set.contains(member),
+                        hydrated_members.contains(member),
+                    ),
+                );
             }
         }
         if self.role == PeerRole::Relay
