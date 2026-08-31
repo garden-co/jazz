@@ -386,6 +386,8 @@ where
     pub(super) mutation_errors: SharedMutationErrors,
     pub(super) browser_relay_recovered_tx_ids: Rc<RefCell<BTreeSet<TxId>>>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
+    #[cfg(test)]
+    pub(super) fail_next_subscription_refresh: Cell<bool>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
     pub(super) observed_session_claim_revision: Cell<u64>,
     /// Fresh non-resumable epoch binding authorization receipts to this link.
@@ -2683,13 +2685,45 @@ where
                             node.settle_published_transaction(tx_id, persistence)?;
                         }
                         drop(node);
-                        stats.subscription_events += refresh_subscriptions_in(
-                            &self.node,
-                            &self.subscriptions,
-                            &self.active_authority_view_receipts,
-                            progress_waker.as_ref(),
-                        )
-                        .await?;
+                        // Durable application is complete at this boundary. A
+                        // refresh failure belongs to the resident subscriptions;
+                        // returning it would discard this tick's progress receipt
+                        // and make the already-consumed batch eligible for replay.
+                        let refresh_result = {
+                            #[cfg(test)]
+                            {
+                                if self.fail_next_subscription_refresh.replace(false) {
+                                    Err(Error::new(
+                                        ErrorCode::Protocol,
+                                        "injected subscription refresh failure",
+                                    ))
+                                } else {
+                                    refresh_subscriptions_in(
+                                        &self.node,
+                                        &self.subscriptions,
+                                        &self.active_authority_view_receipts,
+                                        progress_waker.as_ref(),
+                                    )
+                                    .await
+                                }
+                            }
+                            #[cfg(not(test))]
+                            {
+                                refresh_subscriptions_in(
+                                    &self.node,
+                                    &self.subscriptions,
+                                    &self.active_authority_view_receipts,
+                                    progress_waker.as_ref(),
+                                )
+                                .await
+                            }
+                        };
+                        stats.subscription_events += match refresh_result {
+                            Ok(changed) => changed,
+                            Err(error) => {
+                                route_subscription_refresh_failure(&self.subscriptions, &error)
+                            }
+                        };
                         stats.remote_sync_applied += 1;
                         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                         self.subscriber_dirty_epoch.set(next);
