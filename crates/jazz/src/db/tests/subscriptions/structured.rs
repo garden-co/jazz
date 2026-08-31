@@ -266,6 +266,57 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
 /// This also exercises the bounded-stack peer admission path: the server must
 /// process the membership commit without carrying inactive Subscribe-arm state.
 #[test]
+fn limit_one_subscription_replaces_winner_on_insert_and_retraction() {
+    let schema = relation_schema();
+    let db = open_db(0xc5, AuthorSubject::for_test_bytes([0xc5; 16]), &schema);
+    let prepared_query = prepared(&db, &Query::from("users").limit(1));
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let mut snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert!(snapshot.rows.is_empty());
+
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("later".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.tick().unwrap();
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&snapshot.rows), [row(0xb1)]);
+
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("winner".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let inserted_replacement = block_on(subscription.next_raw()).unwrap();
+    assert!(matches!(
+        &inserted_replacement,
+        SubscriptionEvent::Delta { reset: false, .. }
+    ));
+    apply_subscription_event(&mut snapshot, inserted_replacement);
+    assert_eq!(row_ids(&snapshot.rows), [row(0xa1)]);
+
+    db.delete("users", row(0xa1), Default::default()).unwrap();
+    db.tick().unwrap();
+    let retracted_replacement = block_on(subscription.next_raw()).unwrap();
+    assert!(matches!(
+        &retracted_replacement,
+        SubscriptionEvent::Delta { reset: false, .. }
+    ));
+    apply_subscription_event(&mut snapshot, retracted_replacement);
+    assert_eq!(row_ids(&snapshot.rows), [row(0xb1)]);
+}
+
+#[test]
 fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_shot() {
     let schema = membership_scoped_relation_schema();
     let reader = AuthorSubject::for_test_bytes([0xb2; 16]);

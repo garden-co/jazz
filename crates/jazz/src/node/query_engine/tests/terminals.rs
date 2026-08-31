@@ -867,8 +867,9 @@ fn collector_tree_depth_limit_is_a_lowering_diagnostic() {
 
 #[test]
 fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_rows() {
-    // Internal lowering test: the graph uses the child correlation as an
-    // existence filter, then collapses matching children back to one parent row.
+    // Internal lowering test: the child correlation is an existence gate.
+    // The semi-join retains each qualifying parent occurrence once, regardless
+    // of how many matching child rows exist.
     let request = correlated_path_request(
         CorrelationRequirement::AtLeastOne,
         row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership])),
@@ -887,23 +888,48 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
     assert_public_root_terminal(app_rows);
     assert!(graph_any(app_rows, &|graph| matches!(
         graph,
-        GraphBuilder::ArgMinBy {
-            input,
-            group_cols,
-            order_cols,
-        } if matches!(group_cols.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-            && matches!(order_cols.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-            && matches!(
-                input.as_ref(),
-                GraphBuilder::Project { input, fields }
-                    if fields.iter().any(|field| field.output_name == "row_uuid")
+        GraphBuilder::Project { input, fields }
+            if fields.iter().any(|field| field.output_name == "row_uuid")
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::SemiJoin {
+                        left,
+                        right,
+                        left_on,
+                        right_on,
+                        comparison: groove::ivm::ValueComparison::Exact,
+                    } if matches!(
+                        left.as_ref(),
+                        GraphBuilder::Table { table, .. } if table == "resolved_todos"
+                    )
                         && matches!(
-                            input.as_ref(),
-                            GraphBuilder::Join { left_on, right_on, .. }
-                                if matches!(left_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "row_uuid")
-                                    && matches!(right_on.as_slice(), [groove::ivm::FieldRef::Name(name)] if name == "user_todo")
+                            right.as_ref(),
+                            GraphBuilder::UnwrapNullable { input, field }
+                                if matches!(
+                                    field,
+                                    groove::ivm::FieldRef::Name(name) if name == "user_todo"
+                                )
+                                    && matches!(
+                                        input.as_ref(),
+                                        GraphBuilder::Table { table, .. }
+                                            if table == "resolved_todo_tags"
+                                    )
                         )
-            )
+                        && matches!(
+                            left_on.first(),
+                            Some(groove::ivm::FieldRef::Name(name)) if name == "row_uuid"
+                        )
+                        && matches!(
+                            right_on.first(),
+                            Some(groove::ivm::FieldRef::Name(name)) if name == "user_todo"
+                        )
+                        && left_on.len() == right_on.len()
+                        && left_on.iter().skip(1).eq(right_on.iter().skip(1))
+                )
+    )));
+    assert!(!graph_any(app_rows, &|graph| matches!(
+        graph,
+        GraphBuilder::ArgMinBy { .. }
     )));
     let ProgramOutputSchemas::RowSet(terminals) = &program.lowered.output;
     assert!(
@@ -926,7 +952,8 @@ fn correlated_path_required_app_rows_with_root_facts_filter_and_dedup_parent_row
 #[test]
 fn correlated_path_cardinality_scalar_correlation_lowers_like_at_least_one() {
     // Internal lowering test: legacy relation semantics treat non-array
-    // cardinality correlations as "at least one readable child".
+    // cardinality correlations as "at least one readable child", preserving
+    // each qualifying parent occurrence rather than grouping by its row UUID.
     let request = correlated_path_request(
         CorrelationRequirement::MatchCorrelationCardinality,
         row_set_output(BTreeSet::new()),
@@ -938,6 +965,47 @@ fn correlated_path_cardinality_scalar_correlation_lowers_like_at_least_one() {
     let app_rows = &program.lowered.terminals[0].graph;
     assert_public_root_terminal(app_rows);
     assert!(graph_any(app_rows, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, fields }
+            if fields.iter().any(|field| field.output_name == "row_uuid")
+                && matches!(
+                    input.as_ref(),
+                    GraphBuilder::SemiJoin {
+                        left,
+                        right,
+                        left_on,
+                        right_on,
+                        comparison: groove::ivm::ValueComparison::Exact,
+                    } if matches!(
+                        left.as_ref(),
+                        GraphBuilder::Table { table, .. } if table == "resolved_todos"
+                    )
+                        && matches!(
+                            right.as_ref(),
+                            GraphBuilder::UnwrapNullable { input, field }
+                                if matches!(
+                                    field,
+                                    groove::ivm::FieldRef::Name(name) if name == "user_todo"
+                                )
+                                    && matches!(
+                                        input.as_ref(),
+                                        GraphBuilder::Table { table, .. }
+                                            if table == "resolved_todo_tags"
+                                    )
+                        )
+                        && matches!(
+                            left_on.first(),
+                            Some(groove::ivm::FieldRef::Name(name)) if name == "row_uuid"
+                        )
+                        && matches!(
+                            right_on.first(),
+                            Some(groove::ivm::FieldRef::Name(name)) if name == "user_todo"
+                        )
+                        && left_on.len() == right_on.len()
+                        && left_on.iter().skip(1).eq(right_on.iter().skip(1))
+                )
+    )));
+    assert!(!graph_any(app_rows, &|graph| matches!(
         graph,
         GraphBuilder::ArgMinBy { .. }
     )));

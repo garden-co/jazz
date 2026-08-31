@@ -18,10 +18,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::subscriptions::BindingDelta;
 
 use super::{
-    ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
-    RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
-    VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
-    scan_bounds,
+    ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
+    NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
+    VariantProjection, VariantProjectionKey, arg_by_candidate_replaces, consolidate_deltas,
+    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1084,6 +1084,53 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
     Ok(())
 }
 
+// Recursive full-snapshot evaluation may traverse ArgBy inside a seed or step.
+// Use the maintained operator's shared declared-key/full-record comparator so
+// winner selection cannot diverge by evaluation path.
+
+fn hydrated_arg_by_winners(
+    input: RecordDeltas,
+    output_desc: RecordDescriptor,
+    group_field_indices: &[usize],
+    comparison_field_indices: &[usize],
+    direction: ArgByDirection,
+) -> Result<RecordDeltas, IvmRuntimeError> {
+    let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
+    for delta in input.deltas {
+        if delta.weight <= 0 {
+            continue;
+        }
+        let group_key = encoded_record_key_part(output_desc, delta.raw(), group_field_indices)?;
+        let comparison_key =
+            encoded_record_key_part(output_desc, delta.raw(), comparison_field_indices)?;
+        match winners.entry(group_key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((comparison_key, delta.record));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let winner = entry.get_mut();
+                let replaces = arg_by_candidate_replaces(
+                    &comparison_key,
+                    &delta.record,
+                    &winner.0,
+                    &winner.1,
+                    direction,
+                );
+                if replaces {
+                    *winner = (comparison_key, delta.record);
+                }
+            }
+        }
+    }
+    Ok(RecordDeltas {
+        descriptor: output_desc,
+        deltas: winners
+            .into_values()
+            .map(|(_, record)| RecordDelta { record, weight: 1 })
+            .collect(),
+    })
+}
+
 /// Full-snapshot evaluator used by recursive recompute fallback.
 struct HydrationEvaluator<'a> {
     schema: &'a crate::schema::DatabaseSchema,
@@ -1218,63 +1265,23 @@ impl HydrationEvaluator<'_> {
                 }
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let mut winners =
-                        std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-                    for delta in input.deltas {
-                        let group_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_max_by.group_field_indices,
-                        )?;
-                        let primary_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_max_by.primary_key_field_indices,
-                        )?;
-                        let entry = winners
-                            .entry(group_key)
-                            .or_insert_with(|| (primary_key.clone(), delta.record.clone()));
-                        if primary_key > entry.0 {
-                            *entry = (primary_key, delta.record);
-                        }
-                    }
-                    Ok(RecordDeltas {
-                        descriptor: output_desc,
-                        deltas: winners
-                            .into_values()
-                            .map(|(_, record)| RecordDelta { record, weight: 1 })
-                            .collect(),
-                    })
+                    hydrated_arg_by_winners(
+                        input,
+                        output_desc,
+                        &arg_max_by.group_field_indices,
+                        &arg_max_by.comparison_field_indices,
+                        ArgByDirection::Max,
+                    )
                 }
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let mut winners =
-                        std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-                    for delta in input.deltas {
-                        let group_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_min_by.group_field_indices,
-                        )?;
-                        let primary_key = super::encoded_record_key_part(
-                            output_desc,
-                            delta.raw(),
-                            &arg_min_by.primary_key_field_indices,
-                        )?;
-                        let entry = winners
-                            .entry(group_key)
-                            .or_insert_with(|| (primary_key.clone(), delta.record.clone()));
-                        if primary_key < entry.0 {
-                            *entry = (primary_key, delta.record);
-                        }
-                    }
-                    Ok(RecordDeltas {
-                        descriptor: output_desc,
-                        deltas: winners
-                            .into_values()
-                            .map(|(_, record)| RecordDelta { record, weight: 1 })
-                            .collect(),
-                    })
+                    hydrated_arg_by_winners(
+                        input,
+                        output_desc,
+                        &arg_min_by.group_field_indices,
+                        &arg_min_by.comparison_field_indices,
+                        ArgByDirection::Min,
+                    )
                 }
                 OpType::Union => {
                     let input_nodes = graph_node.descriptor.inputs.clone();
