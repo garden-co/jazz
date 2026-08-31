@@ -73,7 +73,7 @@ jobs:
 
       - uses: ./.github/actions/install-rust-tool
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.20.1
 
       - name: Build CLI binary
         run: cargo zigbuild -p jazz-cli --bin jazz-tools --features otel --release --target ${{ matrix.target }}
