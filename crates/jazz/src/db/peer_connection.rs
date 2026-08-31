@@ -1740,6 +1740,10 @@ where
                                         subscription.shape_id,
                                         subscription.read_view,
                                     ));
+                                    // Local finalization may already have
+                                    // applied this retirement. Reapplying is
+                                    // idempotent, and the command remains in
+                                    // `pending` until the send succeeds.
                                     self.node.borrow_mut().apply_unsubscribe(*subscription);
                                     if let Err(error) =
                                         self.transport.send(SyncMessage::Unsubscribe {
