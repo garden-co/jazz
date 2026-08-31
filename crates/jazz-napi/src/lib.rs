@@ -4626,6 +4626,38 @@ fn core_branch_selector_from_json(value: JsonValue) -> napi::Result<CoreBranchSe
         .map_err(|error| napi::Error::from_reason(format!("invalid branch selector: {error}")))
 }
 
+fn core_legacy_upsert_branch_selector_from_json(
+    value: JsonValue,
+) -> napi::Result<CoreBranchSelector> {
+    if let Ok(selector) = serde_json::from_value(value.clone()) {
+        return Ok(selector);
+    }
+    let JsonValue::Object(values) = value else {
+        return Err(napi::Error::from_reason(
+            "legacy upsert branch selector must be an object",
+        ));
+    };
+    if values.is_empty() {
+        return Err(napi::Error::from_reason(
+            "legacy upsert branch selector must contain at least one column",
+        ));
+    }
+    let values = values
+        .into_iter()
+        .map(|(column, value)| {
+            core_claim_value_from_json(value)
+                .map(|value| (column.clone(), value))
+                .map_err(|error| {
+                    napi::Error::from_reason(format!(
+                        "invalid legacy upsert branch column {column}: {}",
+                        error.reason
+                    ))
+                })
+        })
+        .collect::<napi::Result<Vec<_>>>()?;
+    Ok(CoreBranchSelector::new(values))
+}
+
 fn core_branch_base_from_json(
     value: Option<JsonValue>,
 ) -> napi::Result<Option<CoreBranchViewBase>> {
@@ -4701,7 +4733,7 @@ fn core_upsert_options(options: Option<UpsertOptions>) -> napi::Result<jazz::db:
     };
     let target = match (options.branch, options.head, options.base) {
         (Some(branch), None, None) => jazz::db::WriteTarget::BranchView {
-            head: core_branch_selector_from_json(branch)?,
+            head: core_legacy_upsert_branch_selector_from_json(branch)?,
             base: None,
         },
         (Some(_), _, _) => {
@@ -6739,7 +6771,10 @@ mod tests {
         assert_eq!(
             parsed.target,
             jazz::db::WriteTarget::BranchView {
-                head: crate::core_branch_selector_from_json(branch.clone()).unwrap(),
+                head: jazz::protocol::BranchSelector::new([(
+                    "branch",
+                    CoreValue::String("draft".to_owned()),
+                )]),
                 base: None,
             }
         );

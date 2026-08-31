@@ -3526,13 +3526,46 @@ fn update_options_from_js(options: JsValue) -> Result<jazz::db::UpdateOptions, J
     })
 }
 
+fn legacy_upsert_branch_selector_from_js(value: JsValue) -> Result<BranchSelector, JsValue> {
+    if let Ok(selector) = serde_wasm_bindgen::from_value(value.clone()) {
+        return Ok(selector);
+    }
+    let raw: serde_json::Value = serde_wasm_bindgen::from_value(value).map_err(to_js_error)?;
+    let serde_json::Value::Object(values) = raw else {
+        return Err(JsValue::from_str(
+            "legacy upsert branch selector must be an object",
+        ));
+    };
+    if values.is_empty() {
+        return Err(JsValue::from_str(
+            "legacy upsert branch selector must contain at least one column",
+        ));
+    }
+    let values = values
+        .into_iter()
+        .map(|(column, value)| {
+            claim_value_from_json(value)
+                .map(|value| (column.clone(), value))
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "invalid legacy upsert branch column {column}: {}",
+                        error
+                            .as_string()
+                            .unwrap_or_else(|| "invalid value".to_owned())
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BranchSelector::new(values))
+}
+
 fn upsert_options_from_js(options: JsValue) -> Result<jazz::db::UpsertOptions, JsValue> {
     let branch = write_option(&options, "branch")?;
     let head = write_option(&options, "head")?;
     let base = write_option(&options, "base")?;
     let target = match (branch, head, base) {
         (Some(branch), None, None) => jazz::db::WriteTarget::BranchView {
-            head: serde_wasm_bindgen::from_value(branch).map_err(to_js_error)?,
+            head: legacy_upsert_branch_selector_from_js(branch)?,
             base: None,
         },
         (Some(_), _, _) => {
