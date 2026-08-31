@@ -210,7 +210,7 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       writer.byte(6);
       return;
     case "Bytea":
-      writer.byte(10);
+      writer.byte(16);
       return;
     case "Json":
       writer.byte(11);

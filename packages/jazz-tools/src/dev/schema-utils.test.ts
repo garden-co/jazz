@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { ColumnType, WasmSchema } from "../drivers/types.js";
 
 import { structuralSchemaHash } from "./schema-utils.js";
 
@@ -13,6 +14,14 @@ function enumSchema(variants: string[]) {
           nullable: false,
         },
       ],
+    },
+  };
+}
+
+function schemaWithColumnType(columnType: ColumnType): WasmSchema {
+  return {
+    values: {
+      columns: [{ name: "value", column_type: columnType, nullable: false }],
     },
   };
 }
@@ -43,5 +52,16 @@ describe("structuralSchemaHash", () => {
     });
 
     expect(hashes[0]).not.toBe(hashes[1]);
+  });
+
+  it("distinguishes Double and Bytea at recursive column-type boundaries", () => {
+    expect(structuralSchemaHash(schemaWithColumnType({ type: "Double" }))).not.toBe(
+      structuralSchemaHash(schemaWithColumnType({ type: "Bytea" })),
+    );
+    expect(
+      structuralSchemaHash(schemaWithColumnType({ type: "Array", element: { type: "Double" } })),
+    ).not.toBe(
+      structuralSchemaHash(schemaWithColumnType({ type: "Array", element: { type: "Bytea" } })),
+    );
   });
 });
