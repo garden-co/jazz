@@ -2,8 +2,9 @@
 
 use super::*;
 
-const EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER: usize = 128;
+const EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER: usize = 1024;
 const EXPECTED_MAX_RETAINED_PEER_SHAPES: usize = 1024;
+const EXISTING_SINGLE_PEER_ACTIVE_QUERY_COUNT: usize = 1_000;
 
 fn distinct_shape(schema: &JazzSchema, index: usize) -> ValidatedQuery {
     Query::from("todos")
@@ -319,59 +320,75 @@ fn same_cycle_reattach_reannounces_shape_after_unsubscribe() {
 }
 
 // This stays internal because cardinality admission is a hostile-wire boundary;
-// public query APIs cannot forge an over-limit registration stream.
+// public query APIs cannot forge an over-limit registration stream. The
+// 1,000-registration checkpoint covers the retained-shape cardinality required
+// by the existing 1,000-active-query single-peer topology.
 #[test]
 fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
     let schema = schema();
     let server = open_core(0x78, AuthorSubject::SYSTEM, &schema);
-    let mut peers = Vec::new();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber =
+        server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x80; 16]));
 
-    for peer_index in
-        0..(EXPECTED_MAX_RETAINED_PEER_SHAPES / EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER)
-    {
-        let (mut client_transport, server_transport) = duplex();
-        let subscriber = server.accept_subscriber(
-            server_transport,
-            AuthorSubject::for_test_bytes([0x80 + peer_index as u8; 16]),
-        );
-        for shape_offset in 0..EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER {
-            let shape_index = peer_index * EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER + shape_offset;
-            let shape = distinct_shape(&schema, shape_index);
-            client_transport
-                .send(register_shape_message(&shape))
-                .unwrap();
-            subscriber.borrow_mut().tick().unwrap();
-        }
-        let retained = {
-            let subscriber = subscriber.borrow();
-            let ConnectionLink::Subscriber(state) = &subscriber.link else {
-                panic!("accepted peer must be a subscriber");
-            };
-            state.shape_registrations.len()
-        };
-        assert_eq!(retained, EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER);
-        peers.push((client_transport, subscriber));
+    for shape_index in 0..EXISTING_SINGLE_PEER_ACTIVE_QUERY_COUNT {
+        let shape = distinct_shape(&schema, shape_index);
+        client_transport
+            .send(register_shape_message(&shape))
+            .unwrap();
+        subscriber.borrow_mut().tick().unwrap();
     }
-
-    let peer_extra = distinct_shape(&schema, EXPECTED_MAX_RETAINED_PEER_SHAPES + 1);
-    let (peer_transport, peer) = &mut peers[0];
-    peer_transport
-        .send(register_shape_message(&peer_extra))
-        .unwrap();
-    peer.borrow_mut().tick().unwrap();
-    assert!(matches!(
-        peer_transport.try_recv(),
-        Some(SyncMessage::SubscribeRejected { subscription, .. })
-            if subscription.shape_id == peer_extra.shape_id()
-    ));
     let retained = {
-        let peer = peer.borrow();
-        let ConnectionLink::Subscriber(state) = &peer.link else {
+        let subscriber = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &subscriber.link else {
+            panic!("accepted peer must be a subscriber");
+        };
+        state.shape_registrations.len()
+    };
+    assert_eq!(
+        retained, EXISTING_SINGLE_PEER_ACTIVE_QUERY_COUNT,
+        "one peer must retain enough shapes for the existing active-query topology"
+    );
+
+    for shape_index in
+        EXISTING_SINGLE_PEER_ACTIVE_QUERY_COUNT..EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER
+    {
+        let shape = distinct_shape(&schema, shape_index);
+        client_transport
+            .send(register_shape_message(&shape))
+            .unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let retained = {
+        let subscriber = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &subscriber.link else {
             panic!("accepted peer must be a subscriber");
         };
         state.shape_registrations.len()
     };
     assert_eq!(retained, EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER);
+
+    let peer_extra = distinct_shape(&schema, EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER);
+    client_transport
+        .send(register_shape_message(&peer_extra))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::SubscribeRejected { subscription, .. })
+            if subscription.shape_id == peer_extra.shape_id()
+    ));
+    let retained = {
+        let subscriber = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &subscriber.link else {
+            panic!("accepted peer must be a subscriber");
+        };
+        state.shape_registrations.len()
+    };
+    assert_eq!(
+        retained, EXPECTED_MAX_SHAPE_REGISTRATIONS_PER_PEER,
+        "the 1,025th retained shape must be rejected"
+    );
     assert!(
         server
             .node()
@@ -380,7 +397,7 @@ fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
             .is_none()
     );
 
-    let global_extra = distinct_shape(&schema, EXPECTED_MAX_RETAINED_PEER_SHAPES + 2);
+    let global_extra = distinct_shape(&schema, EXPECTED_MAX_RETAINED_PEER_SHAPES + 1);
     let (mut extra_transport, extra_server_transport) = duplex();
     let extra_peer = server.accept_subscriber(
         extra_server_transport,
