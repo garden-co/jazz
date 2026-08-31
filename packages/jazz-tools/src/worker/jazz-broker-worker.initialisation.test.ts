@@ -223,6 +223,12 @@ class TestPort {
       else this.leaseOutcomes.push(message);
       return;
     }
+    if (
+      message.type === "foreground-node-lease-test-allocated" ||
+      message.type === "foreground-node-lease-cancelled"
+    ) {
+      throw new Error(`Unexpected lease bootstrap response: ${message.type}`);
+    }
     const waiterIndex = this.eventWaiters.findIndex(({ predicate }) => predicate(message));
     if (waiterIndex >= 0) {
       this.eventWaiters.splice(waiterIndex, 1)[0]!.resolve(message);
