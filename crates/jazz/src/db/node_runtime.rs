@@ -17,6 +17,7 @@ where
 {
     pub(super) node: SharedNodeState<S>,
     mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
+    close_owner: futures::lock::Mutex<()>,
     tx_time_reservation_clock: Rc<Cell<TxTime>>,
     node_uuid: NodeUuid,
     receives_commits_as_local: bool,
@@ -104,6 +105,7 @@ where
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
             mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
+            close_owner: futures::lock::Mutex::new(()),
             tx_time_reservation_clock,
             node_uuid,
             receives_commits_as_local,
@@ -187,6 +189,13 @@ where
                 let _ = sender.send(());
             }
         }
+    }
+
+    /// Serialize shutdown drains while keeping admission closure outside the
+    /// await. Cancellation releases ownership so another close caller can
+    /// resume the same idempotent drain and finalization sequence.
+    pub(super) async fn lock_close_owner(&self) -> futures::lock::MutexGuard<'_, ()> {
+        self.close_owner.lock().await
     }
 
     pub(super) fn ensure_mutation_admission_open(&self) -> Result<(), Error> {
@@ -724,16 +733,23 @@ where
     /// Lock the node for opening a transaction while the database still owns
     /// transaction admission.
     ///
-    /// The second gate check closes the race where shutdown starts while an
-    /// opener is waiting for the node mutex. The tombstone check closes the
-    /// corresponding race with an already-linearized handle abandonment.
+    /// `owner_operation_admitted` is true only for an operation already
+    /// retained by the binding owner before shutdown. Those operations must
+    /// drain in FIFO order before the final sweep. Every direct caller checks
+    /// the gate both before and after waiting for the node mutex.
+    ///
+    /// The tombstone check closes the corresponding race with an
+    /// already-linearized handle abandonment.
     pub(super) async fn lock_for_transaction_open(
         &self,
         open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
     ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
-        self.ensure_transaction_admission_open()?;
+        if !owner_operation_admitted {
+            self.ensure_transaction_admission_open()?;
+        }
         let mut node = self.node.lock().await;
-        if let Err(error) = self.ensure_transaction_admission_open() {
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
             self.finish_transaction_abandonment_shutdown_in(&mut node)?;
             return Err(error);
         }
@@ -746,13 +762,16 @@ where
     /// A handle drop records its tombstone without waiting for this mutex.
     /// Therefore even an operation already queued ahead of the maintenance tick
     /// observes and retires the tombstone before it can stage, read, or commit.
+    /// Binding-owner operations accepted before shutdown may finish draining;
+    /// direct callers observe the closed gate after acquiring ownership.
     pub(super) async fn lock_for_transaction_operation(
         &self,
         open_tx_id: OpenTransactionId,
+        owner_operation_admitted: bool,
     ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
         let mut node = self.node.lock().await;
         self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
-        if let Err(error) = self.ensure_transaction_admission_open() {
+        if !owner_operation_admitted && let Err(error) = self.ensure_transaction_admission_open() {
             self.finish_transaction_abandonment_shutdown_in(&mut node)?;
             return Err(error);
         }
@@ -1050,6 +1069,11 @@ where
         Ok(pending.is_some() || retained)
     }
 
+    #[cfg(test)]
+    pub(super) fn defer_rejection_discard_for_test(&self, tx_id: TxId) {
+        self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+    }
+
     /// Finish rejection acknowledgement after all wait observers woken by one
     /// owner turn have had a chance to inspect the shared terminal state.
     pub(super) async fn flush_deferred_rejection_discards(&self) -> Result<(), Error> {
@@ -1321,6 +1345,14 @@ where
         self.transaction_wait_observers
             .borrow_mut()
             .splice(0..0, observers);
+    }
+
+    #[cfg(test)]
+    pub(super) fn enqueue_transaction_wait_observer_for_test(
+        &self,
+        observer: TransactionWaitObserver,
+    ) {
+        self.transaction_wait_observers.borrow_mut().push(observer);
     }
 
     pub(super) async fn drain_transaction_wait_observers(&self) {

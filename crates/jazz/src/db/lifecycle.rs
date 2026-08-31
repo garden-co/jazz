@@ -448,6 +448,12 @@ where
             return Ok(());
         }
         self.node.begin_mutation_shutdown();
+        // Transaction admission and Drop maintenance must cross their shutdown
+        // boundary before close can suspend. The final sweep is transferred to
+        // node-owned maintenance now, so cancellation while any accepted owner
+        // operation or waiter drains cannot leave open transactions behind.
+        self.node.begin_transaction_abandonment_shutdown();
+        let _close_owner = self.node.lock_close_owner().await;
         // Mutation admission belongs to the binding-facing owner. Once that
         // owner enters Closing it retains this Db and awaits every operation
         // it already accepted, in FIFO order, before storage is retired.
@@ -461,10 +467,10 @@ where
         // Acknowledge that durable rejection before closing storage; there is
         // no later owner turn after close to flush the bounded acknowledgement.
         self.node.flush_deferred_rejection_discards().await?;
-        // Close maintenance and finalization admission before the next await.
-        // Late transaction-handle and stream drops then belong to the final
-        // shutdown sweeps rather than to an owner turn that can no longer run.
-        self.node.begin_transaction_abandonment_shutdown();
+        // Close stream-finalization admission before its drain. Transaction
+        // maintenance was already closed and transferred before the first
+        // suspension point; finishing that sweep remains ordered after every
+        // accepted mutation and wait observer.
         self.node.begin_subscription_finalization_shutdown();
         self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;

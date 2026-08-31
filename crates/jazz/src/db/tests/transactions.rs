@@ -701,11 +701,16 @@ fn close_gates_transaction_admission_and_terminalizes_close_races() {
     }
 }
 
-/// Closing transfers its sweep to node-owned maintenance before its first lock
-/// wait. Cancelling that waiter therefore cannot leave either transaction kind
-/// live behind the closed admission gate.
-#[test]
-fn cancelled_close_still_terminalizes_both_transaction_handle_kinds() {
+#[derive(Clone, Copy, Debug)]
+enum CloseCancellationWait {
+    CloseOwner,
+    QueuedMutationDrain,
+    TransactionWaitObserverDrain,
+    DeferredRejectionDiscard,
+    TransactionSweep,
+}
+
+fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
 
     block_on(async {
@@ -714,23 +719,158 @@ fn cancelled_close_still_terminalizes_both_transaction_handle_kinds() {
         let exclusive = db.exclusive_tx().await.unwrap();
         let exclusive_id = exclusive.tx_id;
 
-        let guard = db.node.node.lock().await;
+        let mut observer_release = None;
+        let mut node_guard = None;
+        let mut close_owner_guard = None;
+        match wait {
+            CloseCancellationWait::CloseOwner => {
+                close_owner_guard = Some(db.node.lock_close_owner().await);
+            }
+            CloseCancellationWait::QueuedMutationDrain => {
+                db.node
+                    .enqueue_transaction_operation(
+                        mergeable_id,
+                        Box::pin(async {
+                            std::future::pending::<()>().await;
+                            Ok(())
+                        }),
+                    )
+                    .unwrap();
+            }
+            CloseCancellationWait::TransactionWaitObserverDrain => {
+                let (release, blocked) = futures::channel::oneshot::channel();
+                db.node
+                    .enqueue_transaction_wait_observer_for_test(Box::pin(async move {
+                        let _ = blocked.await;
+                    }));
+                observer_release = Some(release);
+            }
+            CloseCancellationWait::DeferredRejectionDiscard => {
+                db.node.defer_rejection_discard_for_test(TxId::new(
+                    TxTime::new(7_001, 9),
+                    NodeUuid::from_bytes([0xd7; 16]),
+                ));
+                node_guard = Some(db.node.node.lock().await);
+            }
+            CloseCancellationWait::TransactionSweep => {
+                node_guard = Some(db.node.node.lock().await);
+            }
+        }
+
         let mut closing = Box::pin(db.close());
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
-        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+        assert!(
+            matches!(closing.as_mut().poll(&mut context), Poll::Pending),
+            "close must suspend at {wait:?}",
+        );
+
+        let error = match db.mergeable_tx().await {
+            Ok(_) => panic!("close must reject transaction admission at {wait:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+
         drop(closing);
-        drop(guard);
+        if let Some(release) = observer_release {
+            release
+                .send(())
+                .expect("the pending observer remains owned by node maintenance");
+        }
+        drop(node_guard);
+        drop(close_owner_guard);
 
         db.tick().await.unwrap();
         assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
         for tx_id in [mergeable_id, exclusive_id] {
             let error = db.abandon_transaction_handle(tx_id).unwrap_err();
-            assert!(error.message.contains("missing open transaction"));
+            assert!(
+                error.message.contains("missing open transaction"),
+                "{wait:?} cancellation left transaction {tx_id} open: {error}",
+            );
         }
 
         drop(mergeable);
         drop(exclusive);
+    });
+}
+
+/// Internal because deterministic suspension at each node-owner wait and the
+/// resulting open-transaction owner state are not exposed by the public API.
+/// Admission closes and node maintenance owns the sweep before any of these
+/// boundaries can suspend.
+#[test]
+fn cancelled_close_sweeps_transactions_from_every_pre_sweep_wait() {
+    for wait in [
+        CloseCancellationWait::CloseOwner,
+        CloseCancellationWait::QueuedMutationDrain,
+        CloseCancellationWait::TransactionWaitObserverDrain,
+        CloseCancellationWait::DeferredRejectionDiscard,
+        CloseCancellationWait::TransactionSweep,
+    ] {
+        assert_cancelled_close_sweeps_transactions_at(wait);
+    }
+}
+
+/// Internal because cancellation must strand retained FIFO work between close
+/// owners; the public API does not expose that handoff boundary.
+#[test]
+fn cancelled_close_handoff_is_coherent_with_concurrent_and_repeated_close() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let transaction = db.mergeable_tx().await.unwrap();
+        let transaction_id = transaction.tx_id;
+        db.node
+            .enqueue_transaction_operation(
+                transaction_id,
+                Box::pin(async {
+                    std::future::pending::<()>().await;
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        let queued_transaction_id = OpenTransactionId::new();
+        db.enqueue_begin_mergeable(queued_transaction_id, None, None)
+            .unwrap();
+        db.enqueue_transaction_insert(
+            queued_transaction_id,
+            false,
+            "todos".to_owned(),
+            doctest_support::todo_cells("accepted before close", false),
+            InsertOptions {
+                row_id: Some(row(0xd8)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let queued_commit = db
+            .enqueue_commit_mergeable_handle(queued_transaction_id)
+            .unwrap();
+
+        let mut cancelled = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(cancelled);
+
+        let (first, second) = futures::future::join(db.close(), db.close()).await;
+        first.unwrap();
+        second.unwrap();
+        db.close().await.unwrap();
+        assert_eq!(
+            queued_commit.wait(DurabilityTier::Local).await.unwrap(),
+            queued_commit.mergeable_tx_id(),
+            "concurrent close owners must drain FIFO work accepted before shutdown",
+        );
+
+        let error = db.abandon_transaction_handle(transaction_id).unwrap_err();
+        assert!(error.message.contains("missing open transaction"));
+        drop(transaction);
     });
 }
 

@@ -14,6 +14,26 @@ where
         Rc::ptr_eq(&self.node, &other.node)
     }
 
+    async fn lock_for_transaction_open(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        self.node
+            .as_ref()
+            .lock_for_transaction_open(open_tx_id, self.owner_operation_admitted)
+            .await
+    }
+
+    async fn lock_for_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        self.node
+            .as_ref()
+            .lock_for_transaction_operation(open_tx_id, self.owner_operation_admitted)
+            .await
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
@@ -77,8 +97,7 @@ where
     /// [`Db::mergeable_tx`] instead.
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.ensure_mutation_operation_admitted()?;
-        self.node
-            .lock_for_transaction_open(id)
+        self.lock_for_transaction_open(id)
             .await?
             .open_mergeable(id, self.identity.author, None)
             .await
@@ -94,8 +113,7 @@ where
         author: AuthorSubject,
     ) -> Result<(), Error> {
         self.ensure_mutation_operation_admitted()?;
-        self.node
-            .lock_for_transaction_open(id)
+        self.lock_for_transaction_open(id)
             .await?
             .open_mergeable(id, author, Some(author))
             .await
@@ -117,8 +135,7 @@ where
                 "attribution requires a trusted serving node",
             ));
         }
-        self.node
-            .lock_for_transaction_open(id)
+        self.lock_for_transaction_open(id)
             .await?
             .open_mergeable(id, made_by, Some(self.identity.author))
             .await
@@ -176,7 +193,6 @@ where
         tx_id: OpenTransactionId,
     ) -> Result<(), Error> {
         if self
-            .node
             .lock_for_transaction_operation(tx_id)
             .await?
             .mergeable_transaction_is_attributed(tx_id)?
@@ -200,7 +216,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         node.tx_write_mergeable_in_schema(
             tx_id,
             self.schema_version_id,
@@ -257,7 +273,7 @@ where
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         node.tx_write_mergeable_in_schema_and_branch_with_verified_inherited_cells(
             tx_id,
             self.schema_version_id,
@@ -286,8 +302,7 @@ where
         self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPDATE")
             .await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.node
-            .lock_for_transaction_operation(tx_id)
+        self.lock_for_transaction_operation(tx_id)
             .await?
             .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .await
@@ -324,14 +339,12 @@ where
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let head_cells = self
-            .node
             .lock_for_transaction_operation(tx_id)
             .await?
             .visible_current_cells_in_branch(table, &head, row)
             .await?;
         if head_cells.is_some() {
-            self.node
-                .lock_for_transaction_operation(tx_id)
+            self.lock_for_transaction_operation(tx_id)
                 .await?
                 .tx_patch_mergeable_in_schema_and_branch(
                     tx_id,
@@ -346,7 +359,6 @@ where
             return Ok(());
         }
         let Some(mut inherited) = self
-            .node
             .lock_for_transaction_operation(tx_id)
             .await?
             .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
@@ -390,7 +402,6 @@ where
         operation: &str,
     ) -> Result<(), Error> {
         let permission_subject = self
-            .node
             .lock_for_transaction_operation(tx_id)
             .await?
             .mergeable_transaction_permission_subject(tx_id)?;
@@ -406,8 +417,7 @@ where
             (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
             (Some(_), None) => true,
             (Some(_), Some(policy)) => {
-                self.node
-                    .lock_for_transaction_operation(tx_id)
+                self.lock_for_transaction_operation(tx_id)
                     .await?
                     .read_policy_query_allows_open_tx_row(
                         tx_id,
@@ -437,8 +447,7 @@ where
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.node
-            .lock_for_transaction_operation(tx_id)
+        self.lock_for_transaction_operation(tx_id)
             .await?
             .tx_write_mergeable_in_schema(
                 tx_id,
@@ -467,7 +476,6 @@ where
     ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         if self
-            .node
             .lock_for_transaction_operation(tx_id)
             .await?
             .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
@@ -480,8 +488,7 @@ where
             ));
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
-        self.node
-            .lock_for_transaction_operation(tx_id)
+        self.lock_for_transaction_operation(tx_id)
             .await?
             .tx_write_mergeable_in_schema_and_branch(
                 tx_id,
@@ -510,7 +517,7 @@ where
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let content_parents = node
             .local_content_winner_tx_id(table, row)
             .await?
@@ -561,7 +568,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let content_parents = node
             .local_content_winner_tx_id_in_branch(table, &branch, row)
             .await?
@@ -607,7 +614,6 @@ where
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
         let published = self
-            .node
             .lock_for_transaction_operation(open_tx_id)
             .await?
             .commit_mergeable_open(open_tx_id, || self.next_now_ms())
@@ -898,7 +904,7 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut cells = node
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
             .await?;
@@ -919,7 +925,6 @@ where
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
         let cells = self
-            .node
             .lock_for_transaction_operation(tx_id)
             .await?
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
@@ -1002,7 +1007,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut snapshot = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_relation_snapshot_with_options(
@@ -1037,7 +1042,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut rows = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(
@@ -1068,7 +1073,7 @@ where
         tx_id: OpenTransactionId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut rows = node.tx_current_rows(tx_id, table).await?;
         node.hydrate_current_rows(&mut rows).await?;
         Ok(rows)
@@ -1084,8 +1089,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .lock_for_transaction_operation(tx_id)
+        self.lock_for_transaction_operation(tx_id)
             .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
@@ -1114,8 +1118,7 @@ where
             .await?
             .expect("exclusive UPDATE requires a visible target");
         cells.extend(patch);
-        self.node
-            .lock_for_transaction_operation(tx_id)
+        self.lock_for_transaction_operation(tx_id)
             .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
@@ -1145,8 +1148,7 @@ where
             .unwrap_or_default();
         cells.extend(patch);
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .lock_for_transaction_operation(tx_id)
+        self.lock_for_transaction_operation(tx_id)
             .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
@@ -1173,7 +1175,6 @@ where
         allow_absent: bool,
     ) -> Result<Option<RowCells>, Error> {
         let identity = self
-            .node
             .lock_for_transaction_operation(tx_id)
             .await?
             .exclusive_transaction_bound_author(tx_id)?;
@@ -1186,8 +1187,7 @@ where
             (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
             (Some(_), None) => true,
             (Some(_), Some(policy)) => {
-                self.node
-                    .lock_for_transaction_operation(tx_id)
+                self.lock_for_transaction_operation(tx_id)
                     .await?
                     .read_policy_query_allows_open_tx_row(
                         tx_id,
@@ -1214,8 +1214,7 @@ where
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        self.node
-            .lock_for_transaction_operation(tx_id)
+        self.lock_for_transaction_operation(tx_id)
             .await?
             .tx_write_in_schema_at_ms(
                 tx_id,
@@ -1240,7 +1239,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.lock_for_transaction_operation(tx_id).await?;
+        let mut node = self.lock_for_transaction_operation(tx_id).await?;
         // Restore needs one content version and one deletion-register version:
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
@@ -1274,7 +1273,6 @@ where
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
         let (published, unit) = self
-            .node
             .lock_for_transaction_operation(open_tx_id)
             .await?
             .commit_exclusive_bound(open_tx_id, self.next_now_ms())
@@ -1324,7 +1322,6 @@ where
         author: AuthorSubject,
     ) -> Result<TxId, Error> {
         let (published, unit) = self
-            .node
             .lock_for_transaction_operation(open_tx_id)
             .await?
             .commit_exclusive(open_tx_id, author, self.next_now_ms())
@@ -1364,8 +1361,7 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.node
-            .lock_for_transaction_open(id)
+        self.lock_for_transaction_open(id)
             .await?
             .open_exclusive_for_identity(id, author)
             .await
