@@ -691,7 +691,9 @@ fn run_concurrent_live(
     install_participant_claims(&mut edge_node, config);
     apply_core_binding(&mut core, &shape, &binding);
     apply_binding(&mut edge_node, &shape, &binding);
-    let mut policy_peer = PeerState::relay();
+    // This direct benchmark helper represents one SYSTEM-scoped policy
+    // reader, not a multiplexing transport relay.
+    let mut policy_peer = PeerState::new();
     hydrate_edge_policy_direct(&mut core, &mut edge_node, &mut policy_peer);
 
     let mut writer_nodes = Vec::with_capacity(config.active);
@@ -2406,7 +2408,9 @@ fn open_participant(
             node: edge_node,
             _dir: edge_dir,
             core_peer: PeerState::client_link(identity),
-            policy_peer: PeerState::relay(),
+            // Policy hydration is invoked directly in this simulation. It
+            // never carries a downstream session through a relay transport.
+            policy_peer: PeerState::new(),
         },
     }
 }

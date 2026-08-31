@@ -2600,7 +2600,9 @@ fn open_edge(
         node,
         _dir: dir,
         core_peer: PeerState::edge_client(author),
-        policy_peer: PeerState::relay(),
+        // The benchmark drives this policy reader directly. It is not a
+        // multiplexing relay connection and has one SYSTEM policy identity.
+        policy_peer: PeerState::new(),
     }
 }
 
