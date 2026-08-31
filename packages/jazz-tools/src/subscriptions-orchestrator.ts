@@ -212,7 +212,7 @@ export class SubscriptionsOrchestrator {
    * {@link makeQueryKey} to register, and {@link getCacheEntry} to subscribe.
    */
   computeKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
-    return `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
+    return `${this.config.appId}:${serializeQueryOptions(this.prepareQueryOptions(options))}:${query._build()}`;
   }
 
   makeQueryKey<T extends { id: string }>(
@@ -220,10 +220,11 @@ export class SubscriptionsOrchestrator {
     options?: QueryOptions,
     snapshot?: T[],
   ): string {
-    const key = this.computeKey(query, options);
+    const preparedOptions = this.prepareQueryOptions(options);
+    const key = `${this.config.appId}:${serializeQueryOptions(preparedOptions)}:${query._build()}`;
     this.queryDefinitions.set(key, {
       query,
-      options,
+      options: preparedOptions,
       snapshot: snapshot ? [...snapshot] : undefined,
     });
     // A re-seed invalidates any memoised pre-entry snapshot state.
@@ -236,6 +237,10 @@ export class SubscriptionsOrchestrator {
     }
 
     return key;
+  }
+
+  private prepareQueryOptions(options?: QueryOptions): QueryOptions | undefined {
+    return this.db.prepareQueryOptions?.(options) ?? options;
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {

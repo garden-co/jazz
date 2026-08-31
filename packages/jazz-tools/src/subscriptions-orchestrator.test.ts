@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "./runtime/context.js";
 import { type QueryBuilder, type QueryOptions, type SubscriptionHandle } from "./runtime/db.js";
-import { createInspectorLocalQueryOptions } from "./internal/inspector-query.js";
+import {
+  createInspectorLocalQueryOptions,
+  isInspectorLocalQueryOptions,
+} from "./internal/inspector-query.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,
@@ -628,6 +631,40 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     expect(harness.manager.computeKey(query)).not.toBe(
       harness.manager.computeKey(query, createInspectorLocalQueryOptions()),
     );
+  });
+
+  it("SO-U25a1 applies a source-owned Inspector capability before computing and storing a key", async () => {
+    const query = makeQuery();
+    const calls: SubscribeCall[] = [];
+    const manager = new SubscriptionsOrchestrator(
+      { appId: "inspector-source" },
+      {
+        prepareQueryOptions: (options) => createInspectorLocalQueryOptions(options),
+        subscribeDelta: (subscribedQuery, callback, options) => {
+          calls.push({
+            query: subscribedQuery,
+            callback,
+            options,
+            unsubscribe: vi.fn() as SubscriptionHandle,
+          });
+          return calls.at(-1)!.unsubscribe;
+        },
+      },
+    );
+    try {
+      const publicKey = `${"inspector-source"}:${JSON.stringify({})}:${query._build()}`;
+      const key = manager.makeQueryKey(query);
+
+      expect(key).toBe(`inspector-source:inspector-local:{}:${query._build()}`);
+      expect(key).not.toBe(publicKey);
+      const entry = manager.getCacheEntry<Todo>(key);
+      const stop = entry.subscribe({});
+      expect(calls).toHaveLength(1);
+      expect(isInspectorLocalQueryOptions(calls[0]?.options)).toBe(true);
+      stop();
+    } finally {
+      await manager.shutdown();
+    }
   });
 
   it("SO-U25b computeKey alone leaves the key unregistered", async () => {

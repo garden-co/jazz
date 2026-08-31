@@ -419,16 +419,13 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with the Inspector local-read capability in overlay mode", () => {
+  it("leaves local-read source selection to the injected Inspector provider", () => {
     renderGrid();
 
     const options = mockUseAll.mock.calls[0]?.[1];
     expect(options).toBeDefined();
-    expect(Object.isFrozen(options)).toBe(true);
-    // The bridge's capability is non-enumerable, so it remains invisible to
-    // ordinary application option serialization while Db can recognize it.
     expect(Object.keys(options as object)).toEqual([]);
-    expect(Object.getOwnPropertySymbols(options as object)).toHaveLength(1);
+    expect(Object.getOwnPropertySymbols(options as object)).toHaveLength(0);
   });
 
   it("adds a where clause and compiles it into query conditions", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { Db, type DbConfig } from "./db.js";
+import { Db, getDbSubscriptionSource, type DbConfig } from "./db.js";
+import { isInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import type { JazzClient, Row } from "./client.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -35,8 +36,8 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 }
 
 class TestDb extends Db {
-  constructor(client: JazzClient) {
-    super({ appId: "db-one-limit-test" }, new TestRuntimeSource(client));
+  constructor(client: JazzClient, config: DbConfig = { appId: "db-one-limit-test" }) {
+    super(config, new TestRuntimeSource(client));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
@@ -134,5 +135,35 @@ describe("Db.one", () => {
       localUpdates: "deferred",
       openTransactionId: "00000000000070008000000000000001",
     });
+  });
+
+  it("mints local-only read options only for an Inspector control-port attachment", async () => {
+    const { client, query } = makeClient();
+    const ordinary = new TestDb(client);
+    expect(getDbSubscriptionSource(ordinary).prepareQueryOptions).toBeUndefined();
+
+    // The host publishes this coordinate before an Inspector asks the worker
+    // to attach a peer. It is not itself a local-read authority.
+    const hostCoordinateOnly = new TestDb(client, {
+      appId: "db-one-host-coordinate-only",
+      runtimeSources: { inspectorHostPhysicalDbName: "jazz-host-coordinate" },
+    });
+    expect(getDbSubscriptionSource(hostCoordinateOnly).prepareQueryOptions).toBeUndefined();
+
+    const attached = new TestDb(client, {
+      appId: "db-one-inspector-attachment",
+      runtimeSources: {
+        browserWorkerPort: {} as MessagePort,
+        inspectorHostPhysicalDbName: "jazz-inspector-authenticated-context",
+      },
+    });
+    const source = getDbSubscriptionSource(attached);
+    const options = source.prepareQueryOptions?.({ tier: "local-first" });
+
+    expect(isInspectorLocalQueryOptions(options)).toBe(true);
+    expect(options).toMatchObject({ tier: "local-first" });
+
+    await source.all!(app.todos.where({ done: false }), { tier: "remote" });
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ tier: "local-only" });
   });
 });

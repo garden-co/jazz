@@ -54,7 +54,10 @@ import {
   resolveClientInternalSessionSync,
 } from "./client-session.js";
 import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
-import { isInspectorLocalQueryOptions } from "../internal/inspector-query.js";
+import {
+  createInspectorLocalQueryOptions,
+  isInspectorLocalQueryOptions,
+} from "../internal/inspector-query.js";
 import { authSecretSeedForMinting } from "./auth-secret-codec.js";
 import {
   getDbInternalSession,
@@ -215,6 +218,12 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
 
 /** Package-internal subscription surface used by Jazz's UI bindings. */
 export interface DbSubscriptionSource {
+  /**
+   * Prepare public query options before they become part of a subscription
+   * cache key. The Inspector attachment uses this private seam to add its
+   * local-read capability; applications never receive a constructor for it.
+   */
+  prepareQueryOptions?(options?: QueryOptions): QueryOptions | undefined;
   all?<T extends { id: string }>(
     query: QueryBuilder<T>,
     options?: QueryOptions,
@@ -1463,10 +1472,30 @@ export class Db {
     setDbInternalSession(this, resolveClientInternalSessionSync(sessionInput));
     this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
+    // An overlay peer gets its port only through the authenticated Inspector
+    // control handoff. Keep the resulting read policy inside this source: the
+    // Inspector UI uses ordinary `useAll`, while no application-facing option
+    // or package export can manufacture local-only reads.
+    const inspectorAttached =
+      config.runtimeSources?.browserWorkerPort !== undefined &&
+      config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
+    const prepareQueryOptions = inspectorAttached
+      ? (options?: QueryOptions) => createInspectorLocalQueryOptions(options)
+      : undefined;
     dbSubscriptionSources.set(this, {
-      all: (query, options) => this.allInternal(query, lowerPublicDbQueryOptions(options)),
+      ...(prepareQueryOptions ? { prepareQueryOptions } : {}),
+      all: (query, options) =>
+        this.allInternal(
+          query,
+          lowerPublicDbQueryOptions(prepareQueryOptions?.(options) ?? options),
+        ),
       subscribeDelta: (query, callback, options, session) =>
-        this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options), session),
+        this.subscribeDelta(
+          query,
+          callback,
+          lowerPublicDbQueryOptions(prepareQueryOptions?.(options) ?? options),
+          session,
+        ),
     });
   }
 
