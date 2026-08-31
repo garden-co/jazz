@@ -2696,7 +2696,11 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
   ): Promise<unknown | undefined> {
     if (this.closed) return;
-    if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
+    // A Local one-shot read observes the present replica without waiting for
+    // a coverage receipt. This includes non-durable browser followers: their
+    // live subscriptions still use default full propagation through the
+    // durable worker, while `local-only` alone disables that background work.
+    if (tier == null || tier === "local") return;
     if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
     if (!this.hasUpstream()) return;
     if (!this.db.attachQuery) return;
