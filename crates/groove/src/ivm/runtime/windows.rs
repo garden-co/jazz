@@ -50,6 +50,20 @@ pub(super) enum ArgByDirection {
     Max,
 }
 
+pub(super) fn arg_by_candidate_replaces(
+    candidate_key: &[u8],
+    candidate_record: &[u8],
+    winner_key: &[u8],
+    winner_record: &[u8],
+    direction: ArgByDirection,
+) -> bool {
+    match candidate_key.cmp(winner_key) {
+        std::cmp::Ordering::Less => matches!(direction, ArgByDirection::Min),
+        std::cmp::Ordering::Greater => matches!(direction, ArgByDirection::Max),
+        std::cmp::Ordering::Equal => candidate_record < winner_record,
+    }
+}
+
 pub(super) struct ArgBySpec<'a> {
     pub(super) group_fields: &'a [String],
     pub(super) group_field_indices: &'a [usize],
@@ -74,13 +88,9 @@ pub(super) fn arg_by_winner_from_records(
         let key = encoded_record_key_part(descriptor, &record, comparison_field_indices)?;
         let replaces = winner
             .as_ref()
-            .is_none_or(
-                |(winner_key, winner_record): &SourceRecord| match key.cmp(winner_key) {
-                    std::cmp::Ordering::Less => matches!(direction, ArgByDirection::Min),
-                    std::cmp::Ordering::Greater => matches!(direction, ArgByDirection::Max),
-                    std::cmp::Ordering::Equal => record < *winner_record,
-                },
-            );
+            .is_none_or(|(winner_key, winner_record): &SourceRecord| {
+                arg_by_candidate_replaces(&key, &record, winner_key, winner_record, direction)
+            });
         if replaces {
             winner = Some((key, record));
         }

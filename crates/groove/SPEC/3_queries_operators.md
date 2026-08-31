@@ -176,8 +176,11 @@ emits only the winner changes for groups touched by an input change (`ArgMaxByOp
 and `ArgMinByOp` in the reference implementation). These operators are
 executable and graph-only: each takes any single upstream graph input, including
 filtered, joined, or unioned inputs.
-They may consume a recursive node's output, but neither operator may occur
-inside a recursive seed or step graph (`INV-REC-13`, ch. 6).
+They may consume a recursive node's output or occur inside a recursive seed or
+step graph. Jazz rejects user-authored logical recursion that would lower to
+ArgBy before current-row source resolution; internal ArgBy added by that source
+expansion remains executable. Recursive hydration applies the same deterministic
+winner ordering before facts enter the accumulated set (`INV-REC-13`, ch. 6).
 
 For base-table inputs, the table primary key must equal the group columns
 followed by the order columns, in that exact order (`group_cols + order_cols`).

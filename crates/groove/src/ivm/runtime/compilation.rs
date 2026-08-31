@@ -227,15 +227,6 @@ impl IvmRuntime {
                 if builder_contains_recursive(seed) || builder_contains_recursive(step) {
                     return Err(IvmRuntimeError::UnsupportedNestedRecursion);
                 }
-                // Recursive accumulation is a monotone set fixed point. ArgBy winner
-                // replacement is non-monotone, so reject it before compiling either
-                // child graph (INV-REC-13).
-                if builder_contains_arg_by(seed) || builder_contains_arg_by(step) {
-                    return Err(IvmRuntimeError::UnsupportedArgMaxBy(
-                        "arg_max_by and arg_min_by are not supported inside recursive seed or step graphs"
-                            .to_owned(),
-                    ));
-                }
                 let compiled_seed =
                     self.add_dedup_graph_cached(seed, output_memo, compiled_memo)?;
                 let compiled_step =

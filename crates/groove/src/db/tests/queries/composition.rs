@@ -394,9 +394,29 @@ async fn arg_by_snapshot_hydration_tie_breaker_is_independent_of_reversed_input_
         1,
     )];
 
+    let output = || {
+        RecordDescriptor::new([
+            ("row", ColumnType::U64.clone()),
+            ("title", ColumnType::String.clone()),
+            ("stamp", ColumnType::U64.clone()),
+            ("node", ColumnType::U64.clone()),
+        ])
+    };
+    let frontier = || GraphBuilder::frontier_source("frontier", output());
+    let recursive = |seed| GraphBuilder::recursive(seed, frontier(), "frontier", 4);
     for graph in [
         GraphBuilder::arg_min_by(input(), ["row"], ["stamp", "node"]),
         GraphBuilder::arg_max_by(input(), ["row"], ["stamp", "node"]),
+        recursive(GraphBuilder::arg_min_by(
+            input(),
+            ["row"],
+            ["stamp", "node"],
+        )),
+        recursive(GraphBuilder::arg_max_by(
+            input(),
+            ["row"],
+            ["stamp", "node"],
+        )),
     ] {
         assert_eq!(
             database
@@ -578,7 +598,7 @@ async fn predicate_or_filter_matches_either_branch() {
 }
 
 #[futures_test::test]
-async fn arg_by_rejects_bad_primary_keys_and_recursive_seed_or_step_graphs() {
+async fn arg_by_rejects_bad_primary_keys() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])
         .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
@@ -592,62 +612,6 @@ async fn arg_by_rejects_bad_primary_keys_and_recursive_seed_or_step_graphs() {
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("requires primary key"));
-
-    let output = || {
-        RecordDescriptor::new([
-            ("row", ColumnType::U64.clone()),
-            ("stamp", ColumnType::U64.clone()),
-        ])
-    };
-    let frontier = || GraphBuilder::frontier_source("frontier", output());
-    let seed = || GraphBuilder::table("history").project(["row", "stamp"]);
-    let recursive_graphs = [
-        (
-            "arg_max_by seed",
-            GraphBuilder::recursive(
-                history_arg_max().project(["row", "stamp"]),
-                frontier(),
-                "frontier",
-                4,
-            ),
-        ),
-        (
-            "arg_min_by seed",
-            GraphBuilder::recursive(
-                history_arg_min().project(["row", "stamp"]),
-                frontier(),
-                "frontier",
-                4,
-            ),
-        ),
-        (
-            "arg_max_by step",
-            GraphBuilder::recursive(
-                seed(),
-                GraphBuilder::arg_max_by(frontier(), ["row"], ["stamp"]),
-                "frontier",
-                4,
-            ),
-        ),
-        (
-            "arg_min_by step",
-            GraphBuilder::recursive(
-                seed(),
-                GraphBuilder::arg_min_by(frontier(), ["row"], ["stamp"]),
-                "frontier",
-                4,
-            ),
-        ),
-    ];
-    for (case, graph) in recursive_graphs {
-        let err = database.subscribe_one_sink(graph).await.unwrap_err();
-        assert!(
-            format!("{err}").contains(
-                "arg_max_by and arg_min_by are not supported inside recursive seed or step graphs"
-            ),
-            "{case}: {err}"
-        );
-    }
 }
 
 #[futures_test::test]
