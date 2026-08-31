@@ -1506,6 +1506,7 @@ impl PeerState {
         &mut self,
         node: &mut NodeState<S>,
         identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
         subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1514,6 +1515,12 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        // Terminal authorization support is an authority-owned usage site,
+        // not a wire Subscribe. The caller supplies the connection's admitted
+        // claim snapshot before owner-loop maintenance can run: the node's
+        // author-keyed compatibility cache can already have been overwritten
+        // by a sibling session for this same identity.
+        self.set_subscription_policy_binding(subscription, (identity, claims));
         let previous_role = self.role;
         let previous_permission_identity = self.permission_identity;
         self.role = PeerRole::ClientLink { identity };

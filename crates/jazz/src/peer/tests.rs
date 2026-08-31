@@ -989,7 +989,14 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let (_missing_dir, mut missing_edge) = open_node_with_schema(node(0xa5), schema.clone());
     let mut missing_peer = PeerState::edge_client(writer);
     let missing_outcome = missing_peer
-        .ingest_edge_mergeable_commit_unit(&mut missing_edge, tx.clone(), versions.clone(), 10, 10)
+        .ingest_edge_mergeable_commit_unit(
+            &mut missing_edge,
+            tx.clone(),
+            versions.clone(),
+            10,
+            10,
+            BTreeMap::new(),
+        )
         .expect("missing policy claim must fail closed, not abort edge ingest");
     let missing_updates = missing_edge
         .persist_and_settle_outcome(missing_outcome)
@@ -1001,10 +1008,9 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // The support rehydrate must temporarily evaluate the writer's bound
     // session claim even while the peer normally serves as another user.
     let (_bound_dir, mut bound_edge) = open_node_with_schema(node(0xa6), schema.clone());
-    bound_edge.set_test_provider_claims(
-        writer,
-        BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]),
-    );
+    let bound_claims = BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]);
+    bound_edge.set_test_provider_claims(writer, bound_claims.clone());
+    let bound_policy_claims = bound_edge.session_claims_for(writer);
     let prior = bound_edge
         .commit_mergeable_settled(
             MergeableCommit::new("resources", row(0xa8), 1)
@@ -1019,7 +1025,14 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let mut system_serving_peer =
         PeerState::edge_client_with_permission_identity(transport_identity, AuthorSubject::SYSTEM);
     let bound_subscriptions = system_serving_peer
-        .unsettled_authority_scope_subscriptions(&mut bound_edge, writer, &versions, None, true)
+        .unsettled_authority_scope_subscriptions(
+            &mut bound_edge,
+            writer,
+            bound_policy_claims,
+            &versions,
+            None,
+            true,
+        )
         .expect("edge support must bind the writer rather than the transport identity");
     let bound_subscription = bound_subscriptions
         .and_then(|subscriptions| subscriptions.into_iter().next())
@@ -1039,19 +1052,19 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // A present but ill-typed claim remains a real binding error; only an
     // absent claim receives the fail-closed empty-proof treatment.
     let (_wrong_type_dir, mut wrong_type_edge) = open_node_with_schema(node(0xa7), schema);
-    wrong_type_edge.set_test_provider_claims(
-        writer,
-        BTreeMap::from([(
-            "session_id".to_owned(),
-            Value::String("not-a-uuid".to_owned()),
-        )]),
-    );
+    let wrong_type_claims = BTreeMap::from([(
+        "session_id".to_owned(),
+        Value::String("not-a-uuid".to_owned()),
+    )]);
+    wrong_type_edge.set_test_provider_claims(writer, wrong_type_claims.clone());
+    let wrong_type_policy_claims = wrong_type_edge.session_claims_for(writer);
     let mut wrong_type_peer =
         PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
     wrong_type_peer
         .unsettled_authority_scope_subscriptions(
             &mut wrong_type_edge,
             writer,
+            wrong_type_policy_claims,
             &versions,
             None,
             true,
@@ -1059,6 +1072,124 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
         .expect_err("present ill-typed claim must remain an error");
     assert_eq!(wrong_type_peer.link_identity(), transport_identity);
     assert_eq!(wrong_type_peer.identity(), transport_identity);
+}
+
+/// Deferred edge fates own their support receiver by the exact admission
+/// snapshot, not merely by the canonical policy clause. A later authenticated
+/// refresh for the same author must park beside the old fate without replacing
+/// its support view.
+#[test]
+fn deferred_edge_support_coexists_across_same_link_claim_refresh() {
+    let schema = session_claim_read_policy_schema();
+    let writer = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xd3), schema.clone());
+    let (a_tx, a_versions) = resource_commit_unit(&mut writer_node, writer, row(0xd4));
+    let (b_tx, b_versions) = resource_commit_unit(&mut writer_node, writer, row(0xd5));
+    let (_edge_dir, mut edge) = open_node_with_schema(node(0xd6), schema);
+    let seed = edge
+        .commit_mergeable_settled(
+            MergeableCommit::new("resources", row(0xd7), 1)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([(
+                    "owner".to_owned(),
+                    Value::Uuid(writer.test_uuid()),
+                )])),
+        )
+        .expect("seed a resource visible only to writer's A claim");
+    accept_global(&mut edge, seed, 1);
+    let a_raw_claims = BTreeMap::from([(
+        "session_id".to_owned(),
+        Value::Uuid(writer.test_uuid()),
+    )]);
+    edge.set_test_provider_claims(writer, a_raw_claims);
+    let a_claims = edge.session_claims_for(writer);
+    let mut peer = PeerState::edge_client(writer);
+    let a_outcome = peer
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            a_tx.clone(),
+            a_versions.clone(),
+            10,
+            10,
+            a_claims.clone(),
+        )
+        .expect("A parks until its own support receiver settles");
+    edge.persist_and_settle_outcome(a_outcome).unwrap();
+
+    let b_raw_claims = BTreeMap::from([
+        ("session_id".to_owned(), Value::Uuid(writer.test_uuid())),
+        ("refresh_epoch".to_owned(), Value::Bool(true)),
+    ]);
+    edge.set_test_provider_claims(writer, b_raw_claims);
+    let b_claims = edge.session_claims_for(writer);
+    let a_subscription = peer.deferred_edge_fates[&a_tx.tx_id].scope_subscriptions[0];
+    let publication_footprint = peer.publication_states.len();
+    let refreshed_retransmit = peer
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            a_tx.clone(),
+            a_versions,
+            11,
+            11,
+            b_claims.clone(),
+        )
+        .expect("an exact refreshed retransmit preserves A's deferred fate");
+    assert!(refreshed_retransmit.value.is_empty());
+    assert_eq!(peer.deferred_edge_fate_count(), 1);
+    assert_eq!(peer.edge_scope_subscription_count(), 1);
+    assert_eq!(peer.publication_states.len(), publication_footprint);
+    assert_eq!(
+        peer.subscription_policy_binding(a_subscription),
+        Some((writer, a_claims.clone())),
+        "B's retransmit cannot allocate or replace A's retained support"
+    );
+    let b_outcome = peer
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            b_tx.clone(),
+            b_versions,
+            11,
+            11,
+            b_claims.clone(),
+        )
+        .expect("refreshed B parks beside, rather than replacing, A");
+    edge.persist_and_settle_outcome(b_outcome).unwrap();
+
+    let b_subscription = peer.deferred_edge_fates[&b_tx.tx_id].scope_subscriptions[0];
+    assert_ne!(
+        a_subscription, b_subscription,
+        "the retained usage identity includes immutable claims"
+    );
+    assert_eq!(peer.edge_scope_subscription_count(), 2);
+    assert_eq!(
+        peer.subscription_policy_binding(a_subscription),
+        Some((writer, a_claims)),
+        "the parked A fate retains its original claim context after refresh"
+    );
+    assert_eq!(
+        peer.subscription_policy_binding(b_subscription),
+        Some((writer, b_claims)),
+        "the refreshed B fate receives a distinct support receiver"
+    );
+    assert!(
+        !peer.publication_states[&a_subscription].result_member_set.is_empty(),
+        "A evaluates against the visible writer claim"
+    );
+    assert!(
+        !peer.publication_states[&b_subscription].result_member_set.is_empty(),
+        "B evaluates independently under its refreshed snapshot"
+    );
+
+    let settled = peer
+        .drain_deferred_edge_fates(&mut edge, 12)
+        .expect("both binding-qualified support receivers can settle independently");
+    edge.persist_and_settle_outcome(settled).unwrap();
+    assert_eq!(peer.deferred_edge_fate_count(), 0);
+    assert_eq!(
+        peer.edge_scope_subscription_count(),
+        0,
+        "releasing both fates drops their independent retention references"
+    );
 }
 
 #[test]
@@ -1072,7 +1203,14 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let mut peer = PeerState::edge_client(writer);
 
     let outcome = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10, 10)
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            tx.clone(),
+            versions,
+            10,
+            10,
+            BTreeMap::new(),
+        )
         .expect("missing prepared seed claim must be a deferred empty support proof");
     let updates = edge.persist_and_settle_outcome(outcome).unwrap();
     assert!(updates.is_empty());
@@ -1094,19 +1232,40 @@ fn deferred_edge_ingest_rejects_a_conflicting_retransmit() {
     let mut peer = PeerState::edge_client(writer);
 
     let _ = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10, 10)
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            tx.clone(),
+            versions.clone(),
+            10,
+            10,
+            BTreeMap::new(),
+        )
         .expect("missing support claim parks the first commit unit");
     assert_eq!(peer.deferred_edge_fate_count(), 1);
 
     let _ = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10, 10)
+        .ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            tx.clone(),
+            versions.clone(),
+            10,
+            10,
+            BTreeMap::new(),
+        )
         .expect("an identical deferred retransmit remains idempotent");
     assert_eq!(peer.deferred_edge_fate_count(), 1);
 
     let mut conflicting = tx.clone();
     conflicting.n_total_writes = conflicting.n_total_writes.saturating_add(1);
     assert!(matches!(
-        peer.ingest_edge_mergeable_commit_unit(&mut edge, conflicting, versions, 10, 10)
+        peer.ingest_edge_mergeable_commit_unit(
+            &mut edge,
+            conflicting,
+            versions,
+            10,
+            10,
+            BTreeMap::new(),
+        )
             .resolve(),
         Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == tx.tx_id
     ));
@@ -1206,6 +1365,7 @@ fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
         versions.clone(),
         100 + ttl_ms - 1,
         u64::MAX,
+        BTreeMap::new(),
     )
     .expect("missing support defers the edge write");
     let first_updates = edge.persist_and_settle_outcome(first_outcome).unwrap();
@@ -1226,6 +1386,7 @@ fn edge_ingest_uses_monotonic_scope_ttl_and_retains_wall_admission_time() {
         versions,
         100 + ttl_ms,
         u64::MAX,
+        BTreeMap::new(),
     )
     .expect("an identical deferred retransmit remains admissible");
     let retry_updates = edge.persist_and_settle_outcome(retry_outcome).unwrap();

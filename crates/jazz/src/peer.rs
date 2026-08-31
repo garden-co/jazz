@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
+use groove::records::Value;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 

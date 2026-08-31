@@ -258,6 +258,10 @@ pub(super) struct DeferredEdgeFate {
     /// than treating time spent awaiting permission support as client slack.
     pub(super) admission_now_ms: u64,
     pub(super) permission_identity: AuthorSubject,
+    /// Immutable claims captured from the admitted uploading link. Deferred
+    /// support must not consult the identity-global compatibility cache on a
+    /// later drain turn.
+    pub(super) policy_claims: BTreeMap<String, Value>,
     pub(super) scope_subscriptions: Vec<SubscriptionKey>,
 }
 

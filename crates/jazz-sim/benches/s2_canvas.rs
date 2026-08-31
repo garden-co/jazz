@@ -334,12 +334,14 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             };
             let edge_start = ctx.now_ms();
             let active = &mut participants[active_idx];
+            let policy_claims = raw_claims(active.peer.identity());
             let outcome = block_on(active.peer.ingest_edge_mergeable_commit_unit(
                 &mut active.edge.node,
                 tx,
                 versions,
                 u64::MAX,
                 u64::MAX,
+                policy_claims,
             ))
             .expect("edge ingest");
             let updates =
@@ -1176,12 +1178,14 @@ fn run_edge_actor(
                 let start = Instant::now();
                 let writer_peer = writer_peers.get_mut(&writer_idx).expect("writer edge peer");
                 let now_ms = epoch.elapsed().as_millis() as u64;
+                let policy_claims = raw_claims(writer_peer.identity());
                 let outcome = block_on(writer_peer.ingest_edge_mergeable_commit_unit(
                     &mut edge_node,
                     tx,
                     versions,
                     now_ms,
                     now_ms,
+                    policy_claims,
                 ))
                 .expect("edge ingest");
                 let mut updates =

@@ -174,6 +174,7 @@ pub(super) fn dispatch_admitted_subscriber_message<'a, S>(
     peer: &'a mut PeerState,
     local_receiver: bool,
     ingest_context: CommitUnitIngestContext,
+    session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
     admitted_upstream_authority: &'a Rc<RefCell<Option<AuthorityContext>>>,
     edge_fate_routes: &'a EdgeFateRoutes,
     local_fate_routes: &'a LocalFateRoutes,
@@ -325,6 +326,7 @@ where
                         versions,
                         maintenance_now_ms,
                         authority_now_ms,
+                        session_claim_binding.1,
                     )
                     .await
                     .map_err(Error::from)?;
@@ -362,6 +364,7 @@ where
                     peer.prove_terminal_commit_authorization(
                         &mut node,
                         permission_subject,
+                        session_claim_binding.1,
                         &versions,
                         tx.tx_id,
                     )
@@ -3882,6 +3885,9 @@ where
                                 peer,
                                 *local_receiver,
                                 *ingest_context,
+                                session_claim_binding.clone().expect(
+                                    "subscriber dispatch has an admitted immutable session binding",
+                                ),
                                 &self.admitted_upstream_authority,
                                 &self.edge_fate_routes,
                                 &self.local_fate_routes,
@@ -4814,6 +4820,13 @@ where
             delegated_session: None,
         });
         peer.declare_known_state(subscription, None);
+        // Authority scope support has no wire Subscribe admission: this
+        // opaque usage site is allocated locally for the request currently
+        // authenticated on this link. Bind that exact admission snapshot
+        // before the owner-loop rehydrate opens a maintained view. In
+        // particular, do not fall back to the authority transport identity
+        // (normally SYSTEM for a trusted backend link).
+        peer.set_subscription_policy_binding(subscription, (identity, session_claims.clone()));
         let update = {
             let mut node = node.lock().await;
             let mut node = node.scoped_active_session_claims(identity, session_claims.clone());

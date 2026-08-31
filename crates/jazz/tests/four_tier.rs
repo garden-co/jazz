@@ -312,10 +312,14 @@ fn edge_ingest(
     versions: Vec<jazz::protocol::VersionRecord>,
     now_ms: u64,
 ) -> Vec<SyncMessage> {
+    // This direct-topology fixture admits an empty claim object for the peer;
+    // pass that immutable request snapshot rather than consulting node-global
+    // compatibility state (which integration tests cannot access).
+    let policy_claims = BTreeMap::new();
     install_uuid_sub_claim(node, peer.identity());
     block_on(async {
         let outcome = peer
-            .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms, now_ms)
+            .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms, now_ms, policy_claims)
             .await
             .unwrap();
         node.persist_and_settle_outcome(outcome).await.unwrap()

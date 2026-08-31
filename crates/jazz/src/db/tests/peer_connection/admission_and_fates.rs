@@ -1336,6 +1336,19 @@ fn scope_receipt_claim_transition_ignores_late_a_support_and_requires_fresh_b_re
     );
 }
 
+/// An authority-owned authorization support view retains the exact admitted
+/// session snapshot while alice's claims change and the view is rehydrated.
+///
+/// ```text
+/// alice ──scope intent──► authority ──support view (alice + claims)──► alice
+///                                      │
+///                                      └──claim revision──► fresh bound view
+/// ```
+///
+/// This stays at the peer/transport seam because the opaque support
+/// subscription is allocated by the authority rather than exposed by a public
+/// client API. It proves the allocation records its immutable policy binding
+/// before owner-loop maintenance can serve the view.
 #[test]
 fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     let schema = owner_read_schema();
@@ -1501,6 +1514,167 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         proofs, 3,
         "production terminal fate admission must execute one exact aggregate proof per operation"
     );
+}
+
+/// A terminal support receiver belongs to one admitted link, even if another
+/// live link authenticates the same author with different claims before that
+/// receiver is first proved.
+///
+/// ```text
+/// alice/A link ──admitted──► Core ──terminal proof──► A-bound support
+///                                  ▲
+/// alice/B link ──binds B───────────┘
+/// ```
+///
+/// This targets the opaque terminal-support allocation rather than a public
+/// subscription: its canonical query key is intentionally shared, while its
+/// policy snapshot must not be selected from the node's author-keyed legacy
+/// cache. Replacing the explicit A snapshot below with `session_claims_for`
+/// makes the final assertion observe B and fail.
+#[test]
+fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let a_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("editor".to_owned()),
+    )]);
+    let b_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("viewer".to_owned()),
+    )]);
+    let (_a_transport, a_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let a_subscriber =
+        server.accept_subscriber_with_claims(a_server_transport, alice, a_claims.clone());
+    let (_b_transport, b_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa2; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let b_subscriber =
+        server.accept_subscriber_with_claims(b_server_transport, alice, b_claims.clone());
+    b_subscriber
+        .borrow_mut()
+        .tick()
+        .expect("the sibling link records its legacy compatibility claims");
+    assert_eq!(
+        server.node().borrow().session_claims_for(alice),
+        b_claims,
+        "this reproduces the author-keyed cache overwrite that terminal support must ignore"
+    );
+
+    let client = open_db(0xa1, alice, &schema);
+    client.set_test_provider_claims(alice, a_claims.clone());
+    let candidate_cells = cells("same-author sibling snapshot", false, alice);
+    let write = client
+        .insert("todos", candidate_cells.clone(), Default::default())
+        .expect("A can prepare its editor-authorized write");
+    let SyncMessage::CommitUnit { tx, versions } = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .expect("prepared write retains a commit unit")
+    else {
+        panic!("prepared mergeable write must produce one commit unit");
+    };
+    let scope = server
+        .node()
+        .borrow()
+        .authorization_support_scope(
+            alice,
+            &PermissionAdviceAction::Insert {
+                table: "todos".to_owned(),
+                cells: candidate_cells,
+            },
+        )
+        .expect("editor policy has a support clause");
+    let (shape, binding) = scope
+        .subscriptions
+        .into_iter()
+        .next()
+        .expect("editor policy produces one support subscription");
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: scope.options.read_view_key(),
+    };
+
+    {
+        let mut a_connection = a_subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
+            unreachable!("A is an admitted subscriber link");
+        };
+        crate::db::block_on(a_state.peer.prove_terminal_commit_authorization(
+            &mut server.node().borrow_mut(),
+            alice,
+            a_state.session_claims.clone(),
+            &versions,
+            tx.tx_id,
+        ))
+        .expect("A terminal proof remains valid after B updates the legacy cache");
+        assert_eq!(
+            a_state.peer.subscription_policy_binding(subscription),
+            Some((alice, a_claims.clone())),
+            "the maintained terminal support receiver retains A rather than B's sibling snapshot"
+        );
+    }
+
+    // 0→1→2 authenticated refreshes reuse the same canonical support key,
+    // but each must replace its maintained receiver before terminal proof.
+    a_subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(b_claims.clone());
+    {
+        let mut a_connection = a_subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
+            unreachable!("A remains an admitted subscriber link");
+        };
+        crate::db::block_on(a_state.peer.prove_terminal_commit_authorization(
+            &mut server.node().borrow_mut(),
+            alice,
+            a_state.session_claims.clone(),
+            &versions,
+            tx.tx_id,
+        ))
+        .expect("a refreshed terminal proof replaces the stale support receiver");
+        assert_eq!(
+            a_state.peer.subscription_policy_binding(subscription),
+            Some((alice, b_claims)),
+            "terminal support reuse is keyed by exact immutable claims, not just its query key"
+        );
+    }
+    a_subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(a_claims.clone());
+    {
+        let mut a_connection = a_subscriber.borrow_mut();
+        let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
+            unreachable!("A remains an admitted subscriber link");
+        };
+        crate::db::block_on(a_state.peer.prove_terminal_commit_authorization(
+            &mut server.node().borrow_mut(),
+            alice,
+            a_state.session_claims.clone(),
+            &versions,
+            tx.tx_id,
+        ))
+        .expect("the next refreshed terminal proof replaces the stale support receiver");
+        assert_eq!(
+            a_state.peer.subscription_policy_binding(subscription),
+            Some((alice, a_claims)),
+            "each claim revision receives a fresh terminal support receiver"
+        );
+    }
 }
 
 /// Edge client ingress uses the same action-specific authority proof as a
@@ -1707,6 +1881,7 @@ fn edge_fate_route_identity_is_shared_across_client_connections() {
         &mut first,
         false,
         context,
+        (alice, BTreeMap::new()),
         &authority,
         &edge.server.edge_fate_routes,
         &local_routes,
@@ -1737,6 +1912,7 @@ fn edge_fate_route_identity_is_shared_across_client_connections() {
             &mut reconnect,
             false,
             context,
+            (alice, BTreeMap::new()),
             &authority,
             &edge.server.edge_fate_routes,
             &local_routes,
@@ -1761,6 +1937,7 @@ fn edge_fate_route_identity_is_shared_across_client_connections() {
         &mut reconnect,
         false,
         context,
+        (alice, BTreeMap::new()),
         &authority,
         &edge.server.edge_fate_routes,
         &local_routes,
