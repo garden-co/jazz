@@ -3,6 +3,108 @@ import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
 
+/** Structured-clone-safe Error representation used across browser worker ports. */
+export interface BrowserRelayError {
+  name: string;
+  message: string;
+  stack?: string;
+  cause?: unknown;
+}
+
+export function serializeBrowserRelayError(error: unknown): BrowserRelayError {
+  return serializeBrowserRelayErrorWithSeen(error, new WeakSet<object>());
+}
+
+export function deserializeBrowserRelayError(serialized: BrowserRelayError): Error {
+  const cause = deserializeBrowserRelayCause(serialized.cause);
+  const error = new Error(serialized.message);
+  error.name = serialized.name;
+  if (serialized.stack !== undefined) error.stack = serialized.stack;
+  if (cause !== undefined) {
+    Object.defineProperty(error, "cause", {
+      configurable: true,
+      enumerable: false,
+      value: cause,
+      writable: true,
+    });
+  }
+  return error;
+}
+
+function serializeBrowserRelayErrorWithSeen(
+  value: unknown,
+  seen: WeakSet<object>,
+): BrowserRelayError {
+  const error = browserRelayErrorLike(value);
+  if (typeof value === "object" && value !== null) {
+    if (seen.has(value)) {
+      return {
+        name: error.name,
+        message: error.message,
+        ...(error.stack === undefined ? {} : { stack: error.stack }),
+      };
+    }
+    seen.add(value);
+  }
+  const serialized: BrowserRelayError = {
+    name: error.name,
+    message: error.message,
+    ...(error.stack === undefined ? {} : { stack: error.stack }),
+  };
+  if (error.cause !== undefined) serialized.cause = serializeBrowserRelayCause(error.cause, seen);
+  return serialized;
+}
+
+function browserRelayErrorLike(value: unknown): {
+  name: string;
+  message: string;
+  stack?: string;
+  cause?: unknown;
+} {
+  if (value && typeof value === "object" && "message" in value) {
+    const message = typeof value.message === "string" ? value.message : String(value.message);
+    const name = "name" in value && typeof value.name === "string" ? value.name : "Error";
+    const stack = "stack" in value && typeof value.stack === "string" ? value.stack : undefined;
+    const cause = "cause" in value ? value.cause : undefined;
+    return {
+      name,
+      message,
+      ...(stack === undefined ? {} : { stack }),
+      ...(cause === undefined ? {} : { cause }),
+    };
+  }
+  return { name: "Error", message: String(value) };
+}
+
+function serializeBrowserRelayCause(cause: unknown, seen: WeakSet<object>): unknown {
+  if (cause && typeof cause === "object" && "message" in cause)
+    return serializeBrowserRelayErrorWithSeen(cause, seen);
+  try {
+    return structuredClone(cause);
+  } catch {
+    return String(cause);
+  }
+}
+
+function deserializeBrowserRelayCause(cause: unknown): unknown {
+  if (
+    cause &&
+    typeof cause === "object" &&
+    "name" in cause &&
+    typeof cause.name === "string" &&
+    "message" in cause &&
+    typeof cause.message === "string"
+  ) {
+    return deserializeBrowserRelayError({
+      name: cause.name,
+      message: cause.message,
+      ...("stack" in cause && typeof cause.stack === "string" ? { stack: cause.stack } : {}),
+      ...("cause" in cause ? { cause: cause.cause } : {}),
+    });
+  }
+  return cause;
+}
+
 export interface BrowserWorkerInitOptions {
   runtimeSources?: RuntimeSourcesConfig;
   schema: WasmSchema;
@@ -82,7 +184,7 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       workerRealmId: string;
     }
   | { type: "foreground-node-lease-busy"; message: string }
-  | { type: "foreground-node-lease-error"; message: string }
+  | { type: "foreground-node-lease-error"; error: BrowserRelayError }
   | { type: "worker-closing" }
   /**
    * The worker observed cancellation and either had no lease to clean up or
@@ -90,7 +192,7 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
    */
   | {
       type: "foreground-node-lease-cancelled";
-      error?: string;
+      error?: BrowserRelayError;
       /** @internal Test-only durable state; absent from ordinary worker replies. */
       testLeaseState?: "active" | "reusable" | "retired" | "missing";
     };
@@ -101,13 +203,13 @@ export type BrowserForegroundNodeLeasePortRequest =
 
 export type BrowserForegroundNodeLeasePortEvent = {
   type: "foreground-node-lease-result";
-  error?: string;
+  error?: BrowserRelayError;
 };
 
 export type BrowserSharedWorkerConnectResponse =
   | { type: "worker-alive" }
   | { type: "runtime-ready" }
-  | { type: "runtime-error"; message: string }
+  | { type: "runtime-error"; error: BrowserRelayError }
   | { type: "worker-closing" };
 
 export type BrowserFollowerPortRequest =
@@ -220,7 +322,7 @@ export type BrowserFollowerPortEvent =
    * owns the one upstream server connection shared by all attached tabs.
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
-  | { type: "result"; id: number; error?: string }
+  | { type: "result"; id: number; error?: BrowserRelayError }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }
@@ -229,8 +331,8 @@ export type BrowserFollowerPortEvent =
    * deliberately not a mutation rejection: the follower records it only to
    * reject its active remote waits and subscriptions.
    */
-  | { type: "transport-error"; message: string }
+  | { type: "transport-error"; error: BrowserRelayError }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }
-  | { type: "error"; message: string };
+  | { type: "error"; error: BrowserRelayError };

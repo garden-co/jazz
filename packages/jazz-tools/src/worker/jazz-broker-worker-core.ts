@@ -11,21 +11,22 @@ import {
   BrowserWorkerTransportPump,
   transferableFrames,
 } from "../runtime/native-runtime/browser-worker-transport.js";
-import type {
-  BrowserForegroundNodeLeaseAcquireRequest,
-  BrowserForegroundNodeLeaseAcquireResponse,
-  BrowserForegroundNodeLeaseCancelRequest,
-  BrowserForegroundNodeLeaseProbeRequest,
-  BrowserForegroundNodeLeasePortEvent,
-  BrowserForegroundNodeLeasePortRequest,
-  BrowserFollowerPortEvent,
-  BrowserFollowerPortRequest,
-  BrowserInspectorControlEvent,
-  BrowserInspectorControlRequest,
-  BrowserWorkerLifecycleTrace,
-  BrowserSharedWorkerConnectRequest,
-  BrowserSharedWorkerConnectResponse,
-  BrowserWorkerInitOptions,
+import {
+  serializeBrowserRelayError,
+  type BrowserForegroundNodeLeaseAcquireRequest,
+  type BrowserForegroundNodeLeaseAcquireResponse,
+  type BrowserForegroundNodeLeaseCancelRequest,
+  type BrowserForegroundNodeLeaseProbeRequest,
+  type BrowserForegroundNodeLeasePortEvent,
+  type BrowserForegroundNodeLeasePortRequest,
+  type BrowserFollowerPortEvent,
+  type BrowserFollowerPortRequest,
+  type BrowserInspectorControlEvent,
+  type BrowserInspectorControlRequest,
+  type BrowserWorkerLifecycleTrace,
+  type BrowserSharedWorkerConnectRequest,
+  type BrowserSharedWorkerConnectResponse,
+  type BrowserWorkerInitOptions,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
@@ -471,7 +472,7 @@ async function acquireForegroundNodeLease(
       settled = true;
       post(port, {
         type: "foreground-node-lease-cancelled",
-        error: asError(admissionError).message,
+        error: serializeBrowserRelayError(admissionError),
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
       cleanup();
       port.close();
@@ -583,7 +584,7 @@ async function acquireForegroundNodeLease(
         await retire().catch(() => undefined);
         post(port, {
           type: "foreground-node-lease-result",
-          error: asError(error).message,
+          error: serializeBrowserRelayError(error),
         } satisfies BrowserForegroundNodeLeasePortEvent);
         cleanup();
         port.close();
@@ -680,7 +681,7 @@ async function acquireForegroundNodeLease(
     } else {
       post(port, {
         type: "foreground-node-lease-error",
-        message: asError(error).message,
+        error: serializeBrowserRelayError(error),
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
     }
     port.close();
@@ -797,7 +798,7 @@ async function connectTab(
     // the bootstrap reservation before surfacing the terminal result so its
     // physical owner can be released without a follow-on admission race.
     finishBootstrap();
-    post(port, { type: "runtime-error", message: asError(error).message });
+    post(port, { type: "runtime-error", error: serializeBrowserRelayError(error) });
     port.close();
   }
 }
@@ -913,7 +914,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
       // tab runtime capable of rejecting an active remote wait.
       for (const peer of context.peers.values()) {
         if (!peer.subscriber || !peer.pump) continue;
-        post(peer.port, { type: "transport-error", message: error.message });
+        post(peer.port, { type: "transport-error", error: serializeBrowserRelayError(error) });
       }
     });
     if (options.logLevel === "trace") {
@@ -1434,17 +1435,15 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
 
 function result(peer: TabPeer, id: number, error?: Error): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
-  post(peer.port, { type: "result", id, ...(error ? { error: errorDetails(error) } : {}) });
-}
-
-function errorDetails(error: Error): string {
-  const cause = error.cause;
-  if (!(cause instanceof Error) || !cause.stack) return error.stack ?? error.message;
-  return `${error.stack ?? error.message}\nCaused by: ${cause.stack}`;
+  post(peer.port, {
+    type: "result",
+    id,
+    ...(error ? { error: serializeBrowserRelayError(error) } : {}),
+  });
 }
 
 function failPeer(peer: TabPeer, error: Error): void {
-  post(peer.port, { type: "error", message: error.message });
+  post(peer.port, { type: "error", error: serializeBrowserRelayError(error) });
   closeTab(peer.context, peer.tabId);
 }
 

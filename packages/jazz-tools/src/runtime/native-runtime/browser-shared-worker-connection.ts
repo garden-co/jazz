@@ -3,22 +3,23 @@ import {
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
+import {
+  deserializeBrowserRelayError,
+  type BrowserSharedWorkerConnectRequest,
+  type BrowserSharedWorkerConnectResponse,
+  type BrowserForegroundNodeLeaseAcquireResponse,
+  type BrowserForegroundNodeLeasePortEvent,
+  type BrowserForegroundNodeLeasePortRequest,
+  type BrowserFollowerPortRequest,
+  type BrowserInspectorControlEvent,
+  type BrowserWorkerInitOptions,
+} from "./browser-worker-protocol.js";
 import type {
   ForegroundNodeLease,
   BrowserWorkerConnection,
   BrowserWorkerConnectionContext,
 } from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
-import type {
-  BrowserSharedWorkerConnectRequest,
-  BrowserSharedWorkerConnectResponse,
-  BrowserForegroundNodeLeaseAcquireResponse,
-  BrowserForegroundNodeLeasePortEvent,
-  BrowserForegroundNodeLeasePortRequest,
-  BrowserFollowerPortRequest,
-  BrowserInspectorControlEvent,
-  BrowserWorkerInitOptions,
-} from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
@@ -463,7 +464,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           // report that rejection before the caller's operation has observed
           // readiness. The outer, constructor-owned state machine turns this
           // into the same explicit error after it has installed containment.
-          resolve({ connected: false, error: new Error(event.data.message) });
+          resolve({ connected: false, error: deserializeBrowserRelayError(event.data.error) });
           return;
         }
         if (event.data?.type === "worker-closing") {

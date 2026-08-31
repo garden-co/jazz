@@ -490,7 +490,10 @@ describe("broker worker context initialization", () => {
     failedLoad.reject(new Error("WASM load failed"));
 
     const failed = await failedConnection;
-    expect(failed.outcome).toEqual({ type: "runtime-error", message: "WASM load failed" });
+    expect(failed.outcome).toMatchObject({
+      type: "runtime-error",
+      error: { name: "Error", message: "WASM load failed", stack: expect.any(String) },
+    });
     expect(failed.port.close).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(mocks.loadWasmModule).toHaveBeenCalledTimes(2));
 
@@ -933,10 +936,12 @@ describe("broker worker context initialization", () => {
     // process. Its wasm-bindgen module is initialized exactly once, so a
     // later page must not silently inherit an asset URL from a Vite origin
     // which may already have been torn down.
-    expect((await connect(secondOptions, "second-tab")).outcome).toEqual({
+    expect((await connect(secondOptions, "second-tab")).outcome).toMatchObject({
       type: "runtime-error",
-      message:
-        "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+      error: {
+        message:
+          "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+      },
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledTimes(1);
   });
@@ -952,10 +957,12 @@ describe("broker worker context initialization", () => {
     };
 
     expect((await connect(firstOptions, "first-tab")).outcome).toEqual({ type: "runtime-ready" });
-    expect((await connect(secondOptions, "second-tab")).outcome).toEqual({
+    expect((await connect(secondOptions, "second-tab")).outcome).toMatchObject({
       type: "runtime-error",
-      message:
-        "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+      error: {
+        message:
+          "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+      },
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledTimes(1);
   });
@@ -966,9 +973,9 @@ describe("broker worker context initialization", () => {
     });
 
     const failed = await connect(enabledTelemetryOptions("telemetry-failure"), "failed-tab");
-    expect(failed.outcome).toEqual({
+    expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      message: "telemetry installation failed",
+      error: { message: "telemetry installation failed" },
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
     // Durable root admission deliberately precedes all process-wide WASM and
@@ -996,10 +1003,12 @@ describe("broker worker context initialization", () => {
     );
 
     const failed = await connect(options("explicit-owner"), "blocked-tab");
-    expect(failed.outcome).toEqual({
+    expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      message:
-        "IndexedDB database explicit-owner is already owned by a different Jazz browser session",
+      error: {
+        message:
+          "IndexedDB database explicit-owner is already owned by a different Jazz browser session",
+      },
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
@@ -1022,9 +1031,9 @@ describe("broker worker context initialization", () => {
     mocks.openPageStore.mockRejectedValueOnce(new Error("page-store open failed"));
 
     const failed = await connect(enabledTelemetryOptions("page-store-failure"), "failed-tab");
-    expect(failed.outcome).toEqual({
+    expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      message: "page-store open failed",
+      error: { message: "page-store open failed" },
     });
     expect(mocks.loadWasmModule).not.toHaveBeenCalled();
     expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
@@ -1076,9 +1085,9 @@ describe("broker worker context initialization", () => {
     mocks.openBrowser.mockRejectedValueOnce(new Error("browser DB open failed"));
 
     const failed = await connect(enabledTelemetryOptions("browser-db-failure"), "failed-tab");
-    expect(failed.outcome).toEqual({
+    expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      message: "browser DB open failed",
+      error: { message: "browser DB open failed" },
     });
     expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
     expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
@@ -1134,9 +1143,9 @@ describe("broker worker context initialization", () => {
     });
 
     const failed = await connect(enabledTelemetryOptions("adapter-failure"), "failed-tab");
-    expect(failed.outcome).toEqual({
+    expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      message: "adapter construction failed",
+      error: { message: "adapter construction failed" },
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
     expect(rawDb.close).toHaveBeenCalledOnce();
@@ -1214,10 +1223,12 @@ describe("broker worker context initialization", () => {
     // Planted positive: omitting the in-memory physical-owner comparison
     // reuses Alice's already-open page store and admits Bob without calling
     // IndexedDbPageStore.open, so this must fail before the fix.
-    expect((await connect(bob, "bob-tab")).outcome).toEqual({
+    expect((await connect(bob, "bob-tab")).outcome).toMatchObject({
       type: "runtime-error",
-      message:
-        "IndexedDB database shared-physical-root is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts",
+      error: {
+        message:
+          "IndexedDB database shared-physical-root is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts",
+      },
     });
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
@@ -1292,15 +1303,20 @@ describe("broker worker context initialization", () => {
       | ((error: Error) => void)
       | undefined;
     expect(callback).toBeTypeOf("function");
-    callback?.(new Error("Protocol: terminal maintained view failure"));
+    const terminalError = new Error("Protocol: terminal maintained view failure");
+    callback?.(terminalError);
 
     for (const port of [owner.port, successor.port]) {
-      await expect(port.waitForEvent((event) => event.type === "transport-error")).resolves.toEqual(
-        {
-          type: "transport-error",
-          message: "Protocol: terminal maintained view failure",
+      await expect(
+        port.waitForEvent((event) => event.type === "transport-error"),
+      ).resolves.toMatchObject({
+        type: "transport-error",
+        error: {
+          name: "Error",
+          message: terminalError.message,
+          stack: terminalError.stack,
         },
-      );
+      });
     }
     expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);
 

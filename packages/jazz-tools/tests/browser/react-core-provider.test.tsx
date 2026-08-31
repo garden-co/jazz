@@ -19,7 +19,11 @@ import { attachSubscriptionStore } from "../../src/subscription-store-internal.j
 import type { AuthState } from "../../src/runtime/auth-state.js";
 import { canonicalAuthorSubject } from "../../src/runtime/author-id.js";
 import type { PublicSession, Session } from "../../src/runtime/context.js";
-import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
+import type {
+  DbDeltaSubscriptionCallbacks,
+  QueryBuilder,
+  QueryOptions,
+} from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 
 type Todo = {
@@ -556,7 +560,7 @@ describe("react-core provider/hooks browser coverage", () => {
       },
       subscribeDelta(
         _query: QueryBuilder<Todo>,
-        callback: (delta: SubscriptionDelta<Todo>) => void,
+        callbacks: DbDeltaSubscriptionCallbacks<Todo>,
         _options?: QueryOptions,
         session?: Session,
       ) {
@@ -564,7 +568,7 @@ describe("react-core provider/hooks browser coverage", () => {
           session: session
             ? canonicalAuthorSubject(session.issuer, session.user_id)
             : (liveSession?.user ?? "anon"),
-          callback,
+          callback: callbacks.onDelta,
         });
         return () => {};
       },

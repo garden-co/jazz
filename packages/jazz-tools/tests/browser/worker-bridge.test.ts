@@ -59,10 +59,12 @@ import {
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
-import type {
-  BrowserInspectorContext,
-  BrowserInspectorControlEvent,
-  BrowserInspectorControlRequest,
+import {
+  deserializeBrowserRelayError,
+  type BrowserInspectorContext,
+  type BrowserInspectorControlEvent,
+  type BrowserInspectorControlRequest,
+  type BrowserRelayError,
 } from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 
 declare const __JAZZ_BROWSER_SOAK__: string;
@@ -315,8 +317,7 @@ function startRawForegroundLease(
     const onMessage = (
       event: MessageEvent<{
         type?: string;
-        message?: string;
-        error?: string;
+        error?: BrowserRelayError;
         node?: Uint8Array;
         leaseId?: string;
       }>,
@@ -325,9 +326,9 @@ function startRawForegroundLease(
         resolveQueued();
         return;
       }
-      if (event.data?.type === "foreground-node-lease-error") {
+      if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
         port.removeEventListener("message", onMessage);
-        reject(new Error(event.data.message));
+        reject(deserializeBrowserRelayError(event.data.error));
         return;
       }
       if (event.data?.type !== "foreground-node-lease-ready" || !event.data.node) return;
@@ -336,13 +337,16 @@ function startRawForegroundLease(
         node,
         returnWithHighWater(value) {
           return new Promise<void>((resolveReturn, rejectReturn) => {
-            const onResult = (resultEvent: MessageEvent<{ type?: string; error?: string }>) => {
+            const onResult = (
+              resultEvent: MessageEvent<{ type?: string; error?: BrowserRelayError }>,
+            ) => {
               if (resultEvent.data?.type !== "foreground-node-lease-result") return;
               port.removeEventListener("message", onResult);
               port.removeEventListener("message", onMessage);
               port.close();
-              if (resultEvent.data.error) rejectReturn(new Error(resultEvent.data.error));
-              else resolveReturn();
+              if (resultEvent.data.error) {
+                rejectReturn(deserializeBrowserRelayError(resultEvent.data.error));
+              } else resolveReturn();
             };
             port.addEventListener("message", onResult);
             port.postMessage({
@@ -506,7 +510,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
             event: MessageEvent<{
               type?: string;
               node?: Uint8Array;
-              message?: string;
+              error?: BrowserRelayError;
               testLeaseState?: string;
             }>,
           ) => {
@@ -520,9 +524,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
               // before a lease exists to retire.
               port.postMessage({ type: "cancel-foreground-node-lease" });
             }
-            if (event.data?.type === "foreground-node-lease-error") {
+            if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
               port.removeEventListener("message", onMessage);
-              reject(new Error(event.data.message));
+              reject(deserializeBrowserRelayError(event.data.error));
             }
             if (event.data?.type === "foreground-node-lease-cancelled") {
               cancellationLeaseState = event.data.testLeaseState;
@@ -583,13 +587,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
     try {
       await withTimeout(
         new Promise<void>((resolve, reject) => {
-          const onMessage = (event: MessageEvent<{ type?: string; message?: string }>) => {
+          const onMessage = (event: MessageEvent<{ type?: string; error?: BrowserRelayError }>) => {
             if (event.data?.type === "foreground-node-lease-test-allocated") {
               sawTestAllocation = true;
             }
-            if (event.data?.type === "foreground-node-lease-error") {
+            if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
               port.removeEventListener("message", onMessage);
-              reject(new Error(event.data.message));
+              reject(deserializeBrowserRelayError(event.data.error));
             }
             if (event.data?.type === "foreground-node-lease-ready") {
               port.postMessage({ type: "retire-foreground-node-lease" });
@@ -639,7 +643,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
           const onMessage = (
             event: MessageEvent<{
               type?: string;
-              message?: string;
+              error?: BrowserRelayError;
               node?: Uint8Array;
               workerRealmId?: string;
             }>,
@@ -654,9 +658,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
                 workerRealmId: event.data.workerRealmId,
               };
             }
-            if (event.data?.type === "foreground-node-lease-error") {
+            if (event.data?.type === "foreground-node-lease-error" && event.data.error) {
               port.removeEventListener("message", onMessage);
-              reject(new Error(event.data.message));
+              reject(deserializeBrowserRelayError(event.data.error));
             }
             if (event.data?.type === "foreground-node-lease-ready") {
               port.removeEventListener("message", onMessage);
@@ -680,10 +684,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
         async retire() {
           await withTimeout(
             new Promise<void>((resolve, reject) => {
-              const onMessage = (event: MessageEvent<{ type?: string; error?: string }>) => {
+              const onMessage = (
+                event: MessageEvent<{ type?: string; error?: BrowserRelayError }>,
+              ) => {
                 if (event.data?.type !== "foreground-node-lease-result") return;
                 port.removeEventListener("message", onMessage);
-                if (event.data.error) reject(new Error(event.data.error));
+                if (event.data.error) reject(deserializeBrowserRelayError(event.data.error));
                 else resolve();
               };
               port.addEventListener("message", onMessage);
@@ -985,10 +991,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
       // Persistent create must acquire a durable foreground-node lease before
       // any synchronous mutation can mint a transaction identity. Storage
       // readiness therefore belongs to createDb, while schema selection stays
-      // lazy. The original cause must reject that operation directly.
-      await expect(createDb(config)).rejects.toThrow(
-        "Missing or invalid IndexedDB storage epoch manifest",
-      );
+      // lazy. The original structured worker error must reject that operation
+      // directly instead of collapsing to a message-only main-thread Error.
+      let openFailure: unknown;
+      try {
+        await createDb(config);
+      } catch (error) {
+        openFailure = error;
+      }
+      expect(openFailure).toBeInstanceOf(Error);
+      if (!(openFailure instanceof Error)) throw new Error("Expected browser worker open to fail");
+      expect(openFailure).toMatchObject({
+        name: "Error",
+        message: "Missing or invalid IndexedDB storage epoch manifest",
+        stack: expect.stringContaining("Missing or invalid IndexedDB storage epoch manifest"),
+      });
+      expect(openFailure.cause).toBeUndefined();
       await sleep(0);
       expect(ambientErrors).toEqual([]);
       expect(unhandledRejections).toEqual([]);
