@@ -687,7 +687,7 @@ fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
     if bytes.len() > MAX_WIRE_FRAME_BYTES {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
-    let frames: Vec<Vec<u8>> = postcard::from_bytes(bytes)?;
+    let frames: Vec<Vec<u8>> = jazz::wire::decode_postcard_exact(bytes)?;
     if frames
         .iter()
         .any(|frame| validate_wire_frame_len(frame.len()).is_err())
@@ -700,6 +700,27 @@ fn decode_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_batch_decoder_consumes_the_complete_carrier() {
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            postcard::to_allocvec(&vec![vec![0x42_u8]]).expect("encode valid batch"),
+            valid,
+            "frozen WebSocket batch corpus must remain canonical"
+        );
+        assert_eq!(
+            decode_frame_batch(&valid).expect("decode complete valid batch"),
+            vec![vec![0x42]]
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0x00);
+        assert!(
+            decode_frame_batch(&suffixed).is_err(),
+            "a valid batch plus a suffix must not acquire a second interpretation"
+        );
+    }
 
     #[test]
     fn first_frame_subject_validation_rejects_blank_and_preserves_exact_subject() {

@@ -446,7 +446,11 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
 /// interpretations at adjacent protocol seams. Postcard itself also accepts
 /// alternate overlong varint spellings, while the frozen wire contract admits
 /// only the encoder's shortest spelling.
-fn decode_postcard_exact<'a, T>(bytes: &'a [u8]) -> Result<T, postcard::Error>
+///
+/// This is the shared ownership boundary for protocol carriers that contain
+/// exactly one postcard value, including WebSocket frame batches. Callers must
+/// apply their carrier-specific size and cardinality limits separately.
+pub fn decode_postcard_exact<'a, T>(bytes: &'a [u8]) -> Result<T, postcard::Error>
 where
     T: Deserialize<'a> + Serialize,
 {

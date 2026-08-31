@@ -911,7 +911,7 @@ fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard:
     if bytes.len() > MAX_WIRE_FRAME_BYTES {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
-    let frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)?;
+    let frames = jazz::wire::decode_postcard_exact::<Vec<Vec<u8>>>(bytes)?;
     if frames.is_empty()
         || frames.len() > MAX_WIRE_BATCH_FRAMES
         || frames
@@ -1893,6 +1893,27 @@ mod tests {
             .expect("encode count flood below physical byte cap");
         assert!(flood.len() <= MAX_WIRE_FRAME_BYTES);
         assert!(decode_ws_encoded_frame_batch(&flood).is_err());
+    }
+
+    #[test]
+    fn websocket_frame_batch_decoder_consumes_the_complete_carrier() {
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            postcard::to_allocvec(&vec![vec![0x42_u8]]).expect("encode valid batch"),
+            valid,
+            "frozen WebSocket batch corpus must remain canonical"
+        );
+        assert_eq!(
+            decode_ws_encoded_frame_batch(&valid).expect("decode complete valid batch"),
+            vec![vec![0x42]]
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0x00);
+        assert!(
+            decode_ws_encoded_frame_batch(&suffixed).is_err(),
+            "a valid batch plus a suffix must not acquire a second interpretation"
+        );
     }
 
     #[test]

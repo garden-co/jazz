@@ -636,7 +636,7 @@ async fn receive_server_hello(
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     };
     let encoded: Vec<Vec<u8>> =
-        postcard::from_bytes(&bytes).map_err(WebSocketClientError::DecodeBatch)?;
+        jazz::wire::decode_postcard_exact(&bytes).map_err(WebSocketClientError::DecodeBatch)?;
     if encoded.len() != 1 {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
@@ -818,7 +818,7 @@ async fn run_ws_pump(
 }
 
 fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
-    let frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)
+    let frames = jazz::wire::decode_postcard_exact::<Vec<Vec<u8>>>(bytes)
         .map_err(|_| "websocket peer sent malformed wire batch".to_owned())?;
     if frames.len() > MAX_WIRE_BATCH_FRAMES {
         return Err(format!(
@@ -956,6 +956,27 @@ mod tests {
             decode_inbound_batch(&flood, false)
                 .expect_err("count flood must be rejected before channel staging")
                 .contains("frame-count limit")
+        );
+    }
+
+    #[test]
+    fn inbound_batch_decoder_consumes_the_complete_carrier() {
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            postcard::to_allocvec(&vec![vec![0x42_u8]]).expect("encode valid batch"),
+            valid,
+            "frozen WebSocket batch corpus must remain canonical"
+        );
+        assert_eq!(
+            decode_inbound_batch(&valid, false).expect("decode complete valid batch"),
+            vec![vec![0x42]]
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0x00);
+        assert!(
+            decode_inbound_batch(&suffixed, false).is_err(),
+            "a valid batch plus a suffix must not acquire a second interpretation"
         );
     }
 
