@@ -32,6 +32,9 @@ where
     deferred_rejection_discards: RefCell<BTreeSet<TxId>>,
     queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
     reserved_mutations: RefCell<BTreeSet<TxId>>,
+    pub(super) pending_transaction_abandonments: TransactionAbandonmentTombstones,
+    transaction_abandonments_closed: Cell<bool>,
+    transaction_abandonment_shutdown_pending: Cell<bool>,
     pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
@@ -113,6 +116,9 @@ where
             deferred_rejection_discards: RefCell::new(BTreeSet::new()),
             queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
             reserved_mutations: RefCell::new(BTreeSet::new()),
+            pending_transaction_abandonments: Rc::new(RefCell::new(BTreeSet::new())),
+            transaction_abandonments_closed: Cell::new(false),
+            transaction_abandonment_shutdown_pending: Cell::new(false),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
@@ -714,6 +720,175 @@ where
             .borrow()
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker())
+    }
+    /// Lock the node for opening a transaction while the database still owns
+    /// transaction admission.
+    ///
+    /// The second gate check closes the race where shutdown starts while an
+    /// opener is waiting for the node mutex. The tombstone check closes the
+    /// corresponding race with an already-linearized handle abandonment.
+    pub(super) async fn lock_for_transaction_open(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        self.ensure_transaction_admission_open()?;
+        let mut node = self.node.lock().await;
+        if let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        Ok(node)
+    }
+
+    /// Lock the node for an operation on an existing transaction.
+    ///
+    /// A handle drop records its tombstone without waiting for this mutex.
+    /// Therefore even an operation already queued ahead of the maintenance tick
+    /// observes and retires the tombstone before it can stage, read, or commit.
+    pub(super) async fn lock_for_transaction_operation(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        let mut node = self.node.lock().await;
+        self.reject_tombstoned_transaction_in(&mut node, open_tx_id)?;
+        if let Err(error) = self.ensure_transaction_admission_open() {
+            self.finish_transaction_abandonment_shutdown_in(&mut node)?;
+            return Err(error);
+        }
+        Ok(node)
+    }
+
+    fn ensure_transaction_admission_open(&self) -> Result<(), Error> {
+        if self.transaction_abandonments_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database transaction admission is closed",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_transaction_abandoned(&self, open_tx_id: OpenTransactionId) -> bool {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .insert(open_tx_id)
+    }
+
+    pub(super) fn clear_transaction_abandonment(&self, open_tx_id: OpenTransactionId) {
+        self.pending_transaction_abandonments
+            .borrow_mut()
+            .remove(&open_tx_id);
+    }
+
+    fn reject_tombstoned_transaction_in(
+        &self,
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if !self
+            .pending_transaction_abandonments
+            .borrow()
+            .contains(&open_tx_id)
+        {
+            return Ok(());
+        }
+        let retirement = Self::abandon_transaction_for_maintenance(node, open_tx_id);
+        if retirement.is_ok() {
+            self.clear_transaction_abandonment(open_tx_id);
+        }
+        retirement?;
+        Err(transaction_abandoned(open_tx_id))
+    }
+
+    /// Abandon an RAII-owned transaction immediately when the node is
+    /// uncontended, otherwise leave its deduplicated tombstone for the next
+    /// transaction operation or asynchronous owner turn.
+    ///
+    /// This is synchronous and never waits for the node mutex.
+    pub(super) fn abandon_or_enqueue_transaction(&self, open_tx_id: OpenTransactionId) {
+        if self.transaction_abandonments_closed.get() {
+            // Shutdown owns every still-open transaction after closing this
+            // gate, so a late Drop has no separate maintenance to admit.
+            return;
+        }
+        if !self.mark_transaction_abandoned(open_tx_id) {
+            return;
+        }
+        if let Some(mut node) = self.node.try_lock() {
+            if Self::abandon_transaction_for_maintenance(&mut node, open_tx_id).is_ok() {
+                self.clear_transaction_abandonment(open_tx_id);
+            } else {
+                self.schedule_tick(TickUrgency::Immediate);
+            }
+            return;
+        }
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    fn abandon_transaction_for_maintenance(
+        node: &mut NodeState<S>,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        match node.abandon_tx(open_tx_id) {
+            Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn drain_transaction_abandonments_in(&self, node: &mut NodeState<S>) -> Result<usize, Error> {
+        let abandonments = std::mem::take(&mut *self.pending_transaction_abandonments.borrow_mut());
+        let count = abandonments.len();
+        let mut first_error = None;
+        for open_tx_id in abandonments {
+            if let Err(error) = Self::abandon_transaction_for_maintenance(node, open_tx_id) {
+                self.pending_transaction_abandonments
+                    .borrow_mut()
+                    .insert(open_tx_id);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(count),
+        }
+    }
+
+    fn finish_transaction_abandonment_shutdown_in(
+        &self,
+        node: &mut NodeState<S>,
+    ) -> Result<usize, Error> {
+        let drain_result = self.drain_transaction_abandonments_in(node);
+        if self.transaction_abandonment_shutdown_pending.replace(false) {
+            node.abandon_all_open_transactions();
+        }
+        drain_result
+    }
+
+    async fn drain_transaction_abandonments(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
+    }
+
+    /// Close transaction admission and transfer the final open-transaction
+    /// sweep to the node tick owner before the close future can suspend.
+    ///
+    /// If the caller cancels `Db::close` while it is waiting for the node
+    /// mutex, the scheduled tick still drains tombstones and terminalizes every
+    /// open transaction. Repeated close attempts and tick passes are benign.
+    pub(super) fn begin_transaction_abandonment_shutdown(&self) {
+        if self.transaction_abandonments_closed.replace(true) {
+            return;
+        }
+        self.transaction_abandonment_shutdown_pending.set(true);
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    pub(super) async fn finish_transaction_abandonment_shutdown(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        self.finish_transaction_abandonment_shutdown_in(&mut node)
     }
 
     /// Enqueue a stream-finalization command without touching the async node
@@ -2137,6 +2312,7 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();

@@ -440,8 +440,9 @@ where
         Ok(())
     }
 
-    /// Flush node-local maintenance state, write a clean-close marker, and
-    /// close storage without blocking the caller's executor.
+    /// Close maintenance admission, terminalize open transactions and streams,
+    /// flush node-local state, write a clean-close marker, and close storage
+    /// without blocking the caller's executor.
     pub async fn close(&self) -> Result<(), Error> {
         if self.schema_view_is_fixed {
             return Ok(());
@@ -460,11 +461,12 @@ where
         // Acknowledge that durable rejection before closing storage; there is
         // no later owner turn after close to flush the bounded acknowledgement.
         self.node.flush_deferred_rejection_discards().await?;
-        // Close finalization admission before the first await. This makes the
-        // queued retirement set and durable close one lifecycle transition:
-        // a stream dropped while storage is shutting down is either in this
-        // drain or already part of the retired terminal runtime.
+        // Close maintenance and finalization admission before the next await.
+        // Late transaction-handle and stream drops then belong to the final
+        // shutdown sweeps rather than to an owner turn that can no longer run.
+        self.node.begin_transaction_abandonment_shutdown();
         self.node.begin_subscription_finalization_shutdown();
+        self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;
         self.node.node.lock().await.close().await?;
         self.node.retire_subscription_runtime_after_close();
