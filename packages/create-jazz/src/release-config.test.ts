@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -46,12 +46,13 @@ describe("release config", () => {
     expect(step?.run).toContain("schema:1");
   });
 
-  it("packs and loads the bundled preview source snapshot as an adopter would", () => {
+  it("packs and runs the production CLI fail-closed for invalid preview receipts", () => {
     const fixture = fs.mkdtempSync(path.join(tmpdir(), "create-jazz-preview-pack-"));
     const packageDir = path.join(fixture, "create-jazz");
     const packed = path.join(fixture, "packed");
     const extracted = path.join(fixture, "extracted");
     try {
+      execFileSync("pnpm", ["--filter", "create-jazz", "build"], { cwd: repoRoot });
       fs.cpSync(path.join(repoRoot, "packages", "create-jazz"), packageDir, {
         recursive: true,
         filter: (source) => !source.includes(`${path.sep}node_modules`),
@@ -79,12 +80,54 @@ describe("release config", () => {
           fs.readFileSync(path.join(extracted, "package/jazz-source-snapshot.json"), "utf8"),
         ),
       ).toEqual({ schema: 1, packageVersion: version, commit: "a".repeat(40) });
-      execFileSync("npm", ["install", "--ignore-scripts", "--no-package-lock", "--omit=dev"], {
-        cwd: path.join(extracted, "package"),
-      });
-      execFileSync(process.execPath, ["--input-type=module", "-e", 'import("./dist/index.js")'], {
-        cwd: path.join(extracted, "package"),
-      });
+      const extractedPackage = path.join(extracted, "package");
+      // Keep this receipt hermetic: only the packed CLI's behavior is under
+      // test, so its dependencies are linked from the already-installed repo.
+      fs.symlinkSync(
+        path.join(repoRoot, "packages", "create-jazz", "node_modules"),
+        path.join(extractedPackage, "node_modules"),
+      );
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        JAZZ_STARTER_PATH: path.join(repoRoot, "starters", "next-localfirst"),
+      };
+      delete env.npm_config_user_agent;
+      for (const [name, receipt] of [
+        ["malformed", "not json"],
+        [
+          "version-mismatch",
+          JSON.stringify({
+            schema: 1,
+            packageVersion: "2.0.0-alpha.other",
+            commit: "a".repeat(40),
+          }),
+        ],
+      ]) {
+        fs.writeFileSync(path.join(extractedPackage, "jazz-source-snapshot.json"), receipt);
+        const appName = `invalid-${name}`;
+        const result = spawnSync(
+          process.execPath,
+          [
+            "bin/create-jazz.js",
+            appName,
+            "--starter",
+            "next-localfirst",
+            "--hosting",
+            "selfhosted",
+            "--no-git",
+          ],
+          {
+            cwd: extractedPackage,
+            env,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 15_000,
+          },
+        );
+        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+        expect(result.stdout + result.stderr).toMatch(/invalid bundled preview source snapshot/i);
+        expect(fs.existsSync(path.join(extractedPackage, appName))).toBe(false);
+      }
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true });
     }
