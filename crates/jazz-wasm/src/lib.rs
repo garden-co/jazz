@@ -3527,17 +3527,11 @@ fn update_options_from_js(options: JsValue) -> Result<jazz::db::UpdateOptions, J
 }
 
 fn upsert_options_from_js(options: JsValue) -> Result<jazz::db::UpsertOptions, JsValue> {
+    let options = update_options_from_js(options)?;
     Ok(jazz::db::UpsertOptions {
-        identity: write_identity_option(&options)?,
-        target: write_option(&options, "branch")?
-            .map(|branch| {
-                serde_wasm_bindgen::from_value(branch)
-                    .map(jazz::db::ExactWriteTarget::Branch)
-                    .map_err(to_js_error)
-            })
-            .transpose()?
-            .unwrap_or_default(),
-        updated_at_ms: write_timestamp_option(&options)?,
+        identity: options.identity,
+        target: options.target,
+        updated_at_ms: options.updated_at_ms,
     })
 }
 
@@ -3551,11 +3545,17 @@ fn delete_options_from_js(options: JsValue) -> Result<jazz::db::DeleteOptions, J
 }
 
 fn restore_options_from_js(options: JsValue) -> Result<jazz::db::RestoreOptions, JsValue> {
-    let options = upsert_options_from_js(options)?;
     Ok(jazz::db::RestoreOptions {
-        identity: options.identity,
-        target: options.target,
-        updated_at_ms: options.updated_at_ms,
+        identity: write_identity_option(&options)?,
+        target: write_option(&options, "branch")?
+            .map(|branch| {
+                serde_wasm_bindgen::from_value(branch)
+                    .map(jazz::db::ExactWriteTarget::Branch)
+                    .map_err(to_js_error)
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        updated_at_ms: write_timestamp_option(&options)?,
     })
 }
 

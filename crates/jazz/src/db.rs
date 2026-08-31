@@ -2895,7 +2895,7 @@ pub enum WriteIdentity {
     Attribution(AuthorSubject),
 }
 
-/// Exact branch selected by an insert, upsert, or restore.
+/// Exact branch selected by an insert or restore.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ExactWriteTarget {
     /// Write to the database's current root branch.
@@ -2914,7 +2914,7 @@ impl ExactWriteTarget {
     }
 }
 
-/// Root or head-over-base view selected by an update or delete.
+/// Root or head-over-base view selected by an update, upsert, or delete.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum WriteTarget {
     /// Write to the database's current root branch.
@@ -2958,8 +2958,8 @@ pub struct UpdateOptions {
 pub struct UpsertOptions {
     /// Standalone-write identity. Transactions use the identity chosen when opened.
     pub identity: WriteIdentity,
-    /// Exact branch receiving the insert or update.
-    pub target: ExactWriteTarget,
+    /// Root or branch view through which the upsert is applied.
+    pub target: WriteTarget,
     /// Explicit provenance timestamp, or the database clock when omitted.
     pub updated_at_ms: Option<u64>,
 }
@@ -3152,7 +3152,7 @@ where
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
         match options.target {
-            ExactWriteTarget::Root => {
+            WriteTarget::Root => {
                 self.db()
                     .require_mergeable_transaction_upsert_visibility(self.tx_id(), table, row)
                     .await?;
@@ -3179,10 +3179,19 @@ where
                         .await
                 }
             }
-            ExactWriteTarget::Branch(_) => Err(Error::new(
-                ErrorCode::Schema,
-                "branch upserts are not supported inside transactions",
-            )),
+            WriteTarget::BranchView { head, base } => {
+                self.db()
+                    .stage_mergeable_upsert_in_branch_view(
+                        self.tx_id(),
+                        table,
+                        head,
+                        base,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
         }
     }
 
@@ -3599,7 +3608,7 @@ where
         options: UpsertOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_target(&options.target)?;
+        ensure_exclusive_view_target(&options.target)?;
         self.db()
             .stage_exclusive_upsert(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await

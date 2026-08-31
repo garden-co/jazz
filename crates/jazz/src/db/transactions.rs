@@ -386,6 +386,7 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
+        self.ensure_row_not_deleted(table, row).await?;
         self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
             .await
     }
@@ -437,6 +438,80 @@ where
             return Err(read_for_write_denied(operation, table));
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn stage_mergeable_upsert_in_branch_view(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
+        self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
+            .await?;
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
+        let visible_to_session = match permission_subject {
+            Some(identity) => {
+                self.visible_branch_view_cells_for_identity(
+                    table,
+                    &head,
+                    base.as_ref(),
+                    row,
+                    identity,
+                )
+                .await?
+            }
+            None => None,
+        };
+        let mut node = self.node.node.lock().await;
+        if node
+            .tx_visible_current_cells_in_branch(tx_id, table, row, &head)
+            .await?
+            .is_some()
+        {
+            if permission_subject.is_some() && visible_to_session.is_none() {
+                return Err(read_for_write_denied("UPSERT", table));
+            }
+            if cells.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "branch upsert update requires at least one authored column",
+                ));
+            }
+            let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+            node.tx_patch_mergeable_in_schema_and_branch(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                now_ms,
+                head,
+            )
+            .await?;
+            return Ok(());
+        }
+        let inherited = node
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+            .await?;
+        drop(node);
+        if inherited.is_some() && permission_subject.is_some() && visible_to_session.is_none() {
+            return Err(read_for_write_denied("UPSERT", table));
+        }
+        let mut inserted = visible_to_session.or(inherited).unwrap_or_default();
+        inserted.extend(cells);
+        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inserted, now_ms, false)
+            .await
     }
 
     pub(super) async fn stage_mergeable_delete(

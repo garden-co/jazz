@@ -816,6 +816,10 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push(["update", ...args]);
               return fakeWrite();
             },
+            upsertEncoded: (...args: unknown[]) => {
+              calls.push(["upsert", ...args]);
+              return fakeWrite();
+            },
           }),
         openBrowser: async () => {
           throw new Error("not used");
@@ -842,11 +846,19 @@ describe("NativeRuntimeAdapter server transport", () => {
       { title: { type: "Text", value: "updated" } },
       JSON.stringify({ branch_view: { head, base } }),
     );
+    runtime.upsert(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      JSON.stringify({ branch_view: { head, base } }),
+    );
 
     expect(calls[0]?.[0]).toBe("insert");
     expect(calls[0]?.at(-1)).toMatchObject({ branch: head });
     expect(calls[1]?.[0]).toBe("update");
     expect(calls[1]?.at(-1)).toMatchObject({ head, base });
+    expect(calls[2]?.[0]).toBe("upsert");
+    expect(calls[2]?.at(-1)).toMatchObject({ head, base });
   });
 
   it("runs scheduled core ticks before post-wait edge reads", async () => {

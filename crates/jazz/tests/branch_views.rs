@@ -224,6 +224,151 @@ fn indexed_branch_view_masks_base_before_applying_the_predicate() {
 }
 
 #[test]
+fn branch_view_upsert_merges_head_copies_inherited_and_inserts_absent_rows() {
+    let (db, schema) = open_db();
+    let base = selector(0xb1);
+    let head = selector(0xb2);
+    let head_row = RowUuid::from_bytes([0xb3; 16]);
+    let inherited_row = RowUuid::from_bytes([0xb4; 16]);
+    let absent_row = RowUuid::from_bytes([0xb5; 16]);
+    for (row, title, branch) in [
+        (head_row, "head before", head.clone()),
+        (inherited_row, "base before", base.clone()),
+    ] {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(branch),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let target = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: Some(BranchViewBase::Current(base.clone())),
+    };
+    for (row, title) in [
+        (head_row, "head after"),
+        (inherited_row, "inherited after"),
+        (absent_row, "absent after"),
+    ] {
+        db.upsert(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::UpsertOptions {
+                target: target.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(
+        &query,
+        ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base.clone()))),
+    ))
+    .unwrap();
+    let table = &schema.tables[0];
+    let titles = rows
+        .iter()
+        .map(|row| (row.row_uuid(), row.cell(table, "title").unwrap()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        titles,
+        BTreeMap::from([
+            (head_row, Value::String("head after".to_owned())),
+            (inherited_row, Value::String("inherited after".to_owned())),
+            (absent_row, Value::String("absent after".to_owned())),
+        ])
+    );
+
+    let base_rows = block_on(db.all(&query, ReadOpts::default().branch_view(base, None))).unwrap();
+    assert_eq!(base_rows.len(), 1);
+    assert_eq!(base_rows[0].row_uuid(), inherited_row);
+    assert_eq!(
+        base_rows[0].cell(table, "title"),
+        Some(Value::String("base before".to_owned())),
+        "copy-on-write must leave inherited base content unchanged"
+    );
+}
+
+#[test]
+fn mergeable_transaction_branch_view_upsert_handles_all_three_row_states() {
+    let (db, schema) = open_db();
+    let base = selector(0xb6);
+    let head = selector(0xb7);
+    let head_row = RowUuid::from_bytes([0xb8; 16]);
+    let inherited_row = RowUuid::from_bytes([0xb9; 16]);
+    let absent_row = RowUuid::from_bytes([0xba; 16]);
+    for (row, title, branch) in [
+        (head_row, "head before", head.clone()),
+        (inherited_row, "base before", base.clone()),
+    ] {
+        db.insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(branch),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let tx = db.mergeable_tx().unwrap();
+    let target = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: Some(BranchViewBase::Current(base.clone())),
+    };
+    for (row, title) in [
+        (head_row, "head transaction"),
+        (inherited_row, "inherited transaction"),
+        (absent_row, "absent transaction"),
+    ] {
+        tx.upsert(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::UpsertOptions {
+                target: target.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(
+        &query,
+        ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base))),
+    ))
+    .unwrap();
+    let table = &schema.tables[0];
+    let titles = rows
+        .iter()
+        .map(|row| (row.row_uuid(), row.cell(table, "title").unwrap()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        titles,
+        BTreeMap::from([
+            (head_row, Value::String("head transaction".to_owned())),
+            (
+                inherited_row,
+                Value::String("inherited transaction".to_owned())
+            ),
+            (absent_row, Value::String("absent transaction".to_owned())),
+        ])
+    );
+}
+
+#[test]
 fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
     let (db, schema) = open_db();
     let base = selector(0x97);

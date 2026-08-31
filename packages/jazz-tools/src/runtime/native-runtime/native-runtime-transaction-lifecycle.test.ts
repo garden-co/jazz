@@ -160,7 +160,7 @@ type TxForTest = {
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    options?: { branch?: unknown; updatedAtMs?: number },
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
   ): void;
   deleteEncoded(
     table: string,
@@ -1174,6 +1174,46 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
     { op: "restore", updatedAtMs: expectedUpdatedAtMs },
     { op: "delete", updatedAtMs: expectedUpdatedAtMs },
   ]);
+});
+
+it("preserves the full branch view for staged mergeable upserts", () => {
+  let received: { head?: unknown; base?: unknown } | undefined;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          all: () => encodeRows([]),
+          mergeableTx: () =>
+            fakeTx({
+              upsertEncoded: (_table, _rowId, _cells, options) => {
+                received = options;
+              },
+            }),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const head = { values: { workspace: [15, 14] } };
+  const base = { Current: { values: { workspace: [15, 2] } } };
+  const tx = beginTestBatch(runtime);
+
+  runtime.upsert(
+    "todos",
+    "00000000-0000-0000-0000-000000000001",
+    { title: { type: "Text", value: "upserted" } },
+    JSON.stringify({ transaction_id: tx, branch_view: { head, base } }),
+  );
+
+  expect(received).toMatchObject({ head, base });
 });
 
 it("rejects mixed identities within one trusted-serving mergeable transaction", () => {

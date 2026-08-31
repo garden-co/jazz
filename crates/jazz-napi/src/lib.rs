@@ -186,7 +186,8 @@ pub struct UpdateOptions {
 #[napi(object)]
 pub struct UpsertOptions {
     pub author: Option<Uint8Array>,
-    pub branch: Option<JsonValue>,
+    pub head: Option<JsonValue>,
+    pub base: Option<JsonValue>,
     pub updated_at_ms: Option<f64>,
 }
 
@@ -1254,8 +1255,7 @@ impl Tx {
         self.reject_attributed_branch(
             options
                 .as_ref()
-                .and_then(|options| options.branch.as_ref())
-                .is_some(),
+                .is_some_and(|options| options.head.is_some() || options.base.is_some()),
         )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
@@ -4696,14 +4696,21 @@ fn core_upsert_options(options: Option<UpsertOptions>) -> napi::Result<jazz::db:
     let Some(options) = options else {
         return Ok(Default::default());
     };
+    let target = match options.head {
+        Some(head) => jazz::db::WriteTarget::BranchView {
+            head: core_branch_selector_from_json(head)?,
+            base: core_branch_base_from_json(options.base)?,
+        },
+        None if options.base.is_none() => Default::default(),
+        None => {
+            return Err(napi::Error::from_reason(
+                "branch view base requires a head selector",
+            ));
+        }
+    };
     Ok(jazz::db::UpsertOptions {
         identity: core_write_identity(options.author)?,
-        target: options
-            .branch
-            .map(core_branch_selector_from_json)
-            .transpose()?
-            .map(jazz::db::ExactWriteTarget::Branch)
-            .unwrap_or_default(),
+        target,
         updated_at_ms: options
             .updated_at_ms
             .map(|value| checked_u64(value, "updatedAtMs"))
@@ -6689,7 +6696,8 @@ mod tests {
         assert!(
             core_upsert_options(Some(UpsertOptions {
                 author: None,
-                branch: None,
+                head: None,
+                base: None,
                 updated_at_ms: Some(-1.0),
             }))
             .is_err()

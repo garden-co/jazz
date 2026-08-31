@@ -100,6 +100,24 @@ fn branch_update_read_policy_schema() -> JazzSchema {
     )
 }
 
+fn branch_upsert_rule_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("branch", PublicColumnType::Text)
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .branch_by("branch"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("root_todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean),
+            ),
+    )
+}
+
 #[test]
 fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
     let schema = branch_column_reference_policy_schema();
@@ -246,7 +264,10 @@ fn session_branch_updates_require_read_visibility_before_staging() {
         BTreeMap::from([("published".to_owned(), Value::Bool(true))]),
         crate::db::UpsertOptions {
             identity: crate::db::WriteIdentity::Session(writer),
-            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            target: crate::db::WriteTarget::BranchView {
+                head: branch.clone(),
+                base: None,
+            },
             ..Default::default()
         },
     )) {
@@ -426,6 +447,259 @@ fn point_update_preimage_fast_path_preserves_target_and_policy_dispatch() {
         1,
         "a table with a read policy must retain ClientLocal point-query dispatch"
     );
+}
+
+#[test]
+fn branch_view_upserts_reject_tombstones_and_preserve_other_insertability_cases() {
+    let schema = branch_upsert_rule_schema();
+    let db = open_db(0x7d, AuthorSubject::SYSTEM, &schema);
+    let query = db.table("todos");
+    let root_query = db.table("root_todos");
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("todos table");
+    let base = BranchSelector::new([("branch", Value::String("base".to_owned()))]);
+    let head = BranchSelector::new([("branch", Value::String("head".to_owned()))]);
+    let standalone_tombstone = row(0x7e);
+    let standalone_inherited = row(0x7f);
+    let standalone_absent = row(0x80);
+    let transaction_tombstone = row(0x81);
+    let transaction_inherited = row(0x82);
+    let transaction_absent = row(0x83);
+    let standalone_root_tombstone = row(0x84);
+    let transaction_root_tombstone = row(0x85);
+
+    for (row_id, title) in [
+        (standalone_tombstone, "standalone tombstone"),
+        (standalone_inherited, "standalone inherited"),
+        (transaction_tombstone, "transaction tombstone"),
+        (transaction_inherited, "transaction inherited"),
+    ] {
+        block_on(db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                target: crate::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("seed base row");
+    }
+    for (row_id, title) in [
+        (standalone_root_tombstone, "standalone root tombstone"),
+        (transaction_root_tombstone, "transaction root tombstone"),
+    ] {
+        block_on(db.insert(
+            "root_todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        ))
+        .expect("seed root row");
+    }
+
+    for row_id in [standalone_tombstone, transaction_tombstone] {
+        block_on(db.delete(
+            "todos",
+            row_id,
+            crate::db::DeleteOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::current(base.clone())),
+                },
+                ..Default::default()
+            },
+        ))
+        .expect("create head-local tombstone");
+    }
+    for row_id in [standalone_root_tombstone, transaction_root_tombstone] {
+        block_on(db.delete("root_todos", row_id, Default::default()))
+            .expect("create root tombstone");
+    }
+
+    let standalone_tombstone_error = expect_error(block_on(db.upsert(
+        "todos",
+        standalone_tombstone,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        crate::db::UpsertOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::current(base.clone())),
+            },
+            ..Default::default()
+        },
+    )));
+    assert_eq!(
+        standalone_tombstone_error.code,
+        crate::db::ErrorCode::WriteRejected
+    );
+    assert!(
+        standalone_tombstone_error
+            .message
+            .contains("already deleted")
+    );
+
+    block_on(db.upsert(
+        "todos",
+        standalone_inherited,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        crate::db::UpsertOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("copy and patch inherited row");
+    block_on(db.upsert(
+        "todos",
+        standalone_absent,
+        BTreeMap::from([
+            (
+                "title".to_owned(),
+                Value::String("standalone absent".to_owned()),
+            ),
+            ("done".to_owned(), Value::Bool(true)),
+        ]),
+        crate::db::UpsertOptions {
+            target: crate::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("insert absent row in head");
+    let standalone_root_error = expect_error(block_on(db.upsert(
+        "root_todos",
+        standalone_root_tombstone,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )));
+    assert_eq!(
+        standalone_root_error.code,
+        crate::db::ErrorCode::WriteRejected
+    );
+    assert!(standalone_root_error.message.contains("already deleted"));
+
+    block_on(db.transaction(async |tx| {
+        let branch_target = || crate::db::WriteTarget::BranchView {
+            head: head.clone(),
+            base: Some(BranchViewBase::current(base.clone())),
+        };
+        let tombstone_error = tx
+            .upsert(
+                "todos",
+                transaction_tombstone,
+                BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+                crate::db::UpsertOptions {
+                    target: branch_target(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("transaction branch upsert must reject a head tombstone");
+        assert_eq!(tombstone_error.code, crate::db::ErrorCode::WriteRejected);
+        assert!(tombstone_error.message.contains("already deleted"));
+
+        tx.upsert(
+            "todos",
+            transaction_inherited,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            crate::db::UpsertOptions {
+                target: branch_target(),
+                ..Default::default()
+            },
+        )
+        .await?;
+        tx.upsert(
+            "todos",
+            transaction_absent,
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("transaction absent".to_owned()),
+                ),
+                ("done".to_owned(), Value::Bool(true)),
+            ]),
+            crate::db::UpsertOptions {
+                target: branch_target(),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let root_error = tx
+            .upsert(
+                "root_todos",
+                transaction_root_tombstone,
+                BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+                Default::default(),
+            )
+            .await
+            .expect_err("transaction root upsert must match standalone tombstone rejection");
+        assert_eq!(root_error.code, crate::db::ErrorCode::WriteRejected);
+        assert!(root_error.message.contains("already deleted"));
+        Ok(())
+    }))
+    .expect("commit accepted branch upserts");
+
+    block_on(async {
+        let mut node = db.node.node.lock().await;
+        for row_id in [standalone_tombstone, transaction_tombstone] {
+            assert!(
+                node.local_content_winner_tx_id_in_branch("todos", &head, row_id)
+                    .await
+                    .expect("inspect rejected branch upsert")
+                    .is_none(),
+                "rejected branch upsert must not emit tombstone-hidden content"
+            );
+        }
+    });
+
+    let branch_rows = prepared_all(
+        &db,
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        }
+        .branch_view(head.clone(), Some(BranchViewBase::current(base.clone()))),
+    );
+    assert!(!row_ids(&branch_rows).contains(&standalone_tombstone));
+    assert!(!row_ids(&branch_rows).contains(&transaction_tombstone));
+    for (row_id, title) in [
+        (standalone_inherited, "standalone inherited"),
+        (standalone_absent, "standalone absent"),
+        (transaction_inherited, "transaction inherited"),
+        (transaction_absent, "transaction absent"),
+    ] {
+        let visible = branch_rows
+            .iter()
+            .find(|current| current.row_uuid() == row_id)
+            .expect("successful branch upsert must be visible");
+        assert_eq!(
+            visible.cell(table, "title"),
+            Some(Value::String(title.to_owned()))
+        );
+        assert_eq!(visible.cell(table, "done"), Some(Value::Bool(true)));
+    }
+
+    let root_rows = prepared_read(&db, &root_query);
+    assert!(!row_ids(&root_rows).contains(&standalone_root_tombstone));
+    assert!(!row_ids(&root_rows).contains(&transaction_root_tombstone));
 }
 
 #[test]
@@ -3012,7 +3286,10 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
             BTreeMap::new(),
             crate::db::UpsertOptions {
                 identity: attributed,
-                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
                 ..Default::default()
             },
         )),

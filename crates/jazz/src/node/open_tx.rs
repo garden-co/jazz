@@ -702,17 +702,9 @@ where
             ));
         }
         let mut staged_cells = self
-            .visible_current_cells_in_branch(table, &branch, row_uuid)
+            .tx_visible_current_cells_in_branch(tx_id, table, row_uuid, &branch)
             .await?
             .unwrap_or_default();
-        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
-            write.table == table && write.row_uuid == row_uuid && write.branch == branch
-        }) {
-            match &write.cells {
-                PendingCells::Replace(cells) => staged_cells = cells.clone(),
-                PendingCells::Patch(patch) => staged_cells.extend(patch.clone()),
-            }
-        }
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
@@ -733,6 +725,34 @@ where
                 verified_inherited_cells: None,
             },
         )
+    }
+
+    pub(crate) async fn tx_visible_current_cells_in_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_uuid: RowUuid,
+        branch: &BranchSelector,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let mut cells = self
+            .visible_current_cells_in_branch(table, branch, row_uuid)
+            .await?;
+        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
+            write.table == table && write.row_uuid == row_uuid && &write.branch == branch
+        }) {
+            match write.deletion {
+                Some(DeletionEvent::Deleted) => {
+                    cells = None;
+                    continue;
+                }
+                Some(DeletionEvent::Restored) | None => {}
+            }
+            match &write.cells {
+                PendingCells::Replace(replacement) => cells = Some(replacement.clone()),
+                PendingCells::Patch(patch) => cells.get_or_insert_default().extend(patch.clone()),
+            }
+        }
+        Ok(cells)
     }
 
     fn stage_mergeable_write(
