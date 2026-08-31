@@ -40,6 +40,15 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
   assert.doesNotMatch(aggregate, /env:\s*process\.env/);
 });
 
+test("parallel RecordPlayer browser topology has a reserved strict Vitest API port", () => {
+  const config = read("examples/record-player/apps/next-betterauth/vitest.config.browser.ts");
+  assert.match(
+    config,
+    /api:\s*\{\s*port:\s*63318,\s*strictPort:\s*true\s*\}/,
+    "RecordPlayer must not auto-probe the shared Vitest browser API ports used by parallel suites",
+  );
+});
+
 test("sealed consumers select content-addressed artifact paths rather than worktree pointers", () => {
   const runner = read("dev/gates/run-correctness-consumer.mjs");
   const producer = read("dev/artifacts/correctness-artifact-producer.mjs");

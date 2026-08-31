@@ -46,6 +46,12 @@ export default defineConfig({
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
+      // `run-ts-tests.sh` starts this topology suite beside other Vitest
+      // browser projects. Letting each project probe the shared default port
+      // races: a process can load its test module from a sibling project's
+      // Vite server. Keep this project on its reserved port and fail clearly
+      // if that reservation is unexpectedly unavailable.
+      api: { port: 63318, strictPort: true },
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
