@@ -15,16 +15,33 @@ describe("release config", () => {
     ) as { initialVersions?: Record<string, string> };
     const createJazzPackage = JSON.parse(
       fs.readFileSync(path.join(repoRoot, "packages", "create-jazz", "package.json"), "utf8"),
-    ) as { version?: string };
+    ) as { version?: string; files?: string[] };
 
     const jazzFixedGroup = ["jazz-tools", "jazz-wasm", "jazz-napi", "jazz-rn", "create-jazz"];
 
     expect(config.fixed).toContainEqual(jazzFixedGroup);
     expect(createJazzPackage.version).toMatch(/^2\.0\.0-alpha\./);
+    expect(createJazzPackage.files).toContain("jazz-source-snapshot.json");
 
     for (const packageName of jazzFixedGroup) {
       expect(preState.initialVersions?.[packageName]).toBe("2.0.0-alpha.6");
     }
+  });
+
+  it("binds pkg.pr.new create-jazz packages to the pull request head commit", () => {
+    const workflow = parseYaml(
+      fs.readFileSync(path.join(repoRoot, ".github", "workflows", "preview-build.yml"), "utf8"),
+    ) as {
+      jobs: {
+        "publish-pkg-pr-new": { steps: Array<{ name?: string; run?: string; env?: unknown }> };
+      };
+    };
+    const step = workflow.jobs["publish-pkg-pr-new"].steps.find(
+      (candidate) => candidate.name === "Bind create-jazz preview to this immutable commit",
+    );
+    expect(step?.env).toEqual({ PREVIEW_COMMIT: "${{ github.event.pull_request.head.sha }}" });
+    expect(step?.run).toContain("jazz-source-snapshot.json");
+    expect(step?.run).toContain("schema:1");
   });
 
   it("establishes the exact source tag before publishing any package", () => {
