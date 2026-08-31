@@ -113,6 +113,7 @@ const mockWasmSchema = {
     ],
   },
 };
+const initialMockTodoColumns = [...mockWasmSchema.todos.columns];
 
 vi.mock("jazz-tools/react", () => ({
   useAll: (...args: unknown[]) => mockUseAll(...args),
@@ -144,6 +145,8 @@ describe("TableDataGrid", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    mockWasmSchema.todos.columns = [...initialMockTodoColumns];
+
     currentTable = "todos";
     currentRows = [
       {
@@ -491,6 +494,30 @@ describe("TableDataGrid", () => {
       );
       expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
+  });
+
+  it("settles queued edits filtered out by schema drift without opening a transaction", async () => {
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), {
+      target: { value: "stale title draft" },
+    });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
+
+    mockWasmSchema.todos.columns = initialMockTodoColumns.filter(
+      (column) => column.name !== "title",
+    );
+    rerender(renderGridUi());
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    });
+    expect(mockTransaction).not.toHaveBeenCalled();
+    expect(mockTransactionWait).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("creates new transaction work after a definitive authority rejection", async () => {

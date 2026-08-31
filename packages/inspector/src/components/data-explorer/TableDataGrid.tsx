@@ -154,14 +154,17 @@ export interface TableMutationState {
   queuedDeleteRevisions: Record<string, number>;
 }
 
-export interface PendingTableSave {
-  writeResult: WriteResult<void>;
+interface SubmittedTableSave {
   submittedQueuedEdits: Record<string, QueuedRowEdits>;
   submittedStagedInserts: StagedInsert[];
   submittedQueuedDeletes: Set<string>;
   submittedQueuedEditRevisions: Record<string, Record<string, number>>;
   submittedStagedInsertRevisions: Record<string, number>;
   submittedQueuedDeleteRevisions: Record<string, number>;
+}
+
+export interface PendingTableSave extends SubmittedTableSave {
+  writeResult: WriteResult<void>;
 }
 
 function createTableMutationState(): TableMutationState {
@@ -189,6 +192,76 @@ function queuedRowEditsEqual(a: QueuedRowEdits, b: QueuedRowEdits) {
     aColumns.length === Object.keys(b).length &&
     aColumns.every((key) => queuedCellEditsEqual(a[key], b[key]))
   );
+}
+
+function settleSubmittedTableSave(
+  previous: TableMutationState,
+  settledSave: SubmittedTableSave,
+): TableMutationState {
+  const nextQueuedEdits: Record<string, QueuedRowEdits> = {};
+  const nextQueuedEditRevisions: Record<string, Record<string, number>> = {};
+  for (const [rowId, rowEdits] of Object.entries(previous.queuedEdits)) {
+    const submittedRowEdits = settledSave.submittedQueuedEdits[rowId];
+    const remainingRowEdits: QueuedRowEdits = {};
+    const remainingRowRevisions: Record<string, number> = {};
+    for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
+      const currentRevision = previous.queuedEditRevisions[rowId]?.[columnId];
+      const wasSettled =
+        queuedCellEditsEqual(queuedEdit, submittedRowEdits?.[columnId]) &&
+        currentRevision === settledSave.submittedQueuedEditRevisions[rowId]?.[columnId];
+      if (!wasSettled) {
+        remainingRowEdits[columnId] = queuedEdit;
+        if (currentRevision !== undefined) {
+          remainingRowRevisions[columnId] = currentRevision;
+        }
+      }
+    }
+    if (Object.keys(remainingRowEdits).length > 0) {
+      nextQueuedEdits[rowId] = remainingRowEdits;
+      nextQueuedEditRevisions[rowId] = remainingRowRevisions;
+    }
+  }
+
+  const submittedInsertById = new Map(
+    settledSave.submittedStagedInserts.map((insert) => [insert.id, insert]),
+  );
+  const nextStagedInserts = previous.stagedInserts.filter((insert) => {
+    const submitted = submittedInsertById.get(insert.id);
+    return (
+      !submitted ||
+      !queuedRowEditsEqual(insert.edits, submitted.edits) ||
+      previous.stagedInsertRevisions[insert.id] !==
+        settledSave.submittedStagedInsertRevisions[insert.id]
+    );
+  });
+  const nextStagedInsertRevisions: Record<string, number> = {};
+  for (const insert of nextStagedInserts) {
+    const revision = previous.stagedInsertRevisions[insert.id];
+    if (revision !== undefined) {
+      nextStagedInsertRevisions[insert.id] = revision;
+    }
+  }
+
+  const nextQueuedDeletes = new Set(previous.queuedDeletes);
+  const nextQueuedDeleteRevisions = { ...previous.queuedDeleteRevisions };
+  for (const rowId of settledSave.submittedQueuedDeletes) {
+    if (
+      previous.queuedDeleteRevisions[rowId] === settledSave.submittedQueuedDeleteRevisions[rowId]
+    ) {
+      nextQueuedDeletes.delete(rowId);
+      delete nextQueuedDeleteRevisions[rowId];
+    }
+  }
+
+  return {
+    ...previous,
+    queuedEdits: nextQueuedEdits,
+    queuedEditRevisions: nextQueuedEditRevisions,
+    stagedInserts: nextStagedInserts,
+    stagedInsertRevisions: nextStagedInsertRevisions,
+    queuedDeletes: nextQueuedDeletes,
+    queuedDeleteRevisions: nextQueuedDeleteRevisions,
+  };
 }
 
 interface EditableGridRow extends AnimatedGridRow {
@@ -1142,6 +1215,25 @@ export function TableDataGrid() {
           values: buildQueuedInsertValues(schemaColumns, stagedInsert.edits),
         }));
 
+        const submittedSave: SubmittedTableSave = {
+          submittedQueuedEdits,
+          submittedStagedInserts,
+          submittedQueuedDeletes,
+          submittedQueuedEditRevisions,
+          submittedStagedInsertRevisions,
+          submittedQueuedDeleteRevisions,
+        };
+        if (rowUpdates.length === 0 && submittedQueuedDeletes.size === 0 && inserts.length === 0) {
+          setMutationStateByTable((current) => {
+            const previous = current[mutationTable] ?? createTableMutationState();
+            return {
+              ...current,
+              [mutationTable]: settleSubmittedTableSave(previous, submittedSave),
+            };
+          });
+          return;
+        }
+
         const writeResult = await db.transaction((tx) => {
           for (const { rowId, updates } of rowUpdates) {
             tx.update(tableProxy, rowId, updates);
@@ -1153,15 +1245,7 @@ export function TableDataGrid() {
             tx.insert(tableProxy, insert.values, { id: insert.id });
           }
         });
-        pendingSave = {
-          writeResult,
-          submittedQueuedEdits,
-          submittedStagedInserts,
-          submittedQueuedDeletes,
-          submittedQueuedEditRevisions,
-          submittedStagedInsertRevisions,
-          submittedQueuedDeleteRevisions,
-        };
+        pendingSave = { writeResult, ...submittedSave };
         const retainedSave = pendingSave;
         setPendingSaveByTable((current) => {
           const next = new Map(current);
@@ -1180,73 +1264,9 @@ export function TableDataGrid() {
       });
       setMutationStateByTable((current) => {
         const previous = current[mutationTable] ?? createTableMutationState();
-        const nextQueuedEdits: Record<string, QueuedRowEdits> = {};
-        const nextQueuedEditRevisions: Record<string, Record<string, number>> = {};
-        for (const [rowId, rowEdits] of Object.entries(previous.queuedEdits)) {
-          const submittedRowEdits = settledSave.submittedQueuedEdits[rowId];
-          const remainingRowEdits: QueuedRowEdits = {};
-          const remainingRowRevisions: Record<string, number> = {};
-          for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
-            const currentRevision = previous.queuedEditRevisions[rowId]?.[columnId];
-            const wasSettled =
-              queuedCellEditsEqual(queuedEdit, submittedRowEdits?.[columnId]) &&
-              currentRevision === settledSave.submittedQueuedEditRevisions[rowId]?.[columnId];
-            if (!wasSettled) {
-              remainingRowEdits[columnId] = queuedEdit;
-              if (currentRevision !== undefined) {
-                remainingRowRevisions[columnId] = currentRevision;
-              }
-            }
-          }
-          if (Object.keys(remainingRowEdits).length > 0) {
-            nextQueuedEdits[rowId] = remainingRowEdits;
-            nextQueuedEditRevisions[rowId] = remainingRowRevisions;
-          }
-        }
-
-        const submittedInsertById = new Map(
-          settledSave.submittedStagedInserts.map((insert) => [insert.id, insert]),
-        );
-        const nextStagedInserts = previous.stagedInserts.filter((insert) => {
-          const submitted = submittedInsertById.get(insert.id);
-          return (
-            !submitted ||
-            !queuedRowEditsEqual(insert.edits, submitted.edits) ||
-            previous.stagedInsertRevisions[insert.id] !==
-              settledSave.submittedStagedInsertRevisions[insert.id]
-          );
-        });
-        const nextStagedInsertRevisions: Record<string, number> = {};
-        for (const insert of nextStagedInserts) {
-          const revision = previous.stagedInsertRevisions[insert.id];
-          if (revision !== undefined) {
-            nextStagedInsertRevisions[insert.id] = revision;
-          }
-        }
-
-        const nextQueuedDeletes = new Set(previous.queuedDeletes);
-        const nextQueuedDeleteRevisions = { ...previous.queuedDeleteRevisions };
-        for (const rowId of settledSave.submittedQueuedDeletes) {
-          if (
-            previous.queuedDeleteRevisions[rowId] ===
-            settledSave.submittedQueuedDeleteRevisions[rowId]
-          ) {
-            nextQueuedDeletes.delete(rowId);
-            delete nextQueuedDeleteRevisions[rowId];
-          }
-        }
-
         return {
           ...current,
-          [mutationTable]: {
-            ...previous,
-            queuedEdits: nextQueuedEdits,
-            queuedEditRevisions: nextQueuedEditRevisions,
-            stagedInserts: nextStagedInserts,
-            stagedInsertRevisions: nextStagedInsertRevisions,
-            queuedDeletes: nextQueuedDeletes,
-            queuedDeleteRevisions: nextQueuedDeleteRevisions,
-          },
+          [mutationTable]: settleSubmittedTableSave(previous, settledSave),
         };
       });
     } catch (error) {
