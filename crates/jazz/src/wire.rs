@@ -1716,6 +1716,7 @@ mod tests {
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }),
             SyncMessage::SubscribeRejected {
                 subscription,
@@ -1773,6 +1774,7 @@ mod tests {
                     RowUuid::from_bytes([0x77; 16]),
                     tx_id,
                 )],
+                delegated_session: None,
             },
             SyncMessage::RowVersionPayloads {
                 version_bundles: Vec::new(),
@@ -1933,6 +1935,7 @@ mod tests {
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             },
             purpose: AuthorizationScopePurpose {
                 action: PermissionAdviceAction::Read {

@@ -1445,6 +1445,7 @@ where
                             binding: binding.clone(),
                             opts,
                             identity: state.author,
+                            policy_binding: None,
                         },
                     ));
                 }
@@ -1485,6 +1486,7 @@ where
                                     binding: group.binding.clone(),
                                     opts: group.upstream_opts.clone(),
                                     identity: subscriber.peer.link_identity(),
+                                    policy_binding: Some(group.policy_binding.clone()),
                                 })
                         })
                         .collect::<Vec<_>>()
@@ -2168,7 +2170,11 @@ where
         let connections = self.connections.borrow().clone();
         for connection in &connections {
             let mut connection = connection.lock().await;
-            let next = connection.tick().await?;
+            // `PeerConnection::tick` contains the subscriber admission state
+            // machine. Keep that future off the enclosing Db tick frame so a
+            // normal host/test thread cannot accumulate it across connection
+            // passes.
+            let next = Box::pin(connection.tick()).await?;
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
@@ -2196,7 +2202,7 @@ where
                     };
                     if should_tick {
                         let mut connection = connection.lock().await;
-                        let next = connection.tick().await?;
+                        let next = Box::pin(connection.tick()).await?;
                         released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                         stats.subscription_events += next.subscription_events;
                         stats.remote_sync_applied += next.remote_sync_applied;

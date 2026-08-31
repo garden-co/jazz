@@ -10,12 +10,12 @@ use jazz::ids::{
     RowUuid, SchemaVersionId,
 };
 use jazz::protocol::{
-    CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
-    PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
-    RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
-    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
-    build_version_bundle_runs_from_singletons,
+    CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
+    MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
+    PhysicalTableIdentity, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
+    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -366,6 +366,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             }),
         ),
         (
@@ -382,6 +383,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                         authorization_progress: 9,
                     },
                 ),
+                delegated_session: None,
+            }),
+        ),
+        (
+            "subscribe_delegated_session_claim_snapshot",
+            "Subscribe",
+            SyncMessage::Subscribe(Subscribe {
+                shape_id,
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: Some(DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([0x73; 16]),
+                    claims: BTreeMap::from([(
+                        "user_id".to_owned(),
+                        Value::String("delegated-user".to_owned()),
+                    )]),
+                }),
             }),
         ),
         (
@@ -573,6 +592,21 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "FetchRowVersions",
             SyncMessage::FetchRowVersions {
                 requests: vec![RowVersionRef::new("todos", row, tx_id)],
+                delegated_session: None,
+            },
+        ),
+        (
+            "fetch_row_versions_delegated_session_claim_snapshot",
+            "FetchRowVersions",
+            SyncMessage::FetchRowVersions {
+                requests: vec![RowVersionRef::new("todos", row, tx_id)],
+                delegated_session: Some(DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([0x74; 16]),
+                    claims: BTreeMap::from([(
+                        "user_id".to_owned(),
+                        Value::String("delegated-repair-user".to_owned()),
+                    )]),
+                }),
             },
         ),
         (
@@ -914,6 +948,50 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
             "{name}: a canonical payload must reject a suffix"
         );
     }
+}
+
+#[test]
+fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
+    let messages = wire_fixture_messages();
+    for name in ["subscribe_empty_todos_binding", "fetch_row_versions_todos"] {
+        let (_, _, message) = messages
+            .iter()
+            .find(|(candidate, _, _)| *candidate == name)
+            .expect("v1 direct-policy fixture exists");
+        let mut old_shape = encode_sync_message(message).expect("v1 message encodes");
+        assert_eq!(
+            old_shape.pop(),
+            Some(0),
+            "{name}: fixture must end in its explicit delegated_session=None tag"
+        );
+        assert!(
+            decode_sync_message(&old_shape).is_err(),
+            "{name}: the pre-delegation record shape must not decode as v1"
+        );
+    }
+
+    let (_, _, message) = messages
+        .iter()
+        .find(|(name, _, _)| *name == "subscribe_delegated_session_claim_snapshot")
+        .expect("delegated Subscribe fixture exists");
+    let expected = encode_sync_message(message).expect("delegated Subscribe encodes");
+    let SyncMessage::Subscribe(mut changed) = message.clone() else {
+        panic!("delegated fixture must be Subscribe");
+    };
+    changed
+        .delegated_session
+        .as_mut()
+        .expect("delegated fixture carries a snapshot")
+        .claims
+        .insert(
+            "user_id".to_owned(),
+            Value::String("different-user".to_owned()),
+        );
+    assert_ne!(
+        encode_sync_message(&SyncMessage::Subscribe(changed)).expect("changed snapshot encodes"),
+        expected,
+        "a delegated claim change must alter the frozen v1 payload"
+    );
 }
 
 #[test]

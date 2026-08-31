@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use groove::ivm::MultisinkSubscription;
+use groove::records::Value;
 
 use super::super::ids::AuthorSubject;
 use super::super::node::PreparedQueryPlanHandle;
@@ -112,6 +113,9 @@ impl PeerRole {
 /// Server-side shipped-state for one downstream subscription on a peer link.
 #[derive(Debug, Default)]
 pub(super) struct PeerSubscriptionState {
+    /// Immutable admitted policy context for this usage site. Relay links can
+    /// multiplex sessions, so this must not be inferred from connection role.
+    pub(super) policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
     pub(super) member_index: BTreeMap<MemberIndexKey, MemberSlot>,

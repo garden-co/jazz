@@ -129,6 +129,7 @@ fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -198,6 +199,7 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
             subscription: supported_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -212,6 +214,7 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
             subscription: window_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
     seed(&server, "todos", cells("third", false, owner));
@@ -291,6 +294,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -334,6 +338,7 @@ fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
             },
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -381,6 +386,7 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
             known_state: Some(KnownStateDeclaration::ExactVersionSet {
                 versions: oversized_row_version_refs(MAX_KNOWN_STATE_EXACT_REFS + 1),
             }),
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -407,6 +413,7 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
                 completeness: KnownStateCompleteness::FastCurrentMembership,
                 position: crate::time::GlobalTime::default(),
             }),
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -518,6 +525,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
             subscription,
             values: vec![Value::String("A".to_owned())],
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
     assert_protocol_view_update_rows(
@@ -580,6 +588,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
             subscription,
             values,
             known_state,
+            delegated_session: None,
         }))
         .unwrap();
     for _ in 0..2 {
@@ -789,6 +798,7 @@ fn current_row_subscription_key_rejects_ordinary_whole_table_collision() {
             subscription: current_rows_subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
     for _ in 0..2 {
@@ -883,6 +893,7 @@ fn current_row_subscription_key_refuses_existing_ordinary_owner() {
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -976,6 +987,7 @@ fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() 
     client_transport
         .send(SyncMessage::FetchRowVersions {
             requests: oversized_row_version_refs(MAX_FETCH_ROW_VERSIONS + 1),
+            delegated_session: None,
         })
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
@@ -1001,6 +1013,7 @@ fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() 
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -1062,6 +1075,7 @@ fn subscriber_connection_drops_mismatched_shape_id_and_keeps_serving() {
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 
@@ -1305,6 +1319,7 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
             subscription,
             values: Vec::new(),
             known_state: None,
+            delegated_session: None,
         }))
         .unwrap();
 

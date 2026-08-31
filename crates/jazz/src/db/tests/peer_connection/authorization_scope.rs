@@ -288,6 +288,7 @@ fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             },
             purpose: AuthorizationScopePurpose {
                 action: PermissionAdviceAction::Read {
@@ -384,6 +385,7 @@ fn authorization_scope_rejects_unrelated_caller_intent() {
                 subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             },
             purpose: AuthorizationScopePurpose {
                 action: PermissionAdviceAction::Read {
@@ -473,6 +475,7 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
                     subscription,
                     values: Vec::new(),
                     known_state: None,
+                    delegated_session: None,
                 },
                 purpose: AuthorizationScopePurpose {
                     action: action.clone(),
@@ -764,6 +767,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
                 subscription: canonical_subscription,
                 values: Vec::new(),
                 known_state: None,
+                delegated_session: None,
             },
             purpose: AuthorizationScopePurpose {
                 action: PermissionAdviceAction::Read {
@@ -817,6 +821,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
                     subscription,
                     values: Vec::new(),
                     known_state: None,
+                    delegated_session: None,
                 },
                 purpose: AuthorizationScopePurpose {
                     action: PermissionAdviceAction::Read {

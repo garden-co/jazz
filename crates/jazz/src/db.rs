@@ -2031,6 +2031,9 @@ struct PendingUpstreamSubscription {
     binding: Binding,
     opts: RegisterShapeOptions,
     identity: AuthorSubject,
+    /// Immutable logical session context for a relay-multiplexed request.
+    /// Direct upstream consumers use `None` and authenticate at transport.
+    policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
 }
 
 struct QueryCoverageRegistration {
@@ -2070,6 +2073,8 @@ struct OpenedUpstreamCoverage {
 struct CoverageGroup {
     shape: ValidatedQuery,
     binding: Binding,
+    /// Immutable context represented by this relay-only coverage key.
+    policy_binding: (AuthorSubject, BTreeMap<String, Value>),
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
     initialized: bool,
@@ -2087,6 +2092,7 @@ struct CoverageGroup {
 struct RelayUpstreamSubscriptionOwner {
     downstream_connection_epoch: u64,
     coverage: CoverageKey,
+    policy_binding: (AuthorSubject, BTreeMap<String, Value>),
     downstream_subscriptions: BTreeSet<SubscriptionKey>,
 }
 
@@ -2839,6 +2845,7 @@ fn coverage_key(
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         opts,
+        policy_binding: None,
     }
 }
 

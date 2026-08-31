@@ -207,6 +207,7 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts.clone(),
                 identity,
+                policy_binding: None,
             };
             self.register_query_coverage(coverage.clone(), pending_subscription.clone(), false);
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
@@ -246,6 +247,7 @@ where
                 binding: binding.clone(),
                 opts: upstream_opts,
                 identity,
+                policy_binding: None,
             },
             true,
         );
@@ -294,6 +296,7 @@ where
                     binding: binding.clone(),
                     opts: opts.clone(),
                     identity,
+                    policy_binding: None,
                 },
             ));
         self.node

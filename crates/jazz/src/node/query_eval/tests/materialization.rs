@@ -742,6 +742,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
             &mut node,
             SyncMessage::FetchRowVersions {
                 requests: missing.clone(),
+                delegated_session: None,
             },
         )
         .expect("serve canonical contributor repair");

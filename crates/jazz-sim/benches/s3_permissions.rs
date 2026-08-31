@@ -2035,6 +2035,7 @@ fn ensure_client_subscription_registered(
             subscription,
             values,
             known_state: None,
+            delegated_session: None,
         }),
     )
     .expect("client registers query binding before view updates");

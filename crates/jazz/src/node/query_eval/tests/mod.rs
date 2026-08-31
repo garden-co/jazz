@@ -205,6 +205,7 @@ fn subscribe_query_binding_with_opts(
         },
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
 }

@@ -479,6 +479,84 @@ fn maintained_subscription_fast_cursor_skips_covered_members_and_sends_only_newe
     assert!(result_member_removes.is_empty());
 }
 
+#[test]
+fn served_subscription_paths_fail_closed_when_a_relay_binding_is_removed() {
+    // Open, rehydrate, maintained delivery, and coverage delivery all resolve
+    // their policy context through this one served-subscription seam. Removing
+    // the binding must therefore fail before any of those paths can fall back
+    // to the relay's SYSTEM transport identity.
+    let mut relay = PeerState::relay();
+    let subscription = SubscriptionKey {
+        shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(0x991)),
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x992)),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    relay.set_subscription_policy_binding(
+        subscription,
+        (AuthorSubject::for_test_bytes([0x99; 16]), BTreeMap::new()),
+    );
+    relay.forget_subscription(subscription);
+    assert!(matches!(
+        relay.served_subscription_policy_binding(subscription),
+        Err(Error::InvalidStoredValue(
+            "served subscription is missing its immutable policy binding"
+        ))
+    ));
+
+    // The explicitly named standalone/direct helper remains the only identity
+    // fallback: it terminates one identity and has no multiplexed relay state.
+    let alice = AuthorSubject::for_test_bytes([0x9a; 16]);
+    let mut direct = PeerState::client_link(alice);
+    direct
+        .ensure_direct_internal_subscription_policy_binding(subscription)
+        .unwrap();
+    assert_eq!(
+        direct.served_subscription_policy_binding(subscription).unwrap(),
+        (alice, BTreeMap::new())
+    );
+}
+
+#[test]
+fn relay_public_rehydrate_wrappers_reject_missing_binding_without_installing_one() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x9b));
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let canonical = subscription_key(&shape, &binding);
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x9b)),
+        ..canonical
+    };
+    let mut relay = PeerState::relay();
+
+    assert!(matches!(
+        relay
+            .rehydrate_query_for_subscription_with_opts(
+                &mut core,
+                canonical,
+                &shape,
+                &binding,
+                RegisterShapeOptions::default(),
+            )
+            .resolve(),
+        Err(Error::InvalidStoredValue(
+            "relay subscription requires an explicit immutable policy binding"
+        ))
+    ));
+    assert!(relay.subscription_policy_binding(canonical).is_none());
+
+    assert!(matches!(
+        relay
+            .rehydrate_query_for_subscription_from_maintained_subscription(
+                &mut core, canonical, target, &shape,
+            )
+            .resolve(),
+        Err(Error::InvalidStoredValue(
+            "relay subscription requires an explicit immutable policy binding"
+        ))
+    ));
+    assert!(relay.subscription_policy_binding(target).is_none());
+}
+
 fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
     RealRowMemberEntry::current_content((
         "todos".to_owned().into(),
@@ -1347,6 +1425,7 @@ fn register_shape_binding_for_receiver_with_opts(
         subscription: subscription_key_with_opts(shape, binding, &opts),
         values,
         known_state: None,
+        delegated_session: None,
     }))
     .unwrap();
 }
