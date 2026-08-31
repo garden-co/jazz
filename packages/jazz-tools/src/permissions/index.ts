@@ -836,9 +836,11 @@ type QualifiedPermissionWhereEntries = {
   [K in `${string}.${string}`]?: unknown | SessionRefValue | RowRefValue | RecursiveCurrentValue;
 };
 
-type PermissionWhereObject<T> =
+type PermissionWhereObject<T> = (
   | PermissionWhereObjectBase<T>
-  | (PermissionWhereObjectBase<T> & QualifiedPermissionWhereEntries);
+  | (PermissionWhereObjectBase<T> & QualifiedPermissionWhereEntries)
+) &
+  ("type" extends keyof T ? unknown : { type?: never });
 
 type PermissionWhereInput<T> =
   T extends Array<infer U>
