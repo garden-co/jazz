@@ -630,6 +630,14 @@ describe("websocket frame carrier", () => {
     const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
     expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+
+    const unknownCode = encodeWireError(7, 3, "future code");
+    expect(() => isWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+    expect(() => decodeWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+
+    const unknownRetry = encodeWireError(6, 4, "future retry");
+    expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+    expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
