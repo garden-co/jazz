@@ -398,6 +398,27 @@ describe("package root public API", () => {
     }
   });
 
+  it("maps the Node-only foreground lease implementation away from browser bundles", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
+    ) as { browser?: Record<string, string> };
+
+    expect(packageJson.browser).toMatchObject({
+      "./dist/runtime/native-runtime/node-foreground-node-lease.js":
+        "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js",
+    });
+    expect(
+      readFileSync(
+        join(
+          packageRootDir,
+          "..",
+          "src/runtime/native-runtime/node-foreground-node-lease.browser.ts",
+        ),
+        "utf8",
+      ),
+    ).not.toMatch(/from\s+["']node:/);
+  });
+
   it("publishes restored React Native and Expo entrypoints", () => {
     const packageJson = JSON.parse(
       readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
