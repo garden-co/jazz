@@ -105,12 +105,12 @@ the write-durability values used by `wait({ tier })`.
   the write is set to `"global"`**.
 </Callout>
 
-### Local updates and propagation
+### Own writes and propagation
 
-Two additional options control how the subscription interacts with local writes and upstream servers:
+The read tier also determines how a subscription treats your own local writes:
 
-- `localUpdates` (`"immediate"` \| `"deferred"`, default `"immediate"`)&hairsp;—&hairsp;With `"immediate"`, your own local writes appear in the subscription while it's still waiting for the tier to confirm the initial snapshot (only once the subscription has settled at least once). With `"deferred"`, all delivery is held until the tier confirms.
-- `propagation` (`"full"` \| `"local-only"`, default `"full"`)&hairsp;—&hairsp;With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried and no server communication happens.
+- `"local-first"` and `"remote-if-possible"` show your own local writes immediately once the subscription has settled at least once.
+- `"remote"` defers your own local writes until the server accepts them.
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including which APIs accept these options and how they compose.
 

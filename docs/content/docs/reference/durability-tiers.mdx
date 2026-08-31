@@ -34,19 +34,22 @@ Read choices control when the **first result** of a query or subscription is del
 They are intentionally separate from write durability: write APIs and `wait({ tier })`
 continue to use local, edge, and global.
 
-| Option         | Values                                                  | Default         | What it does                                                                                                                                                                                                                                                                     |
-| -------------- | ------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`         | `"local-first"` \| `"remote"` \| `"remote-if-possible"` | runtime default | Product-level read choice; the older values remain available as legacy controls.                                                                                                                                                                                                 |
-| `localUpdates` | `"immediate"` \| `"deferred"`                           | `"immediate"`   | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
-| `propagation`  | `"full"` \| `"local-only"`                              | `"full"`        | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
+| Option        | Values                                                  | Default         | What it does                                                                                                                                                                            |
+| ------------- | ------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tier`        | `"local-first"` \| `"remote"` \| `"remote-if-possible"` | runtime default | Product-level read choice, including how the subscription treats your own local writes. The older values remain available as legacy controls.                                           |
+| `propagation` | `"full"` \| `"local-only"`                              | `"full"`        | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication. |
 
 New applications should use the product read choices `"local-first"`,
-`"remote"`, and `"remote-if-possible"`. Local-first uses local knowledge;
-remote waits for the ordinary remote view. Remote-if-possible uses local knowledge
-only after the app explicitly calls `db.disconnect()`; a timeout, connection
-error, or slow response never triggers that fallback. A one-shot keeps its initial
-choice, while a disconnected subscription starts locally and is replaced with the
-ordinary remote subscription after reconnect.
+`"remote"`, and `"remote-if-possible"`:
+
+- `"local-first"` show local data before the server's, and shows your own local writes immediately.
+- `"remote"` shows only data accepted by the server.
+- `"remote-if-possible"` prioritizes remote data, but falls back to local data if the app explicitly calls `db.disconnect()` (a timeout, connection error, or slow response never triggers that fallback).
+  Local writes are optimistically shown before server approval.
+
+A one-shot keeps its initial choice, while a disconnected `"remote-if-possible"`
+subscription starts locally and is replaced with the ordinary remote subscription
+after reconnect.
 
 The older read values `"local"`, `"edge"`, and `"global"` remain accepted
 with their existing semantics during migration. They are legacy read controls only;

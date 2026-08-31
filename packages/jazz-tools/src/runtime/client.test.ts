@@ -336,15 +336,27 @@ describe("public read tiers", () => {
   it("keeps legacy read durability controls byte-for-byte compatible", () => {
     for (const tier of ["local", "edge", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);
-      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({ tier });
+      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
+        tier,
+        localUpdates: "immediate",
+      });
     }
   });
 
-  it("does not reinterpret remote-if-possible as a third native tier", () => {
+  it("infers the own-write overlay policy from the product read tier", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.LocalFirst })).toMatchObject({
+      tier: "local",
+      localUpdates: "immediate",
+    });
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.Remote })).toMatchObject({
+      tier: "edge",
+      localUpdates: "deferred",
+    });
     expect(
       resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.RemoteIfPossible }),
     ).toMatchObject({
       tier: "edge",
+      localUpdates: "immediate",
     });
   });
 });

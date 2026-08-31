@@ -350,10 +350,24 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
-/** Product-facing policy for reads. It deliberately does not change write durability. */
+
+/**
+ * Determines what data is returned for queries and subscriptions.
+ * It does not affect write durability.
+ */
 export enum ReadTier {
+  /**
+   * Read local data before server's. Own writes are optimistically shown before server approval.
+   */
   LocalFirst = "local-first",
+  /**
+   * Read only data confirmed by the server. Own writes are included after server approval.
+   */
   Remote = "remote",
+  /**
+   * Prefer remote data, but fall back to local data when offline. Own writes are optimistically
+   * shown before server approval.
+   */
   RemoteIfPossible = "remote-if-possible",
 }
 /** @deprecated Read APIs also accept these legacy durability names unchanged. */
@@ -365,9 +379,9 @@ export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
  * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
  * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
  * - With `"deferred"`, all delivery is held until the tier confirms.
- * Default is `"immediate"`.
+ * @internal
  */
-export type LocalUpdatesMode = "immediate" | "deferred";
+type LocalUpdatesMode = "immediate" | "deferred";
 /**
  * Controls where the subscription reads data from.
  *
@@ -400,16 +414,20 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  /**
+   * Determines what data is returned for queries and subscriptions.
+   * @deprecated DurabilityTier values remain accepted with their old meaning.
+   */
   tier?: QueryReadTier;
-  localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
 }
 
-type InternalQueryExecutionOptions = QueryExecutionOptions & {
+/** @internal Low-level read controls that are not part of the product-facing query API. */
+export type InternalQueryExecutionOptions = QueryExecutionOptions & {
+  localUpdates?: LocalUpdatesMode;
   openTransactionId?: OpenTransactionId;
   runtimeSettledTier?: DurabilityTier | null;
 };
@@ -554,15 +572,20 @@ export function resolveDefaultDurabilityTier(
 
 export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
-  options?: QueryExecutionOptions,
+  options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
+  const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
   return {
-    tier: resolveReadTier(options?.tier ?? resolveDefaultDurabilityTier(context)),
-    localUpdates: options?.localUpdates ?? "immediate",
+    tier: resolveReadTier(selectedTier),
+    localUpdates: options?.localUpdates ?? resolveLocalUpdatesMode(selectedTier),
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
+}
+
+function resolveLocalUpdatesMode(tier: QueryReadTier): LocalUpdatesMode {
+  return tier === ReadTier.Remote ? "deferred" : "immediate";
 }
 
 /** @internal Low-level runtimes retain the legacy three-tier wire contract. */
