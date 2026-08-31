@@ -1658,7 +1658,9 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 /// The core must accept and persist the whole exclusive bundle before the
 /// relay extends its projection for each sibling. Besides the view-scoped
 /// cardinality contract, this keeps the deep authoritative-ingest path on a
-/// normal host thread rather than relying on an enlarged test stack.
+/// normal host thread rather than relying on an enlarged test stack. The
+/// ordinary `Db::tick` boundary must therefore remain stack-safe when this
+/// receipt runs on libtest's default 2 MiB worker stack.
 fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let schema = compile_schema(
         &SchemaBuilder::new()

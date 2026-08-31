@@ -1439,6 +1439,38 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+/// Poll a thread-affine database operation on an auxiliary stack segment when
+/// the caller's current stack is nearly exhausted.
+///
+/// A single owner turn can synchronously poll through storage, validation,
+/// maintained-view, and transport layers before an async storage operation
+/// yields. Keep that implementation detail from making the public `Db` API
+/// depend on a host executor's task-stack size.
+pub(crate) struct StackSafeFuture<F> {
+    inner: Pin<Box<F>>,
+}
+
+impl<F> StackSafeFuture<F> {
+    pub(crate) fn new(inner: F) -> Self {
+        Self {
+            inner: Box::pin(inner),
+        }
+    }
+}
+
+impl<F: Future> Future for StackSafeFuture<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // Keep a generous red zone: the stack consumed by a poll is not known
+        // until it reaches the deepest storage/ingest path. The 8 MiB segment
+        // is temporary and released after the poll returns or yields.
+        stacker::maybe_grow(4 * 1024 * 1024, 8 * 1024 * 1024, || {
+            self.inner.as_mut().poll(context)
+        })
+    }
+}
+
 /// Thread-affine high-level database handle.
 pub struct Db<S>
 where

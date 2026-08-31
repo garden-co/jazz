@@ -937,7 +937,11 @@ where
 
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
-    pub async fn tick(&self) -> Result<(), Error> {
+    pub fn tick(&self) -> impl Future<Output = Result<(), Error>> + '_ {
+        StackSafeFuture::new(self.tick_inner())
+    }
+
+    async fn tick_inner(&self) -> Result<(), Error> {
         // A later queued mutation may be cold while holding its retained
         // preparation continuation.  Persist resident publications before
         // polling that queue so unrelated cold preparation cannot starve an
@@ -972,7 +976,11 @@ where
     }
 
     /// Service every connection once and return binding-observable wake counts.
-    pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+    pub fn tick_stats(&self) -> impl Future<Output = Result<DbTickStats, Error>> + '_ {
+        StackSafeFuture::new(self.tick_stats_inner())
+    }
+
+    async fn tick_stats_inner(&self) -> Result<DbTickStats, Error> {
         // See `tick`: previously admitted resident publications must keep
         // progressing even when the next FIFO preparation is cold.
         if self.node.has_pending_local_publications() {
