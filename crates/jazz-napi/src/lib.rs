@@ -1677,13 +1677,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_insert(table, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_insert(table, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -1757,13 +1758,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -1820,13 +1822,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_delete(table, row_id, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_delete(table, row_id, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -1852,13 +1855,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_restore(table, row_id, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_restore(table, row_id, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -1893,13 +1897,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_insert(table, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_insert(table, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -1930,13 +1935,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_update(table, row, patch, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_update(table, row, patch, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -1967,13 +1973,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_upsert(table, row, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_upsert(table, row, cells, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -2002,13 +2009,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_delete(table, row, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_delete(table, row, options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -2039,13 +2047,14 @@ impl NapiDb {
                 let write = db
                     .enqueue_restore(table, row, Some(cells), options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-                db.drive_queued_mutation_once();
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_memory(Rc::clone(db), write)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_restore(table, row, Some(cells), options)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                core_drive_direct_mutation_once(db, &write)?;
                 core_write_persistent(Rc::clone(db), write)
             }
         }
@@ -6014,6 +6023,72 @@ mod tests {
         assert!(
             db.write_state(reserved_tx_id).is_err(),
             "NAPI did not reintroduce a runtime-global no-op alias"
+        );
+    }
+
+    /// The sync NAPI mutation ABI makes one resident admission turn before it
+    /// returns a `Write`. An operation that fails in that turn must not hand
+    /// callers a seemingly committed receipt, and ordinary/partial-value
+    /// entrypoints must preserve the same boundary.
+    #[test]
+    fn direct_insert_and_large_value_update_surface_memory_first_turn_failures() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = serde_json::to_vec(&source).expect("serialize NAPI policy fixture");
+        let author = CoreAuthorSubject::for_test_bytes([0xc4; 16]);
+        let db = NapiDb::open_memory(
+            Uint8Array::from(schema),
+            Uint8Array::from(encode_persistent_open_config(author)),
+        )
+        .expect("open memory NAPI fixture");
+        let label_cells = |value: &str| {
+            let descriptor = RecordDescriptor::new([("label", ValueType::String)]);
+            let raw = descriptor
+                .create(&[CoreValue::String(value.to_owned())])
+                .expect("encode label fixture cell");
+            Uint8Array::from(
+                postcard::to_allocvec(&(descriptor, raw)).expect("encode named NAPI cells"),
+            )
+        };
+
+        let insert_error = match db.insert_encoded_with_options(
+            "missing_table".to_owned(),
+            label_cells("before"),
+            None,
+        ) {
+            Ok(_) => panic!("ordinary insert must surface its first-turn failure"),
+            Err(error) => error,
+        };
+        assert!(
+            insert_error.reason.contains("missing_table"),
+            "ordinary insert retains its core failure diagnostic: {}",
+            insert_error.reason
+        );
+
+        let large_update_error = match db.update_large_values_encoded(
+            "missing_table".to_owned(),
+            Uint8Array::from(vec![0xc5; 16]),
+            label_cells("after"),
+            json!([]),
+            None,
+        ) {
+            Ok(_) => panic!("partial-value entrypoint must surface its first-turn failure"),
+            Err(error) => error,
+        };
+        assert!(
+            large_update_error.reason.contains("missing_table"),
+            "partial-value update retains its core failure diagnostic: {}",
+            large_update_error.reason
         );
     }
 
