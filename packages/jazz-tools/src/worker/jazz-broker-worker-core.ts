@@ -55,6 +55,8 @@ type TabPeer = {
   flushPumpComplete: boolean;
   flushObserved: boolean;
   transportWaitAbort: AbortController;
+  /** True only for a port transferred through authenticated Inspector control. */
+  inspectorAttachment: boolean;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -1067,7 +1069,12 @@ async function waitForServerConnection(
   }
 }
 
-function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): void {
+function attachTab(
+  context: RuntimeContext,
+  tabId: string,
+  port: MessagePort,
+  inspectorAttachment = false,
+): void {
   closeTab(context, tabId);
   let peer!: TabPeer;
   const onMessage = (event: MessageEvent<BrowserFollowerPortRequest>) => {
@@ -1086,6 +1093,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     flushPumpComplete: false,
     flushObserved: false,
     transportWaitAbort: new AbortController(),
+    inspectorAttachment,
     onMessage,
     onMessageError,
   };
@@ -1200,7 +1208,14 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           ensureServerConnection(peer.context);
         }
       });
-      result(peer, message.id);
+      result(
+        peer,
+        message.id,
+        undefined,
+        peer.inspectorAttachment
+          ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
+          : undefined,
+      );
       return;
     }
     if (message.type === "update-auth") {
@@ -1382,7 +1397,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       } satisfies BrowserInspectorControlEvent);
       return;
     }
-    attachTab(context, message.tabId, message.port);
+    attachTab(context, message.tabId, message.port, true);
     port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
   };
   const dispose = () => {
@@ -1397,9 +1412,19 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
   port.start();
 }
 
-function result(peer: TabPeer, id: number, error?: Error): void {
+function result(
+  peer: TabPeer,
+  id: number,
+  error?: Error,
+  receipt?: { inspectorAttachmentPhysicalDbName: string },
+): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
-  post(peer.port, { type: "result", id, ...(error ? { error: errorDetails(error) } : {}) });
+  post(peer.port, {
+    type: "result",
+    id,
+    ...(error ? { error: errorDetails(error) } : {}),
+    ...receipt,
+  });
 }
 
 function errorDetails(error: Error): string {

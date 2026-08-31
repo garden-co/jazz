@@ -7,6 +7,7 @@ import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/d
 import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
 import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
 import { useAll } from "../../src/react-core/use-all.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 
 const schema: WasmSchema = {
   orgs: {
@@ -455,7 +456,7 @@ describe("useAll browser integration", () => {
       <JazzProvider client={client}>
         <UseAllProbe
           query={makeQuery<Todo>("todos", {})}
-          options={{ localUpdates: "deferred", propagation: "full" }}
+          options={{ propagation: "full" }}
           pick={(row) => row.title}
         />
       </JazzProvider>,
@@ -476,7 +477,7 @@ describe("useAll browser integration", () => {
     );
   });
 
-  it("supports local-only read propagation", async () => {
+  it("supports the internal local-only read tier", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("local-only"),
@@ -493,7 +494,7 @@ describe("useAll browser integration", () => {
     });
 
     await expect(
-      client.db.all(makeQuery<Todo>("todos", {}), { propagation: "local-only" }),
+      client.db.all(makeQuery<Todo>("todos", {}), inspectorLocalQueryOptions()),
     ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
   });
 

@@ -1065,14 +1065,10 @@ export function TableDataGrid() {
   // whole point is to show the host's local — possibly unsynced — data), so it
   // must not wait for an edge ack or force a server round-trip on reads.
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "local";
-  const queryOptions = useMemo(
-    () =>
-      ({
-        propagation: runtime === "standalone" ? "full" : "local-only",
-        visibility: "hidden_from_live_query_list",
-      }) as const,
-    [runtime],
-  );
+  // Overlay Db construction receives an authenticated Inspector worker port.
+  // Jazz Tools turns that handoff into its private local-read query source,
+  // so this UI never imports or manufactures a privileged option itself.
+  const queryOptions: QueryOptions = useMemo(() => ({}), []);
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.
   const isInitialLoading = queryResult.isLoading;
@@ -2010,7 +2006,7 @@ function RelationCell({
   schema: Record<string, { columns: ColumnDescriptor[] }>;
   relationTable: string;
   relationId: string;
-  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
+  queryOptions: QueryOptions;
 }) {
   const queryBuilder = useMemo(
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
@@ -2117,7 +2113,7 @@ function PlainTableView({
   gridColumns: GridColumn[];
   sorting: readonly SortColumn[];
   schema: Record<string, { columns: ColumnDescriptor[] }>;
-  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
+  queryOptions: QueryOptions;
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
   stagedInserts: StagedInsert[];

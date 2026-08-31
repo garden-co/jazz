@@ -13,7 +13,7 @@ import { IndexedDbPageStore } from "../indexeddb-page-store.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
-  resolve: () => void;
+  resolve: (receipt?: { inspectorAttachmentPhysicalDbName?: string }) => void;
   reject: (error: Error) => void;
 };
 
@@ -32,6 +32,7 @@ type BrowserFollowerPortRpcRequest =
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
   private readonly pump: BrowserWorkerTransportPump;
   private readonly readyPromise: Promise<void>;
+  private inspectorAttachmentPhysicalDbName: string | null = null;
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private closed = false;
@@ -120,6 +121,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     if (this.closed) throw new Error("Browser follower connection is closed");
   }
 
+  /** A worker-issued receipt, not an assertion supplied by the caller. */
+  getAuthenticatedInspectorAttachmentPhysicalDbName(): string | null {
+    return this.inspectorAttachmentPhysicalDbName;
+  }
+
   async waitForServerConnection(): Promise<void> {
     await this.ready();
     await this.request({ type: "wait-server" });
@@ -148,7 +154,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const channel = new MessageChannel();
     const id = this.nextRequestId++;
     const promise = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { type: "open-inspector-control", resolve, reject });
+      this.pending.set(id, { type: "open-inspector-control", resolve: () => resolve(), reject });
     });
     this.port.postMessage(
       {
@@ -209,11 +215,17 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));
     const id = this.nextRequestId++;
     const message = { ...request, id };
-    const promise = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { type: request.type, resolve, reject });
-    });
+    const promise = new Promise<{ inspectorAttachmentPhysicalDbName?: string } | undefined>(
+      (resolve, reject) => {
+        this.pending.set(id, { type: request.type, resolve, reject });
+      },
+    );
     this.port.postMessage(message satisfies BrowserFollowerPortRequest);
-    return promise;
+    return promise.then((receipt) => {
+      if (request.type === "init" && receipt?.inspectorAttachmentPhysicalDbName) {
+        this.inspectorAttachmentPhysicalDbName = receipt.inspectorAttachmentPhysicalDbName;
+      }
+    });
   }
 
   private readonly onMessage = (event: MessageEvent<BrowserFollowerPortEvent>): void => {
@@ -276,7 +288,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.pending.delete(message.id);
     if (message.error) {
       pending.reject(new Error(`Browser worker ${pending.type} failed: ${message.error}`));
-    } else pending.resolve();
+    } else {
+      pending.resolve({
+        inspectorAttachmentPhysicalDbName: message.inspectorAttachmentPhysicalDbName,
+      });
+    }
   };
 
   private readonly onMessageError = (): void => {

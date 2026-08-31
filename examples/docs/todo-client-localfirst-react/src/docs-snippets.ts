@@ -1,4 +1,4 @@
-import type { Db } from "jazz-tools";
+import { ReadTier, type Db } from "jazz-tools";
 import { app } from "../schema.js";
 
 const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
@@ -90,8 +90,7 @@ export async function combinedQuery(db: Db) {
 // #region reading-tier-react
 export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
   return db.subscribe(app.todos.where({ done: false }), (todos) => onCount(todos.length), {
-    tier: "edge",
-    localUpdates: "immediate",
+    tier: ReadTier.Remote,
   });
 }
 // #endregion reading-tier-react

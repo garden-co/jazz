@@ -360,30 +360,27 @@ export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 /** @deprecated Read APIs also accept these legacy durability names unchanged. */
 export type LegacyReadDurabilityTier = DurabilityTier;
 export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
+/** @internal Inspector-only tier that never subscribes upstream. */
+type InternalQueryReadTier = QueryReadTier | "local-only";
 /**
  * Controls when a write is visible to subscriptions.
  *
  * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
  * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
  * - With `"deferred"`, all delivery is held until the tier confirms.
- * Default is `"immediate"`.
+ * @internal
  */
-export type LocalUpdatesMode = "immediate" | "deferred";
+type LocalUpdatesMode = "immediate" | "deferred";
 /**
  * Controls where the subscription reads data from.
  *
  * - With `"full"`, the subscription is sent to upstream servers, which push matching data back.
  * - With `"local-only"`, only local storage is queried and no server communication happens.
+ *
+ * Defaults to `"full"`.
+ * @internal
  */
-export type QueryPropagation = "full" | "local-only";
-/**
- * Whether this query should be shown in the inspector.
- * Useful for helpers and framework internals that create subscriptions
- * but should stay out of the DB inspector.
- * Defaults to `"public"`.
- */
-export type QueryVisibility = "public" | "hidden_from_live_query_list";
-
+type QueryPropagation = "full" | "local-only";
 /** Named values selecting one exact branch-local row coordinate. */
 export interface BranchSelector {
   values: Record<string, Value>;
@@ -401,16 +398,52 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  /**
+   * Determines what data is returned for queries and subscriptions.
+   * @deprecated DurabilityTier values remain accepted with their old meaning.
+   */
   tier?: QueryReadTier;
-  localUpdates?: LocalUpdatesMode;
-  propagation?: QueryPropagation;
-  visibility?: QueryVisibility;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
 }
 
-type InternalQueryExecutionOptions = QueryExecutionOptions & {
+/**
+ * Copy the product-facing subset of query options before crossing a public
+ * JavaScript boundary.  TypeScript declarations are useful guidance, but a
+ * caller can always supply an object through `as any` (or plain JavaScript).
+ * In particular, transport propagation and own-write delivery are runtime
+ * controls, not product API switches.
+ *
+ * @internal Db uses the analogous conversion when it lowers typed builders.
+ */
+export function publicQueryExecutionOptions(
+  options?: QueryExecutionOptions,
+): QueryExecutionOptions | undefined {
+  if (!options) return undefined;
+  const candidate = options as { tier?: unknown; branch?: unknown };
+  const result: QueryExecutionOptions = {};
+  if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
+  if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
+  return result;
+}
+
+/** @internal `local-only` is deliberately excluded from the product surface. */
+export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
+  return (
+    value === ReadTier.LocalFirst ||
+    value === ReadTier.Remote ||
+    value === ReadTier.RemoteIfPossible ||
+    value === "local" ||
+    value === "edge" ||
+    value === "global"
+  );
+}
+
+/** @internal Low-level read controls that are not part of the product-facing query API. */
+export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
+  tier?: InternalQueryReadTier;
+  localUpdates?: LocalUpdatesMode;
+  propagation?: QueryPropagation;
   openTransactionId?: OpenTransactionId;
   runtimeSettledTier?: DurabilityTier | null;
 };
@@ -419,7 +452,6 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
-  visibility: QueryVisibility;
   branch?: BranchView;
 }
 
@@ -555,20 +587,24 @@ export function resolveDefaultDurabilityTier(
 
 export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
-  options?: QueryExecutionOptions,
+  options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
+  const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
   return {
-    tier: resolveReadTier(options?.tier ?? resolveDefaultDurabilityTier(context)),
-    localUpdates: options?.localUpdates ?? "immediate",
-    propagation: options?.propagation ?? "full",
-    visibility: options?.visibility ?? "public",
+    tier: resolveReadTier(selectedTier),
+    localUpdates: options?.localUpdates ?? resolveLocalUpdatesMode(selectedTier),
+    propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
     branch: options?.branch,
   };
 }
 
+function resolveLocalUpdatesMode(tier: InternalQueryReadTier): LocalUpdatesMode {
+  return tier === ReadTier.Remote ? "deferred" : "immediate";
+}
+
 /** @internal Low-level runtimes retain the legacy three-tier wire contract. */
-export function resolveReadTier(tier: QueryReadTier): DurabilityTier {
-  return tier === ReadTier.LocalFirst
+export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
+  return tier === ReadTier.LocalFirst || tier === "local-only"
     ? "local"
     : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
       ? "edge"
@@ -1273,7 +1309,12 @@ export class JazzClient {
    * @param options Optional read durability options
    * @returns Array of matching rows
    */
-  async query(
+  async query(query: string, options?: QueryExecutionOptions, session?: Session): Promise<Row[]> {
+    return this.queryInternal(query, publicQueryExecutionOptions(options), session);
+  }
+
+  /** @internal */
+  async queryInternal(
     query: string,
     options?: InternalQueryExecutionOptions,
     session?: Session,
@@ -1562,6 +1603,16 @@ export class JazzClient {
     query: string,
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
+    session?: Session,
+  ): number {
+    return this.subscribeInternal(query, callback, publicQueryExecutionOptions(options), session);
+  }
+
+  /** @internal */
+  subscribeInternal(
+    query: string,
+    callback: SubscriptionCallback,
+    options?: InternalQueryExecutionOptions,
     session?: Session,
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);

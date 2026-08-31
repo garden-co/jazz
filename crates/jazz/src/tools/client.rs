@@ -2659,7 +2659,12 @@ impl JazzClient {
     }
 
     fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
-        Self::core_read_opts(Some(tier.legacy_durability_tier()))
+        let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
+        opts.local_updates = match tier {
+            ReadTier::Remote => CoreLocalUpdates::Deferred,
+            ReadTier::LocalFirst | ReadTier::RemoteIfPossible => CoreLocalUpdates::Immediate,
+        };
+        opts
     }
 }
 
@@ -3154,9 +3159,9 @@ impl JazzClient {
 
     /// Subscribe using a product-level read tier.
     ///
-    /// `RemoteIfPossible` remains strict in the native Rust facade because it
-    /// has no public explicit-disconnect state; host bindings can lower it to
-    /// local only after their caller explicitly disconnects.
+    /// `RemoteIfPossible` keeps a strict remote initial gate in the native Rust
+    /// facade because it has no public explicit-disconnect state; host bindings
+    /// can lower it to local only after their caller explicitly disconnects.
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -3616,8 +3621,9 @@ mod tests {
             .expect("close yielding persistent storage");
     }
 
-    /// Product read tiers lower to the unchanged facade durability contract,
-    /// keeping write durability independent of the read API migration.
+    /// This binding-boundary lowering is asserted directly because its internal
+    /// overlay bit is not independently observable without conflating it with
+    /// remote transport timing. Write durability remains independent.
     #[test]
     fn read_tier_lowers_without_changing_write_durability() {
         assert_eq!(
@@ -3632,6 +3638,18 @@ mod tests {
             ReadTier::RemoteIfPossible.legacy_durability_tier(),
             DurabilityTier::EdgeServer,
             "the native facade has no explicit offline boundary"
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
+            CoreLocalUpdates::Immediate
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).local_updates,
+            CoreLocalUpdates::Deferred
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::RemoteIfPossible).local_updates,
+            CoreLocalUpdates::Immediate
         );
         assert_eq!(
             core_legacy_read_tier(DurabilityTier::Local),

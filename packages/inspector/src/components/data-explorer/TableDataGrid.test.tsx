@@ -440,16 +440,13 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with local-only propagation in overlay mode", () => {
+  it("leaves local-read source selection to the injected Inspector provider", () => {
     renderGrid();
 
-    expect(mockUseAll).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.objectContaining({
-        propagation: "local-only",
-        visibility: "hidden_from_live_query_list",
-      }),
-    );
+    const options = mockUseAll.mock.calls[0]?.[1];
+    expect(options).toBeDefined();
+    expect(Object.keys(options as object)).toEqual([]);
+    expect(Object.getOwnPropertySymbols(options as object)).toHaveLength(0);
   });
 
   it("adds a where clause and compiles it into query conditions", () => {

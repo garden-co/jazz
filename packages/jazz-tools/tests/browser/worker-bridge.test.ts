@@ -15,6 +15,7 @@ import {
   resolveDefaultPersistentDbName,
   type QueryBuilder,
 } from "../../src/runtime/db.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
@@ -2956,7 +2957,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (rows) => {
           snapshots.push(rows);
         },
-        { propagation: "local-only" },
+        inspectorLocalQueryOptions(),
       ),
     );
 
@@ -2984,14 +2985,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await waitForCondition(
       async () => {
-        const rows = await dbB.all(allTodos, { propagation: "local-only" });
+        const rows = await dbB.all(allTodos, inspectorLocalQueryOptions());
         return rows.some((row) => row.title === "local-only-local-1");
       },
       8000,
       "local-only query should retrieve persisted IndexedDB rows after reopen",
     );
 
-    const snapshotsB = await dbB.all(allTodos, { propagation: "local-only" });
+    const snapshotsB = await dbB.all(allTodos, inspectorLocalQueryOptions());
     expect(snapshotsB.length).toBe(1);
     expect(snapshotsB[0].title).toBe("local-only-local-1");
   }, 60000);
@@ -3009,7 +3010,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (rows) => {
           snapshots.push(rows);
         },
-        { propagation: "local-only" },
+        inspectorLocalQueryOptions(),
       ),
     );
 
@@ -3750,7 +3751,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const rowAfterNullUpdate = await db.one(nullableApp.todos.where({ id: insertedTodo.id }), {
       tier: "local",
-      localUpdates: "immediate",
     });
     expect(rowAfterNullUpdate).not.toBeNull();
     expect(rowAfterNullUpdate?.description ?? null).toBeNull();

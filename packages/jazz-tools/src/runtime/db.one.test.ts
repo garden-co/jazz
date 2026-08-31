@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { Db, type DbConfig } from "./db.js";
+import { Db, getDbSubscriptionSource, type DbConfig } from "./db.js";
+import { isInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import type { JazzClient, Row } from "./client.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -35,8 +36,8 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 }
 
 class TestDb extends Db {
-  constructor(client: JazzClient) {
-    super({ appId: "db-one-limit-test" }, new TestRuntimeSource(client));
+  constructor(client: JazzClient, config: DbConfig = { appId: "db-one-limit-test" }) {
+    super(config, new TestRuntimeSource(client));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
@@ -50,6 +51,7 @@ function makeClient() {
   const client = {
     getSchema: () => new Map(Object.entries(app.wasmSchema)),
     query,
+    queryInternal: query,
     beginTransaction,
     onMutationError: vi.fn(),
   } as unknown as JazzClient;
@@ -111,5 +113,88 @@ describe("Db.one", () => {
     expect(query.mock.calls[0]?.[1]).toMatchObject({
       openTransactionId: "00000000000070008000000000000001",
     });
+  });
+
+  it("lowers public options before adding transaction-owned read controls", async () => {
+    const { client, query } = makeClient();
+    const db = new TestDb(client);
+    const tx = db.beginTransaction();
+
+    await tx.all(app.todos.where({ done: false }), {
+      tier: "local",
+      // JavaScript callers can supply these despite their absence from the
+      // public type. They must not override transaction semantics.
+      propagation: "local-only",
+      localUpdates: "visible",
+      openTransactionId: "forged-open-transaction",
+      runtimeSettledTier: "global",
+    } as any);
+
+    expect(query.mock.calls[0]?.[1]).toEqual({
+      tier: "local",
+      localUpdates: "deferred",
+      openTransactionId: "00000000000070008000000000000001",
+    });
+  });
+
+  it("does not mint Inspector-local reads from attachment-shaped config", async () => {
+    const { client, query } = makeClient();
+    const ordinary = new TestDb(client);
+    expect(getDbSubscriptionSource(ordinary).prepareQueryOptions).toBeUndefined();
+
+    // The host publishes this coordinate before an Inspector asks the worker
+    // to attach a peer. It is not itself a local-read authority.
+    const hostCoordinateOnly = new TestDb(client, {
+      appId: "db-one-host-coordinate-only",
+      runtimeSources: { inspectorHostPhysicalDbName: "jazz-host-coordinate" },
+    });
+    expect(getDbSubscriptionSource(hostCoordinateOnly).prepareQueryOptions).toBeUndefined();
+
+    const forgedAttachment = new TestDb(client, {
+      appId: "db-one-inspector-attachment",
+      runtimeSources: {
+        browserWorkerPort: {} as MessagePort,
+        inspectorHostPhysicalDbName: "jazz-inspector-authenticated-context",
+      },
+    });
+    const source = getDbSubscriptionSource(forgedAttachment);
+    expect(source.prepareQueryOptions).toBeDefined();
+    const cacheOnlyMarker = source.prepareQueryOptions?.({ tier: "remote" });
+    expect(isInspectorLocalQueryOptions(cacheOnlyMarker)).toBe(true);
+
+    // A matching port and physical coordinate are not authority. Only the
+    // worker's authenticated Inspector control-port receipt enables local
+    // reads, and ordinary caller config cannot manufacture that transition.
+    await source.all!(app.todos.where({ done: false }), cacheOnlyMarker);
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ tier: "remote" });
+  });
+
+  it("revokes Inspector-local authority when its worker generation is replaced", async () => {
+    const { client, query } = makeClient();
+    const db = new TestDb(client, {
+      appId: "db-one-inspector-generation",
+      runtimeSources: {
+        browserWorkerPort: {} as MessagePort,
+        inspectorHostPhysicalDbName: "jazz-inspector-authenticated-context",
+      },
+    });
+    const source = getDbSubscriptionSource(db);
+    const connectionHost = (
+      db as unknown as {
+        dbForConnection(): {
+          enableAuthenticatedInspectorLocalReads(name: string): void;
+          clearAuthenticatedInspectorLocalReads(): void;
+        };
+      }
+    ).dbForConnection();
+
+    connectionHost.enableAuthenticatedInspectorLocalReads("jazz-inspector-authenticated-context");
+    await source.all!(app.todos.where({ done: false }));
+    expect(query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: "local-only" });
+
+    // Same configured coordinate is not a receipt for a replacement worker.
+    connectionHost.clearAuthenticatedInspectorLocalReads();
+    await source.all!(app.todos.where({ done: false }));
+    expect(query.mock.calls.at(-1)?.[1]).toEqual({});
   });
 });

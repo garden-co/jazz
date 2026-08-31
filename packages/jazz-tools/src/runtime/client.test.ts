@@ -339,15 +339,71 @@ describe("public read tiers", () => {
   it("keeps legacy read durability controls byte-for-byte compatible", () => {
     for (const tier of ["local", "edge", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);
-      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({ tier });
+      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
+        tier,
+        localUpdates: "immediate",
+      });
     }
   });
 
-  it("does not reinterpret remote-if-possible as a third native tier", () => {
+  it("infers the own-write overlay policy from the product read tier", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.LocalFirst })).toMatchObject({
+      tier: "local",
+      localUpdates: "immediate",
+    });
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.Remote })).toMatchObject({
+      tier: "edge",
+      localUpdates: "deferred",
+    });
     expect(
       resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.RemoteIfPossible }),
     ).toMatchObject({
       tier: "edge",
+      localUpdates: "immediate",
+    });
+  });
+
+  it.each([
+    [ReadTier.LocalFirst, "local", undefined],
+    [ReadTier.Remote, "edge", JSON.stringify({ local_updates: "deferred" })],
+    [ReadTier.RemoteIfPossible, "edge", undefined],
+  ] as const)(
+    "keeps public %s reads full and derives their own-write policy",
+    async (tier, nativeTier, expectedOptionsJson) => {
+      const runtime = makeFakeRuntime();
+      runtime.query.mockResolvedValue([]);
+      runtime.createSubscription.mockReturnValue(7);
+      const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+      const injected = {
+        tier,
+        propagation: "local-only",
+        localUpdates: "immediate",
+        openTransactionId: "forged-open-transaction",
+        runtimeSettledTier: "global",
+      } as any;
+
+      await client.query('{"relation_ir":{"table":"todos"}}', injected);
+      const subscription = client.subscribe(
+        '{"relation_ir":{"table":"todos"}}',
+        () => {},
+        injected,
+      );
+
+      expect(runtime.query.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.query.mock.calls[0]?.[3]).toBe(expectedOptionsJson);
+      expect(runtime.createSubscription.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.createSubscription.mock.calls[0]?.[3]).toBe(expectedOptionsJson);
+      client.unsubscribe(subscription);
+    },
+  );
+});
+
+describe("internal read tiers", () => {
+  it("lowers local-only reads without exposing upstream propagation", () => {
+    expect(resolveEffectiveQueryExecutionOptions({}, { tier: "local-only" })).toMatchObject({
+      tier: "local",
+      localUpdates: "immediate",
+      propagation: "local-only",
     });
   });
 });
@@ -488,7 +544,7 @@ describe("JazzClient transaction query plumbing", () => {
     client.insertInternal("todos", {}, undefined, undefined, undefined, transactionId);
 
     await expect(
-      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      client.queryInternal(JSON.stringify({ relation_ir: { table: "todos" } }), {
         localUpdates: "deferred",
         openTransactionId: transactionId,
       }),

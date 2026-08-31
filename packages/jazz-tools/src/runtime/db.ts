@@ -24,9 +24,9 @@ import {
   type RestoreOptions as InternalRestoreOptions,
   type UpdateOptions as InternalUpdateOptions,
   type DurabilityTier,
-  type QueryExecutionOptions as InternalQueryExecutionOptions,
-  type QueryPropagation,
-  type QueryVisibility,
+  type QueryExecutionOptions,
+  type InternalQueryExecutionOptions,
+  isPublicQueryReadTier,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
   ReadTier,
@@ -54,6 +54,10 @@ import {
   resolveClientInternalSessionSync,
 } from "./client-session.js";
 import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
+import {
+  createInspectorLocalQueryOptions,
+  isInspectorLocalQueryOptions,
+} from "../internal/inspector-query.js";
 import { authSecretSeedForMinting } from "./auth-secret-codec.js";
 import {
   getDbInternalSession,
@@ -180,15 +184,46 @@ export type QualifiedBranch = Record<string, BranchValue>;
 export type Branch = BranchValue | QualifiedBranch;
 export type BranchBase = Branch | readonly [branch: Branch, snapshot: unknown];
 
-export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
+export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
   /** Current branch coordinate. A scalar selects a table with one `branchBy` column. */
   branch?: Branch;
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
   base?: BranchBase;
 };
 
+type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
+  tier?: InternalQueryExecutionOptions["tier"];
+};
+
+/**
+ * Lower product options to the internal native-read controls. This is a
+ * runtime boundary, rather than merely a TypeScript one: JavaScript callers
+ * must not be able to select local-only propagation or a deferred own-write
+ * overlay by adding private fields to an options object.
+ */
+function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptions | undefined {
+  if (!options) return undefined;
+  const candidate = options as QueryOptions & {
+    tier?: unknown;
+    branch?: unknown;
+    base?: unknown;
+  };
+  const lowered: InternalDbQueryOptions = {};
+  if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
+  if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
+  if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
+  if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
+  return lowered;
+}
+
 /** Package-internal subscription surface used by Jazz's UI bindings. */
 export interface DbSubscriptionSource {
+  /**
+   * Prepare public query options before they become part of a subscription
+   * cache key. The Inspector attachment uses this private seam to add its
+   * local-read capability; applications never receive a constructor for it.
+   */
+  prepareQueryOptions?(options?: QueryOptions): QueryOptions | undefined;
   all?<T extends { id: string }>(
     query: QueryBuilder<T>,
     options?: QueryOptions,
@@ -333,7 +368,7 @@ function normalizeBranchView(
 function nativeDbQueryOptions(
   schema: WasmSchema,
   tableName: string,
-  options?: QueryOptions,
+  options?: InternalDbQueryOptions,
 ): InternalQueryExecutionOptions {
   if (!options) return {};
   const { branch, base, ...rest } = options;
@@ -430,7 +465,7 @@ export interface ActiveQuerySubscriptionTrace {
   table: string;
   branches: string[];
   tier: DurabilityTier;
-  propagation: QueryPropagation;
+  propagation: "full" | "local-only";
   createdAt: string;
   stack?: string;
 }
@@ -442,10 +477,6 @@ export interface LogoutOptions {
 type ActiveQuerySubscriptionTraceListener = (
   traces: readonly ActiveQuerySubscriptionTrace[],
 ) => void;
-
-type StoredActiveQuerySubscriptionTrace = ActiveQuerySubscriptionTrace & {
-  visibility: QueryVisibility;
-};
 
 type RuntimeQueryTracePayload = {
   table: string;
@@ -1333,8 +1364,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const rows = await client.query(
+    // Transactions accept the same public options surface as Db. Lower before
+    // reaching native options so JavaScript callers cannot smuggle runtime
+    // controls (for example `localUpdates` or `openTransactionId`) through this
+    // otherwise separate execution path.
+    const queryOptions = nativeDbQueryOptions(
+      query._schema,
+      builtQuery.table,
+      lowerPublicDbQueryOptions(options),
+    );
+    const rows = await client.queryInternal(
       translateQuery(builderJson, planningSchema),
       {
         ...queryOptions,
@@ -1409,15 +1448,13 @@ export class Db {
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
   private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
-  private readonly activeQuerySubscriptionTraces = new Map<
-    string,
-    StoredActiveQuerySubscriptionTrace
-  >();
+  private readonly activeQuerySubscriptionTraces = new Map<string, ActiveQuerySubscriptionTrace>();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
+  #authenticatedInspectorPhysicalDbName: string | null = null;
 
   /**
    * Protected constructor - use {@link createDb} in regular app code.
@@ -1436,10 +1473,32 @@ export class Db {
     setDbInternalSession(this, resolveClientInternalSessionSync(sessionInput));
     this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
+    // An overlay peer gets its port only through the authenticated Inspector
+    // control handoff. Keep the resulting read policy inside this source: the
+    // Inspector UI uses ordinary `useAll`, while no application-facing option
+    // or package export can manufacture local-only reads.
+    const inspectorAttachmentRequested =
+      config.runtimeSources?.browserWorkerPort !== undefined &&
+      config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
     dbSubscriptionSources.set(this, {
-      all: (query, options) => this.all(query, options),
+      // Cache identity is reserved before the async worker receipt arrives so
+      // an Inspector entry can never share a host application's query cache.
+      // This marker is not authority: execution below strips it unless the
+      // worker subsequently authenticates this attachment.
+      ...(inspectorAttachmentRequested
+        ? {
+            prepareQueryOptions: (options?: QueryOptions) =>
+              createInspectorLocalQueryOptions(options),
+          }
+        : {}),
+      all: (query, options) =>
+        inspectorAttachmentRequested
+          ? this.allFromInspectorAttachment(query, options)
+          : this.allInternal(query, lowerPublicDbQueryOptions(options)),
       subscribeDelta: (query, callback, options, session) =>
-        this.subscribeDelta(query, callback, options, session),
+        inspectorAttachmentRequested
+          ? this.subscribeFromInspectorAttachment(query, callback, options, session)
+          : this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options), session),
     });
   }
 
@@ -1459,7 +1518,66 @@ export class Db {
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       clearAuthError: () => this.authStateStore.clearError(),
       onMutationError: (event) => this.handleMutationError(event),
+      enableAuthenticatedInspectorLocalReads: (physicalDbName) =>
+        this.#enableAuthenticatedInspectorLocalReads(physicalDbName),
+      clearAuthenticatedInspectorLocalReads: () => this.#clearAuthenticatedInspectorLocalReads(),
     };
+  }
+
+  #enableAuthenticatedInspectorLocalReads(physicalDbName: string): void {
+    // The configured coordinate is only selection metadata. It becomes
+    // authority only when the worker returns this exact root in the init
+    // receipt for a peer it created through Inspector control.
+    if (this.config.runtimeSources?.inspectorHostPhysicalDbName !== physicalDbName) return;
+    this.#authenticatedInspectorPhysicalDbName = physicalDbName;
+  }
+
+  #clearAuthenticatedInspectorLocalReads(): void {
+    this.#authenticatedInspectorPhysicalDbName = null;
+  }
+
+  private async inspectorAttachmentOptions<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<InternalDbQueryOptions> {
+    // Client construction starts the follower's init handshake. Do not decide
+    // the read tier from config/MessagePort shape: wait for the worker receipt.
+    this.getClient(query._schema);
+    await this.connection.ensureReady("local");
+    const selectedOptions = this.#authenticatedInspectorPhysicalDbName
+      ? createInspectorLocalQueryOptions(options)
+      : // Drop a source's cache-only marker when the worker did not issue an
+        // Inspector receipt. Symbols are deliberately non-enumerable.
+        options && { ...options };
+    return lowerPublicDbQueryOptions(selectedOptions) ?? {};
+  }
+
+  private async allFromInspectorAttachment<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+  ): Promise<T[]> {
+    return this.allInternal(query, await this.inspectorAttachmentOptions(query, options));
+  }
+
+  private subscribeFromInspectorAttachment<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): SubscriptionHandle {
+    let inner: SubscriptionHandle | null = null;
+    let cancelled = false;
+    const ready = this.inspectorAttachmentOptions(query, options).then((prepared) => {
+      if (cancelled) return;
+      inner = this.subscribeDelta(query, callback, prepared, session);
+      return inner.ready;
+    });
+    const handle = (() => {
+      cancelled = true;
+      inner?.();
+    }) as SubscriptionHandle;
+    Object.defineProperty(handle, "ready", { value: ready });
+    return handle;
   }
 
   /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */
@@ -1776,9 +1894,9 @@ export class Db {
    * @internal
    */
   getActiveQuerySubscriptions(): ActiveQuerySubscriptionTrace[] {
-    return Array.from(this.activeQuerySubscriptionTraces.values())
-      .filter((trace) => trace.visibility === "public")
-      .map(({ visibility: _visibility, ...trace }) => cloneActiveQuerySubscriptionTrace(trace));
+    return Array.from(this.activeQuerySubscriptionTraces.values()).map((trace) =>
+      cloneActiveQuerySubscriptionTrace(trace),
+    );
   }
 
   /**
@@ -2260,6 +2378,13 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    return this.allInternal(query, lowerPublicDbQueryOptions(options));
+  }
+
+  private async allInternal<T>(
+    query: QueryBuilder<T>,
+    options?: InternalDbQueryOptions,
+  ): Promise<T[]> {
     const client = this.getClient(query._schema);
     // A newly attached browser-worker follower has no authoritative
     // namespace-wide explicit-offline state until its init handshake resolves.
@@ -2286,8 +2411,12 @@ export class Db {
     await this.ensureReady(effectiveTier);
     const rows =
       context || usesRelationTraversal
-        ? await client.query(wasmQuery, queryOptions, context?.readSession ?? context?.session)
-        : await client.query(wasmQuery, queryOptions);
+        ? await client.queryInternal(
+            wasmQuery,
+            queryOptions,
+            context?.readSession ?? context?.session,
+          )
+        : await client.queryInternal(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -2334,7 +2463,7 @@ export class Db {
         }
         callback(update.all);
       },
-      options,
+      lowerPublicDbQueryOptions(options),
       session,
     );
   }
@@ -2374,7 +2503,7 @@ export class Db {
   private subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
-    options?: QueryOptions,
+    options?: InternalDbQueryOptions,
     session?: Session,
   ): SubscriptionHandle {
     // Constructing a browser follower starts its init handshake. Do that before
@@ -2443,7 +2572,7 @@ export class Db {
       let installationComplete = false;
       let id: number;
       try {
-        id = client.subscribe(
+        id = client.subscribeInternal(
           wasmQuery,
           (delta) => {
             if (unsubscribed || activeSubscription?.generation !== generation) return;
@@ -2515,7 +2644,11 @@ export class Db {
     // the readiness property. Framework bindings consume `ready` below via
     // DbSubscriptionSource and surface it as their normal error state.
     if (ready) void ready.catch(() => undefined);
-    if (queryOptions.tier == null || queryOptions.tier === "local") {
+    if (
+      queryOptions.tier == null ||
+      queryOptions.tier === "local" ||
+      queryOptions.tier === "local-only"
+    ) {
       deliver(manager.seed([]));
     }
     if (
@@ -2574,15 +2707,15 @@ export class Db {
       !this.connection.shouldDeferSubscriptionStart(
         resolveReadTier(queryOptions.tier ?? "local"),
       ) &&
-      queryOptions.propagation !== "local-only" &&
+      resolveEffectiveQueryExecutionOptions(this.config, queryOptions).propagation !==
+        "local-only" &&
       resolveReadTier(queryOptions.tier ?? "local") !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
-        this.all(query, {
+        this.allInternal(query, {
           ...options,
-          tier: "local",
-          propagation: "local-only",
+          tier: "local-only",
         });
       const seedLocal = () => {
         const seedRows =
@@ -2654,6 +2787,9 @@ export class Db {
     }
 
     const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
+    if (resolvedOptions.propagation === "local-only") {
+      return null;
+    }
     const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 
@@ -2666,7 +2802,6 @@ export class Db {
       propagation: resolvedOptions.propagation,
       createdAt: new Date().toISOString(),
       stack: trimSubscriptionTraceStack(new Error().stack),
-      visibility: resolvedOptions.visibility ?? "public",
     });
     this.notifyActiveQuerySubscriptionTraceListeners();
 

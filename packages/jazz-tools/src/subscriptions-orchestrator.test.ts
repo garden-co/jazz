@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "./runtime/context.js";
-import type { QueryBuilder, QueryOptions, SubscriptionHandle } from "./runtime/db.js";
+import { type QueryBuilder, type QueryOptions, type SubscriptionHandle } from "./runtime/db.js";
+import {
+  createInspectorLocalQueryOptions,
+  isInspectorLocalQueryOptions,
+} from "./internal/inspector-query.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,
@@ -210,14 +214,12 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const key = harness.manager.makeQueryKey(query, {
         tier: "edge",
-        localUpdates: "deferred",
-        propagation: "local-only",
+        branch: "draft",
       });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
           tier: "edge",
-          localUpdates: "deferred",
-          propagation: "local-only",
+          branch: "draft",
         })}:${query._build()}`,
       );
     } finally {
@@ -225,18 +227,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U07c makeQueryKey changes when localUpdates or propagation changes", async () => {
+  it("SO-U07c makeQueryKey changes when tier or branch changes", async () => {
     const harness = createUnitHarness("app-so-u07c");
     const query = makeQuery();
 
     try {
       const defaultKey = harness.manager.makeQueryKey(query);
-      const deferredKey = harness.manager.makeQueryKey(query, { localUpdates: "deferred" });
-      const localOnlyKey = harness.manager.makeQueryKey(query, { propagation: "local-only" });
+      const edgeKey = harness.manager.makeQueryKey(query, { tier: "edge" });
+      const branchKey = harness.manager.makeQueryKey(query, { branch: "draft" });
 
-      expect(deferredKey).not.toBe(defaultKey);
-      expect(localOnlyKey).not.toBe(defaultKey);
-      expect(localOnlyKey).not.toBe(deferredKey);
+      expect(edgeKey).not.toBe(defaultKey);
+      expect(branchKey).not.toBe(defaultKey);
+      expect(branchKey).not.toBe(edgeKey);
     } finally {
       await harness.manager.shutdown();
     }
@@ -274,8 +276,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const options = {
         tier: "global",
-        localUpdates: "deferred",
-        propagation: "local-only",
+        branch: "draft",
       } satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 
@@ -620,6 +621,49 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(key).toBe(harness.manager.makeQueryKey(query));
     } finally {
       await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U25a keeps an Inspector-local query separate from an equivalent product query", () => {
+    const harness = createUnitHarness();
+    const query = makeQuery();
+
+    expect(harness.manager.computeKey(query)).not.toBe(
+      harness.manager.computeKey(query, createInspectorLocalQueryOptions()),
+    );
+  });
+
+  it("SO-U25a1 applies a source-owned Inspector capability before computing and storing a key", async () => {
+    const query = makeQuery();
+    const calls: SubscribeCall[] = [];
+    const manager = new SubscriptionsOrchestrator(
+      { appId: "inspector-source" },
+      {
+        prepareQueryOptions: (options) => createInspectorLocalQueryOptions(options),
+        subscribeDelta: (subscribedQuery, callback, options) => {
+          calls.push({
+            query: subscribedQuery,
+            callback,
+            options,
+            unsubscribe: vi.fn() as SubscriptionHandle,
+          });
+          return calls.at(-1)!.unsubscribe;
+        },
+      },
+    );
+    try {
+      const publicKey = `${"inspector-source"}:${JSON.stringify({})}:${query._build()}`;
+      const key = manager.makeQueryKey(query);
+
+      expect(key).toBe(`inspector-source:inspector-local:{}:${query._build()}`);
+      expect(key).not.toBe(publicKey);
+      const entry = manager.getCacheEntry<Todo>(key);
+      const stop = entry.subscribe({});
+      expect(calls).toHaveLength(1);
+      expect(isInspectorLocalQueryOptions(calls[0]?.options)).toBe(true);
+      stop();
+    } finally {
+      await manager.shutdown();
     }
   });
 

@@ -1,5 +1,6 @@
 import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
-import type { DbSubscriptionSource, QueryBuilder, QueryOptions } from "./runtime/db.js";
+import { type DbSubscriptionSource, type QueryBuilder, type QueryOptions } from "./runtime/db.js";
+import { isInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { Session } from "./runtime/context.js";
 
 type UseAllStatePending<T> = {
@@ -211,7 +212,7 @@ export class SubscriptionsOrchestrator {
    * {@link makeQueryKey} to register, and {@link getCacheEntry} to subscribe.
    */
   computeKey<T extends { id: string }>(query: QueryBuilder<T>, options?: QueryOptions): string {
-    return `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
+    return `${this.config.appId}:${serializeQueryOptions(this.prepareQueryOptions(options))}:${query._build()}`;
   }
 
   makeQueryKey<T extends { id: string }>(
@@ -219,10 +220,11 @@ export class SubscriptionsOrchestrator {
     options?: QueryOptions,
     snapshot?: T[],
   ): string {
-    const key = this.computeKey(query, options);
+    const preparedOptions = this.prepareQueryOptions(options);
+    const key = `${this.config.appId}:${serializeQueryOptions(preparedOptions)}:${query._build()}`;
     this.queryDefinitions.set(key, {
       query,
-      options,
+      options: preparedOptions,
       snapshot: snapshot ? [...snapshot] : undefined,
     });
     // A re-seed invalidates any memoised pre-entry snapshot state.
@@ -235,6 +237,10 @@ export class SubscriptionsOrchestrator {
     }
 
     return key;
+  }
+
+  private prepareQueryOptions(options?: QueryOptions): QueryOptions | undefined {
+    return this.db.prepareQueryOptions?.(options) ?? options;
   }
 
   getCacheEntry<T extends { id: string }>(key: string): CacheEntryHandle<T> {
@@ -539,9 +545,9 @@ function sessionsEqual(a: Session | null, b: Session | null): boolean {
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {
-  if (!options) {
-    return "{}";
-  }
-
-  return JSON.stringify(options);
+  // The Inspector capability is deliberately non-enumerable, so it cannot be
+  // forwarded as an application option. Retain it in cache identity: otherwise
+  // an overlay query could share a full-propagation entry with the host app.
+  const serialized = JSON.stringify(options ?? {});
+  return isInspectorLocalQueryOptions(options) ? `inspector-local:${serialized}` : serialized;
 }

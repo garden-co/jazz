@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,9 +8,12 @@ import * as packageRoot from "./index.js";
 import * as runtime from "./runtime/index.js";
 import type { QueryExecutionOptions } from "./runtime/index.js";
 
+// @ts-expect-error The Inspector-only local-read capability is not an installed-app entrypoint.
+import type { inspectorLocalQueryOptions as InspectorCapability } from "jazz-tools/dev/inspector";
+
+void (null as unknown as InspectorCapability);
+
 const canonicalQueryExecutionOptions: QueryExecutionOptions = {
-  tier: "local-first",
-  propagation: "local-only",
   branch: "draft",
   base: "main",
 };
@@ -18,14 +22,47 @@ const remoteIfPossibleQueryExecutionOptions: QueryExecutionOptions = {
   tier: "remote-if-possible",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
-  // @ts-expect-error propagate was removed; use propagation instead.
+  // @ts-expect-error propagate is not a public query option.
   propagate: false,
+};
+const removedLocalUpdatesOption: QueryExecutionOptions = {
+  // @ts-expect-error localUpdates is inferred from tier and is no longer configurable.
+  localUpdates: "deferred",
+};
+const removedPropagationOption: QueryExecutionOptions = {
+  // @ts-expect-error propagation is an internal read-routing control.
+  propagation: "local-only",
+};
+const removedVisibilityOption: QueryExecutionOptions = {
+  // @ts-expect-error local-only subscriptions are omitted from introspection automatically.
+  visibility: "hidden_from_live_query_list",
+};
+const internalLocalOnlyTier: QueryExecutionOptions = {
+  // @ts-expect-error local-only is reserved for internal Inspector reads.
+  tier: "local-only",
 };
 
 void canonicalQueryExecutionOptions;
 void remoteQueryExecutionOptions;
 void remoteIfPossibleQueryExecutionOptions;
 void removedQueryExecutionOptions;
+void removedLocalUpdatesOption;
+void removedPropagationOption;
+void removedVisibilityOption;
+void internalLocalOnlyTier;
+
+// @ts-expect-error LocalUpdatesMode was removed from the public runtime surface.
+import type { LocalUpdatesMode as RuntimeLocalUpdatesMode } from "./runtime/index.js";
+// @ts-expect-error LocalUpdatesMode was removed from the package-root surface.
+import type { LocalUpdatesMode as PackageRootLocalUpdatesMode } from "./index.js";
+// @ts-expect-error QueryPropagation was removed from the public runtime surface.
+import type { QueryPropagation as RuntimeQueryPropagation } from "./runtime/index.js";
+// @ts-expect-error QueryPropagation was removed from the package-root surface.
+import type { QueryPropagation as PackageRootQueryPropagation } from "./index.js";
+// @ts-expect-error QueryVisibility was removed from the public runtime surface.
+import type { QueryVisibility as RuntimeQueryVisibility } from "./runtime/index.js";
+// @ts-expect-error QueryVisibility was removed from the package-root surface.
+import type { QueryVisibility as PackageRootQueryVisibility } from "./index.js";
 
 // @ts-expect-error NativeRuntimeAdapter is intentionally not part of the public runtime surface.
 import type { NativeRuntimeAdapter as InternalNativeRuntimeAdapterExport } from "./runtime/index.js";
@@ -396,6 +433,22 @@ describe("package root public API", () => {
     ]) {
       expect(exportedPaths, removedPathFragment).not.toContain(removedPathFragment);
     }
+
+    // The Inspector's local-only query capability is compiled into the private
+    // Inspector bundle, never made available to an installed application.
+    expect(exportedPaths).not.toContain("./dev/inspector");
+    expect(exportedPaths).not.toContain("inspector-query");
+    expect(exportedPaths).not.toContain("./internal/");
+  });
+
+  it("rejects the former Inspector capability subpath at runtime", () => {
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        ["--input-type=module", "--eval", 'await import("jazz-tools/dev/inspector")'],
+        { cwd: join(packageRootDir, ".."), stdio: ["ignore", "ignore", "pipe"] },
+      ),
+    ).toThrow(/Package subpath ['"]\.\/dev\/inspector['"] is not defined by "exports"/);
   });
 
   it("publishes restored React Native and Expo entrypoints", () => {
