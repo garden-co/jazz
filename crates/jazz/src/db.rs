@@ -3153,10 +3153,11 @@ where
         ensure_transaction_identity(options.identity)?;
         match options.target {
             WriteTarget::Root => {
-                self.db()
+                let exists = self
+                    .db()
                     .require_mergeable_transaction_upsert_visibility(self.tx_id(), table, row)
                     .await?;
-                if self.read(table, row).await?.is_some() {
+                if exists {
                     self.db()
                         .stage_mergeable_update(
                             self.tx_id(),

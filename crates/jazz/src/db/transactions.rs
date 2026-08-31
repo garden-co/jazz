@@ -390,9 +390,14 @@ where
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
+        let exists = self.transaction_read(tx_id, table, row).await?.is_some();
+        if !exists {
+            self.ensure_row_not_deleted(table, row).await?;
+        }
         self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
-            .await
+            .await?;
+        Ok(exists)
     }
 
     async fn require_mergeable_transaction_read_visibility(
