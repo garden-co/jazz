@@ -284,6 +284,31 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 // ---------------------------------------------------------------------------
 
 describe("SharedWorker bridge with IndexedDB", () => {
+  it("coalesces concurrent first-tab durable-owner admission in one worker realm", async () => {
+    const dbName = uniqueDbName("concurrent-first-owner");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("concurrent-first-owner-app"),
+      secret: generateAuthSecret(),
+    });
+
+    const [first, second] = await withTimeout(
+      Promise.all([
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+        SharedBrowserForegroundNodeLease.acquire({ dbName, storageOwner }),
+      ]),
+      5_000,
+      "concurrent first tabs did not share durable physical-owner admission",
+    );
+    try {
+      expect(second.node).not.toEqual(first.node);
+    } finally {
+      // A second first-open transaction must not have retired the first live
+      // identity as "abandoned". Clean return rejects an unknown/retired
+      // lease, so both succeeding proves both remained durably active.
+      await Promise.all([first.returnWithHighWater(11n), second.returnWithHighWater(22n)]);
+    }
+  }, 10_000);
+
   /**
    * A foreground which times out while the worker is still delivering its
    * durable identity must cancel/retire that lease before a later foreground

@@ -86,6 +86,7 @@ type ForegroundLeaseOwner = {
   pageStore: IndexedDbPageStore;
   storageOwner: string;
   activeLeaseIds: Set<string>;
+  allocationTail: Promise<void>;
 };
 
 type PhysicalDatabaseOwner = {
@@ -120,6 +121,7 @@ let foregroundLeaseTestHooks: ForegroundLeaseTestHooks | null = null;
 const contexts = new Map<string, RuntimeContext>();
 const foregroundLeaseOwners = new Map<string, ForegroundLeaseOwner>();
 const physicalDatabaseOwners = new Map<string, PhysicalDatabaseOwner>();
+const physicalDatabaseOwnerAdmissions = new Map<string, Promise<PhysicalDatabaseOwner>>();
 const inspectorControlPorts = new Set<MessagePort>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
 let wasmModuleSource: string | null = null;
@@ -154,6 +156,36 @@ async function ensurePhysicalDatabaseOwner(
     return existing;
   }
 
+  const pending = physicalDatabaseOwnerAdmissions.get(dbName);
+  if (pending) {
+    const owner = await pending;
+    if (owner.storageOwner !== storageOwner) {
+      throw new Error(
+        `IndexedDB database ${dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
+      );
+    }
+    return owner;
+  }
+
+  // Publish the same-realm admission before its first await can yield. Two
+  // first tabs may enter this function in adjacent worker message turns; Web
+  // Locks must fence other worker realms, not make one of those local callers
+  // spuriously observe this realm as a competing durable owner.
+  const admission = openPhysicalDatabaseOwner(dbName, storageOwner);
+  physicalDatabaseOwnerAdmissions.set(dbName, admission);
+  try {
+    return await admission;
+  } finally {
+    if (physicalDatabaseOwnerAdmissions.get(dbName) === admission) {
+      physicalDatabaseOwnerAdmissions.delete(dbName);
+    }
+  }
+}
+
+async function openPhysicalDatabaseOwner(
+  dbName: string,
+  storageOwner: string,
+): Promise<PhysicalDatabaseOwner> {
   const epoch = await acquireBrowserPhysicalDatabaseEpoch(dbName);
   let pageStore: IndexedDbPageStore | null = null;
   try {
@@ -399,16 +431,26 @@ async function acquireForegroundNodeLease(
     owner = foregroundLeaseOwners.get(request.dbName) ?? null;
     if (!owner) {
       const physicalOwner = await ensurePhysicalDatabaseOwner(request.dbName, request.storageOwner);
-      owner = {
-        // Lease bootstrap occurs before a foreground runtime is materialized,
-        // but it still opens the physical root. Admit its exact durable owner
-        // here, before the request can observe or mutate the lease pool.
-        pageStore: physicalOwner.pageStore,
-        storageOwner: request.storageOwner,
-        activeLeaseIds: new Set(),
-      };
-      foregroundLeaseOwners.set(request.dbName, owner);
-    } else if (owner.storageOwner !== request.storageOwner) {
+      // Another first-tab admission can have installed the in-memory owner
+      // while this request awaited the shared physical-open flight. Recheck
+      // before deciding whether the durable pool has no live leases: creating
+      // a second owner object here would make both callers run abandoned-lease
+      // recovery and let the later allocation retire the earlier live node.
+      owner = foregroundLeaseOwners.get(request.dbName) ?? null;
+      if (!owner) {
+        owner = {
+          // Lease bootstrap occurs before a foreground runtime is materialized,
+          // but it still opens the physical root. Admit its exact durable owner
+          // here, before the request can observe or mutate the lease pool.
+          pageStore: physicalOwner.pageStore,
+          storageOwner: request.storageOwner,
+          activeLeaseIds: new Set(),
+          allocationTail: Promise.resolve(),
+        };
+        foregroundLeaseOwners.set(request.dbName, owner);
+      }
+    }
+    if (owner.storageOwner !== request.storageOwner) {
       throw new Error(
         `IndexedDB database ${request.dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
       );
@@ -417,7 +459,7 @@ async function acquireForegroundNodeLease(
       await requestCancellation();
       return;
     }
-    const allocated = owner.pageStore.acquireForegroundNodeLease(owner.activeLeaseIds.size === 0);
+    const allocated = allocateForegroundNodeLease(owner);
     allocationPromise = (async () => {
       const allocatedLease = await allocated;
       // This is an internal browser-receipt seam. It delays only delivery of
@@ -434,7 +476,6 @@ async function acquireForegroundNodeLease(
       return allocatedLease;
     })();
     lease = await allocationPromise;
-    owner.activeLeaseIds.add(lease.leaseId);
     if (cancellationRequested) {
       await requestCancellation();
       return;
@@ -456,6 +497,28 @@ async function acquireForegroundNodeLease(
       message: asError(error).message,
     } satisfies BrowserForegroundNodeLeaseAcquireResponse);
     port.close();
+  }
+}
+
+async function allocateForegroundNodeLease(
+  owner: ForegroundLeaseOwner,
+): Promise<Awaited<ReturnType<IndexedDbPageStore["acquireForegroundNodeLease"]>>> {
+  const predecessor = owner.allocationTail;
+  let release!: () => void;
+  owner.allocationTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await predecessor;
+  try {
+    const lease = await owner.pageStore.acquireForegroundNodeLease(owner.activeLeaseIds.size === 0);
+    // Publish the live lease before releasing the next allocation. IndexedDB
+    // already serializes the durable transactions; this matching in-memory
+    // order prevents a queued caller from treating the just-committed lease
+    // as abandoned during first-realm recovery.
+    owner.activeLeaseIds.add(lease.leaseId);
+    return lease;
+  } finally {
+    release();
   }
 }
 
