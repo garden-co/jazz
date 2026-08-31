@@ -834,7 +834,10 @@ describe("broker worker context initialization", () => {
 
     await expect(cancellation).resolves.toMatchObject({
       type: "foreground-node-lease-cancelled",
-      error: "IndexedDB admission rejected",
+      error: expect.objectContaining({
+        name: "Error",
+        message: "IndexedDB admission rejected",
+      }),
     });
     await vi.waitFor(() => expect(port.close).toHaveBeenCalledOnce());
     await Promise.resolve();
