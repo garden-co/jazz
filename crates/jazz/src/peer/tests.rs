@@ -1674,9 +1674,15 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     };
     let edge_subscription = subscription_key_with_opts(&shape, &binding, &edge_opts);
     let mut first_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x45; 16]));
+    let mut cloned_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x47; 16]));
     let mut reconnected_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x46; 16]));
 
     first_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    // A separate peer can reconnect with an identical concrete binding.  It
+    // must keep that binding alive when the first peer later retires.
+    cloned_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
     // Refreshing the same publication replaces, rather than duplicates, its
@@ -1695,7 +1701,7 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
         .unwrap();
     assert_eq!(
         core.outbound_shape_owner_count_for_test(shape.shape_id()),
-        2,
+        3,
         "each independently served peer must own its live publication"
     );
 
@@ -1711,8 +1717,21 @@ fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
     first_peer.forget_subscription_with_node(&mut core, subscription);
     assert!(
         core.registered_shape(shape.shape_id()).is_some(),
-        "a second peer serving the same policy partition remains an owner"
+        "other peers and policy partitions remain shape owners"
     );
+    assert_eq!(
+        core.registered_query_binding_count_for_test(),
+        2,
+        "an identical binding remains live until its second peer retires"
+    );
+
+    cloned_peer.forget_subscription_with_node(&mut core, subscription);
+    assert_eq!(
+        core.registered_query_binding_count_for_test(),
+        1,
+        "retiring the final owner of one binding must preserve the other partition"
+    );
+    assert!(core.registered_shape(shape.shape_id()).is_some());
 
     reconnected_peer.forget_subscription_with_node(&mut core, edge_subscription);
     assert!(

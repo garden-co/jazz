@@ -211,6 +211,11 @@ where
             .entry(shape_id)
             .or_default()
             .insert((publication_owner, subscription));
+        self.query
+            .outbound_binding_owners
+            .entry(subscription)
+            .or_default()
+            .insert(publication_owner);
         Ok(())
     }
 
@@ -223,15 +228,27 @@ where
         subscription: SubscriptionKey,
     ) {
         let shape_id = subscription.shape_id;
-        let Some(owners) = self.query.outbound_shape_owners.get_mut(&shape_id) else {
+        let Some(shape_owners) = self.query.outbound_shape_owners.get_mut(&shape_id) else {
             return;
         };
-        if !owners.remove(&(publication_owner, subscription)) {
+        if !shape_owners.remove(&(publication_owner, subscription)) {
             return;
         }
-        let became_unowned = owners.is_empty();
+        let became_unowned = shape_owners.is_empty();
         if became_unowned {
             self.query.outbound_shape_owners.remove(&shape_id);
+        }
+        let binding_became_unowned = self
+            .query
+            .outbound_binding_owners
+            .get_mut(&subscription)
+            .is_some_and(|owners| {
+                owners.remove(&publication_owner);
+                owners.is_empty()
+            });
+        if binding_became_unowned {
+            self.query.outbound_binding_owners.remove(&subscription);
+            self.apply_unsubscribe(subscription);
         }
         self.reclaim_shape_if_unowned(shape_id);
     }
@@ -294,6 +311,9 @@ where
         self.query
             .pending_terminal_operations_by_binding_view
             .retain(|key, _| !reclaimed.contains(key.shape_id));
+        self.query
+            .outbound_binding_owners
+            .retain(|subscription, _| !reclaimed.contains(subscription.shape_id));
     }
 
     #[cfg(test)]

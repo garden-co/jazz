@@ -591,6 +591,7 @@ where
                 peer_shape_owners: BTreeMap::new(),
                 locally_registered_shapes: BTreeSet::new(),
                 outbound_shape_owners: BTreeMap::new(),
+                outbound_binding_owners: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),

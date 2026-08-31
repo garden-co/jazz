@@ -832,6 +832,10 @@ struct QueryServing {
     /// this node serving a downstream peer. Both kinds of owner may retain the
     /// same shape concurrently.
     outbound_shape_owners: BTreeMap<ShapeId, BTreeSet<(u64, SubscriptionKey)>>,
+    /// Served publications retaining each concrete binding view.  This keeps
+    /// one peer's retirement from leaving its binding receipts resident, while
+    /// still permitting multiple peer states to share an identical binding.
+    outbound_binding_owners: BTreeMap<SubscriptionKey, BTreeSet<u64>>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
     // A wire subscription is identified by its usage binding handle *and* read
     // view. The same canonical binding id may legitimately be registered at
