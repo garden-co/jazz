@@ -300,6 +300,230 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(read).resolves.toEqual([]);
   });
 
+  it("waits for server admission before running a strict relation query", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: (...args: unknown[]) => {
+              calls.push(args);
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await Promise.resolve();
+
+    expect(calls).toEqual([]);
+    await waitForFakeWebSocketNegotiation();
+    await expect(read).resolves.toEqual([]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("runs a strict relation query normally after server admission", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: (...args: unknown[]) => {
+              calls.push(args);
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }), null, "edge"),
+    ).resolves.toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toEqual({ tier: "edge" });
+  });
+
+  it("moves a strict relation query from a stalled handshake to its auth-refresh replacement", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        if (sockets[0] === this) {
+          this.sent.push(data);
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    let relationQueries = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              relationQueries += 1;
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await waitForFakeWebSocketNegotiation();
+    expect(relationQueries).toBe(0);
+
+    await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
+    await waitForFakeWebSocketNegotiation();
+
+    expect(sockets).toHaveLength(2);
+    await expect(read).resolves.toEqual([]);
+    expect(relationQueries).toBe(1);
+  });
+
+  it("rejects a strict relation query when its pre-admission carrier terminates", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+
+      override send(data: Uint8Array | string): void {
+        this.sent.push(data);
+      }
+    } as unknown as typeof WebSocket;
+    let relationQueries = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              relationQueries += 1;
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await waitForFakeWebSocketNegotiation();
+    sockets[0]!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(3, 1, "pre-admission denied")]),
+    );
+
+    await expect(read).rejects.toThrow("pre-admission denied");
+    expect(relationQueries).toBe(0);
+  });
+
+  it("returns an empty result when closing during a strict relation query handshake", async () => {
+    globalThis.WebSocket = class extends FakeWebSocket {
+      override send(data: Uint8Array | string): void {
+        this.sent.push(data);
+      }
+    } as unknown as typeof WebSocket;
+    let relationQueries = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allRelationQuery: () => {
+              relationQueries += 1;
+              return encodeRows([]);
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const read = runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      null,
+      "edge",
+    );
+    await waitForFakeWebSocketNegotiation();
+    expect(relationQueries).toBe(0);
+
+    await runtime.close();
+
+    await expect(read).resolves.toEqual([]);
+    expect(relationQueries).toBe(0);
+  });
+
   it("requires native db bindings to expose a tick scheduler", () => {
     expect(
       () =>

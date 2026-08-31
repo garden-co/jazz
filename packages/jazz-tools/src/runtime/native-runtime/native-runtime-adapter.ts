@@ -1970,6 +1970,8 @@ export class NativeRuntimeAdapter implements Runtime {
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
+      await this.waitForStrictRemoteQueryTransport(tier);
+      if (this.closed) return [];
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
@@ -2736,33 +2738,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed) return;
     if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
     if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
-    // `connect()` starts its WebSocket handshake before it can admit the
-    // native transport. A strict remote read begun in that interval must
-    // await the in-flight connection instead of falling through to a local
-    // materialization merely because the transport has not been installed yet.
-    while (!this.hasUpstream()) {
-      const pendingConnection = this.serverCarrierPromise;
-      if (!pendingConnection) return;
-      const attempt = this.serverConnectionAttempt;
-      const terminal =
-        attempt?.carrier === this.serverCarrier
-          ? await Promise.race([pendingConnection.then(() => null), attempt.terminal])
-          : null;
-      if (this.closed) return;
-      // Reauthentication/reconnect can retire a stalled carrier while this
-      // query is waiting. Follow the replacement attempt; only surface a
-      // terminal error when this was still the current connection.
-      if (terminal) {
-        if (
-          this.serverCarrierPromise !== null &&
-          this.serverCarrierPromise !== pendingConnection &&
-          this.serverConnectionAttempt?.carrier === this.serverCarrier
-        ) {
-          continue;
-        }
-        throw terminal;
-      }
-    }
+    await this.waitForStrictRemoteQueryTransport(tier);
     if (!this.db.attachQuery) return;
     // Coverage registration and probes are synchronous node operations. A
     // storage-backed evaluator may hold that node across suspension, so enter
@@ -2829,6 +2805,43 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.emitQueryCoverageTrace("covered");
     return attachment;
+  }
+
+  /**
+   * A strict remote query cannot materialize its local snapshot before an
+   * in-flight server handshake has either admitted its authority transport or
+   * failed. Relation-IR reads bypass query attachment, so they share this
+   * gate with attached reads instead of acquiring a second coverage path.
+   */
+  private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
+    if (tier !== "edge" && tier !== "global") return;
+    // `connect()` starts its WebSocket handshake before it can admit the
+    // native transport. A strict remote read begun in that interval must
+    // await the in-flight connection instead of falling through to a local
+    // materialization merely because the transport has not been installed yet.
+    while (!this.hasUpstream()) {
+      const pendingConnection = this.serverCarrierPromise;
+      if (!pendingConnection) return;
+      const attempt = this.serverConnectionAttempt;
+      const terminal =
+        attempt?.carrier === this.serverCarrier
+          ? await Promise.race([pendingConnection.then(() => null), attempt.terminal])
+          : null;
+      if (this.closed) return;
+      // Reauthentication/reconnect can retire a stalled carrier while this
+      // query is waiting. Follow the replacement attempt; only surface a
+      // terminal error when this was still the current connection.
+      if (terminal) {
+        if (
+          this.serverCarrierPromise !== null &&
+          this.serverCarrierPromise !== pendingConnection &&
+          this.serverConnectionAttempt?.carrier === this.serverCarrier
+        ) {
+          continue;
+        }
+        throw terminal;
+      }
+    }
   }
 
   private attachLocalReadCoverageInBackground(
