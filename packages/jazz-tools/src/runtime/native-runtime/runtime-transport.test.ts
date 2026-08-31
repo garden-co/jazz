@@ -42,6 +42,31 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("marks external peer admission as requiring a distinct peer pass", () => {
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const peerWork: Array<boolean | undefined> = [];
+    const unsubscribe = runtime.onPeerTransportWork((requiresDistinctPass) =>
+      peerWork.push(requiresDistinctPass),
+    );
+
+    runtime.notifyPeerTransportActivity();
+
+    expect(peerWork).toEqual([true]);
+    unsubscribe();
+  });
+
   it.each([
     [
       "transport mentioning a nested rejection",
