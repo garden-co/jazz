@@ -40,12 +40,12 @@ test("every direct Node/browser correctness entrypoint uses the one sealed consu
   assert.doesNotMatch(aggregate, /env:\s*process\.env/);
 });
 
-test("parallel RecordPlayer browser topology has a reserved strict Vitest API port", () => {
+test("parallel RecordPlayer browser topology gets an OS-assigned isolated Vitest API port", () => {
   const config = read("examples/record-player/apps/next-betterauth/vitest.config.browser.ts");
   assert.match(
     config,
-    /api:\s*\{\s*port:\s*63318,\s*strictPort:\s*true\s*\}/,
-    "RecordPlayer must not auto-probe the shared Vitest browser API ports used by parallel suites",
+    /api:\s*\{\s*port:\s*0,\s*strictPort:\s*true\s*\}/,
+    "RecordPlayer must receive an OS-assigned API port rather than probing a shared default range",
   );
 });
 

@@ -3,6 +3,7 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
+import { providerReceipt } from "./vitest-receipts.mjs";
 
 /**
  * The provider receipt mocks Jazz and Better Auth deliberately. Keep it out of
@@ -20,7 +21,7 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    include: ["tests/browser/provider.e2e.test.tsx"],
+    include: [providerReceipt],
     browser: {
       enabled: true,
       provider: playwright(),

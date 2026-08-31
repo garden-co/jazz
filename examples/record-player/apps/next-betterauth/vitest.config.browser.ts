@@ -4,6 +4,7 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
 import { resolve } from "node:path";
+import { topologyReceipt } from "./vitest-receipts.mjs";
 import {
   blockJazzServerNetwork,
   jazzServerInfo,
@@ -42,16 +43,14 @@ export default defineConfig({
     // This project owns the Jazz server lifecycle. Keep the mocked provider
     // receipt in vitest.config.provider.ts so `test:browser` remains a true
     // topology-only gate.
-    include: ["tests/browser/topology.e2e.test.ts"],
+    include: [topologyReceipt],
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
-      // `run-ts-tests.sh` starts this topology suite beside other Vitest
-      // browser projects. Letting each project probe the shared default port
-      // races: a process can load its test module from a sibling project's
-      // Vite server. Keep this project on its reserved port and fail clearly
-      // if that reservation is unexpectedly unavailable.
-      api: { port: 63318, strictPort: true },
+      // Let the OS allocate a private API port for this invocation. Browser
+      // projects run in parallel in the workspace gate; a fixed/default Vite
+      // port couples otherwise independent topology processes.
+      api: { port: 0, strictPort: true },
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
