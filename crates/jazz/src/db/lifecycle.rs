@@ -900,6 +900,13 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
+        // A later queued mutation may be cold while holding its retained
+        // preparation continuation.  Persist resident publications before
+        // polling that queue so unrelated cold preparation cannot starve an
+        // earlier local durability boundary or its outbox release.
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
@@ -907,7 +914,9 @@ where
             return Ok(());
         }
         self.node.drain_subscription_finalizations().await?;
-        self.node.settle_local_publications().await?;
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
@@ -916,6 +925,11 @@ where
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        // See `tick`: previously admitted resident publications must keep
+        // progressing even when the next FIFO preparation is cold.
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
@@ -923,7 +937,9 @@ where
             return Ok(DbTickStats::default());
         }
         self.node.drain_subscription_finalizations().await?;
-        self.node.settle_local_publications().await?;
+        if self.node.has_pending_local_publications() {
+            self.node.settle_local_publications().await?;
+        }
         let stats = self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;

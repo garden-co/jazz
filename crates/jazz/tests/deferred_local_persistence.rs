@@ -275,6 +275,66 @@ fn cancelled_started_deferred_persistence_poison_requires_reopen() {
     assert!(rows.iter().any(|row| row.row_uuid() == fresh.row_uuid()));
 }
 
+/// A cold queued preparation must not indefinitely prevent persistence of an
+/// earlier resident publication.  The two owner responsibilities are ordered
+/// by publication, not by later preparation work.
+#[test]
+fn cold_queued_preparation_does_not_starve_earlier_deferred_persistence() {
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x5d; 16]),
+            author: AuthorSubject::for_test_bytes([0x6d; 16]),
+        },
+    )))
+    .expect("open yielding database");
+    let seeded = block_on(db.insert("todos", row! { title: "seed" }, Default::default()))
+        .expect("seed durable row");
+    block_on(seeded.wait(DurabilityTier::Local)).expect("seed is durable");
+
+    db.set_deferred_local_persistence(true);
+    let earlier = block_on(db.insert("todos", row! { title: "earlier" }, Default::default()))
+        .expect("admit resident deferred publication");
+    assert_eq!(
+        block_on(earlier.write_state())
+            .expect("resident write state")
+            .durability,
+        DurabilityTier::None,
+    );
+
+    storage.evict_all();
+    control.take_observed();
+    control.pause_on(TestStorageOperation::Get);
+    control.pause_on(TestStorageOperation::ScanOpen);
+    db.enqueue_update(
+        "todos".to_owned(),
+        seeded.row_uuid(),
+        row! { title: "later cold preparation" },
+        Default::default(),
+    )
+    .expect("queue later cold mutation");
+
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut tick = Box::pin(db.tick());
+    assert!(matches!(tick.as_mut().poll(&mut context), Poll::Pending));
+    assert!(
+        control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany),
+        "an earlier resident publication must start persistence even while a later queued preparation is cold",
+    );
+    assert!(matches!(
+        tick.as_mut().poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+}
+
 #[test]
 fn queued_update_retains_cold_preparation_and_its_definitive_identity() {
     let schema = schema();

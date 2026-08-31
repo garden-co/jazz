@@ -528,6 +528,14 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
+    /// Whether a resident publication still needs its ordered durability turn.
+    /// This check is deliberately synchronous so a host's one bounded tick
+    /// does not spend its sole poll acquiring the publication-settler mutex
+    /// when there is no publication to advance.
+    pub(super) fn has_pending_local_publications(&self) -> bool {
+        !self.pending_local_publications.borrow().is_empty()
+    }
+
     pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
         let _settler = self.local_publication_settler.lock().await;
         loop {
