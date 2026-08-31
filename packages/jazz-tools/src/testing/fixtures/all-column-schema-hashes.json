@@ -1,0 +1,133 @@
+{
+  "schemaHashFormat": 2,
+  "legacyByteaColumnTypeTag": 10,
+  "currentByteaColumnTypeTag": 16,
+  "schema": {
+    "all_types": {
+      "columns": [
+        {
+          "name": "integer",
+          "column_type": { "type": "Integer" },
+          "nullable": false,
+          "default": { "type": "Integer", "value": 42 }
+        },
+        {
+          "name": "bigint",
+          "column_type": { "type": "BigInt" },
+          "nullable": false,
+          "default": { "type": "BigInt", "value": "9007199254740993" }
+        },
+        {
+          "name": "double",
+          "column_type": { "type": "Double" },
+          "nullable": false,
+          "default": { "type": "Double", "value": 1.25 }
+        },
+        {
+          "name": "boolean",
+          "column_type": { "type": "Boolean" },
+          "nullable": false,
+          "default": { "type": "Boolean", "value": true }
+        },
+        {
+          "name": "text",
+          "column_type": { "type": "Text" },
+          "nullable": false,
+          "default": { "type": "Text", "value": "fixture" }
+        },
+        {
+          "name": "enum",
+          "column_type": { "type": "Enum", "variants": ["draft", "active"] },
+          "nullable": false
+        },
+        {
+          "name": "enum_payload",
+          "column_type": {
+            "type": "EnumPayload",
+            "cases": [
+              { "name": "empty", "fields": [] },
+              {
+                "name": "binary",
+                "fields": [
+                  { "name": "score", "column_type": { "type": "Double" }, "nullable": false },
+                  {
+                    "name": "payload",
+                    "column_type": { "type": "Array", "element": { "type": "Bytea" } },
+                    "nullable": true
+                  }
+                ]
+              }
+            ]
+          },
+          "nullable": false,
+          "default": { "type": "Enum", "value": { "case": "empty", "values": [] } }
+        },
+        {
+          "name": "timestamp",
+          "column_type": { "type": "Timestamp" },
+          "nullable": false,
+          "default": { "type": "Timestamp", "value": 1773285322816 }
+        },
+        {
+          "name": "uuid",
+          "column_type": { "type": "Uuid" },
+          "nullable": false,
+          "default": { "type": "Uuid", "value": "00112233-4455-6677-8899-aabbccddeeff" }
+        },
+        {
+          "name": "bytea",
+          "column_type": { "type": "Bytea" },
+          "nullable": false,
+          "default": { "type": "Bytea", "value": [0, 16, 255] }
+        },
+        { "name": "json", "column_type": { "type": "Json" }, "nullable": true },
+        {
+          "name": "json_schema",
+          "column_type": {
+            "type": "Json",
+            "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+          },
+          "nullable": false
+        },
+        {
+          "name": "array_double",
+          "column_type": { "type": "Array", "element": { "type": "Double" } },
+          "nullable": false
+        },
+        {
+          "name": "array_bytea",
+          "column_type": { "type": "Array", "element": { "type": "Bytea" } },
+          "nullable": false
+        },
+        {
+          "name": "nested_row",
+          "column_type": {
+            "type": "Row",
+            "columns": [
+              { "name": "double", "column_type": { "type": "Double" }, "nullable": false },
+              { "name": "bytea", "column_type": { "type": "Bytea" }, "nullable": false },
+              {
+                "name": "deeper",
+                "column_type": {
+                  "type": "Array",
+                  "element": {
+                    "type": "Row",
+                    "columns": [
+                      { "name": "payload", "column_type": { "type": "Bytea" }, "nullable": true }
+                    ]
+                  }
+                },
+                "nullable": false
+              }
+            ]
+          },
+          "nullable": false
+        }
+      ],
+      "indexed_columns": ["text", "uuid"],
+      "branchBy": ["uuid"]
+    }
+  },
+  "currentHash": "aa8829b07fd733102562d7055a17578f7284c692af07d625095baacffde2b1a9",
+  "legacyByteaHash": "e07f991368f7315cd7e8361586902c27463dac7994cffebe730565a6f2a8879f"
+}

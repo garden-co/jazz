@@ -9,6 +9,55 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
 
+const COLUMN_TYPE_HASH_TAG = {
+  Integer: 1,
+  BigInt: 2,
+  Boolean: 3,
+  Text: 4,
+  Timestamp: 5,
+  Uuid: 6,
+  Array: 7,
+  Row: 8,
+  Enum: 9,
+  Double: 10,
+  Json: 11,
+  TransactionId: 12,
+  EnumPayload: 13,
+  ScalarEnum: 14,
+  CatalogueEnumPayload: 15,
+  Bytea: 16,
+} as const satisfies Record<
+  WasmColumnType["type"] | "TransactionId" | "ScalarEnum" | "CatalogueEnumPayload",
+  number
+>;
+
+const VALUE_HASH_TAG = {
+  Integer: 1,
+  BigInt: 2,
+  Boolean: 3,
+  Text: 4,
+  Timestamp: 5,
+  Uuid: 6,
+  Array: 7,
+  Row: 8,
+  Null: 9,
+  Double: 10,
+  Bytea: 11,
+  Enum: 14,
+} as const satisfies Record<Value["type"], number>;
+
+const CURRENT_STRUCTURAL_HASH_FORMAT = {
+  byteaTag: COLUMN_TYPE_HASH_TAG.Bytea,
+} as const;
+
+const LEGACY_BYTEA_STRUCTURAL_HASH_FORMAT = {
+  byteaTag: COLUMN_TYPE_HASH_TAG.Double,
+} as const;
+
+type StructuralHashFormat = {
+  byteaTag: number;
+};
+
 export function normalizeSchemaHashInput(hash: string, label: string): string {
   const normalized = hash.trim().toLowerCase();
   if (!/^[0-9a-f]{12,64}$/.test(normalized)) {
@@ -22,6 +71,21 @@ export function shortSchemaHash(hash: string): string {
 }
 
 export function structuralSchemaHash(schema: WasmSchema): string {
+  return structuralSchemaHashWithFormat(schema, CURRENT_STRUCTURAL_HASH_FORMAT);
+}
+
+/**
+ * Computes the historical identity where Bytea shared Double's column-type tag.
+ *
+ * Use this only to resolve an existing catalogue identity and connect it to the
+ * current identity with a durable migration edge. New catalogue identities
+ * always use {@link structuralSchemaHash}.
+ */
+export function legacyByteaStructuralSchemaHash(schema: WasmSchema): string {
+  return structuralSchemaHashWithFormat(schema, LEGACY_BYTEA_STRUCTURAL_HASH_FORMAT);
+}
+
+function structuralSchemaHashWithFormat(schema: WasmSchema, format: StructuralHashFormat): string {
   const writer = new StructuralHashWriter();
 
   for (const tableName of Object.keys(schema).sort()) {
@@ -29,7 +93,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
 
     writer.stringBytes(tableName);
     writer.byte(0);
-    hashColumns(writer, table.columns);
+    hashColumns(writer, table.columns, format);
 
     if (table.indexed_columns) {
       writer.byte(1);
@@ -38,13 +102,20 @@ export function structuralSchemaHash(schema: WasmSchema): string {
         writer.byte(0);
       }
     }
+
+    if (table.branchBy?.length) {
+      writer.stringBytes("branch_by");
+      writer.byte(0);
+      writer.stringBytes(JSON.stringify(table.branchBy));
+      writer.byte(0);
+    }
   }
 
   return bytesToHex(blake3(writer.bytes()));
 }
 
 export function columnTypeSignature(columnType: WasmColumnType): string {
-  return JSON.stringify(columnType);
+  return JSON.stringify(canonicalizeJsonObject(columnType));
 }
 
 class StructuralHashWriter {
@@ -78,6 +149,12 @@ class StructuralHashWriter {
     this.bytes(bytes);
   }
 
+  i32(value: number): void {
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setInt32(0, value, true);
+    this.bytes(bytes);
+  }
+
   i64(value: number | bigint): void {
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigInt64(0, BigInt(value), true);
@@ -91,11 +168,15 @@ class StructuralHashWriter {
   }
 }
 
-function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]): void {
+function hashColumns(
+  writer: StructuralHashWriter,
+  columns: ColumnDescriptor[],
+  format: StructuralHashFormat,
+): void {
   for (const column of columns) {
     writer.stringBytes(column.name);
     writer.byte(0);
-    hashColumnType(writer, column.column_type);
+    hashColumnType(writer, column.column_type, format);
     writer.byte(column.nullable ? 1 : 0);
 
     if (column.references) {
@@ -105,11 +186,11 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
       writer.byte(0);
     }
 
+    // Absence remains untagged for compatibility with schemas authored before
+    // column defaults were included in structural identity.
     if (column.default) {
       writer.byte(1);
       hashValue(writer, column.default);
-    } else {
-      writer.byte(0);
     }
 
     if (column.merge_strategy) {
@@ -118,84 +199,99 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
     } else {
       writer.byte(0);
     }
+
+    writer.byte(0);
   }
 }
 
 function hashValue(writer: StructuralHashWriter, value: Value): void {
   switch (value.type) {
     case "Integer":
-      writer.byte(1);
-      writer.i64(value.value);
+      writer.byte(VALUE_HASH_TAG.Integer);
+      writer.i32(value.value);
       return;
     case "BigInt":
-      writer.byte(2);
+      writer.byte(VALUE_HASH_TAG.BigInt);
       writer.i64(value.value);
       return;
     case "Double":
-      writer.byte(10);
+      writer.byte(VALUE_HASH_TAG.Double);
       writer.f64(value.value);
       return;
     case "Boolean":
-      writer.byte(3);
+      writer.byte(VALUE_HASH_TAG.Boolean);
       writer.byte(value.value ? 1 : 0);
       return;
     case "Text":
-      writer.byte(4);
+      writer.byte(VALUE_HASH_TAG.Text);
       writer.stringBytes(value.value);
       writer.byte(0);
       return;
     case "Timestamp":
-      writer.byte(5);
+      writer.byte(VALUE_HASH_TAG.Timestamp);
       writer.i64(value.value);
       return;
     case "Uuid":
-      writer.byte(6);
+      writer.byte(VALUE_HASH_TAG.Uuid);
       writer.bytes(uuidBytes(value.value));
       return;
     case "Bytea":
-      writer.byte(11);
+      writer.byte(VALUE_HASH_TAG.Bytea);
       writer.u64(value.value.length);
       writer.bytes(value.value);
       return;
     case "Array":
-      writer.byte(7);
+      writer.byte(VALUE_HASH_TAG.Array);
       writer.u64(value.value.length);
       for (const inner of value.value) {
         hashValue(writer, inner);
       }
       return;
     case "Row":
-      writer.byte(8);
+      writer.byte(VALUE_HASH_TAG.Row);
+      writer.u64(value.value.values.length);
+      for (const inner of value.value.values) {
+        hashValue(writer, inner);
+      }
+      return;
+    case "Enum":
+      writer.byte(VALUE_HASH_TAG.Enum);
+      writer.stringBytes(value.value.case);
+      writer.byte(0);
       writer.u64(value.value.values.length);
       for (const inner of value.value.values) {
         hashValue(writer, inner);
       }
       return;
     case "Null":
-      writer.byte(9);
+      writer.byte(VALUE_HASH_TAG.Null);
       return;
   }
 }
 
-function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType): void {
+function hashColumnType(
+  writer: StructuralHashWriter,
+  columnType: WasmColumnType,
+  format: StructuralHashFormat,
+): void {
   switch (columnType.type) {
     case "Integer":
-      writer.byte(1);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Integer);
       return;
     case "BigInt":
-      writer.byte(2);
+      writer.byte(COLUMN_TYPE_HASH_TAG.BigInt);
       return;
     case "Double":
-      writer.byte(10);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Double);
       return;
     case "Boolean":
-      writer.byte(3);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Boolean);
       return;
     case "Text":
-      writer.byte(4);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Text);
       return;
     case "Enum": {
-      writer.byte(9);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Enum);
       writer.u64(columnType.variants.length);
       for (const variant of columnType.variants) {
         writer.stringBytes(variant);
@@ -203,20 +299,37 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       }
       return;
     }
+    case "EnumPayload":
+      writer.byte(COLUMN_TYPE_HASH_TAG.EnumPayload);
+      writer.u64(columnType.cases.length);
+      for (const enumCase of columnType.cases) {
+        writer.stringBytes(enumCase.name);
+        writer.byte(0);
+        writer.u64(enumCase.fields.length);
+        for (const field of enumCase.fields) {
+          writer.stringBytes(field.name);
+          writer.byte(0);
+          hashColumnType(writer, field.column_type, format);
+          writer.byte(field.nullable ? 1 : 0);
+        }
+      }
+      return;
     case "Timestamp":
-      writer.byte(5);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Timestamp);
       return;
     case "Uuid":
-      writer.byte(6);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Uuid);
       return;
     case "Bytea":
-      writer.byte(10);
+      writer.byte(format.byteaTag);
       return;
     case "Json":
-      writer.byte(11);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Json);
       if (columnType.schema) {
         writer.byte(1);
-        const encoded = new TextEncoder().encode(JSON.stringify(columnType.schema));
+        const encoded = new TextEncoder().encode(
+          JSON.stringify(canonicalizeJsonObject(columnType.schema)),
+        );
         writer.u64(encoded.length);
         writer.bytes(encoded);
       } else {
@@ -224,14 +337,44 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       }
       return;
     case "Array":
-      writer.byte(7);
-      hashColumnType(writer, columnType.element);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Array);
+      hashColumnType(writer, columnType.element, format);
       return;
     case "Row":
-      writer.byte(8);
-      hashColumns(writer, columnType.columns);
+      writer.byte(COLUMN_TYPE_HASH_TAG.Row);
+      hashColumns(writer, columnType.columns, format);
       return;
   }
+}
+
+function canonicalizeJsonObject(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeJsonObject);
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => compareUnicodeScalarOrder(left, right))
+      .map(([key, entry]) => [key, canonicalizeJsonObject(entry)]),
+  );
+}
+
+function compareUnicodeScalarOrder(left: string, right: string): number {
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const leftCodePoint = left.codePointAt(leftIndex)!;
+    const rightCodePoint = right.codePointAt(rightIndex)!;
+    if (leftCodePoint !== rightCodePoint) {
+      return leftCodePoint - rightCodePoint;
+    }
+    leftIndex += leftCodePoint > 0xffff ? 2 : 1;
+    rightIndex += rightCodePoint > 0xffff ? 2 : 1;
+  }
+  return left.length - right.length;
 }
 
 function uuidBytes(value: string): Uint8Array {

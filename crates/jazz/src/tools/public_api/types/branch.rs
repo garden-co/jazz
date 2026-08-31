@@ -8,6 +8,60 @@ use super::*;
 // Schema Hashing - Content-addressed schema identification
 // ============================================================================
 
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum ColumnTypeHashTag {
+    Integer = 1,
+    BigInt = 2,
+    Boolean = 3,
+    Text = 4,
+    Timestamp = 5,
+    Uuid = 6,
+    Array = 7,
+    Row = 8,
+    Enum = 9,
+    Double = 10,
+    Json = 11,
+    TransactionId = 12,
+    EnumPayload = 13,
+    ScalarEnum = 14,
+    CatalogueEnumPayload = 15,
+    Bytea = 16,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum ValueHashTag {
+    Integer = 1,
+    BigInt = 2,
+    Boolean = 3,
+    Text = 4,
+    Timestamp = 5,
+    Uuid = 6,
+    Array = 7,
+    Row = 8,
+    Null = 9,
+    Double = 10,
+    Bytea = 11,
+    TransactionId = 12,
+    Enum = 14,
+}
+
+#[derive(Clone, Copy)]
+enum SchemaHashFormat {
+    Current,
+    LegacyByteaCollision,
+}
+
+impl SchemaHashFormat {
+    fn bytea_tag(self) -> u8 {
+        match self {
+            Self::Current => ColumnTypeHashTag::Bytea as u8,
+            Self::LegacyByteaCollision => ColumnTypeHashTag::Double as u8,
+        }
+    }
+}
+
 /// Content-addressed hash of a schema's structural elements.
 /// Uses BLAKE3 over deterministic table ordering while preserving each table's
 /// declared column order.
@@ -73,8 +127,26 @@ impl SchemaHash {
         ))
     }
 
-    /// Compute hash for a complete schema (HashMap<TableName, TableSchema>).
+    /// Compute the current structural hash for a complete schema.
+    ///
+    /// New catalogue identities always use the current format. Historical
+    /// Bytea identities can be derived explicitly with
+    /// [`SchemaHash::compute_legacy_bytea`] for catalogue resolution and a
+    /// durable migration edge.
     pub fn compute(schema: &Schema) -> Self {
+        Self::compute_with_format(schema, SchemaHashFormat::Current)
+    }
+
+    /// Compute the historical schema identity where `Bytea` shared `Double`'s
+    /// column-type tag.
+    ///
+    /// This is a read/migration compatibility operation only. New catalogue
+    /// entries must use [`SchemaHash::compute`].
+    pub fn compute_legacy_bytea(schema: &Schema) -> Self {
+        Self::compute_with_format(schema, SchemaHashFormat::LegacyByteaCollision)
+    }
+
+    fn compute_with_format(schema: &Schema, format: SchemaHashFormat) -> Self {
         let mut hasher = blake3::Hasher::new();
 
         // Sort tables by name for deterministic ordering
@@ -89,7 +161,7 @@ impl SchemaHash {
             hasher.update(&[0]); // delimiter
 
             // Hash row descriptor in declared column order
-            hash_row_descriptor(&mut hasher, &table_schema.columns);
+            hash_row_descriptor_with_format(&mut hasher, &table_schema.columns, format);
 
             if let Some(indexed_columns) = &table_schema.indexed_columns {
                 // `None` must hash exactly like pre-index-override schemas so
@@ -144,19 +216,31 @@ impl<'de> Deserialize<'de> for SchemaHash {
 
 /// Hash a RowDescriptor into a hasher, preserving declared column order.
 pub(crate) fn hash_row_descriptor(hasher: &mut blake3::Hasher, descriptor: &RowDescriptor) {
+    hash_row_descriptor_with_format(hasher, descriptor, SchemaHashFormat::Current);
+}
+
+fn hash_row_descriptor_with_format(
+    hasher: &mut blake3::Hasher,
+    descriptor: &RowDescriptor,
+    format: SchemaHashFormat,
+) {
     for col in &descriptor.columns {
-        hash_column_descriptor(hasher, col);
+        hash_column_descriptor(hasher, col, format);
     }
 }
 
 /// Hash a single ColumnDescriptor.
-fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
+fn hash_column_descriptor(
+    hasher: &mut blake3::Hasher,
+    col: &ColumnDescriptor,
+    format: SchemaHashFormat,
+) {
     // Name
     hasher.update(col.name.as_str().as_bytes());
     hasher.update(&[0]);
 
     // Type
-    hash_column_type(hasher, &col.column_type);
+    hash_column_type(hasher, &col.column_type, format);
 
     // Nullable flag
     hasher.update(&[col.nullable as u8]);
@@ -196,58 +280,58 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
 fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
     match value {
         Value::Integer(v) => {
-            hasher.update(&[1]);
+            hasher.update(&[ValueHashTag::Integer as u8]);
             hasher.update(&v.to_le_bytes());
         }
         Value::BigInt(v) => {
-            hasher.update(&[2]);
+            hasher.update(&[ValueHashTag::BigInt as u8]);
             hasher.update(&v.to_le_bytes());
         }
         Value::Double(v) => {
-            hasher.update(&[10]);
+            hasher.update(&[ValueHashTag::Double as u8]);
             hasher.update(&v.to_le_bytes());
         }
         Value::Boolean(v) => {
-            hasher.update(&[3, *v as u8]);
+            hasher.update(&[ValueHashTag::Boolean as u8, *v as u8]);
         }
         Value::Text(v) => {
-            hasher.update(&[4]);
+            hasher.update(&[ValueHashTag::Text as u8]);
             hasher.update(v.as_bytes());
             hasher.update(&[0]);
         }
         Value::Timestamp(v) => {
-            hasher.update(&[5]);
+            hasher.update(&[ValueHashTag::Timestamp as u8]);
             hasher.update(&v.to_le_bytes());
         }
         Value::Uuid(v) => {
-            hasher.update(&[6]);
+            hasher.update(&[ValueHashTag::Uuid as u8]);
             hasher.update(v.uuid().as_bytes());
         }
         Value::TransactionId(v) => {
-            hasher.update(&[12]);
+            hasher.update(&[ValueHashTag::TransactionId as u8]);
             hasher.update(v);
         }
         Value::Bytea(v) => {
-            hasher.update(&[11]);
+            hasher.update(&[ValueHashTag::Bytea as u8]);
             hasher.update(&(v.len() as u64).to_le_bytes());
             hasher.update(v);
         }
         Value::Array(values) => {
-            hasher.update(&[7]);
+            hasher.update(&[ValueHashTag::Array as u8]);
             hasher.update(&(values.len() as u64).to_le_bytes());
             for inner in values {
                 hash_value(hasher, inner);
             }
         }
         Value::Row { values, .. } => {
-            hasher.update(&[8]);
+            hasher.update(&[ValueHashTag::Row as u8]);
             hasher.update(&(values.len() as u64).to_le_bytes());
             for inner in values {
                 hash_value(hasher, inner);
             }
         }
         Value::Enum { case, values } => {
-            hasher.update(&[14]);
+            hasher.update(&[ValueHashTag::Enum as u8]);
             hasher.update(case.as_bytes());
             hasher.update(&[0]);
             hasher.update(&(values.len() as u64).to_le_bytes());
@@ -256,31 +340,31 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             }
         }
         Value::Null => {
-            hasher.update(&[9]);
+            hasher.update(&[ValueHashTag::Null as u8]);
         }
     }
 }
 
 /// Hash a ColumnType recursively (for Array and Row types).
-fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
+fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType, format: SchemaHashFormat) {
     match col_type {
         ColumnType::Integer => {
-            hasher.update(&[1]);
+            hasher.update(&[ColumnTypeHashTag::Integer as u8]);
         }
         ColumnType::BigInt => {
-            hasher.update(&[2]);
+            hasher.update(&[ColumnTypeHashTag::BigInt as u8]);
         }
         ColumnType::Double => {
-            hasher.update(&[10]);
+            hasher.update(&[ColumnTypeHashTag::Double as u8]);
         }
         ColumnType::Boolean => {
-            hasher.update(&[3]);
+            hasher.update(&[ColumnTypeHashTag::Boolean as u8]);
         }
         ColumnType::Text => {
-            hasher.update(&[4]);
+            hasher.update(&[ColumnTypeHashTag::Text as u8]);
         }
         ColumnType::Enum { variants } => {
-            hasher.update(&[9]);
+            hasher.update(&[ColumnTypeHashTag::Enum as u8]);
             // Scalar enum order assigns durable discriminant tags, so it is
             // structural schema identity rather than presentation metadata.
             hasher.update(&(variants.len() as u64).to_le_bytes());
@@ -290,7 +374,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             }
         }
         ColumnType::ScalarEnum { name, variants } => {
-            hasher.update(&[14]);
+            hasher.update(&[ColumnTypeHashTag::ScalarEnum as u8]);
             hasher.update(name.as_bytes());
             hasher.update(&[0]);
             hasher.update(&(variants.len() as u64).to_le_bytes());
@@ -300,7 +384,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             }
         }
         ColumnType::CatalogueEnumPayload { name, cases } => {
-            hasher.update(&[15]);
+            hasher.update(&[ColumnTypeHashTag::CatalogueEnumPayload as u8]);
             hasher.update(name.as_bytes());
             hasher.update(&[0]);
             hasher.update(&(cases.len() as u64).to_le_bytes());
@@ -311,13 +395,13 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
                 for field in &case.fields {
                     hasher.update(field.name.as_str().as_bytes());
                     hasher.update(&[0]);
-                    hash_column_type(hasher, &field.column_type);
+                    hash_column_type(hasher, &field.column_type, format);
                     hasher.update(&[u8::from(field.nullable)]);
                 }
             }
         }
         ColumnType::EnumPayload { cases } => {
-            hasher.update(&[13]);
+            hasher.update(&[ColumnTypeHashTag::EnumPayload as u8]);
             hasher.update(&(cases.len() as u64).to_le_bytes());
             for case in cases {
                 hasher.update(case.name.as_bytes());
@@ -326,25 +410,25 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
                 for field in &case.fields {
                     hasher.update(field.name.as_str().as_bytes());
                     hasher.update(&[0]);
-                    hash_column_type(hasher, &field.column_type);
+                    hash_column_type(hasher, &field.column_type, format);
                     hasher.update(&[u8::from(field.nullable)]);
                 }
             }
         }
         ColumnType::Timestamp => {
-            hasher.update(&[5]);
+            hasher.update(&[ColumnTypeHashTag::Timestamp as u8]);
         }
         ColumnType::Uuid => {
-            hasher.update(&[6]);
+            hasher.update(&[ColumnTypeHashTag::Uuid as u8]);
         }
         ColumnType::TransactionId => {
-            hasher.update(&[12]);
+            hasher.update(&[ColumnTypeHashTag::TransactionId as u8]);
         }
         ColumnType::Bytea => {
-            hasher.update(&[10]);
+            hasher.update(&[format.bytea_tag()]);
         }
         ColumnType::Json { schema } => {
-            hasher.update(&[11]);
+            hasher.update(&[ColumnTypeHashTag::Json as u8]);
             match schema {
                 Some(schema) => {
                     hasher.update(&[1]);
@@ -361,12 +445,12 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             }
         }
         ColumnType::Array { element: elem } => {
-            hasher.update(&[7]);
-            hash_column_type(hasher, elem);
+            hasher.update(&[ColumnTypeHashTag::Array as u8]);
+            hash_column_type(hasher, elem, format);
         }
         ColumnType::Row { columns: desc } => {
-            hasher.update(&[8]);
-            hash_row_descriptor(hasher, desc);
+            hasher.update(&[ColumnTypeHashTag::Row as u8]);
+            hash_row_descriptor_with_format(hasher, desc, format);
         }
     }
 }

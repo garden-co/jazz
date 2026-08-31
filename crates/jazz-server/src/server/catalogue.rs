@@ -418,6 +418,10 @@ impl CatalogueIndex {
                     // that must remain invisible to rehydration.
                     return Ok(());
                 }
+                // Stored metadata is the durable identity, not a cache of a
+                // hash to recompute during rehydration. Historical Bytea
+                // entries retain their legacy identity until a lens connects
+                // it to the corrected identity.
                 let declared_hash = entry
                     .metadata
                     .get(MetadataKey::SchemaHash.as_str())
@@ -425,15 +429,17 @@ impl CatalogueIndex {
                     .ok_or_else(|| {
                         corrupt_catalogue_entry(entry, "missing or invalid schema_hash metadata")
                     })?;
-                let computed_hash = SchemaHash::compute(&schema);
-                if declared_hash != computed_hash || entry.object_id != computed_hash.to_object_id()
+                let current_hash = SchemaHash::compute(&schema);
+                let legacy_bytea_hash = SchemaHash::compute_legacy_bytea(&schema);
+                if ![current_hash, legacy_bytea_hash].contains(&declared_hash)
+                    || entry.object_id != declared_hash.to_object_id()
                 {
                     return Err(corrupt_catalogue_entry(
                         entry,
                         "schema payload, schema_hash metadata, and object id must agree",
                     ));
                 }
-                self.schemas.entry(computed_hash).or_insert(schema);
+                self.schemas.entry(declared_hash).or_insert(schema);
                 let published_at = entry
                     .metadata
                     .get(MetadataKey::PublishedAt.as_str())
@@ -446,7 +452,7 @@ impl CatalogueIndex {
                         )
                     })?;
                 self.schema_published_at
-                    .entry(computed_hash)
+                    .entry(declared_hash)
                     .and_modify(|existing| *existing = (*existing).max(published_at))
                     .or_insert(published_at);
             }
@@ -840,9 +846,10 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
-    use jazz::tools::public_schema::{SchemaBuilder, TablePolicies};
+    use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TablePolicies, TableSchema};
+    use jazz::tools::schema_lens::LensTransform;
 
-    use super::{CatalogueStore, StoredCatalogue};
+    use super::*;
     use crate::server::catalogue_storage::CatalogueMemoryStorage;
 
     #[test]
@@ -898,6 +905,52 @@ mod tests {
                 })
                 .count(),
             PUBLISHERS - 1
+        );
+    }
+
+    // This stays internal because legacy catalogue metadata and the exact
+    // rehydration boundary are not observable through a public client API.
+    #[test]
+    fn legacy_bytea_identity_rehydrates_and_connects_to_current_identity() {
+        let app_id = AppId::from_name("legacy-bytea-catalogue");
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("files").column("payload", ColumnType::Bytea))
+            .build();
+        let legacy_hash = SchemaHash::compute_legacy_bytea(&schema);
+        let current_hash = SchemaHash::compute(&schema);
+        assert_ne!(legacy_hash, current_hash);
+
+        let mut metadata = catalogue_metadata(app_id, ObjectType::CatalogueSchema);
+        metadata.insert(MetadataKey::SchemaHash.to_string(), legacy_hash.to_string());
+        metadata.insert(MetadataKey::PublishedAt.to_string(), "1".to_owned());
+        let legacy_entry = CatalogueEntry {
+            object_id: legacy_hash.to_object_id(),
+            metadata,
+            content: encode_schema(&schema),
+        };
+        let mut storage = CatalogueMemoryStorage::new();
+        storage
+            .upsert_catalogue_entry(&legacy_entry)
+            .expect("seed legacy catalogue entry");
+
+        let store =
+            StoredCatalogue::new(app_id, None, Box::new(storage)).expect("rehydrate catalogue");
+        assert_eq!(
+            store.known_schema(&legacy_hash).unwrap(),
+            Some(schema.clone())
+        );
+        assert_eq!(store.known_schema(&current_hash).unwrap(), None);
+
+        let current_object_id = store.publish_schema(schema.clone()).unwrap();
+        assert_eq!(current_object_id, current_hash.to_object_id());
+        assert_eq!(store.known_schema(&current_hash).unwrap(), Some(schema));
+
+        let migration = Lens::new(legacy_hash, current_hash, LensTransform::new());
+        store.publish_lens(&migration).unwrap();
+        assert!(
+            store
+                .are_schema_hashes_connected(legacy_hash, current_hash)
+                .unwrap()
         );
     }
 }

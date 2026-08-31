@@ -26,6 +26,7 @@ import {
 } from "../runtime/schema-fetch.js";
 import {
   columnTypeSignature,
+  legacyByteaStructuralSchemaHash,
   normalizeSchemaHashInput,
   shortSchemaHash,
   tableSchemasEqual,
@@ -99,13 +100,15 @@ export interface DeployOptions extends CatalogueServerOptions {
    */
   schema: SchemaSourceInput;
   /**
-   * Permissions to publish. Omitting this param restricts `deploy` to only publish the schema.
+   * Permissions to publish. Omitting this param restricts `deploy` to publishing
+   * the schema and any required identity compatibility edge.
    */
   permissions?: CompiledPermissionsMap;
   /**
-   * Migration between the current server schema and the new schema.
+   * Migration between the current permissions head schema and the new schema.
    * Only published if there's no existing migration between these schemas.
-   * In order to publish migrations, provide {@link permissions} as well.
+   * In order to publish this permissions-driven migration, provide
+   * {@link permissions} as well.
    */
   migration?: DefinedMigration;
   /**
@@ -291,23 +294,69 @@ export function schemaTransitionRequiresRowTransform(
   );
 }
 
+export type StoredStructuralSchemaIdentity = {
+  hash: string;
+  format: "current" | "legacy-bytea" | "historical";
+};
+
+/**
+ * Resolves the durable catalogue identity that owns a stored schema payload.
+ *
+ * The current hash is preferred. The historical Bytea/Double-collision hash is
+ * then resolved explicitly, without treating it as an alias for the current
+ * identity. Callers that publish a release must publish the current identity
+ * and connect a legacy result with a normal catalogue migration edge.
+ */
+export async function resolveStoredStructuralSchemaIdentity(
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+  wasmSchema: WasmSchema,
+): Promise<StoredStructuralSchemaIdentity | null> {
+  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
+  const currentHash = await computeSchemaHash(wasmSchema);
+  const legacyByteaHash = legacyByteaStructuralSchemaHash(wasmSchema);
+  const candidates: StoredStructuralSchemaIdentity[] = [];
+
+  if (hashes.includes(currentHash)) {
+    candidates.push({ hash: currentHash, format: "current" });
+  }
+  if (legacyByteaHash !== currentHash && hashes.includes(legacyByteaHash)) {
+    candidates.push({ hash: legacyByteaHash, format: "legacy-bytea" });
+  }
+  for (const hash of hashes) {
+    if (hash !== currentHash && hash !== legacyByteaHash) {
+      candidates.push({ hash, format: "historical" });
+    }
+  }
+
+  for (const candidate of candidates) {
+    const stored = await fetchStoredWasmSchema(serverUrl, {
+      appId,
+      adminSecret,
+      schemaHash: candidate.hash,
+    });
+    if (wasmSchemasEqual(stored.schema, wasmSchema)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 export async function resolveStoredStructuralSchemaHash(
   appId: string,
   serverUrl: string,
   adminSecret: string,
   wasmSchema: WasmSchema,
 ): Promise<string | null> {
-  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
-  const storedSchemas = await Promise.all(
-    hashes.map(async (hash) => ({
-      hash,
-      schema: (await fetchStoredWasmSchema(serverUrl, { appId, adminSecret, schemaHash: hash }))
-        .schema,
-    })),
+  const identity = await resolveStoredStructuralSchemaIdentity(
+    appId,
+    serverUrl,
+    adminSecret,
+    wasmSchema,
   );
-
-  const match = storedSchemas.find(({ schema }) => wasmSchemasEqual(schema, wasmSchema));
-  return match?.hash ?? null;
+  return identity?.hash ?? null;
 }
 
 export async function resolveStoredStructuralSchemaHashOrThrow(
@@ -508,12 +557,14 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
 }
 
 /**
- * Publishes a schema and optional permissions.
+ * Publishes a schema, required identity compatibility edges, and optional permissions.
  *
- * When updating permissions to target a new schema, also attempts to publish a migration
- * between the old and new schemas. When a required migration is missing, returns
- * `migration.status === "missing"` without publishing permissions. Set `noVerify` to
- * publish permissions anyway.
+ * A durable legacy Bytea identity is connected to the corrected identity even
+ * when permissions are not part of the deploy. When updating permissions to
+ * target a new schema, also attempts to publish a migration between the old and
+ * new schemas. When a required migration is missing, returns
+ * `migration.status === "missing"` without publishing permissions. Set `noVerify`
+ * to publish permissions anyway.
  */
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const wasmSchema = resolveSchemaSource(options.schema);
@@ -526,12 +577,14 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     collectWarning(warnings, diagnostic.message);
   }
 
-  const storedSchemaHash = await resolveStoredStructuralSchemaHash(
+  const storedIdentity = await resolveStoredStructuralSchemaIdentity(
     options.appId,
     options.serverUrl,
     options.adminSecret,
     wasmSchema,
   );
+  const storedSchemaHash =
+    storedIdentity && storedIdentity.format !== "legacy-bytea" ? storedIdentity.hash : null;
 
   let schema: DeploySchemaResult;
   if (storedSchemaHash) {
@@ -552,8 +605,32 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     };
   }
 
+  let migration: DeployResult["migration"];
+  if (storedIdentity?.format === "legacy-bytea" && storedIdentity.hash !== schema.hash) {
+    const { connected } = await fetchSchemaConnectivity(options.serverUrl, {
+      appId: options.appId,
+      adminSecret: options.adminSecret,
+      fromHash: storedIdentity.hash,
+      toHash: schema.hash,
+    });
+
+    migration = connected
+      ? {
+          status: "already-connected",
+          fromHash: storedIdentity.hash,
+          toHash: schema.hash,
+        }
+      : await pushMigration({
+          appId: options.appId,
+          serverUrl: options.serverUrl,
+          adminSecret: options.adminSecret,
+          fromHash: storedIdentity.hash,
+          toHash: schema.hash,
+        });
+  }
+
   if (!options.permissions) {
-    return { schema, warnings };
+    return { schema, migration, warnings };
   }
 
   const { head: previousHead } = await fetchPermissionsHead(options.serverUrl, {
@@ -561,8 +638,11 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     adminSecret: options.adminSecret,
   });
 
-  let migration: DeployResult["migration"];
-  if (previousHead && previousHead.schemaHash !== schema.hash) {
+  if (
+    previousHead &&
+    previousHead.schemaHash !== schema.hash &&
+    (migration?.fromHash !== previousHead.schemaHash || migration?.toHash !== schema.hash)
+  ) {
     const { connected } = await fetchSchemaConnectivity(options.serverUrl, {
       appId: options.appId,
       adminSecret: options.adminSecret,

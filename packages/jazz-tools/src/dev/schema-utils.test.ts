@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { ColumnType, WasmSchema } from "../drivers/types.js";
 
-import { structuralSchemaHash } from "./schema-utils.js";
+import { legacyByteaStructuralSchemaHash, structuralSchemaHash } from "./schema-utils.js";
 
 function enumSchema(variants: string[]) {
   return {
@@ -17,6 +18,14 @@ function enumSchema(variants: string[]) {
   };
 }
 
+function schemaWithColumnType(columnType: ColumnType): WasmSchema {
+  return {
+    values: {
+      columns: [{ name: "value", column_type: columnType, nullable: false }],
+    },
+  };
+}
+
 describe("structuralSchemaHash", () => {
   const orderedEnumFixture = JSON.parse(
     readFileSync(
@@ -24,6 +33,19 @@ describe("structuralSchemaHash", () => {
       "utf8",
     ),
   ) as { schemaLayoutVersion: number; cases: Array<{ variants: string[]; hash: string }> };
+  const allColumnFixture = JSON.parse(
+    readFileSync(
+      new URL("../testing/fixtures/all-column-schema-hashes.json", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    schemaHashFormat: number;
+    legacyByteaColumnTypeTag: number;
+    currentByteaColumnTypeTag: number;
+    schema: WasmSchema;
+    currentHash: string;
+    legacyByteaHash: string;
+  };
 
   it("treats enum declaration order as durable tag meaning", () => {
     expect(structuralSchemaHash(enumSchema(["draft", "active"]))).not.toBe(
@@ -43,5 +65,42 @@ describe("structuralSchemaHash", () => {
     });
 
     expect(hashes[0]).not.toBe(hashes[1]);
+  });
+
+  it("matches Rust for every portable column type and both Bytea hash formats", () => {
+    expect(allColumnFixture.schemaHashFormat).toBe(2);
+    expect(allColumnFixture.legacyByteaColumnTypeTag).toBe(10);
+    expect(allColumnFixture.currentByteaColumnTypeTag).toBe(16);
+    expect(structuralSchemaHash(allColumnFixture.schema)).toBe(allColumnFixture.currentHash);
+    expect(legacyByteaStructuralSchemaHash(allColumnFixture.schema)).toBe(
+      allColumnFixture.legacyByteaHash,
+    );
+    expect(allColumnFixture.currentHash).not.toBe(allColumnFixture.legacyByteaHash);
+  });
+
+  it("distinguishes Double and Bytea at every recursive column-type boundary", () => {
+    expect(structuralSchemaHash(schemaWithColumnType({ type: "Double" }))).not.toBe(
+      structuralSchemaHash(schemaWithColumnType({ type: "Bytea" })),
+    );
+    expect(
+      structuralSchemaHash(schemaWithColumnType({ type: "Array", element: { type: "Double" } })),
+    ).not.toBe(
+      structuralSchemaHash(schemaWithColumnType({ type: "Array", element: { type: "Bytea" } })),
+    );
+    expect(
+      structuralSchemaHash(
+        schemaWithColumnType({
+          type: "Row",
+          columns: [{ name: "nested", column_type: { type: "Double" }, nullable: false }],
+        }),
+      ),
+    ).not.toBe(
+      structuralSchemaHash(
+        schemaWithColumnType({
+          type: "Row",
+          columns: [{ name: "nested", column_type: { type: "Bytea" }, nullable: false }],
+        }),
+      ),
+    );
   });
 });

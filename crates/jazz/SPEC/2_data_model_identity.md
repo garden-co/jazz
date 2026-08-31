@@ -174,6 +174,37 @@ without creating a second physical storage partition. Changing any storage-shape
 input yields a new `SchemaVersionId`. This content-addressing is what lets
 multiple storage schema versions coexist (ch. 10).
 
+The admin/tooling catalogue also carries a BLAKE3 `SchemaHash` for the public
+structural schema exchanged by Rust and TypeScript. This is distinct from the
+core `SchemaVersionId`, but its byte stream is likewise a durable cross-runtime
+contract. Column types use the following named one-byte tags:
+
+| Type                   | Tag | Type            | Tag |
+| ---------------------- | --: | --------------- | --: |
+| `Integer`              |   1 | `BigInt`        |   2 |
+| `Boolean`              |   3 | `Text`          |   4 |
+| `Timestamp`            |   5 | `Uuid`          |   6 |
+| `Array`                |   7 | `Row`           |   8 |
+| `Enum`                 |   9 | `Double`        |  10 |
+| `Json`                 |  11 | `TransactionId` |  12 |
+| `EnumPayload`          |  13 | `ScalarEnum`    |  14 |
+| `CatalogueEnumPayload` |  15 | `Bytea`         |  16 |
+
+`Array`, `Row`, and payload-enum fields recursively use the same tags. Rust and
+TypeScript MUST emit the same bytes for every portable type, defaults, index
+overrides, and branch keys. Tags are append-only once published.
+
+The historical format accidentally assigned `Bytea` tag 10, colliding with
+`Double`. A stored catalogue schema retains that historical hash from its
+durable `schema_hash` metadata and remains addressable by it. It is not an alias
+for the corrected identity: any newly published copy uses tag 16. A deploy that
+encounters the durable historical identity MUST publish the corrected identity
+and connect the historical hash to the corrected hash with an ordinary durable
+migration lens, regardless of whether the deploy also publishes permissions
+(including schema-only CLI deploys). This appends a forward compatibility edge
+rather than rewriting either identity; the transform is empty when the decoded
+schemas are structurally equal.
+
 _Further invariants._ `INV-DATA-7` — `SchemaVersionId` changes when a column's
 merge strategy changes.
 

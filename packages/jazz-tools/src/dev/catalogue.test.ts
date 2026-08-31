@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
+import { deploy as deployCatalogue } from "./catalogue.js";
+import { legacyByteaStructuralSchemaHash, structuralSchemaHash } from "./schema-utils.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -104,6 +106,174 @@ describe("dev catalogue runtime schema identity", () => {
     await createNapiNativeRuntimeAdapter(app.wasmSchema);
 
     expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
+  });
+});
+
+describe("legacy Bytea catalogue identity", () => {
+  it("publishes the corrected identity and connects the legacy identity with a migration", async () => {
+    const schema = s.defineApp({
+      files: s.table({
+        payload: s.bytes(),
+      }),
+    }).wasmSchema;
+    const legacyHash = legacyByteaStructuralSchemaHash(schema);
+    const currentHash = structuralSchemaHash(schema);
+    const previousHead = {
+      schemaHash: legacyHash,
+      version: 1,
+      parentBundleObjectId: null,
+      bundleObjectId: "11111111-1111-1111-1111-111111111111",
+    };
+    const nextHead = {
+      schemaHash: currentHash,
+      version: 2,
+      parentBundleObjectId: previousHead.bundleObjectId,
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+    let migrationBody: Record<string, unknown> | undefined;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [legacyHash] }), { status: 200 });
+        }
+        if (
+          url.endsWith(`/apps/${APP_ID}/schema/${legacyHash}`) ||
+          url.endsWith(`/apps/${APP_ID}/schema/${currentHash}`)
+        ) {
+          return new Response(JSON.stringify({ schema: { tables: schema }, publishedAt: 1 }), {
+            status: 200,
+          });
+        }
+        if (url.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+          return new Response(
+            JSON.stringify({
+              objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              hash: currentHash,
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+          return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
+        }
+        if (url.includes(`/apps/${APP_ID}/admin/schema-connectivity`)) {
+          return new Response(JSON.stringify({ connected: false }), { status: 200 });
+        }
+        if (url.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          migrationBody = JSON.parse(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              objectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+              fromHash: legacyHash,
+              toHash: currentHash,
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+          return new Response(JSON.stringify({ head: nextHead }), { status: 201 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+    const result = await deployCatalogue({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      schema,
+      permissions: {},
+    });
+
+    expect(legacyHash).not.toBe(currentHash);
+    expect(result.schema).toMatchObject({ hash: currentHash, status: "published" });
+    expect(result.migration).toMatchObject({
+      fromHash: legacyHash,
+      toHash: currentHash,
+      status: "published",
+    });
+    expect(migrationBody).toEqual({
+      fromHash: legacyHash,
+      toHash: currentHash,
+      forward: [],
+    });
+    expect(result.permissions?.schemaHash).toBe(currentHash);
+  });
+
+  it("connects the durable legacy identity when deploying without permissions", async () => {
+    const schema = s.defineApp({
+      files: s.table({
+        payload: s.bytes(),
+      }),
+    }).wasmSchema;
+    const legacyHash = legacyByteaStructuralSchemaHash(schema);
+    const currentHash = structuralSchemaHash(schema);
+    let migrationBody: Record<string, unknown> | undefined;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith(`/apps/${APP_ID}/schemas`)) {
+          return new Response(JSON.stringify({ hashes: [legacyHash] }), { status: 200 });
+        }
+        if (
+          url.endsWith(`/apps/${APP_ID}/schema/${legacyHash}`) ||
+          url.endsWith(`/apps/${APP_ID}/schema/${currentHash}`)
+        ) {
+          return new Response(JSON.stringify({ schema: { tables: schema }, publishedAt: 1 }), {
+            status: 200,
+          });
+        }
+        if (url.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+          return new Response(
+            JSON.stringify({
+              objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              hash: currentHash,
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.includes(`/apps/${APP_ID}/admin/schema-connectivity`)) {
+          return new Response(JSON.stringify({ connected: false }), { status: 200 });
+        }
+        if (url.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
+          migrationBody = JSON.parse(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              objectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+              fromHash: legacyHash,
+              toHash: currentHash,
+            }),
+            { status: 201 },
+          );
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    const result = await deployCatalogue({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      schema,
+    });
+
+    expect(legacyHash).not.toBe(currentHash);
+    expect(result.schema).toMatchObject({ hash: currentHash, status: "published" });
+    expect(result.migration).toMatchObject({
+      fromHash: legacyHash,
+      toHash: currentHash,
+      status: "published",
+    });
+    expect(migrationBody).toEqual({
+      fromHash: legacyHash,
+      toHash: currentHash,
+      forward: [],
+    });
+    expect(result.permissions).toBeUndefined();
   });
 });
 

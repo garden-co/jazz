@@ -216,6 +216,55 @@ fn row_descriptor_hash_changes_when_merge_strategy_changes() {
     );
 }
 
+#[test]
+fn row_descriptor_hash_distinguishes_double_and_bytea() {
+    let double = RowDescriptor::new(vec![ColumnDescriptor::new("value", ColumnType::Double)]);
+    let bytea = RowDescriptor::new(vec![ColumnDescriptor::new("value", ColumnType::Bytea)]);
+
+    assert_ne!(
+        double.content_hash(),
+        bytea.content_hash(),
+        "Double and Bytea require distinct durable schema identities"
+    );
+}
+
+#[test]
+fn row_descriptor_hash_distinguishes_nested_double_and_bytea() {
+    let array_double = RowDescriptor::new(vec![ColumnDescriptor::new(
+        "value",
+        ColumnType::Array {
+            element: Box::new(ColumnType::Double),
+        },
+    )]);
+    let array_bytea = RowDescriptor::new(vec![ColumnDescriptor::new(
+        "value",
+        ColumnType::Array {
+            element: Box::new(ColumnType::Bytea),
+        },
+    )]);
+    assert_ne!(array_double.content_hash(), array_bytea.content_hash());
+
+    let row_double = RowDescriptor::new(vec![ColumnDescriptor::new(
+        "value",
+        ColumnType::Row {
+            columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "nested",
+                ColumnType::Double,
+            )])),
+        },
+    )]);
+    let row_bytea = RowDescriptor::new(vec![ColumnDescriptor::new(
+        "value",
+        ColumnType::Row {
+            columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "nested",
+                ColumnType::Bytea,
+            )])),
+        },
+    )]);
+    assert_ne!(row_double.content_hash(), row_bytea.content_hash());
+}
+
 // ========================================================================
 // Schema Hash Tests
 // ========================================================================
@@ -362,6 +411,36 @@ fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
         hashes[0], hashes[1],
         "reordering variants changes durable tag meaning"
     );
+}
+
+#[test]
+fn schema_hash_matches_all_column_cross_runtime_fixture_and_legacy_format() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AllColumnHashFixture {
+        schema_hash_format: u8,
+        legacy_bytea_column_type_tag: u8,
+        current_bytea_column_type_tag: u8,
+        schema: std::collections::BTreeMap<TableName, TableSchema>,
+        current_hash: String,
+        legacy_bytea_hash: String,
+    }
+
+    let fixture: AllColumnHashFixture = serde_json::from_str(include_str!(
+        "../../../../../../packages/jazz-tools/src/testing/fixtures/all-column-schema-hashes.json"
+    ))
+    .expect("all-column hash fixture is valid JSON");
+
+    assert_eq!(fixture.schema_hash_format, 2);
+    assert_eq!(fixture.legacy_bytea_column_type_tag, 10);
+    assert_eq!(fixture.current_bytea_column_type_tag, 16);
+    let schema: Schema = fixture.schema.into_iter().collect();
+    assert_eq!(SchemaHash::compute(&schema).to_hex(), fixture.current_hash);
+    assert_eq!(
+        SchemaHash::compute_legacy_bytea(&schema).to_hex(),
+        fixture.legacy_bytea_hash
+    );
+    assert_ne!(fixture.current_hash, fixture.legacy_bytea_hash);
 }
 
 #[test]

@@ -51,6 +51,7 @@ import {
   resolveKnownSchemaHash,
   resolveStoredStructuralSchemaHash,
   resolveStoredStructuralSchemaHashOrThrow,
+  resolveStoredStructuralSchemaIdentity,
   schemaTransitionRequiresRowTransform,
   shortSchemaHash,
 } from "./catalogue.js";
@@ -1696,13 +1697,16 @@ async function resolveProjectDeployMigrationChain(
     return undefined;
   }
 
+  const storedReleaseIdentity = await resolveStoredStructuralSchemaIdentity(
+    options.appId,
+    options.serverUrl,
+    options.adminSecret,
+    compiled.wasmSchema,
+  );
   const toHash =
-    (await resolveStoredStructuralSchemaHash(
-      options.appId,
-      options.serverUrl,
-      options.adminSecret,
-      compiled.wasmSchema,
-    )) ?? (await computeSchemaHash(compiled.wasmSchema));
+    storedReleaseIdentity?.format === "current"
+      ? storedReleaseIdentity.hash
+      : await computeSchemaHash(compiled.wasmSchema);
   if (head.schemaHash === toHash) {
     return undefined;
   }
@@ -1830,12 +1834,14 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     // The catalogue deploy primitive accepts one migration.  Project deploy
     // deliberately owns multi-step replay so each reviewed edge is published
     // in order, and permissions cannot advance until the complete path exists.
-    const existingReleaseSchema = await resolveStoredStructuralSchemaHash(
+    const storedReleaseIdentity = await resolveStoredStructuralSchemaIdentity(
       options.appId,
       options.serverUrl,
       options.adminSecret,
       compiled.wasmSchema,
     );
+    const existingReleaseSchema =
+      storedReleaseIdentity?.format === "current" ? storedReleaseIdentity.hash : null;
     const warnings = collectMissingExplicitPolicyDiagnostics(
       Object.keys(compiled.wasmSchema),
       compiled.permissions,
