@@ -460,13 +460,24 @@ where
         Ok(())
     }
 
-    /// Flush node-local maintenance state, write a clean-close marker, and
-    /// close storage without blocking the caller's executor.
+    /// Close maintenance admission, terminalize open transactions and streams,
+    /// flush node-local state, write a clean-close marker, and close storage
+    /// without blocking the caller's executor.
     pub async fn close(&self) -> Result<(), Error> {
         if self.schema_view_is_fixed {
             return Ok(());
         }
         self.node.begin_mutation_shutdown();
+        // Transaction admission and Drop maintenance must cross their shutdown
+        // boundary before close can suspend. The final sweep is transferred to
+        // node-owned maintenance now, so cancellation while any accepted owner
+        // operation or waiter drains cannot leave open transactions behind.
+        self.node.begin_transaction_abandonment_shutdown();
+        // Subscription finalization has the same ownership boundary. Capture
+        // every live stream before waiting for a close owner so cancellation
+        // cannot admit a late finalizer outside the terminal retirement set.
+        self.node.begin_subscription_finalization_shutdown();
+        let _close_owner = self.node.lock_close_owner().await;
         // Mutation admission belongs to the binding-facing owner. Once that
         // owner enters Closing it retains this Db and awaits every operation
         // it already accepted, in FIFO order, before storage is retired.
@@ -480,11 +491,10 @@ where
         // Acknowledge that durable rejection before closing storage; there is
         // no later owner turn after close to flush the bounded acknowledgement.
         self.node.flush_deferred_rejection_discards().await?;
-        // Close finalization admission before the first await. This makes the
-        // queued retirement set and durable close one lifecycle transition:
-        // a stream dropped while storage is shutting down is either in this
-        // drain or already part of the retired terminal runtime.
-        self.node.begin_subscription_finalization_shutdown();
+        // Both finalization gates and their terminal retirement sets were
+        // transferred before the first suspension point. Finishing the sweeps
+        // remains ordered after every accepted mutation and wait observer.
+        self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;
         self.node.node.lock().await.close().await?;
         self.node.retire_subscription_runtime_after_close();
@@ -939,6 +949,16 @@ where
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
+            // A cold FIFO owner operation remains retained at the queue head.
+            // If a close future was cancelled while polling it, its terminal
+            // sweeps still belong to node maintenance and must not wait for
+            // that operation to wake before becoming observable.
+            if self.node.transaction_abandonment_shutdown_is_pending() {
+                self.node.finish_transaction_abandonment_shutdown().await?;
+            }
+            if self.node.subscription_finalization_shutdown_is_pending() {
+                self.node.drain_subscription_finalizations().await?;
+            }
             return Ok(());
         }
         self.node.drain_subscription_finalizations().await?;
@@ -962,6 +982,12 @@ where
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
+            if self.node.transaction_abandonment_shutdown_is_pending() {
+                self.node.finish_transaction_abandonment_shutdown().await?;
+            }
+            if self.node.subscription_finalization_shutdown_is_pending() {
+                self.node.drain_subscription_finalizations().await?;
+            }
             return Ok(DbTickStats::default());
         }
         self.node.drain_subscription_finalizations().await?;

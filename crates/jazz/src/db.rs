@@ -1578,6 +1578,7 @@ impl UploadRetryClock for MonotonicUploadRetryClock {
 
 type SharedUploadRetryClock = Rc<RefCell<Rc<dyn UploadRetryClock>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
+type TransactionAbandonmentTombstones = Rc<RefCell<BTreeSet<OpenTransactionId>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
 type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
@@ -2540,6 +2541,13 @@ impl Error {
     }
 }
 
+fn transaction_abandoned(open_tx_id: OpenTransactionId) -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        format!("transaction handle was abandoned: {open_tx_id}"),
+    )
+}
+
 fn row_already_deleted(row: RowUuid) -> Error {
     Error::new(
         ErrorCode::WriteRejected,
@@ -3438,11 +3446,11 @@ where
 {
     db: &'a Db<S>,
     tx_id: OpenTransactionId,
-    /// Set once the transaction has been committed, so `Drop` does not then
-    /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
-    /// `abandon_transaction_handle` on an already-committed transaction — benign
-    /// only because `abandon_tx` tolerates an unknown id, and silent because the
-    /// result was discarded.
+    /// Set once the transaction has been committed, so `Drop` does not submit
+    /// redundant abandonment maintenance for an already-terminal id.
+    ///
+    /// Maintenance is idempotent, but successful commit owns the terminal
+    /// transition and should not enqueue cleanup behind unrelated node work.
     committed: bool,
 }
 
@@ -3510,7 +3518,7 @@ where
         if self.committed {
             return;
         }
-        let _ = self.db.abandon_transaction_handle(self.tx_id);
+        self.db.node.abandon_or_enqueue_transaction(self.tx_id);
     }
 }
 
@@ -3735,7 +3743,7 @@ where
         if self.committed {
             return;
         }
-        let _ = self.db.abandon_exclusive_handle(self.tx_id);
+        self.db.node.abandon_or_enqueue_transaction(self.tx_id);
     }
 }
 

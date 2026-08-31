@@ -298,12 +298,20 @@ a Groove ID, so a catalogue/runtime refresh cannot replace a handle between
 enqueue and drain. Enqueue synchronously marks that state closed; refresh MUST
 NOT rehydrate it while retirement is waiting for the node mutex.
 
-Database shutdown closes finalization admission and snapshots every live stream
-into its retirement set before its first storage await. It drains that set,
-retires the maintained runtime and connection bookkeeping, and only then closes
-storage. A finalizer arriving after admission closes may be acknowledged because
-the whole runtime it could have owned is already terminal; it cannot leave a
-Groove subscription, upstream refcount, or connection resident.
+Database shutdown closes both subscription-finalization and transaction
+admission before its first suspension. It snapshots every live stream into
+its retirement set and transfers the open-transaction sweep to node-owned
+maintenance before waiting for node ownership. Cancelling a pending `Db::close`
+MUST NOT lose that sweep or an accepted FIFO mutation it was polling: the next
+node owner resumes the retained queue entry, drains queued transaction
+abandonment, and terminalizes every remaining open transaction while the closed
+gate rejects new openers and operations. An opener that was waiting for node
+ownership when admission closes must reject and enqueue its local cleanup,
+because it was absent from the shutdown snapshot. Only after those ownership
+passes does a completing close retire maintained runtime and connection
+bookkeeping and close storage. A finalizer arriving after terminal retirement
+owns no resident work because the completed sweep already owns that runtime
+state.
 
 **Implementation status (2026-07-27).** Local live reads currently use a named
 local materialized-row bridge while maintained-view integration continues;
@@ -377,6 +385,17 @@ groups multiple facade writes under one `TxId`; the resulting commit unit carrie
 `n_total_writes` equal to the number of grouped versions (`INV-API-26`).
 `exclusive_tx()` exposes the serializable transaction path from ch. 3/ch. 5 on
 the facade and reports validation conflicts as `WriteRejected` (`INV-API-27`).
+
+Owning Rust transaction handles use idempotent RAII abandonment. Dropping an
+uncommitted `MergeableTx` or `ExclusiveTx` synchronously records a deduplicated
+tombstone outside the storage-owning node, then retires it immediately when the
+node is uncontended or schedules node maintenance. Every transaction open,
+read, stage, and commit operation MUST inspect and drain its id's tombstone
+after acquiring node ownership and before acting. Thus an operation already
+waiting ahead of the maintenance tick cannot commit a logically abandoned
+transaction. Tombstone drainage treats missing or already-terminal ids as
+benign and processes every later id independently; drop never waits for async
+ownership.
 
 Write durability follows the client facade boundary. A `Db` write always lands
 locally first, remains `Local`, and is queued in the shared outbox for upstream
