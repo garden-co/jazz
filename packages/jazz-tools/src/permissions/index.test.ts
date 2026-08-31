@@ -452,6 +452,68 @@ describe("permissions DSL", () => {
     );
   });
 
+  it("rejects an unbranded policy expression in a nested table exists condition", () => {
+    const unbrandedExpression = { type: "True" } as unknown as PermissionExpressionInput;
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where(policy.projects.exists.where(unbrandedExpression)),
+      ]),
+    ).toThrowError(
+      'Unbranded permission condition with policy expression discriminator "True" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).',
+    );
+  });
+
+  it("keeps non-discriminator type comparisons in nested table exists conditions", () => {
+    const ordinaryTypeComparison = {
+      type: "custom-row-kind",
+    } as unknown as PermissionExpressionInput;
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where(policy.projects.exists.where(ordinaryTypeComparison)),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Exists",
+      table: "projects",
+      condition: {
+        type: "Cmp",
+        column: "type",
+        op: "Eq",
+        value: { type: "Literal", value: "custom-row-kind" },
+      },
+    });
+  });
+
+  it("treats a real type column as row data in nested table exists conditions", () => {
+    const compiled = definePermissions(documentApp, ({ policy }) => [
+      policy.projects.allowRead.where(
+        policy.documents.exists.where({ type: "True", title: "Visible" }),
+      ),
+    ]);
+
+    expect(compiled.projects!.select?.using).toEqual({
+      type: "Exists",
+      table: "documents",
+      condition: {
+        type: "And",
+        exprs: [
+          {
+            type: "Cmp",
+            column: "type",
+            op: "Eq",
+            value: { type: "Literal", value: "True" },
+          },
+          {
+            type: "Cmp",
+            column: "title",
+            op: "Eq",
+            value: { type: "Literal", value: "Visible" },
+          },
+        ],
+      },
+    });
+  });
+
   it("treats a type column as row data inside compound conditions", () => {
     const compiled = definePermissions(documentApp, ({ policy, allOf }) => [
       policy.documents.allowRead.where(allOf([{ type: "True" }, { title: "Visible" }])),
@@ -1358,6 +1420,43 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation IR join.");
     }
     expect(using.rel.input.input.left.type).toBe("Gather");
+  });
+
+  it("composes nested table exists with recursive relation exists", () => {
+    const compiled = definePermissions(app, ({ policy, allOf, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.claims["sub"],
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      return [
+        policy.todos.allowRead.where((todo) =>
+          allOf([
+            policy.projects.exists.where({ id: todo.projectId }),
+            policy.exists(
+              reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+                "resource_access_edges.resource": todo.id,
+                grant_role: "viewer",
+              }),
+            ),
+          ]),
+        ),
+      ];
+    });
+
+    const using = toAssertionPolicyExprWithRelForTest(compiled.todos!.select?.using);
+    expect(using).toMatchObject({
+      type: "And",
+      exprs: [
+        { type: "Exists", table: "projects" },
+        { type: "ExistsRel", rel: { type: "Project" } },
+      ],
+    });
   });
 
   it("lowers hop relation plans to relation IR join + project", () => {

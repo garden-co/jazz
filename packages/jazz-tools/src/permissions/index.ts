@@ -1096,7 +1096,7 @@ function buildTablePolicyBuilder(
       brandPermissionExpression({
         __jazzPermissionKind: "exists",
         table,
-        where: normalizeWhereObject(input),
+        where: normalizeWhereObject(input, hasTypeColumn),
       }),
   };
 
@@ -2077,9 +2077,14 @@ function createRowContext(): RowContext<Record<string, unknown>> {
   });
 }
 
-function normalizeWhereObject(input: unknown): Record<string, unknown> {
+function normalizeWhereObject(input: unknown, hasTypeColumn?: boolean): Record<string, unknown> {
   if (!isPlainObject(input)) {
     throw new Error("Expected a where-object condition.");
+  }
+  if (!hasTypeColumn && isPolicyExpressionDiscriminator(input.type)) {
+    throw new Error(
+      `Unbranded permission condition with policy expression discriminator "${input.type}" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).`,
+    );
   }
   return input;
 }
@@ -2109,14 +2114,9 @@ function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
     });
   }
   if (isPlainObject(input)) {
-    if (!hasTypeColumn && isPolicyExpressionDiscriminator(input.type)) {
-      throw new Error(
-        `Unbranded permission condition with policy expression discriminator "${input.type}" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).`,
-      );
-    }
     return brandPermissionExpression({
       __jazzPermissionKind: "where-object",
-      where: normalizeWhereObject(input),
+      where: normalizeWhereObject(input, hasTypeColumn),
     });
   }
   throw new Error("Unsupported permission condition input.");

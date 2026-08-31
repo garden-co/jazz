@@ -313,6 +313,9 @@ describe("permissions type inference", () => {
         // @ts-expect-error invalid exists where key for projects
         policy.projects.exists.where({ missingColumn: true });
 
+        // @ts-expect-error policy expression discriminators are not row columns on projects
+        policy.projects.exists.where({ type: "True" });
+
         // @ts-expect-error row callback should expose only known todo columns
         policy.todos.allowRead.where((todo) => ({ ownerId: todo.missingColumn }));
       }
