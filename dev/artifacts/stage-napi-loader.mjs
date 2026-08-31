@@ -8,7 +8,6 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -121,8 +120,6 @@ function pruneStaleRootNapiArtifacts(packageDir, selectedPlatform) {
     if (!selected.has(entry.name)) unlinkSync(path);
   }
 }
-
-const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 function verifyStagedNapiGeneration(manifest, target, bindingName, bindingBytes) {
   if (manifest.kind !== "napi" || manifest.profile !== "release" || manifest.target !== target)
