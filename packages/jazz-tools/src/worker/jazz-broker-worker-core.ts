@@ -103,7 +103,7 @@ type PhysicalDatabaseOwner = {
  */
 export type ForegroundLeaseTestHooks = {
   delayAfterLeaseAllocation(request: BrowserForegroundNodeLeaseAcquireRequest): number | undefined;
-  allocationCommitted(port: MessagePort, node: Uint8Array): void;
+  allocationCommitted(port: MessagePort, node: Uint8Array, workerRealmId: string): void;
   cancellationRetired(
     pageStore: IndexedDbPageStore,
     node: Uint8Array,
@@ -428,7 +428,7 @@ async function acquireForegroundNodeLease(
         if (!Number.isSafeInteger(delay) || delay < 0 || delay > 1_000) {
           throw new Error("Invalid foreground lease test delay");
         }
-        testHooks?.allocationCommitted(port, allocatedLease.node.slice());
+        testHooks?.allocationCommitted(port, allocatedLease.node.slice(), workerRealmId);
         await new Promise<void>((resolve) => setTimeout(resolve, delay));
       }
       return allocatedLease;

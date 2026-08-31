@@ -19,10 +19,11 @@ installJazzBrokerWorker({
       }
       return delay;
     },
-    allocationCommitted(port, node) {
+    allocationCommitted(port, node, workerRealmId) {
       port.postMessage({
         type: "foreground-node-lease-test-allocated",
         node,
+        workerRealmId,
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
     },
     async cancellationRetired(pageStore, node) {

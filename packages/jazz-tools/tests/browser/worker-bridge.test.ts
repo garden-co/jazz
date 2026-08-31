@@ -428,6 +428,96 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(sawTestAllocation).toBe(false);
   }, 10_000);
 
+  it("shares one stable test-worker realm between foreground lease clients", async () => {
+    const dbName = uniqueDbName("shared-test-worker-lease");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("shared-test-worker-lease-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const workerUrl = new URL("./jazz-broker-worker-test.ts", import.meta.url);
+    const acquire = async () => {
+      const worker = new SharedWorker(workerUrl, {
+        type: "module",
+        name: `${workerName}:generation-0`,
+      });
+      const port = worker.port;
+      port.start();
+      let allocation: { node: Uint8Array; workerRealmId: string } | null = null;
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          const onMessage = (
+            event: MessageEvent<{
+              type?: string;
+              message?: string;
+              node?: Uint8Array;
+              workerRealmId?: string;
+            }>,
+          ) => {
+            if (
+              event.data?.type === "foreground-node-lease-test-allocated" &&
+              event.data.node &&
+              event.data.workerRealmId
+            ) {
+              allocation = {
+                node: event.data.node.slice(),
+                workerRealmId: event.data.workerRealmId,
+              };
+            }
+            if (event.data?.type === "foreground-node-lease-error") {
+              port.removeEventListener("message", onMessage);
+              reject(new Error(event.data.message));
+            }
+            if (event.data?.type === "foreground-node-lease-ready") {
+              port.removeEventListener("message", onMessage);
+              resolve();
+            }
+          };
+          port.addEventListener("message", onMessage);
+          port.postMessage({
+            type: "acquire-foreground-node-lease",
+            dbName,
+            storageOwner,
+            testDelayAfterLeaseAllocationMs: 0,
+          });
+        }),
+        5_000,
+        "test foreground lease client did not receive a lease",
+      );
+      if (!allocation) throw new Error("test foreground lease allocation was not observed");
+      return {
+        ...allocation,
+        async retire() {
+          await withTimeout(
+            new Promise<void>((resolve, reject) => {
+              const onMessage = (event: MessageEvent<{ type?: string; error?: string }>) => {
+                if (event.data?.type !== "foreground-node-lease-result") return;
+                port.removeEventListener("message", onMessage);
+                if (event.data.error) reject(new Error(event.data.error));
+                else resolve();
+              };
+              port.addEventListener("message", onMessage);
+              port.postMessage({ type: "retire-foreground-node-lease" });
+            }),
+            5_000,
+            "test foreground lease did not retire",
+          );
+          port.close();
+        },
+      };
+    };
+
+    const first = await acquire();
+    let second: Awaited<ReturnType<typeof acquire>> | null = null;
+    try {
+      second = await acquire();
+      expect(first.workerRealmId).toBe(second.workerRealmId);
+      expect(first.node).not.toEqual(second.node);
+    } finally {
+      await Promise.all([first.retire(), second?.retire()]);
+    }
+  }, 15_000);
+
   it("fences a generation-advanced worker realm until its live predecessor releases the physical root", async () => {
     const appId = uniqueDbName("physical-worker-epoch-app");
     const dbName = uniqueDbName("physical-worker-epoch-root");

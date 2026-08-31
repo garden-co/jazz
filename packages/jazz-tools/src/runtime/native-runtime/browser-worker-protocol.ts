@@ -52,7 +52,12 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       confirmedTxTime: string;
     }
   /** @internal Emitted only by a capability-bearing browser test worker. */
-  | { type: "foreground-node-lease-test-allocated"; node: Uint8Array }
+  | {
+      type: "foreground-node-lease-test-allocated";
+      node: Uint8Array;
+      /** @internal Test-worker realm marker, never shipped in production. */
+      workerRealmId: string;
+    }
   | { type: "foreground-node-lease-error"; message: string }
   /**
    * The worker observed cancellation and either had no lease to clean up or
