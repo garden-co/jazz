@@ -23,7 +23,7 @@ Invariant digest:
   subscription mechanism.
 - `INV-API-8`: `Db::insert` MUST generate the row id using its configured `RowIdSource`; `Db::insert_with_id` MUST use the caller-supplied `RowUuid`.
 - `INV-API-9`: `Db::update` MUST preserve omitted fields for a locally present row by merging the patch over the row's current local cells.
-- `INV-API-10`: `Db::upsert` MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally.
+- `INV-API-10`: `Db::upsert` MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally. Through a branch-view `WriteTarget`, it MUST merge a head-local row, copy an inherited base row into the head without a cross-branch parent, or insert into the head when the row is absent from the full view. A head-local deletion winner that hides the row MUST instead reject the upsert with `ErrorCode::WriteRejected`; upsert MUST NOT write tombstone-hidden content or implicitly restore the deletion register. Standalone and mergeable-transaction upserts MUST use the same rule.
 - `INV-API-11`: `Db::delete` MUST lower to a mergeable commit with `DeletionEvent::Deleted` and make the row absent from current reads after local application.
 - `INV-API-12`: `Db::restore` MUST reject empty cell data with `ErrorCode::Schema` and MUST lower a non-empty restore to content write plus `DeletionEvent::Restored`.
 - `INV-API-13`: Every local write method MUST return a `WriteHandle` carrying the affected `RowUuid`, backing `TxId`, and local durability tier.
@@ -294,6 +294,36 @@ and `restore`. `insert` obtains its row id from the configured
 patch over the row's current local cells, so omitted fields keep their value
 (`INV-API-9`).
 
+An upsert's `WriteTarget` is the complete read view used to choose between
+update and insert. For a head-over-base branch view, a head-local row is patched
+with its local content winner as parent. A row inherited only from the base is
+copied into the head and patched without making the base transaction a parent;
+unchanged indirect large-value cells retain engine-only proof from that exact
+inherited preimage. A row absent from both head and base is inserted into the
+head.
+
+A committed head-local deletion winner is not absence when it tombstone-hides
+the row: the upsert returns `ErrorCode::WriteRejected` and emits no content
+write. Callers that mean to revive committed deleted state must use `restore`
+with `ExactWriteTarget::Branch(head)`, which publishes replacement content and
+`DeletionEvent::Restored` together. Within one mergeable transaction, however,
+a later upsert supersedes that same transaction's pending delete atomically, so
+the commit cannot contain tombstone-hidden replacement content. Transactional
+branch-view classification and session read visibility include the staged
+overlay, allowing a session to upsert a branch row it inserted or upserted
+earlier in the same transaction.
+
+Low-level JavaScript upsert options use `{ head, base? }` for a branch view.
+For compatibility, the former `{ branch }` shape is an exact alias for
+`{ head: branch }`; it cannot be combined with either `head` or `base`.
+Ambiguous combinations and `base` without `head` are rejected before the
+root/default target can be selected.
+
+Rust `UpsertOptions::target` now uses `WriteTarget` rather than
+`ExactWriteTarget`. Root/default callers keep their runtime behaviour, but code
+that constructs the field with `ExactWriteTarget` must migrate, and exhaustive
+matches over the options field must handle `WriteTarget::BranchView`.
+
 The write handle is the caller's durability and fate observation point. It
 carries the affected `RowUuid`, the backing `TxId` (`mergeable_tx_id()`), and the local
 durability tier (`INV-API-13`). `wait(tier)` returns only when the requested
@@ -349,10 +379,14 @@ Trusted backends can perform core-only attributed writes: the backend sets
 backend's authenticated identity. Clients may attribute writes only to themselves
 (`INV-API-29`, ch. 7).
 
-_Further invariants._ `INV-API-10` — `upsert` merges over current cells when the
-row exists locally, else writes the supplied cells. `INV-API-11` — `delete`
-lowers to a mergeable `DeletionEvent::Deleted`. `INV-API-12` — `restore` rejects
-empty data and lowers to content + `DeletionEvent::Restored`. `INV-API-25` —
+_Further invariants._ `INV-API-10` — `upsert` uses its complete `WriteTarget`:
+it merges a root or head-local row, copies and patches a base-inherited row into
+the head without a cross-branch parent, or inserts into the target when absent.
+A tombstone-hidden row is not insertable: root and branch-view upserts reject it,
+and only `restore` emits `DeletionEvent::Restored`. Standalone and
+mergeable-transaction upserts use the same choice.
+`INV-API-11` — `delete` lowers to a mergeable `DeletionEvent::Deleted`.
+`INV-API-12` — `restore` rejects empty data and lowers to content plus `DeletionEvent::Restored`. `INV-API-25` —
 
 #### Permission advice dry runs
 

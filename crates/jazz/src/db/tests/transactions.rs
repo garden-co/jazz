@@ -352,6 +352,119 @@ fn mergeable_branch_view_tx_retains_only_exact_inherited_large_values() {
     ));
 }
 
+/// Standalone and mergeable-transaction branch-view upserts may copy an
+/// inherited row whose untouched large value is represented by a descriptor.
+/// The descriptor remains trusted only because it came from that exact base
+/// preimage.
+#[test]
+fn branch_view_upserts_preserve_verified_inherited_large_values() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("branch", PublicColumnType::Text)
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .branch_by("branch"),
+        ),
+    );
+    let db = open_db(0x51, AuthorSubject::SYSTEM, &schema);
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+    });
+    let base = BranchSelector::new([("branch", Value::String("base".to_owned()))]);
+    let standalone_head = BranchSelector::new([("branch", Value::String("standalone".to_owned()))]);
+    let transaction_head =
+        BranchSelector::new([("branch", Value::String("transaction".to_owned()))]);
+    let standalone_row = row(0x51);
+    let transaction_row = row(0x52);
+    let standalone_body = "s".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 1);
+    let transaction_body = "t".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 2);
+
+    for (row_id, body) in [
+        (standalone_row, standalone_body.clone()),
+        (transaction_row, transaction_body.clone()),
+    ] {
+        let seeded = db
+            .insert(
+                "documents",
+                BTreeMap::from([
+                    ("branch".to_owned(), Value::String("base".to_owned())),
+                    ("title".to_owned(), Value::String("base".to_owned())),
+                    ("body".to_owned(), Value::String(body)),
+                ]),
+                InsertOptions {
+                    row_id: Some(row_id),
+                    target: ExactWriteTarget::Branch(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        block_on(seeded.wait(DurabilityTier::Local)).unwrap();
+    }
+
+    let standalone = db
+        .upsert(
+            "documents",
+            standalone_row,
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("standalone overlay".to_owned()),
+            )]),
+            UpsertOptions {
+                target: WriteTarget::BranchView {
+                    head: standalone_head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    block_on(standalone.wait(DurabilityTier::Local)).unwrap();
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.upsert(
+        "documents",
+        transaction_row,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("transaction overlay".to_owned()),
+        )]),
+        UpsertOptions {
+            target: WriteTarget::BranchView {
+                head: transaction_head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let query = db.table("documents");
+    for (head, row_id, expected_body) in [
+        (standalone_head, standalone_row, standalone_body),
+        (transaction_head, transaction_row, transaction_body),
+    ] {
+        let rows = prepared_all(
+            &db,
+            &query,
+            ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base.clone()))),
+        );
+        let visible = rows
+            .iter()
+            .find(|candidate| candidate.row_uuid() == row_id)
+            .expect("upserted inherited row remains visible");
+        assert_eq!(
+            visible.cell(&schema.tables[0], "body"),
+            Some(Value::String(expected_body))
+        );
+    }
+}
+
 #[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = build_public_db_test_schema(PublicSchemaBuilder::new());

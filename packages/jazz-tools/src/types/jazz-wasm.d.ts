@@ -66,12 +66,18 @@ declare module "jazz-wasm" {
     base?: unknown;
   };
 
-  export type UpsertOptions = WriteOptions & {
-    branch?: unknown;
-  };
+  /** `branch` is the legacy alias for `head`; the two selector forms are exclusive. */
+  export type UpsertOptions = WriteOptions &
+    (
+      | { branch?: never; head?: never; base?: never }
+      | { branch?: never; head: unknown; base?: unknown }
+      | { branch: unknown; head?: never; base?: never }
+    );
 
   export type DeleteOptions = UpdateOptions;
-  export type RestoreOptions = UpsertOptions;
+  export type RestoreOptions = WriteOptions & {
+    branch?: unknown;
+  };
 
   export class WasmTx {
     insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
