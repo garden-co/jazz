@@ -365,7 +365,10 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
 
     let update = peer
         .rehydrate_query_for_subscription_from_maintained_subscription(
-            &mut core, canonical, target, &shape,
+            &mut core,
+            canonical,
+            target,
+            &shape,
         )
         .unwrap()
         .expect("expected view update");
@@ -1692,7 +1695,10 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     };
     let duplicate = peer
         .rehydrate_query_for_subscription_from_maintained_subscription(
-            &mut core, canonical, target, &shape,
+            &mut core,
+            canonical,
+            target,
+            &shape,
         )
         .unwrap()
         .expect("duplicate structured usage receives a reset");
@@ -5027,4 +5033,98 @@ fn incremental_query_result_sets_match_full_rehydrate_after_seeded_commits() {
             "incremental whole-table result set diverged from full rehydrate at step {step}"
         );
     }
+}
+
+
+#[test]
+fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x93));
+    let live = row(0x48);
+    let live_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")),
+        )
+        .unwrap();
+    accept_global(&mut core, live_tx, 1);
+
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let canonical = subscription_key(&shape, &binding);
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x48)),
+        ..canonical
+    };
+    let mut peer = PeerState::new();
+    peer.rehydrate_query_for_subscription_with_opts(
+        &mut core,
+        canonical,
+        &shape,
+        &binding,
+        RegisterShapeOptions::default(),
+    )
+    .unwrap();
+    let old_receiver = maintained_subscription_id(&peer, canonical)
+        .expect("canonical maintained receiver missing");
+
+    let deleted_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", live, 2_000).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, deleted_tx, 2);
+
+    let reconciled = peer
+        .reconcile_maintained_subscription_for_clone(
+            &mut core,
+            canonical,
+            &shape,
+            &binding,
+            &RegisterShapeOptions::default(),
+            None,
+        )
+        .unwrap()
+        .expect("expected canonical reconciliation");
+
+    assert!(row_result_set(&peer, canonical).unwrap().is_empty());
+    let canonical_update = reconciled
+        .canonical_update
+        .as_ref()
+        .expect("authoritative reconciliation must remain owner-visible");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        reset_result_set,
+        result_member_removes,
+        ..
+    }) = canonical_update
+    else {
+        panic!("expected canonical view update");
+    };
+    assert_eq!(*subscription, canonical);
+    assert!(!*reset_result_set);
+    assert_eq!(result_member_removes.len(), 1);
+
+    let target_reset = peer
+        .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
+            &mut core,
+            canonical,
+            target,
+            &shape,
+            reconciled,
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        result_member_adds,
+        ..
+    }) = target_reset
+    else {
+        panic!("expected target view update");
+    };
+    assert!(result_member_adds.is_empty());
+    let retained_receiver = maintained_subscription_id(&peer, canonical)
+        .expect("canonical maintained receiver missing after reconciliation");
+    assert_eq!(
+        old_receiver, retained_receiver,
+        "incremental canonical reconciliation should retain the active receiver"
+    );
+    assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
 }

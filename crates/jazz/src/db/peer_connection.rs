@@ -3909,44 +3909,159 @@ where
                         if group.awaiting_upstream_settlement && !settled_handoff {
                             continue;
                         }
-                        let pending_initial = std::mem::take(
-                            &mut group.pending_initial_subscribers,
-                        );
+                        let pending_initial =
+                            std::mem::take(&mut group.pending_initial_subscribers);
+                        let mut established_subscribers = group
+                            .subscribers
+                            .difference(&pending_initial)
+                            .copied()
+                            .collect::<BTreeSet<_>>();
                         let serving_initial = !pending_initial.is_empty();
                         for subscription in pending_initial {
-                            let update_result = {
-                                let mut node = self.node.lock().await;
-                                let mut node = node.scoped_active_session_claims(
-                                    session_claim_binding.as_ref().expect("subscriber claims").0,
-                                    session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
-                                );
-                                if group.initialized
-                                    || peer.has_maintained_subscription(group_subscription)
-                                {
-                                    peer.rehydrate_query_for_subscription_from_maintained_subscription_and_waker(
-                                        &mut node,
-                                        group_subscription,
-                                        subscription,
-                                        &group.shape,
-                                        progress_waker.as_ref(),
-                                    )
-                                    .await
-                                } else {
-                                    peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                            let cloning_existing = group.initialized
+                                || peer.has_maintained_subscription(group_subscription);
+                            let reconciled = if cloning_existing {
+                                let result = {
+                                    let mut node = self.node.lock().await;
+                                    let mut node = node.scoped_active_session_claims(
+                                        session_claim_binding.as_ref().expect("subscriber claims").0,
+                                        session_claim_binding
+                                            .as_ref()
+                                            .expect("subscriber claims")
+                                            .1
+                                            .clone(),
+                                    );
+                                    peer.reconcile_maintained_subscription_for_clone(
                                         &mut node,
                                         group_subscription,
                                         &group.shape,
                                         &group.binding,
-                                        coverage.opts.clone(),
+                                        &coverage.opts,
                                         progress_waker.as_ref(),
                                     )
                                     .await
-                                    .map(|update| {
-                                        update.map(|update| {
-                                            retarget_view_update(update, subscription)
-                                        })
-                                    })
+                                };
+                                let reconciled = match result {
+                                    Ok(Some(reconciled)) => reconciled,
+                                    Ok(None) => {
+                                        group.pending_initial_subscribers.insert(subscription);
+                                        serve_again = true;
+                                        continue;
+                                    }
+                                    Err(crate::node::Error::QueryCapability(detail)) => {
+                                        queue_direct_control(
+                                            &mut self.pending_control_responses,
+                                            unsupported_shape_capability_rejection_message(
+                                                subscription,
+                                                detail,
+                                            ),
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
+                                    }
+                                    Err(error) => {
+                                        queue_direct_control(
+                                            &mut self.pending_control_responses,
+                                            server_subscription_failure_rejection_message(
+                                                subscription,
+                                                &error,
+                                            ),
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
+                                    }
+                                };
+                                Some(reconciled)
+                            } else {
+                                None
+                            };
+                            if let Some(canonical_update) = reconciled
+                                .as_ref()
+                                .and_then(|reconciled| reconciled.canonical_update.as_ref())
+                            {
+                                // Reconciliation has already advanced the canonical
+                                // maintained state. Publish that durable transition to
+                                // every established usage before any fallible reset
+                                // assembly for the new usage can fail.
+                                for sibling in established_subscribers.iter().copied() {
+                                    let mut sibling_update =
+                                        retarget_view_update(canonical_update.clone(), sibling);
+                                    stamp_view_update_authorization_progress_from(
+                                        peer,
+                                        group_subscription,
+                                        &mut sibling_update,
+                                    );
+                                    let receipt =
+                                        scope_purposes.get(&sibling).and_then(|purpose| {
+                                            aggregate_authorization_scope_receipt_for_view(
+                                                scope_aggregates,
+                                                &self.node.borrow(),
+                                                peer,
+                                                ingest_context.identity,
+                                                connection_epoch,
+                                                purpose,
+                                                &sibling_update,
+                                            )
+                                        });
+                                    send_with_sync_context(
+                                        &self.node,
+                                        peer,
+                                        self.transport.as_mut(),
+                                        sibling_update,
+                                    )?;
+                                    if let Some((subscription, receipt)) = receipt {
+                                        self.transport
+                                            .send(SyncMessage::AuthorizationScopeReceipt {
+                                                subscription,
+                                                receipt,
+                                            })
+                                            .map_err(transport_error)?;
+                                    }
+                                    sent_view_update = true;
                                 }
+                            }
+                            let update_result = if let Some(reconciled) = reconciled {
+                                let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding
+                                        .as_ref()
+                                        .expect("subscriber claims")
+                                        .1
+                                        .clone(),
+                                );
+                                peer
+                                    .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
+                                        &mut node,
+                                        group_subscription,
+                                        subscription,
+                                        &group.shape,
+                                        reconciled,
+                                    )
+                                .await
+                                .map(Some)
+                            } else {
+                                let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding
+                                        .as_ref()
+                                            .expect("subscriber claims")
+                                            .1
+                                            .clone(),
+                                );
+                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                    &mut node,
+                                    group_subscription,
+                                    &group.shape,
+                                    &group.binding,
+                                    coverage.opts.clone(),
+                                    progress_waker.as_ref(),
+                                )
+                                .await
+                                .map(|update| {
+                                    update.map(|update| retarget_view_update(update, subscription))
+                                })
                             };
                             let mut update = match update_result {
                                 Ok(Some(update)) => update,
@@ -4014,6 +4129,7 @@ where
                                 return Ok(true);
                             }
                             sent_view_update = true;
+                            established_subscribers.insert(subscription);
                         }
                         if serving_initial {
                             continue;
