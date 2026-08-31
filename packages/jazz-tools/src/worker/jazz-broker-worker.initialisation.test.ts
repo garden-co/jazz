@@ -165,12 +165,17 @@ vi.mock("../runtime/native-runtime/schema-codec.js", () => ({
 
 type RuntimeOutcome = Extract<
   BrowserSharedWorkerConnectResponse,
-  { type: "runtime-ready" | "runtime-error" }
+  { type: "runtime-ready" | "runtime-error" | "worker-closing" }
 >;
 
 type ForegroundLeaseOutcome = Extract<
   BrowserForegroundNodeLeaseAcquireResponse,
-  { type: "foreground-node-lease-ready" | "foreground-node-lease-error" }
+  {
+    type:
+      | "foreground-node-lease-ready"
+      | "foreground-node-lease-busy"
+      | "foreground-node-lease-error";
+  }
 >;
 
 type ForegroundLeaseProbeOutcome = Extract<
@@ -178,6 +183,11 @@ type ForegroundLeaseProbeOutcome = Extract<
   {
     type: "foreground-node-lease-worker-alive" | "foreground-node-lease-worker-closing";
   }
+>;
+
+type ForegroundLeaseCancellation = Extract<
+  BrowserForegroundNodeLeaseAcquireResponse,
+  { type: "foreground-node-lease-cancelled" }
 >;
 
 type WorkerGlobal = typeof globalThis & {
@@ -195,6 +205,9 @@ class TestPort {
   private readonly leaseOutcomeWaiters: Array<(outcome: ForegroundLeaseOutcome) => void> = [];
   private readonly leaseProbeOutcomes: ForegroundLeaseProbeOutcome[] = [];
   private readonly leaseProbeOutcomeWaiters: Array<(outcome: ForegroundLeaseProbeOutcome) => void> =
+    [];
+  private readonly leaseCancellations: ForegroundLeaseCancellation[] = [];
+  private readonly leaseCancellationWaiters: Array<(outcome: ForegroundLeaseCancellation) => void> =
     [];
   private readonly events: BrowserFollowerPortEvent[] = [];
   private readonly eventWaiters: Array<{
@@ -219,7 +232,11 @@ class TestPort {
       | BrowserForegroundNodeLeaseAcquireResponse,
       | BrowserInspectorControlEvent,
   ): void {
-    if (message.type === "runtime-ready" || message.type === "runtime-error") {
+    if (
+      message.type === "runtime-ready" ||
+      message.type === "runtime-error" ||
+      message.type === "worker-closing"
+    ) {
       const waiter = this.outcomeWaiters.shift();
       if (waiter) waiter(message);
       else this.outcomes.push(message);
@@ -239,6 +256,7 @@ class TestPort {
     }
     if (
       message.type === "foreground-node-lease-ready" ||
+      message.type === "foreground-node-lease-busy" ||
       message.type === "foreground-node-lease-error"
     ) {
       const waiter = this.leaseOutcomeWaiters.shift();
@@ -246,10 +264,13 @@ class TestPort {
       else this.leaseOutcomes.push(message);
       return;
     }
-    if (
-      message.type === "foreground-node-lease-test-allocated" ||
-      message.type === "foreground-node-lease-cancelled"
-    ) {
+    if (message.type === "foreground-node-lease-cancelled") {
+      const waiter = this.leaseCancellationWaiters.shift();
+      if (waiter) waiter(message);
+      else this.leaseCancellations.push(message);
+      return;
+    }
+    if (message.type === "foreground-node-lease-test-allocated") {
       throw new Error(`Unexpected lease bootstrap response: ${message.type}`);
     }
     const waiterIndex = this.eventWaiters.findIndex(({ predicate }) => predicate(message));
@@ -295,6 +316,18 @@ class TestPort {
     const waiter = deferred<ForegroundLeaseProbeOutcome>();
     this.leaseProbeOutcomeWaiters.push(waiter.resolve);
     return waiter.promise;
+  }
+
+  waitForLeaseCancellation(): Promise<ForegroundLeaseCancellation> {
+    const outcome = this.leaseCancellations.shift();
+    if (outcome) return Promise.resolve(outcome);
+    const waiter = deferred<ForegroundLeaseCancellation>();
+    this.leaseCancellationWaiters.push(waiter.resolve);
+    return waiter.promise;
+  }
+
+  leaseCancellationCount(): number {
+    return this.leaseCancellations.length;
   }
 
   hasLeaseProbeOutcome(): boolean {
@@ -592,6 +625,14 @@ describe("broker worker context initialization", () => {
       attemptId: "probe-after-termination-ack",
     });
     expect(successor.port.close).toHaveBeenCalledOnce();
+
+    // The normal runtime bootstrap gets an equally explicit handoff signal.
+    // It can advance its SharedWorker generation instead of waiting for a
+    // doomed port's generic timeout, while ordinary idle close remains
+    // cancelable through its bootstrap reservation.
+    await expect(connect(initOptions, "runtime-after-termination")).resolves.toMatchObject({
+      outcome: { type: "worker-closing" },
+    });
     inspector.close();
   });
 
@@ -758,6 +799,77 @@ describe("broker worker context initialization", () => {
       }),
     );
     expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+  });
+
+  it("retries only a classified external physical-owner conflict", async () => {
+    const { BrowserPhysicalDatabaseBusyError } =
+      await import("../runtime/browser-physical-database-epoch.js");
+    const busy = new BrowserPhysicalDatabaseBusyError("busy-lease-root");
+    mocks.openPageStore.mockRejectedValueOnce(busy).mockRejectedValueOnce(new Error("bad storage"));
+
+    const busyLease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: "busy-lease-root",
+      storageOwner: "owner",
+    });
+    await expect(busyLease.outcome).resolves.toEqual({
+      type: "foreground-node-lease-busy",
+      message: busy.message,
+    });
+    expect(busyLease.port.close).toHaveBeenCalledOnce();
+
+    const permanentFailure = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: "terminal-lease-root",
+      storageOwner: "owner",
+    });
+    await expect(permanentFailure.outcome).resolves.toEqual({
+      type: "foreground-node-lease-error",
+      message: "bad storage",
+    });
+    expect(permanentFailure.port.close).toHaveBeenCalledOnce();
+  });
+
+  it("acknowledges cancelled owner-admission rejection exactly once and releases retry cleanup", async () => {
+    const admission = deferred<never>();
+    mocks.openPageStore.mockImplementationOnce(() => admission.promise);
+    const port = connectLeaseProbe().port;
+    const cancellation = port.waitForLeaseCancellation();
+    port.emitMessage({
+      type: "acquire-foreground-node-lease",
+      dbName: "cancelled-owner-admission",
+      storageOwner: "owner",
+    });
+    await vi.waitFor(() => expect(mocks.openPageStore).toHaveBeenCalledOnce());
+
+    // The page can send both its timeout cancellation and a terminal port
+    // error while the same physical-owner admission is still pending. Neither
+    // may leave the retained cleanup port open or publish a second receipt.
+    port.emitMessage({ type: "cancel-foreground-node-lease" });
+    port.emitMessage({ type: "cancel-foreground-node-lease" });
+    admission.reject(new Error("IndexedDB admission rejected"));
+
+    await expect(cancellation).resolves.toMatchObject({
+      type: "foreground-node-lease-cancelled",
+      error: "IndexedDB admission rejected",
+    });
+    await vi.waitFor(() => expect(port.close).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(port.leaseCancellationCount()).toBe(0);
+    expect(port.close).toHaveBeenCalledOnce();
+
+    // The failed owner never reached a durable lease; a fresh bootstrap must
+    // not inherit an in-memory owner or reservation from the cancelled port.
+    const retry = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: "cancelled-owner-admission",
+      storageOwner: "owner",
+    });
+    await expect(retry.outcome).resolves.toMatchObject({
+      type: "foreground-node-lease-ready",
+    });
+    retry.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(retry.port.close).toHaveBeenCalledOnce());
   });
 
   it("does not expose retained lifecycle entries across browser auth scopes", async () => {
