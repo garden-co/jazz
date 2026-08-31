@@ -1032,6 +1032,9 @@ where
                 acknowledgement: None,
             });
         }
+        // Once admission closes, an abandoned close future must not be the
+        // sole owner capable of retiring the captured streams.
+        self.schedule_tick(TickUrgency::Immediate);
     }
 
     /// Release all connection and subscription bookkeeping after its backing

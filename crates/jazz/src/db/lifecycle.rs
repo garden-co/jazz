@@ -473,6 +473,10 @@ where
         // node-owned maintenance now, so cancellation while any accepted owner
         // operation or waiter drains cannot leave open transactions behind.
         self.node.begin_transaction_abandonment_shutdown();
+        // Subscription finalization has the same ownership boundary. Capture
+        // every live stream before waiting for a close owner so cancellation
+        // cannot admit a late finalizer outside the terminal retirement set.
+        self.node.begin_subscription_finalization_shutdown();
         let _close_owner = self.node.lock_close_owner().await;
         // Mutation admission belongs to the binding-facing owner. Once that
         // owner enters Closing it retains this Db and awaits every operation
@@ -487,11 +491,9 @@ where
         // Acknowledge that durable rejection before closing storage; there is
         // no later owner turn after close to flush the bounded acknowledgement.
         self.node.flush_deferred_rejection_discards().await?;
-        // Close stream-finalization admission before its drain. Transaction
-        // maintenance was already closed and transferred before the first
-        // suspension point; finishing that sweep remains ordered after every
-        // accepted mutation and wait observer.
-        self.node.begin_subscription_finalization_shutdown();
+        // Both finalization gates and their terminal retirement sets were
+        // transferred before the first suspension point. Finishing the sweeps
+        // remains ordered after every accepted mutation and wait observer.
         self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;
         self.node.node.lock().await.close().await?;

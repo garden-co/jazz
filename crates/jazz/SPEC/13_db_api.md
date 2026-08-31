@@ -290,7 +290,7 @@ enqueue and drain. Enqueue synchronously marks that state closed; refresh MUST
 NOT rehydrate it while retirement is waiting for the node mutex.
 
 Database shutdown closes both subscription-finalization and transaction
-admission before its first storage await. It snapshots every live stream into
+admission before its first suspension. It snapshots every live stream into
 its retirement set and transfers the open-transaction sweep to node-owned
 maintenance before waiting for node ownership. Cancelling a pending `Db::close`
 MUST NOT lose that sweep: the next node owner drains queued transaction
