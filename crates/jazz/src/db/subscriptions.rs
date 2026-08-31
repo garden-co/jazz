@@ -540,6 +540,11 @@ where
                 acknowledgement: None,
             });
         }));
+        // This opener may have been waiting for the node mutex while a close
+        // attempt closed finalization admission. Its local maintained view
+        // was absent from that close's snapshot, so reject it and let this
+        // guard transfer cleanup to the still-live node owner.
+        self.node.ensure_subscription_finalization_open()?;
         // A projected ordered root needs terminal patches even without nested
         // arrays: an unprojected sort-key mutation can move a visible row
         // without changing the projected payload. Unprojected roots retain

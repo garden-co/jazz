@@ -949,6 +949,16 @@ where
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
+            // A cold FIFO owner operation remains retained at the queue head.
+            // If a close future was cancelled while polling it, its terminal
+            // sweeps still belong to node maintenance and must not wait for
+            // that operation to wake before becoming observable.
+            if self.node.transaction_abandonment_shutdown_is_pending() {
+                self.node.finish_transaction_abandonment_shutdown().await?;
+            }
+            if self.node.subscription_finalization_shutdown_is_pending() {
+                self.node.drain_subscription_finalizations().await?;
+            }
             return Ok(());
         }
         self.node.drain_subscription_finalizations().await?;
@@ -972,6 +982,12 @@ where
         self.node.poll_transaction_wait_observers();
         self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
+            if self.node.transaction_abandonment_shutdown_is_pending() {
+                self.node.finish_transaction_abandonment_shutdown().await?;
+            }
+            if self.node.subscription_finalization_shutdown_is_pending() {
+                self.node.drain_subscription_finalizations().await?;
+            }
             return Ok(DbTickStats::default());
         }
         self.node.drain_subscription_finalizations().await?;

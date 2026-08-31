@@ -10,6 +10,51 @@ use super::peer_connection::{
 use super::*;
 use crate::time::TxTime;
 
+/// Retain a FIFO owner operation while `Db::close` polls it. Dropping the
+/// close future drops the lease, rather than the accepted operation.
+struct QueuedMutationLease<'a> {
+    queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+    operation: Option<QueuedMutationOperation>,
+}
+
+impl<'a> QueuedMutationLease<'a> {
+    fn new(
+        queue: &'a RefCell<VecDeque<QueuedMutationOperation>>,
+        operation: QueuedMutationOperation,
+    ) -> Self {
+        Self {
+            queue,
+            operation: Some(operation),
+        }
+    }
+
+    fn operation(&self) -> &QueuedMutationOperation {
+        self.operation
+            .as_ref()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn operation_mut(&mut self) -> &mut QueuedMutationOperation {
+        self.operation
+            .as_mut()
+            .expect("queued mutation lease must retain its operation")
+    }
+
+    fn take(&mut self) -> QueuedMutationOperation {
+        self.operation
+            .take()
+            .expect("queued mutation lease must retain its operation")
+    }
+}
+
+impl Drop for QueuedMutationLease<'_> {
+    fn drop(&mut self) {
+        if let Some(operation) = self.operation.take() {
+            self.queue.borrow_mut().push_front(operation);
+        }
+    }
+}
+
 /// Node-owned participant surface for upstream and subscriber connections.
 pub struct Node<S>
 where
@@ -40,6 +85,7 @@ where
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
     subscription_finalizations_closed: Cell<bool>,
+    subscription_runtime_retired: Cell<bool>,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) upstream_coverage_refcounts: UpstreamCoverageRefCounts,
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
@@ -125,6 +171,7 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
             subscription_finalizations_closed: Cell::new(false),
+            subscription_runtime_retired: Cell::new(false),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
@@ -207,6 +254,16 @@ where
                 "database mutation owner is closing",
             ))
         }
+    }
+
+    pub(super) fn ensure_subscription_finalization_open(&self) -> Result<(), Error> {
+        if self.subscription_finalizations_closed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "database subscription admission is closed",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn enqueue_mutation(
@@ -414,10 +471,11 @@ where
 
     pub(super) async fn drain_queued_mutations(&self) {
         loop {
-            let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+            let Some(operation) = self.queued_mutations.borrow_mut().pop_front() else {
                 return;
             };
-            let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+            let mut lease = QueuedMutationLease::new(&self.queued_mutations, operation);
+            let poisoned = lease.operation().open_tx_id.and_then(|open_tx_id| {
                 self.queued_open_transaction_failures
                     .borrow()
                     .get(&open_tx_id)
@@ -425,9 +483,9 @@ where
             });
             let result = match poisoned {
                 Some(error) => Err(error),
-                None => operation.future.as_mut().await,
+                None => lease.operation_mut().future.as_mut().await,
             };
-            self.finish_queued_mutation(operation, result);
+            self.finish_queued_mutation(lease.take(), result);
         }
     }
 
@@ -918,6 +976,10 @@ where
         self.finish_transaction_abandonment_shutdown_in(&mut node)
     }
 
+    pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
+        self.transaction_abandonment_shutdown_pending.get()
+    }
+
     /// Enqueue a stream-finalization command without touching the async node
     /// mutex. This is the only operation a stream's `Drop` implementation may
     /// perform. A closed node has already retired its runtime, so later
@@ -927,13 +989,14 @@ where
         mut command: PendingSubscriptionFinalization,
     ) {
         if self.subscription_finalizations_closed.get() {
-            // Db::close has synchronously retired every maintained view and
-            // connection before setting this gate. A late finalizer therefore
-            // owns no resident Groove or upstream state to clean up.
-            if let Some(acknowledgement) = command.acknowledgement.take() {
-                let _ = acknowledgement.send(());
+            if self.subscription_runtime_retired.get() {
+                // Terminal retirement already drained every maintained view
+                // and connection, so a late finalizer owns no resident work.
+                if let Some(acknowledgement) = command.acknowledgement.take() {
+                    let _ = acknowledgement.send(());
+                }
+                return;
             }
-            return;
         }
         self.pending_subscription_finalizations
             .borrow_mut()
@@ -1042,6 +1105,7 @@ where
     /// view or upstream ownership behind: the retirement pass drained them
     /// before close, and this removes the now-unusable runtime shell.
     pub(super) fn retire_subscription_runtime_after_close(&self) {
+        self.subscription_runtime_retired.set(true);
         self.subscriptions.borrow_mut().clear();
         self.connections.borrow_mut().clear();
         self.upstream_subscriptions.borrow_mut().clear();
@@ -1057,6 +1121,10 @@ where
         self.pending_relay_subscription_rejections
             .borrow_mut()
             .clear();
+    }
+
+    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
+        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {

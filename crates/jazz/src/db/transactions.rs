@@ -786,10 +786,8 @@ where
             tx_id,
             Box::pin(async move {
                 let published = db
-                    .node
-                    .node
-                    .lock()
-                    .await
+                    .lock_for_transaction_operation(open_tx_id)
+                    .await?
                     .commit_mergeable_open_at(open_tx_id, tx_id, || now_ms)
                     .await?;
                 debug_assert_eq!(published.tx_id, tx_id);
@@ -1435,10 +1433,8 @@ where
             tx_id,
             Box::pin(async move {
                 let (published, unit) = db
-                    .node
-                    .node
-                    .lock()
-                    .await
+                    .lock_for_transaction_operation(open_tx_id)
+                    .await?
                     .commit_exclusive_bound_at(open_tx_id, tx_id)
                     .await?;
                 debug_assert_eq!(published.tx_id, tx_id);

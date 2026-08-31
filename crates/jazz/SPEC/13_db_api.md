@@ -293,13 +293,16 @@ Database shutdown closes both subscription-finalization and transaction
 admission before its first suspension. It snapshots every live stream into
 its retirement set and transfers the open-transaction sweep to node-owned
 maintenance before waiting for node ownership. Cancelling a pending `Db::close`
-MUST NOT lose that sweep: the next node owner drains queued transaction
-abandonment and terminalizes every remaining open transaction while the closed
-gate rejects new openers and operations. Only after those ownership passes does
-a completing close retire maintained runtime and connection bookkeeping and
-close storage. A stream finalizer or transaction-handle drop arriving after
-admission closes owns no separate resident work: the corresponding final sweep
-already owns that runtime state.
+MUST NOT lose that sweep or an accepted FIFO mutation it was polling: the next
+node owner resumes the retained queue entry, drains queued transaction
+abandonment, and terminalizes every remaining open transaction while the closed
+gate rejects new openers and operations. An opener that was waiting for node
+ownership when admission closes must reject and enqueue its local cleanup,
+because it was absent from the shutdown snapshot. Only after those ownership
+passes does a completing close retire maintained runtime and connection
+bookkeeping and close storage. A finalizer arriving after terminal retirement
+owns no resident work because the completed sweep already owns that runtime
+state.
 
 **Implementation status (2026-07-27).** Local live reads currently use a named
 local materialized-row bridge while maintained-view integration continues;

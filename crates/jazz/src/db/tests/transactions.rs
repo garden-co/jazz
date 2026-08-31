@@ -727,6 +727,69 @@ fn dropped_handles_beat_commit_waiters_already_ahead_of_tick() {
     });
 }
 
+/// Internal because queued binding commits and RAII drops meet below the
+/// public facade. The public receipt is the queued write handle's terminal
+/// error after one owner tick.
+#[test]
+fn queued_commits_reject_handles_abandoned_while_the_node_is_locked() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let mergeable = db.mergeable_tx().await.unwrap();
+        let mergeable_id = mergeable.tx_id;
+        mergeable
+            .insert(
+                "todos",
+                doctest_support::todo_cells("queued mergeable abandoned", false),
+                InsertOptions {
+                    row_id: Some(row(0xd3)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let node_owner = db.node.node.lock().await;
+        let mergeable_commit = db.enqueue_commit_mergeable_handle(mergeable_id).unwrap();
+        drop(mergeable);
+        drop(node_owner);
+        db.tick().await.unwrap();
+        let mergeable_error = mergeable_commit
+            .wait(DurabilityTier::Local)
+            .await
+            .unwrap_err();
+        assert_eq!(mergeable_error.code, ErrorCode::Protocol);
+        assert!(mergeable_error.message.contains("was abandoned"));
+        // Settle the failed mergeable commit's idempotent cleanup before
+        // placing the independent exclusive receipt on the FIFO owner.
+        db.tick().await.unwrap();
+
+        let exclusive = db.exclusive_tx().await.unwrap();
+        let exclusive_id = exclusive.tx_id;
+        exclusive
+            .insert(
+                "todos",
+                doctest_support::todo_cells("queued exclusive abandoned", false),
+                InsertOptions {
+                    row_id: Some(row(0xd4)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let node_owner = db.node.node.lock().await;
+        let exclusive_commit = db.enqueue_commit_exclusive_handle(exclusive_id).unwrap();
+        drop(exclusive);
+        drop(node_owner);
+        db.tick().await.unwrap();
+        let exclusive_error = exclusive_commit
+            .wait(DurabilityTier::Local)
+            .await
+            .unwrap_err();
+        assert_eq!(exclusive_error.code, ErrorCode::Protocol);
+        assert!(exclusive_error.message.contains("was abandoned"));
+    });
+}
+
 /// Internal because stale maintenance ids are deliberately absent from the
 /// public API. A stale id at the head must not fail the tick or strand a later
 /// live transaction.
@@ -925,6 +988,44 @@ fn cancelled_close_sweeps_transactions_from_every_pre_sweep_wait() {
     }
 }
 
+/// Internal because only the owner queue exposes the exact cancellation point
+/// between dequeue and a cold operation's completion. Accepted FIFO work must
+/// remain retained when an in-progress close future is dropped.
+#[test]
+fn cancelled_close_retains_the_cold_queued_owner_operation() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+
+    block_on(async {
+        let (release, blocked) = futures::channel::oneshot::channel();
+        let completed = Rc::new(Cell::new(false));
+        let operation_completed = Rc::clone(&completed);
+        db.node
+            .enqueue_transaction_operation(
+                OpenTransactionId::new(),
+                Box::pin(async move {
+                    blocked
+                        .await
+                        .expect("cancelled close must retain the queued operation");
+                    operation_completed.set(true);
+                    Ok(())
+                }),
+            )
+            .unwrap();
+
+        let mut closing = Box::pin(db.close());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(closing.as_mut().poll(&mut context), Poll::Pending));
+        drop(closing);
+
+        release
+            .send(())
+            .expect("close cancellation must not drop the queued operation");
+        db.drive_queued_mutation_once();
+        assert!(completed.get());
+    });
+}
+
 /// Internal because cancellation must strand retained FIFO work between close
 /// owners; the public API does not expose that handoff boundary.
 #[test]
@@ -934,11 +1035,14 @@ fn cancelled_close_handoff_is_coherent_with_concurrent_and_repeated_close() {
     block_on(async {
         let transaction = db.mergeable_tx().await.unwrap();
         let transaction_id = transaction.tx_id;
+        let (release_retained_operation, retained_operation) = futures::channel::oneshot::channel();
         db.node
             .enqueue_transaction_operation(
                 transaction_id,
-                Box::pin(async {
-                    std::future::pending::<()>().await;
+                Box::pin(async move {
+                    retained_operation
+                        .await
+                        .expect("the cancelled close retains accepted FIFO work");
                     Ok(())
                 }),
             )
@@ -970,6 +1074,12 @@ fn cancelled_close_handoff_is_coherent_with_concurrent_and_repeated_close() {
             Poll::Pending
         ));
         drop(cancelled);
+
+        // Cancellation retains the cold head; release it before asking a new
+        // close owner to finish the same FIFO sequence.
+        release_retained_operation
+            .send(())
+            .expect("retained owner operation remains live after cancellation");
 
         let (first, second) = futures::future::join(db.close(), db.close()).await;
         first.unwrap();
