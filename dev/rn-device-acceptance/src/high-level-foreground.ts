@@ -76,6 +76,30 @@ export async function seedHighLevelForegroundRuntime(
 }
 
 /**
+ * Open a second public foreground after the seed foreground has shut down and
+ * require the seed row through it. This is the pre-termination half of the
+ * persistence receipt: unlike the seed client's own read, this new in-memory
+ * foreground can materialize the row only after the persistent native relay
+ * has accepted it. The subsequent process-restart read remains the durable
+ * SQLite half of the same end-to-end claim.
+ */
+export async function proveHighLevelForegroundRelayReadback(
+  capability: Uint8Array,
+  runNonce: string,
+): Promise<void> {
+  const client = await createJazzClient(clientConfig(capability));
+  try {
+    const rows = await client.db.all(app.todos);
+    assertPersistedTitleForRun(
+      rows.map((row) => row.title),
+      runNonce,
+    );
+  } finally {
+    await client.shutdown();
+  }
+}
+
+/**
  * Materialize the row written by a prior process through `createJazzClient`.
  * This deliberately does not use the byte-level fixture or read SQLite: it is
  * the public API half of the process-restart receipt.

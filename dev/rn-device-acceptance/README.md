@@ -37,7 +37,12 @@ The Expo config plugin copies and registers the Android template during prebuild
 - `local-write-subscription`: UI-A write observed by UI-B through one relay, with both aliases in one installed JSI runtime.
 - `independent-jsi-runtime-subscription`: two physical JSI runtimes through one relay (explicit TODO; do not infer this from the same-runtime alias receipt).
 - `reconnect`: connection recovery (still TODO).
-- `reopen`: the drivers run a seed launch, deliberately terminate the full Android/iOS app process, then run a verification launch. Fresh A and B foregrounds must each read only their own row committed by the seed process.
+- `reopen`: the seed client writes through the public API, shuts down, and a
+  fresh public foreground first reads that run-bound row through the live
+  persistent relay. The drivers then deliberately terminate the full
+  Android/iOS app process and run a verification launch, where a newly
+  admitted public foreground must read the same row from the recreated relay
+  and SQLite owner.
 - `scope-isolation`: persists canonical A and B fixture rows through separate installed JSI foregrounds. Trusted Android/iOS code alone replaces A with B (whose SQLite path is chosen in compiled native code); both directions must reject the other scope's row, both before and after a full process restart. It never exposes a generic host-reset or path-selection API to JavaScript.
 - `backpressure` and `corrupt-store`: bounded frame recovery and fail-closed storage diagnostics.
 

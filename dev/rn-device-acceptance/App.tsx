@@ -12,6 +12,7 @@ import {
 } from "./src/foreground-byte-abi";
 import {
   proveHighLevelForegroundRestart,
+  proveHighLevelForegroundRelayReadback,
   seedHighLevelForegroundRuntime,
 } from "./src/high-level-foreground";
 import {
@@ -116,6 +117,12 @@ async function observeTrustedAdmissionLifecycle(markFailure: (code: DeviceDiagno
   const scopeA = await admittedNativeRelay();
   markFailure("public-client-seed-failed");
   await seedHighLevelForegroundRuntime(scopeA.capability, receipt.runNonce, markFailure);
+  // The first client is now fully shut down. A new public foreground must
+  // read the run-bound row through the persistent relay before the driver
+  // terminates the whole app; this keeps the later restart receipt from being
+  // the first proof that the seed escaped its in-memory UI preview.
+  markFailure("public-client-relay-readback-failed");
+  await proveHighLevelForegroundRelayReadback(scopeA.capability, receipt.runNonce);
   markFailure("scope-isolation-failed");
   await proveForegroundScopeIsolation(
     foregroundFactory,
