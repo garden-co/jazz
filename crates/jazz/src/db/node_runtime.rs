@@ -26,6 +26,10 @@ where
     queued_mutations: RefCell<VecDeque<QueuedMutationOperation>>,
     transaction_wait_observers: RefCell<Vec<TransactionWaitObserver>>,
     queued_mutation_failures: RefCell<BTreeMap<TxId, Error>>,
+    /// Rejections claimed by a waiter during the current owner turn. They
+    /// stay observable until every waiter that was woken by the same fate has
+    /// had one polling opportunity, then are discarded before the turn ends.
+    deferred_rejection_discards: RefCell<BTreeSet<TxId>>,
     queued_open_transaction_failures: RefCell<BTreeMap<OpenTransactionId, Error>>,
     reserved_mutations: RefCell<BTreeSet<TxId>>,
     pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
@@ -106,6 +110,7 @@ where
             queued_mutations: RefCell::new(VecDeque::new()),
             transaction_wait_observers: RefCell::new(Vec::new()),
             queued_mutation_failures: RefCell::new(BTreeMap::new()),
+            deferred_rejection_discards: RefCell::new(BTreeSet::new()),
             queued_open_transaction_failures: RefCell::new(BTreeMap::new()),
             reserved_mutations: RefCell::new(BTreeSet::new()),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
@@ -864,9 +869,50 @@ where
         let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
-            self.node.lock().await.discard_rejection(tx_id).await?;
+            self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+            self.schedule_tick(TickUrgency::Immediate);
         }
         Ok(pending.is_some() || retained)
+    }
+
+    /// Finish rejection acknowledgement after all wait observers woken by one
+    /// owner turn have had a chance to inspect the shared terminal state.
+    pub(super) async fn flush_deferred_rejection_discards(&self) -> Result<(), Error> {
+        let tx_ids = std::mem::take(&mut *self.deferred_rejection_discards.borrow_mut());
+        let mut first_error = None;
+        for tx_id in tx_ids {
+            if let Err(error) = self.node.lock().await.discard_rejection(tx_id).await {
+                self.deferred_rejection_discards.borrow_mut().insert(tx_id);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            // A failed atomic Groove commit poisons this opened database. Do
+            // not convert its retained acknowledgement into an immediate tick
+            // loop: the caller must observe the error and reopen before this
+            // runtime can make durable progress again. Other errors are also
+            // retained, but have no generic retry-safety contract here, so a
+            // host may explicitly service a later owner turn without us
+            // spinning on an unknown storage failure.
+            if matches!(
+                error,
+                crate::node::Error::Groove(groove::db::Error::DatabasePoisoned)
+            ) {
+                tracing::error!(
+                    %error,
+                    "deferred mutation-error acknowledgement requires reopening the database"
+                );
+            } else {
+                tracing::warn!(
+                    %error,
+                    "deferred mutation-error acknowledgement retained for an explicit later retry"
+                );
+            }
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     pub(super) async fn transaction_wait_outcome(
@@ -900,6 +946,34 @@ where
         }
     }
 
+    /// Read a transaction's wait predicate without claiming its rejection.
+    ///
+    /// A queued empty update may use an existing transaction as its bounded
+    /// completion target. That public request must observe the target's state,
+    /// but it is not an additional owner of the target's mutation-error
+    /// delivery: the target's own waiter or mutation-error callback retains
+    /// that responsibility.
+    async fn completion_target_wait_outcome(
+        &self,
+        public_tx_id: TxId,
+        target_tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Option<Result<TxId, Error>> {
+        let state = self.node.lock().await.transaction_state(target_tx_id).await;
+        let Some((fate, global_time, durability)) = state else {
+            return Some(Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("completion target for transaction {public_tx_id:?} is not known locally"),
+            )));
+        };
+        let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
+        match fate {
+            Fate::Rejected(reason) => Some(Err(write_rejected(public_tx_id, reason))),
+            Fate::Pending | Fate::Accepted if satisfied => Some(Ok(public_tx_id)),
+            Fate::Pending | Fate::Accepted => None,
+        }
+    }
+
     pub(super) fn queued_mutation_write_state(
         &self,
         tx_id: TxId,
@@ -927,6 +1001,21 @@ where
         tier: DurabilityTier,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
+        self.wait_for_write_with(tx_id, None, tier, callback);
+    }
+
+    /// Callback wait for a binding-owned write handle. A queued empty update
+    /// reserves a request id before it can asynchronously discover that the
+    /// update is a no-op; its handle-local alias then points at the existing
+    /// transaction whose state satisfies this wait. The alias is retained by
+    /// the caller, never by this runtime.
+    pub(super) fn wait_for_write_with(
+        self: &Rc<Self>,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
+        tier: DurabilityTier,
+        callback: Box<dyn FnOnce(Result<TxId, Error>)>,
+    ) {
         if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing {
             callback(Err(Error::new(
                 ErrorCode::NotObserved,
@@ -938,9 +1027,77 @@ where
         self.transaction_wait_observers
             .borrow_mut()
             .push(Box::pin(async move {
-                callback(node.wait_for_transaction(tx_id, tier).await);
+                callback(node.wait_for_write(tx_id, alias, tier).await);
             }));
         self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    async fn wait_for_write(
+        &self,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        let Some(alias) = alias else {
+            return self.wait_for_transaction(tx_id, tier).await;
+        };
+        loop {
+            let target_tx_id = { *alias.borrow() };
+            if let Some(target_tx_id) = target_tx_id {
+                return self
+                    .wait_for_completion_target(tx_id, target_tx_id, tier)
+                    .await;
+            }
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                return outcome;
+            }
+            if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing
+                && !self.reserved_mutations.borrow().contains(&tx_id)
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("database closed before transaction {tx_id:?} reached {tier:?}"),
+                ));
+            }
+            let state_change = self.register_write_state_waiter(tx_id);
+            let target_tx_id = { *alias.borrow() };
+            if let Some(target_tx_id) = target_tx_id {
+                drop(state_change);
+                return self
+                    .wait_for_completion_target(tx_id, target_tx_id, tier)
+                    .await;
+            }
+            if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    async fn wait_for_completion_target(
+        &self,
+        public_tx_id: TxId,
+        target_tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self
+                .completion_target_wait_outcome(public_tx_id, target_tx_id, tier)
+                .await
+            {
+                return outcome;
+            }
+            let state_change = self.register_write_state_waiter(target_tx_id);
+            if let Some(outcome) = self
+                .completion_target_wait_outcome(public_tx_id, target_tx_id, tier)
+                .await
+            {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
     }
 
     pub(super) async fn wait_for_transaction(

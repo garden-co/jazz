@@ -1512,6 +1512,7 @@ type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type QueuedMutationFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + 'static>>;
 type QueuedMutationCompletion = Box<dyn FnOnce(Result<(), Error>) + 'static>;
 type TransactionWaitObserver = Pin<Box<dyn Future<Output = ()> + 'static>>;
+type QueuedMutationAlias = Rc<RefCell<Option<TxId>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MutationOwnerLifecycle {
@@ -3727,6 +3728,7 @@ where
     tx_id: TxId,
     local_tier: DurabilityTier,
     queued_status: Option<Rc<RefCell<QueuedMutationStatus>>>,
+    queued_alias: Option<QueuedMutationAlias>,
 }
 
 impl<S> WriteHandle<S>
@@ -3826,8 +3828,13 @@ where
                 "database handle was dropped",
             ));
         };
+        let resolved_tx_id = self
+            .queued_alias
+            .as_ref()
+            .and_then(|alias| *alias.borrow())
+            .unwrap_or(self.tx_id);
         let Some((fate, global_time, durability)) =
-            node.lock().await.transaction_state(self.tx_id).await
+            node.lock().await.transaction_state(resolved_tx_id).await
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,

@@ -671,7 +671,7 @@ where
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status))
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status, None))
     }
 
     /// Abandon an owned open transaction handle.
@@ -1325,7 +1325,7 @@ where
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status))
+        Ok(self.queued_write_handle(RowUuid::from_bytes([0; 16]), tx_id, status, None))
     }
 
     /// Commit an owned exclusive transaction as an explicit policy identity.

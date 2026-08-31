@@ -1867,6 +1867,7 @@ impl CoreDb {
             tx_id,
             local_tier: DurabilityTier::Global,
             queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -1896,6 +1897,7 @@ impl CoreDb {
             tx_id,
             local_tier: DurabilityTier::Global,
             queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -1950,6 +1952,7 @@ impl CoreDb {
             tx_id,
             local_tier: DurabilityTier::Global,
             queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -2010,6 +2013,7 @@ impl CoreDb {
             tx_id,
             local_tier: DurabilityTier::Global,
             queued_status: None,
+            queued_alias: None,
         })
     }
 

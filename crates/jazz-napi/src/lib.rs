@@ -240,11 +240,11 @@ impl NapiDbInnerStorage {
 enum NapiWrite {
     Memory {
         db: Rc<CoreDb<CoreMemoryStorage>>,
-        tx_id: TxId,
+        write: WriteHandle<CoreMemoryStorage>,
     },
     Persistent {
         db: Rc<CoreDb<CoreRocksDbStorage>>,
-        tx_id: TxId,
+        write: WriteHandle<CoreRocksDbStorage>,
     },
 }
 
@@ -878,11 +878,11 @@ impl Write {
             finish_wait_promise(env, deferred, result);
         };
         match write {
-            NapiWrite::Memory { db, tx_id } => {
-                db.wait_for_transaction_with(*tx_id, tier, callback);
+            NapiWrite::Memory { db, write } => {
+                db.wait_for_write_with(write, tier, callback);
             }
-            NapiWrite::Persistent { db, tx_id } => {
-                db.wait_for_transaction_with(*tx_id, tier, callback);
+            NapiWrite::Persistent { db, write } => {
+                db.wait_for_write_with(write, tier, callback);
             }
         }
         Ok(PromiseRaw::new(env, promise))
@@ -912,8 +912,8 @@ impl Write {
             return Err(napi::Error::from_reason("write state is unavailable"));
         };
         let state = match write {
-            NapiWrite::Memory { db, tx_id } => db.write_state(*tx_id),
-            NapiWrite::Persistent { db, tx_id } => db.write_state(*tx_id),
+            NapiWrite::Memory { write, .. } => core_block_on(write.write_state()),
+            NapiWrite::Persistent { write, .. } => core_block_on(write.write_state()),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(core_write_state_to_json(&state))
@@ -4317,7 +4317,7 @@ fn core_write_memory(
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
         tx_id: TransactionId::from_committed_tx(tx_id),
-        inner: Some(NapiWrite::Memory { db, tx_id }),
+        inner: Some(NapiWrite::Memory { db, write }),
     })
 }
 
@@ -4335,7 +4335,7 @@ fn core_write_persistent(
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
         row_id: result.row_id,
         tx_id: TransactionId::from_committed_tx(tx_id),
-        inner: Some(NapiWrite::Persistent { db, tx_id }),
+        inner: Some(NapiWrite::Persistent { db, write }),
     })
 }
 
@@ -5435,15 +5435,16 @@ mod tests {
 
     use crate::{
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, JazzServer, JazzServerInner,
-        NapiDb, NapiDbInnerStorage, NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
-        PendingSubscriptionBatchOutcome, PendingSubscriptionBatchPoll, PreparedQuery,
-        RestoreOptions, Tx, UpdateOptions, UpsertOptions, authority_epoch_from_bigint,
-        close_after_cleanup, core_author_id_from_bytes, core_block_on, core_claim_value_from_json,
-        core_drive_direct_mutation_once, core_insert_options, core_open_backend_identity,
-        core_open_identity, core_read_opts_from_json, core_read_tier_from_str,
-        core_restore_options, core_subscription_event_to_napi, core_update_options,
-        core_upsert_options, encode_core_subscription_delta, requeue_retryable_subscription_batch,
-        unknown_transaction_kind_message,
+        NapiDb, NapiDbInnerStorage, NapiTxKind, NapiWrite, PendingNativeRead,
+        PendingNativeSubscriptionBatch, PendingSubscriptionBatchOutcome,
+        PendingSubscriptionBatchPoll, PreparedQuery, RestoreOptions, Tx, UpdateOptions,
+        UpsertOptions, authority_epoch_from_bigint, close_after_cleanup, core_author_id_from_bytes,
+        core_block_on, core_claim_value_from_json, core_drive_direct_mutation_once,
+        core_insert_options, core_open_backend_identity, core_open_identity,
+        core_read_opts_from_json, core_read_tier_from_str, core_restore_options,
+        core_subscription_event_to_napi, core_update_options, core_upsert_options,
+        core_write_memory, core_write_state_to_json, encode_core_subscription_delta,
+        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
     };
 
     #[test]
@@ -5921,6 +5922,98 @@ mod tests {
             core_block_on(second.wait(DurabilityTier::Local)).expect("second wait resolves"),
             second.mergeable_tx_id(),
             "the retained FIFO successor eventually completes normally"
+        );
+    }
+
+    /// A public NAPI write owns the bounded completion target for a queued
+    /// no-op. Its request id is intentionally not a durable transaction, so
+    /// resolving `writeState` or `wait` through `Db::write_state(request)`
+    /// would incorrectly report `NotObserved` after admission.
+    #[test]
+    fn napi_write_retains_queued_noop_completion_target() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = jazz::schema::JazzSchema::new(&source)
+            .expect("NAPI no-op write fixture schema compiles");
+        let families = schema.column_families();
+        let families = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let author = CoreAuthorSubject::for_test_bytes([0xc4; 16]);
+        let db = Rc::new(
+            core_block_on(CoreDb::open(CoreDbConfig::new(
+                schema,
+                CoreMemoryStorage::new(&families).expect("valid memory storage families"),
+                CoreDbIdentity {
+                    node: CoreNodeUuid::from_bytes([0x54; 16]),
+                    author: author.clone(),
+                },
+            )))
+            .expect("NAPI no-op write fixture opens"),
+        );
+        let row = CoreRowUuid::from_bytes([0x64; 16]);
+        let existing_tx_id = db
+            .seed_settled_mergeable_for_bootstrap(
+                "items",
+                row,
+                author,
+                BTreeMap::from([("label".to_owned(), CoreValue::String("before".to_owned()))]),
+            )
+            .expect("seed current row");
+        let queued = db
+            .enqueue_update("items".to_owned(), row, BTreeMap::new(), Default::default())
+            .expect("queue empty update");
+        let reserved_tx_id = queued.mergeable_tx_id();
+        let napi_write = core_write_memory(Rc::clone(&db), queued).expect("wrap queued write");
+
+        let waited = Rc::new(RefCell::new(None));
+        let waited_for_callback = Rc::clone(&waited);
+        match napi_write
+            .inner
+            .as_ref()
+            .expect("public write keeps inner handle")
+        {
+            NapiWrite::Memory { db, write } => {
+                db.wait_for_write_with(write, DurabilityTier::Local, move |outcome| {
+                    *waited_for_callback.borrow_mut() = Some(outcome)
+                })
+            }
+            NapiWrite::Persistent { .. } => panic!("memory write retained wrong backend"),
+        }
+        db.drive_queued_mutation_once();
+        core_block_on(db.tick()).expect("the scheduled binding observer receives no-op completion");
+
+        assert_eq!(
+            napi_write
+                .write_state()
+                .expect("NAPI write state follows target"),
+            core_write_state_to_json(
+                &db.write_state(existing_tx_id)
+                    .expect("existing transaction remains observable"),
+            ),
+            "the public write follows its bounded completion target rather than a global alias"
+        );
+        assert_eq!(
+            waited
+                .borrow_mut()
+                .take()
+                .expect("NAPI wait callback resolves")
+                .expect("no-op target is locally durable"),
+            reserved_tx_id,
+            "the public wait retains its synchronous request identity"
+        );
+        assert!(
+            db.write_state(reserved_tx_id).is_err(),
+            "NAPI did not reintroduce a runtime-global no-op alias"
         );
     }
 

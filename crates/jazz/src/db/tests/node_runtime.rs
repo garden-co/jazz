@@ -77,6 +77,191 @@ fn reopened_wait_observer_yields_instead_of_sync_polling_cold_storage() {
     assert_eq!(observed.borrow_mut().take().unwrap().unwrap(), tx_id);
 }
 
+/// A failed durable acknowledgement remains retained, but a poisoned database
+/// must surface the terminal tick instead of hot-looping a scheduler forever.
+#[test]
+fn deferred_rejection_acknowledgement_failure_requires_explicit_reopen_without_hot_loop() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xca; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xca; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xca))),
+    }))
+    .expect("open controlled rejection fixture");
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_transport));
+    let write = db
+        .insert(
+            "todos",
+            cells("retry deferred acknowledgement", false, author),
+            Default::default(),
+        )
+        .expect("create pending write");
+    let tx_id = write.mergeable_tx_id();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .expect("authority fate reaches fixture");
+    db.tick().expect("persist authority rejection");
+
+    let outcome = Rc::new(RefCell::new(None));
+    let callback = Rc::clone(&outcome);
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+        *callback.borrow_mut() = Some(result);
+    });
+    let scheduler = Rc::new(RecordingScheduler::default());
+    db.set_tick_scheduler(Some(scheduler.clone()));
+    control.take_observed();
+    scheduler.take();
+    control.fail_next(TestStorageOperation::WriteMany);
+    let error = db
+        .tick()
+        .expect_err("failed acknowledgement surfaces through the owner tick");
+    assert!(
+        error.to_string().contains("injected WriteMany failure"),
+        "the original acknowledgement failure is not hidden"
+    );
+    assert_eq!(
+        outcome
+            .borrow_mut()
+            .take()
+            .expect("waiter observes rejection")
+            .expect_err("rejected write")
+            .code,
+        ErrorCode::WriteRejected
+    );
+    assert!(
+        db.node
+            .node()
+            .borrow()
+            .rejected_transaction(tx_id)
+            .is_some(),
+        "failed acknowledgement remains retained until a reopened database can acknowledge it"
+    );
+
+    let first_attempts = control
+        .take_observed()
+        .iter()
+        .filter(|operation| **operation == TestStorageOperation::WriteMany)
+        .count();
+    assert!(
+        first_attempts > 0,
+        "the first owner turn attempted the durable acknowledgement"
+    );
+    assert_eq!(
+        scheduler.take(),
+        vec![TickUrgency::Immediate],
+        "the only wake is the waiter completion scheduled before its acknowledgement fails"
+    );
+    let error = db
+        .tick()
+        .expect_err("a poisoned database remains terminal until reopened");
+    assert!(
+        error.to_string().contains("poisoned"),
+        "the later explicit tick makes the reopen requirement visible"
+    );
+    assert!(
+        scheduler.take().is_empty(),
+        "a permanently poisoned acknowledgement cannot create an owner-turn hot loop"
+    );
+    assert!(
+        db.node
+            .node()
+            .borrow()
+            .rejected_transaction(tx_id)
+            .is_some(),
+        "an indeterminate atomic-write failure never loses the rejected transaction"
+    );
+}
+
+/// Close must fail before writing its clean-close marker when a drained
+/// waiter cannot durably acknowledge a rejection.
+#[test]
+fn close_fails_before_clean_marker_when_rejection_acknowledgement_fails() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcb; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xcb; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xcb))),
+    }))
+    .expect("open controlled close fixture");
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_transport));
+    let write = db
+        .insert(
+            "todos",
+            cells("close failed acknowledgement", false, author),
+            Default::default(),
+        )
+        .expect("create pending write");
+    let tx_id = write.mergeable_tx_id();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .expect("authority fate reaches fixture");
+    db.tick().expect("persist authority rejection");
+
+    let outcome = Rc::new(RefCell::new(None));
+    let callback = Rc::clone(&outcome);
+    db.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |result| {
+        *callback.borrow_mut() = Some(result);
+    });
+    control.take_observed();
+    control.fail_next(TestStorageOperation::WriteMany);
+    let error = block_on(db.close()).expect_err("close propagates acknowledgement failure");
+    assert!(
+        error.to_string().contains("injected WriteMany failure"),
+        "close exposes the durable acknowledgement failure"
+    );
+    assert_eq!(
+        outcome
+            .borrow_mut()
+            .take()
+            .expect("close drains the waiter")
+            .expect_err("drained waiter observes rejection")
+            .code,
+        ErrorCode::WriteRejected
+    );
+    assert!(
+        db.node
+            .node()
+            .borrow()
+            .rejected_transaction(tx_id)
+            .is_some(),
+        "failed close retains the rejection for an explicit retry"
+    );
+    assert!(
+        !control
+            .take_observed()
+            .contains(&TestStorageOperation::Close),
+        "failed acknowledgement prevents storage close and its clean-close marker"
+    );
+}
+
 #[test]
 fn large_write_pushes_staging_before_syncing_its_referencing_row() {
     let schema = schema();

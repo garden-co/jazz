@@ -34,7 +34,7 @@ use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, Rea
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
 use jazz::tools::{OpenTransactionId, TransactionId};
-use jazz::tx::{DurabilityTier, TxId};
+use jazz::tx::DurabilityTier;
 use jazz::wire::{TransportError, WireAuthorityEndpoint, WireTransport};
 use serde::{Deserialize, Serialize};
 
@@ -377,12 +377,12 @@ impl WasmStreamingMutation {
 enum WasmWriteInner {
     MemoryTx {
         db: Rc<Db<MemoryStorage>>,
-        tx_id: TxId,
+        write: WriteHandle<MemoryStorage>,
     },
     #[cfg(target_arch = "wasm32")]
     BrowserTx {
         db: Rc<Db<BrowserStorage>>,
-        tx_id: TxId,
+        write: WriteHandle<BrowserStorage>,
     },
 }
 
@@ -406,12 +406,12 @@ impl WasmWrite {
     #[wasm_bindgen(js_name = writeState)]
     pub fn write_state(&self) -> Result<JsValue, JsValue> {
         match &self.inner {
-            Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
-                write_state_to_js(db.write_state(*tx_id).map_err(to_js_error)?)
+            Some(WasmWriteInner::MemoryTx { write, .. }) => {
+                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
             }
             #[cfg(target_arch = "wasm32")]
-            Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
-                write_state_to_js(db.write_state(*tx_id).map_err(to_js_error)?)
+            Some(WasmWriteInner::BrowserTx { write, .. }) => {
+                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }
@@ -421,12 +421,12 @@ impl WasmWrite {
     pub fn wait(&self, tier: String) -> Result<js_sys::Promise, JsValue> {
         let tier = durability_tier_from_str(&tier)?;
         match &self.inner {
-            Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
-                Ok(wait_promise(db.as_ref(), *tx_id, tier))
+            Some(WasmWriteInner::MemoryTx { db, write }) => {
+                Ok(wait_promise(db.as_ref(), write, tier))
             }
             #[cfg(target_arch = "wasm32")]
-            Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
-                Ok(wait_promise(db.as_ref(), *tx_id, tier))
+            Some(WasmWriteInner::BrowserTx { db, write }) => {
+                Ok(wait_promise(db.as_ref(), write, tier))
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }
@@ -3731,12 +3731,12 @@ where
     Ok(stats.subscription_events as u32)
 }
 
-fn wait_promise<S>(db: &Db<S>, tx_id: TxId, tier: DurabilityTier) -> js_sys::Promise
+fn wait_promise<S>(db: &Db<S>, write: &WriteHandle<S>, tier: DurabilityTier) -> js_sys::Promise
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     js_sys::Promise::new(&mut |resolve, reject| {
-        db.wait_for_transaction_with(tx_id, tier, move |result| match result {
+        db.wait_for_write_with(write, tier, move |result| match result {
             Ok(_) => {
                 let _ = resolve.call0(&JsValue::UNDEFINED);
             }
@@ -3879,7 +3879,7 @@ fn wasm_write_memory(
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
         row_id: result.row_id,
         tx_id: TransactionId::from_committed_tx(tx_id),
-        inner: Some(WasmWriteInner::MemoryTx { db, tx_id }),
+        inner: Some(WasmWriteInner::MemoryTx { db, write }),
     })
 }
 
@@ -3897,7 +3897,7 @@ fn wasm_write_browser(
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
         row_id: result.row_id,
         tx_id: TransactionId::from_committed_tx(tx_id),
-        inner: Some(WasmWriteInner::BrowserTx { db, tx_id }),
+        inner: Some(WasmWriteInner::BrowserTx { db, write }),
     })
 }
 
@@ -4417,6 +4417,97 @@ mod dynamic_schema_view_tests {
                 "invalid updatedAtMs {invalid:?} must fail before a write"
             );
         }
+    }
+
+    /// The WASM object itself, rather than the runtime, owns the completion
+    /// target for a queued empty update. Retaining only the request id would
+    /// make the public `wait`/`writeState` methods lose the existing current
+    /// transaction as soon as the no-op admission completes.
+    #[test]
+    fn wasm_write_retains_queued_noop_completion_target() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("WASM no-op write schema compiles");
+        let families = schema.column_families();
+        let families = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+        let db = Rc::new(
+            block_on(Db::open(DbConfig::new(
+                schema,
+                MemoryStorage::new(&families).expect("valid memory storage families"),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x55; 16]),
+                    author: author.clone(),
+                },
+            )))
+            .expect("WASM no-op write fixture opens"),
+        );
+        let row = RowUuid::from_bytes([0x65; 16]);
+        let existing_tx_id = db
+            .seed_settled_mergeable_for_bootstrap(
+                "items",
+                row,
+                author,
+                BTreeMap::from([("label".to_owned(), Value::String("before".to_owned()))]),
+            )
+            .expect("seed current row");
+        let queued = db
+            .enqueue_update("items".to_owned(), row, BTreeMap::new(), Default::default())
+            .expect("queue empty update");
+        let reserved_tx_id = queued.mergeable_tx_id();
+        let wasm_write = wasm_write_memory(Rc::clone(&db), queued).expect("wrap queued write");
+
+        let waited = Rc::new(RefCell::new(None));
+        let waited_for_callback = Rc::clone(&waited);
+        match wasm_write
+            .inner
+            .as_ref()
+            .expect("WASM write keeps inner handle")
+        {
+            WasmWriteInner::MemoryTx { db, write } => {
+                db.wait_for_write_with(write, DurabilityTier::Local, move |outcome| {
+                    *waited_for_callback.borrow_mut() = Some(outcome)
+                })
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmWriteInner::BrowserTx { .. } => panic!("memory write retained wrong backend"),
+        }
+        block_on(db.tick()).expect("scheduled WASM wait receives no-op completion");
+
+        match wasm_write.inner.as_ref().expect("WASM write remains live") {
+            WasmWriteInner::MemoryTx { write, .. } => assert_eq!(
+                block_on(write.write_state()).expect("WASM handle follows target"),
+                db.write_state(existing_tx_id)
+                    .expect("existing transaction remains observable"),
+                "the wrapper retains the handle-local completion target"
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmWriteInner::BrowserTx { .. } => unreachable!(),
+        }
+        assert_eq!(
+            waited
+                .borrow_mut()
+                .take()
+                .expect("WASM wait callback resolves")
+                .expect("no-op target is locally durable"),
+            reserved_tx_id,
+            "the binding wait preserves its synchronous request identity"
+        );
+        assert!(
+            db.write_state(reserved_tx_id).is_err(),
+            "WASM did not reintroduce a runtime-global no-op alias"
+        );
     }
 
     /// The JavaScript-facing parsers share the checked timestamp conversion

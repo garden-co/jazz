@@ -478,6 +478,7 @@ where
         row: RowUuid,
         tx_id: TxId,
         queued_status: Rc<RefCell<QueuedMutationStatus>>,
+        queued_alias: Option<QueuedMutationAlias>,
     ) -> WriteHandle<S> {
         WriteHandle {
             node: Rc::downgrade(&self.node.node),
@@ -485,6 +486,7 @@ where
             tx_id,
             local_tier: DurabilityTier::None,
             queued_status: Some(queued_status),
+            queued_alias,
         }
     }
 
@@ -513,7 +515,7 @@ where
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(row, tx_id, status))
+        Ok(self.queued_write_handle(row, tx_id, status, None))
     }
 
     #[doc(hidden)]
@@ -529,15 +531,27 @@ where
         options.updated_at_ms = Some(now_ms);
         let tx_id = self.reserve_transaction_id_at_ms(now_ms)?;
         let db = self.clone_for_reserved_transaction(tx_id);
+        let empty_patch = patch.is_empty();
+        let alias = Rc::new(RefCell::new(None));
+        let update_alias = Rc::clone(&alias);
         let status = self.node.enqueue_mutation(
             tx_id,
             Box::pin(async move {
                 let write = db.update(&table, row, patch, options).await?;
-                debug_assert_eq!(write.mergeable_tx_id(), tx_id);
+                let actual_tx_id = write.mergeable_tx_id();
+                if empty_patch && actual_tx_id != tx_id {
+                    // Empty root patches deliberately validate visibility and
+                    // reuse the current row transaction. The returned write
+                    // handle retains that existing transaction as its bounded
+                    // completion target once validation succeeds.
+                    *update_alias.borrow_mut() = Some(actual_tx_id);
+                } else {
+                    debug_assert_eq!(actual_tx_id, tx_id);
+                }
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(row, tx_id, status))
+        Ok(self.queued_write_handle(row, tx_id, status, Some(alias)))
     }
 
     #[doc(hidden)]
@@ -561,7 +575,7 @@ where
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(row, tx_id, status))
+        Ok(self.queued_write_handle(row, tx_id, status, None))
     }
 
     #[doc(hidden)]
@@ -584,7 +598,7 @@ where
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(row, tx_id, status))
+        Ok(self.queued_write_handle(row, tx_id, status, None))
     }
 
     #[doc(hidden)]
@@ -608,7 +622,7 @@ where
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(row, tx_id, status))
+        Ok(self.queued_write_handle(row, tx_id, status, None))
     }
 
     #[doc(hidden)]
@@ -634,7 +648,7 @@ where
                 Ok(())
             }),
         );
-        Ok(self.queued_write_handle(row, tx_id, status))
+        Ok(self.queued_write_handle(row, tx_id, status, None))
     }
     /// Read a byte range from an ordinary bytes or string cell without
     /// exposing its physical representation. Inline and indirect cells share
@@ -2880,6 +2894,7 @@ where
             tx_id,
             local_tier,
             queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -3354,6 +3369,7 @@ where
             tx_id,
             local_tier,
             queued_status: None,
+            queued_alias: None,
         })
     }
 
@@ -3383,6 +3399,7 @@ where
             tx_id,
             local_tier,
             queued_status: None,
+            queued_alias: None,
         })
     }
 

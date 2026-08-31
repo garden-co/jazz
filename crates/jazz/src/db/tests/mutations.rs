@@ -1597,6 +1597,210 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
 }
 
+/// A queued empty root update validates its target asynchronously, but still
+/// exposes one stable reservation to the synchronous caller. Once validation
+/// completes, that reservation aliases the already-current row transaction;
+/// it must never manufacture a second row version or become unobservable.
+#[test]
+fn queued_empty_update_aliases_current_transaction_without_publishing() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc0; 16]);
+    let db = open_db(0xc0, author, &schema);
+    let row = row(0xc1);
+    crate::db::block_on(db.insert(
+        "todos",
+        cells("existing", false, author),
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .expect("seed current row");
+
+    let preceding = db
+        .enqueue_update(
+            "todos".to_owned(),
+            row,
+            cells("first queued update", false, author),
+            Default::default(),
+        )
+        .expect("queue a predecessor before the no-op");
+
+    let queued = db
+        .enqueue_update("todos".to_owned(), row, BTreeMap::new(), Default::default())
+        .expect("synchronous facade reserves an empty update");
+    let alias_weak = Rc::downgrade(
+        queued
+            .queued_alias
+            .as_ref()
+            .expect("empty queued update owns a handle-local completion alias"),
+    );
+    let reserved_tx_id = queued.mergeable_tx_id();
+    assert_ne!(
+        reserved_tx_id,
+        preceding.mergeable_tx_id(),
+        "reservation is a fresh request identity"
+    );
+    assert_eq!(
+        crate::db::block_on(queued.write_state())
+            .expect("pending queued write state")
+            .fate,
+        Fate::Pending
+    );
+    let waited = Rc::new(RefCell::new(None));
+    let waited_for_callback = Rc::clone(&waited);
+    db.wait_for_write_with(&queued, DurabilityTier::Local, move |outcome| {
+        *waited_for_callback.borrow_mut() = Some(outcome);
+    });
+    assert!(
+        waited.borrow().is_none(),
+        "a binding-owned wait remains pending until its queued update has been admitted"
+    );
+
+    db.drive_queued_mutation_once();
+    assert_eq!(
+        crate::db::block_on(queued.write_state())
+            .expect("no-op remains pending behind its FIFO predecessor")
+            .fate,
+        Fate::Pending,
+        "the no-op cannot observe or alias a row version before earlier queued work completes"
+    );
+
+    db.tick()
+        .expect("queued no-op validates its current target");
+    db.tick()
+        .expect("binding-owned wait observes the completed no-op target");
+
+    assert_eq!(
+        waited
+            .borrow_mut()
+            .take()
+            .expect("binding-owned wait resolves after the no-op target is known")
+            .expect("current transaction satisfies local durability"),
+        reserved_tx_id,
+        "binding wait preserves the queued request identity while observing its current target"
+    );
+
+    assert_eq!(
+        crate::db::block_on(queued.wait(DurabilityTier::Local))
+            .expect("the reservation resolves through the current transaction"),
+        reserved_tx_id,
+        "queued callers retain the request identity they were synchronously given"
+    );
+    assert_eq!(
+        crate::db::block_on(queued.write_state())
+            .expect("write handle follows the completed no-op alias"),
+        db.write_state(preceding.mergeable_tx_id())
+            .expect("current row transaction remains observable")
+    );
+    assert!(
+        db.write_state(reserved_tx_id).is_err(),
+        "a no-op reservation is not a durable node transaction; only its returned handle owns the completion alias"
+    );
+    let current_row = prepared_read(&db, &Query::from("todos"))
+        .into_iter()
+        .next()
+        .expect("one seeded row");
+    assert_eq!(
+        crate::db::block_on(db.node.node().borrow_mut().current_row_tx_id(&current_row))
+            .expect("current-row transaction lookup"),
+        preceding.mergeable_tx_id(),
+        "the empty update must not publish a new row version"
+    );
+    drop(queued);
+    assert!(
+        alias_weak.upgrade().is_none(),
+        "successful no-op aliases are retained only by their write handles"
+    );
+}
+
+/// A queued no-op can observe the still-pending current transaction at a
+/// stricter tier. Its synthetic request must report that rejection as its own,
+/// without consuming the current transaction's independently registered
+/// mutation-error ownership.
+#[test]
+fn queued_empty_update_rejection_does_not_consume_its_target_error() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let client = open_db(0xc2, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let current = client
+        .insert(
+            "todos",
+            cells("pending current row", false, author),
+            Default::default(),
+        )
+        .expect("create the pending current transaction");
+    let target_tx_id = current.mergeable_tx_id();
+    let alias = client
+        .enqueue_update(
+            "todos".to_owned(),
+            current.row_uuid(),
+            BTreeMap::new(),
+            Default::default(),
+        )
+        .expect("queue empty update against pending current row");
+    let public_tx_id = alias.mergeable_tx_id();
+    client
+        .tick()
+        .expect("empty update resolves its completion target before the fate arrives");
+
+    let target_outcome = Rc::new(RefCell::new(None));
+    let target_callback = Rc::clone(&target_outcome);
+    client.wait_for_transaction_with(target_tx_id, DurabilityTier::Edge, move |outcome| {
+        *target_callback.borrow_mut() = Some(outcome);
+    });
+    let alias_outcome = Rc::new(RefCell::new(None));
+    let alias_callback = Rc::clone(&alias_outcome);
+    client.wait_for_write_with(&alias, DurabilityTier::Edge, move |outcome| {
+        *alias_callback.borrow_mut() = Some(outcome);
+    });
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: target_tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .expect("authority fate reaches client");
+    client.tick().expect("fate settles both active observers");
+
+    let alias_error = alias_outcome
+        .borrow_mut()
+        .take()
+        .expect("aliased write observer resolves")
+        .expect_err("target rejection is surfaced through the alias");
+    assert_eq!(alias_error.code, ErrorCode::WriteRejected);
+    assert!(
+        alias_error.message.contains(&format!("{public_tx_id:?}")),
+        "the alias reports its public request identity"
+    );
+    assert!(
+        !alias_error.message.contains(&format!("{target_tx_id:?}")),
+        "the private completion target does not leak through the alias error"
+    );
+    let target_error = target_outcome
+        .borrow_mut()
+        .take()
+        .expect("target observer resolves independently")
+        .expect_err("target remains responsible for its own rejection");
+    assert_eq!(target_error.code, ErrorCode::WriteRejected);
+    assert!(
+        target_error.message.contains(&format!("{target_tx_id:?}")),
+        "the target observer retains its own transaction identity"
+    );
+    assert!(
+        client
+            .node
+            .node()
+            .borrow()
+            .rejected_transaction(target_tx_id)
+            .is_none(),
+        "the target observer, not the alias, consumed its mutation-error ownership"
+    );
+}
+
 /// A live application waiter consumes an authority rejection and prevents the
 /// fallback mutation-error callback from firing, including when the fate has
 /// no edge-forwarding route and only the ordinary local handler can notify it.
@@ -1797,6 +2001,90 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
     assert!(replayed_events.borrow().is_empty());
 }
 
+/// Close drains observers while durable storage is still live. A waiter which
+/// claims a rejection during that drain must acknowledge it immediately rather
+/// than leaving it to be replayed as an unhandled error after reopen.
+#[test]
+fn close_acknowledges_rejection_claimed_by_drained_waiter() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xc4; 16]),
+        author,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage: RocksDbStorage::open(dir.path(), &refs).expect("open durable client storage"),
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc4))),
+    }))
+    .expect("open durable client");
+    let (client_transport, mut authority_transport) = duplex();
+    let upstream = block_on(client.connect_upstream(client_transport));
+    let write = client
+        .insert(
+            "todos",
+            cells("close-drained rejection", false, author),
+            Default::default(),
+        )
+        .expect("create pending write");
+    let tx_id = write.mergeable_tx_id();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .expect("authority fate reaches durable client");
+    client
+        .tick()
+        .expect("client persists the authority rejection");
+
+    let drained_outcome = Rc::new(RefCell::new(None));
+    let callback_outcome = Rc::clone(&drained_outcome);
+    client.wait_for_transaction_with(tx_id, DurabilityTier::Edge, move |outcome| {
+        *callback_outcome.borrow_mut() = Some(outcome);
+    });
+    drop(write);
+    drop(upstream);
+    drop(authority_transport);
+    block_on(client.close()).expect("close drains and acknowledges the waiter");
+    assert_eq!(
+        drained_outcome
+            .borrow_mut()
+            .take()
+            .expect("close drained the waiting observer")
+            .expect_err("the drained waiter sees the stored rejection")
+            .code,
+        ErrorCode::WriteRejected
+    );
+    drop(client);
+
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage: RocksDbStorage::open(dir.path(), &refs).expect("reopen durable client storage"),
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc4))),
+    }))
+    .expect("reopen durable client");
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    reopened.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+    reopened
+        .tick()
+        .expect("reopened client services pending errors");
+    assert!(
+        events.borrow().is_empty(),
+        "the close-drained rejection was acknowledged exactly once before storage closed"
+    );
+}
+
 #[test]
 fn write_fate_and_durability_are_queryable_through_facade() {
     let schema = schema();
@@ -1883,6 +2171,7 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
         tx_id,
         local_tier: DurabilityTier::Local,
         queued_status: None,
+        queued_alias: None,
     };
     let err = block_on(handle.wait(DurabilityTier::Global)).unwrap_err();
     assert_eq!(err.code, ErrorCode::WriteRejected);

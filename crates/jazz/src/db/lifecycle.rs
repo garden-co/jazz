@@ -456,6 +456,10 @@ where
         // retirement, so the shared Closing state terminalizes them instead
         // of leaving binding promises parked forever.
         self.node.drain_transaction_wait_observers().await;
+        // A drained waiter may have claimed an already-rejected transaction.
+        // Acknowledge that durable rejection before closing storage; there is
+        // no later owner turn after close to flush the bounded acknowledgement.
+        self.node.flush_deferred_rejection_discards().await?;
         // Close finalization admission before the first await. This makes the
         // queued retirement set and durable close one lifecycle transition:
         // a stream dropped while storage is shutting down is either in this
@@ -727,6 +731,24 @@ where
             .wait_for_transaction_with(tx_id, tier, Box::new(callback));
     }
 
+    /// Binding-only callback wait that preserves a queued write handle's
+    /// bounded completion target. Unlike a durable transaction-id lookup, an
+    /// empty queued update may resolve to an existing row transaction.
+    #[doc(hidden)]
+    pub fn wait_for_write_with(
+        &self,
+        write: &WriteHandle<S>,
+        tier: DurabilityTier,
+        callback: impl FnOnce(Result<TxId, Error>) + 'static,
+    ) {
+        self.node.wait_for_write_with(
+            write.tx_id,
+            write.queued_alias.clone(),
+            tier,
+            Box::new(callback),
+        );
+    }
+
     /// Wait until this database observes another state transition for `tx_id`.
     ///
     /// Callers should always check [`Db::write_state`] before and after
@@ -880,6 +902,7 @@ where
     pub async fn tick(&self) -> Result<(), Error> {
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
             return Ok(());
         }
@@ -887,6 +910,7 @@ where
         self.node.settle_local_publications().await?;
         self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
         Ok(())
     }
 
@@ -894,6 +918,7 @@ where
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
         let queued_mutation_pending = self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
         if queued_mutation_pending {
             return Ok(DbTickStats::default());
         }
@@ -901,7 +926,15 @@ where
         self.node.settle_local_publications().await?;
         let stats = self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
+        self.flush_deferred_rejection_discards_after_tick().await?;
         Ok(stats)
+    }
+
+    async fn flush_deferred_rejection_discards_after_tick(&self) -> Result<(), Error> {
+        // A durable rejection acknowledgement is part of the owner turn. If
+        // it fails, retain the ID but surface the failure instead of silently
+        // scheduling an unbounded retry loop against a poisoned database.
+        self.node.flush_deferred_rejection_discards().await
     }
 
     #[allow(dead_code)]
