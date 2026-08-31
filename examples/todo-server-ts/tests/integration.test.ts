@@ -18,7 +18,6 @@ import {
   type RunningServer,
   type Todo,
 } from "../src/main.ts";
-import { app } from "../schema.js";
 
 const EXTERNAL_ISSUER = "https://todo-server.example.test";
 
@@ -265,11 +264,12 @@ describe("Todo Server Integration", () => {
         0,
       );
 
-      // This receipt is specifically about the local Fjall store surviving a
-      // cold restart. The HTTP route uses an Edge read, whose immediate
-      // read-your-writes behavior after reopening is intentionally tracked in
-      // https://github.com/garden-co/jazz/issues/1995.
-      const todos = await server2.db.all(app.todos, { tier: "local" });
+      // The server's public authenticated route must be able to serve the
+      // persisted current state immediately after reopening, rather than only
+      // exposing it through the administrative local handle.
+      const response = await authenticatedFetch(`${server2.baseUrl}/todos`);
+      expect(response.status).toBe(200);
+      const todos = (await response.json()) as Todo[];
 
       // Both todos should be present
       expect(todos.length).toBe(2);
