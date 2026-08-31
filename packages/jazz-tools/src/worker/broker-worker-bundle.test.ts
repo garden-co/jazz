@@ -39,6 +39,8 @@ describe("broker worker packaging", () => {
       // The cancellation-race scheduler belongs to the browser test entry,
       // not a same-origin client-visible production worker protocol.
       expect(source).not.toContain("foreground-node-lease-test-allocated");
+      expect(source).not.toContain("foreground-node-lease-test-queued");
+      expect(source).not.toContain("testDelayBeforeLeaseAllocationMs");
       expect(source).not.toContain("testDelayAfterLeaseAllocationMs");
       await expect(access(wasmOutfile)).resolves.toBeUndefined();
       expect((await stat(wasmOutfile)).size).toBeGreaterThan(0);

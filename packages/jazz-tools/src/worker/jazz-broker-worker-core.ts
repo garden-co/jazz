@@ -86,6 +86,7 @@ type ForegroundLeaseOwner = {
   pageStore: IndexedDbPageStore;
   storageOwner: string;
   activeLeaseIds: Set<string>;
+  pendingLeaseAllocations: number;
   allocationTail: Promise<void>;
 };
 
@@ -103,6 +104,8 @@ type PhysicalDatabaseOwner = {
  * any test-shaped fields from its message protocol.
  */
 export type ForegroundLeaseTestHooks = {
+  delayBeforeLeaseAllocation(request: BrowserForegroundNodeLeaseAcquireRequest): number | undefined;
+  allocationQueued(port: MessagePort): void;
   delayAfterLeaseAllocation(request: BrowserForegroundNodeLeaseAcquireRequest): number | undefined;
   allocationCommitted(port: MessagePort, node: Uint8Array, workerRealmId: string): void;
   cancellationRetired(
@@ -445,6 +448,7 @@ async function acquireForegroundNodeLease(
           pageStore: physicalOwner.pageStore,
           storageOwner: request.storageOwner,
           activeLeaseIds: new Set(),
+          pendingLeaseAllocations: 0,
           allocationTail: Promise.resolve(),
         };
         foregroundLeaseOwners.set(request.dbName, owner);
@@ -459,7 +463,7 @@ async function acquireForegroundNodeLease(
       await requestCancellation();
       return;
     }
-    const allocated = allocateForegroundNodeLease(owner);
+    const allocated = allocateForegroundNodeLease(owner, request, port, testHooks);
     allocationPromise = (async () => {
       const allocatedLease = await allocated;
       // This is an internal browser-receipt seam. It delays only delivery of
@@ -502,7 +506,14 @@ async function acquireForegroundNodeLease(
 
 async function allocateForegroundNodeLease(
   owner: ForegroundLeaseOwner,
+  request: BrowserForegroundNodeLeaseAcquireRequest,
+  port: MessagePort,
+  testHooks: ForegroundLeaseTestHooks | null,
 ): Promise<Awaited<ReturnType<IndexedDbPageStore["acquireForegroundNodeLease"]>>> {
+  // Reservation is synchronous and precedes the queue wait. A lease request
+  // is worker-owned lifecycle work from this point onward even though it has
+  // not yet published an active durable identity.
+  owner.pendingLeaseAllocations += 1;
   const predecessor = owner.allocationTail;
   let release!: () => void;
   owner.allocationTail = new Promise<void>((resolve) => {
@@ -510,6 +521,14 @@ async function allocateForegroundNodeLease(
   });
   await predecessor;
   try {
+    const delay = testHooks?.delayBeforeLeaseAllocation(request);
+    if (delay !== undefined) {
+      if (!Number.isSafeInteger(delay) || delay < 0 || delay > 1_000) {
+        throw new Error("Invalid foreground lease test delay");
+      }
+      testHooks?.allocationQueued(port);
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
     const lease = await owner.pageStore.acquireForegroundNodeLease(owner.activeLeaseIds.size === 0);
     // Publish the live lease before releasing the next allocation. IndexedDB
     // already serializes the durable transactions; this matching in-memory
@@ -518,7 +537,12 @@ async function allocateForegroundNodeLease(
     owner.activeLeaseIds.add(lease.leaseId);
     return lease;
   } finally {
+    owner.pendingLeaseAllocations -= 1;
     release();
+    // On success the active ID now retains the worker. On terminal failure no
+    // port can finish handoff, so this balanced decrement may release an idle
+    // physical owner. Other queued reservations remain counted independently.
+    maybeCloseWorker();
   }
 }
 
@@ -1248,7 +1272,7 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
 
 function maybeCloseWorker(): void {
   const hasActiveForegroundLease = [...foregroundLeaseOwners.values()].some(
-    (owner) => owner.activeLeaseIds.size > 0,
+    (owner) => owner.activeLeaseIds.size > 0 || owner.pendingLeaseAllocations > 0,
   );
   if (contexts.size === 0 && inspectorControlPorts.size === 0 && !hasActiveForegroundLease) {
     const databaseNames = new Set<string>([

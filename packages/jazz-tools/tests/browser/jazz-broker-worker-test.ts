@@ -9,6 +9,14 @@ import type {
 // inspects these test-only request fields.
 installJazzBrokerWorker({
   foregroundLeaseTestHooks: {
+    delayBeforeLeaseAllocation(
+      request: BrowserForegroundNodeLeaseAcquireRequest,
+    ): number | undefined {
+      return request.testDelayBeforeLeaseAllocationMs;
+    },
+    allocationQueued(port) {
+      port.postMessage({ type: "foreground-node-lease-test-queued" });
+    },
     delayAfterLeaseAllocation(
       request: BrowserForegroundNodeLeaseAcquireRequest,
     ): number | undefined {

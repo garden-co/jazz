@@ -35,6 +35,8 @@ export interface BrowserForegroundNodeLeaseAcquireRequest {
   /** Exact durable owner that must admit the physical root before lease issue. */
   storageOwner: string;
   /** @internal Browser-only scheduling seam for the real worker receipt. */
+  testDelayBeforeLeaseAllocationMs?: number;
+  /** @internal Browser-only scheduling seam for the real worker receipt. */
   testDelayAfterLeaseAllocationMs?: number;
 }
 

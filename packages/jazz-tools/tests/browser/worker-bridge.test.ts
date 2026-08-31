@@ -279,11 +279,161 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
   return app.todos.where({ projectId });
 }
 
+type RawForegroundLease = {
+  node: Uint8Array;
+  returnWithHighWater(value: bigint): Promise<void>;
+};
+
+function startRawForegroundLease(
+  port: MessagePort,
+  request: {
+    dbName: string;
+    storageOwner: string;
+    testDelayBeforeLeaseAllocationMs?: number;
+  },
+): { queued: Promise<void>; ready: Promise<RawForegroundLease> } {
+  let resolveQueued!: () => void;
+  const queued = new Promise<void>((resolve) => {
+    resolveQueued = resolve;
+  });
+  const ready = new Promise<RawForegroundLease>((resolve, reject) => {
+    const onMessage = (
+      event: MessageEvent<{
+        type?: string;
+        message?: string;
+        error?: string;
+        node?: Uint8Array;
+        leaseId?: string;
+      }>,
+    ) => {
+      if (event.data?.type === "foreground-node-lease-test-queued") {
+        resolveQueued();
+        return;
+      }
+      if (event.data?.type === "foreground-node-lease-error") {
+        port.removeEventListener("message", onMessage);
+        reject(new Error(event.data.message));
+        return;
+      }
+      if (event.data?.type !== "foreground-node-lease-ready" || !event.data.node) return;
+      const node = event.data.node.slice();
+      resolve({
+        node,
+        returnWithHighWater(value) {
+          return new Promise<void>((resolveReturn, rejectReturn) => {
+            const onResult = (resultEvent: MessageEvent<{ type?: string; error?: string }>) => {
+              if (resultEvent.data?.type !== "foreground-node-lease-result") return;
+              port.removeEventListener("message", onResult);
+              port.removeEventListener("message", onMessage);
+              port.close();
+              if (resultEvent.data.error) rejectReturn(new Error(resultEvent.data.error));
+              else resolveReturn();
+            };
+            port.addEventListener("message", onResult);
+            port.postMessage({
+              type: "return-foreground-node-lease",
+              confirmedTxTime: value.toString(),
+            });
+          });
+        },
+      });
+    };
+    port.addEventListener("message", onMessage);
+    port.start();
+    port.postMessage({ type: "acquire-foreground-node-lease", ...request });
+  });
+  return { queued, ready };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe("SharedWorker bridge with IndexedDB", () => {
+  it("retains a queued first-owner allocation after the preceding lease returns", async () => {
+    const dbName = uniqueDbName("queued-first-owner");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("queued-first-owner-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const createPort = () => {
+      const worker = new SharedWorker(new URL("./jazz-broker-worker-test.ts", import.meta.url), {
+        type: "module",
+        name: `${workerName}:generation-0`,
+      });
+      return worker.port;
+    };
+    const first = startRawForegroundLease(createPort(), { dbName, storageOwner });
+    const second = startRawForegroundLease(createPort(), {
+      dbName,
+      storageOwner,
+      testDelayBeforeLeaseAllocationMs: 250,
+    });
+
+    const [firstLease] = await withTimeout(
+      Promise.all([first.ready, second.queued]),
+      5_000,
+      "second foreground allocation did not enter the admitted queue",
+    );
+    await firstLease.returnWithHighWater(11n);
+    const secondLease = await withTimeout(
+      second.ready,
+      5_000,
+      "returning the first lease released a physical owner with admitted allocation work",
+    );
+    // The queued request begins only after the clean return commits, so it is
+    // allowed—and expected—to reuse that safely handed-off identity.
+    expect(secondLease.node).toEqual(firstLease.node);
+    await secondLease.returnWithHighWater(22n);
+
+    // Both balanced reservations are now gone. A successor realm can claim
+    // the physical root and reuse the final clean handoff.
+    await sleep(100);
+    const successorWorker = new SharedWorker(
+      new URL("./jazz-broker-worker-test.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-1` },
+    );
+    const successor = await withTimeout(
+      startRawForegroundLease(successorWorker.port, { dbName, storageOwner }).ready,
+      5_000,
+      "balanced queued allocations left the physical root unavailable to a successor realm",
+    );
+    expect(successor.node).toEqual(secondLease.node);
+    await successor.returnWithHighWater(33n);
+  }, 10_000);
+
+  it("releases a terminally failed pending allocation for a clean successor", async () => {
+    const dbName = uniqueDbName("failed-pending-owner");
+    const storageOwner = createBrowserStorageOwner({
+      appId: uniqueDbName("failed-pending-owner-app"),
+      secret: generateAuthSecret(),
+    });
+    const workerName = createBrowserSharedWorkerBaseName(undefined, dbName);
+    const failedWorker = new SharedWorker(
+      new URL("./jazz-broker-worker-test.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-0` },
+    );
+    const failed = startRawForegroundLease(failedWorker.port, {
+      dbName,
+      storageOwner,
+      testDelayBeforeLeaseAllocationMs: 1_001,
+    });
+    await expect(failed.ready).rejects.toThrow("Invalid foreground lease test delay");
+
+    await sleep(100);
+    const successorWorker = new SharedWorker(
+      new URL("./jazz-broker-worker-test.ts", import.meta.url),
+      { type: "module", name: `${workerName}:generation-1` },
+    );
+    const successor = await withTimeout(
+      startRawForegroundLease(successorWorker.port, { dbName, storageOwner }).ready,
+      5_000,
+      "failed pending allocation retained the physical owner",
+    );
+    await successor.returnWithHighWater(44n);
+  }, 10_000);
+
   it("coalesces concurrent first-tab durable-owner admission in one worker realm", async () => {
     const dbName = uniqueDbName("concurrent-first-owner");
     const storageOwner = createBrowserStorageOwner({
