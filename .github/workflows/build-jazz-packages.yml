@@ -221,6 +221,7 @@ jobs:
             crates/jazz-napi/index.d.ts
             crates/jazz-napi/native-loader.cjs
             crates/jazz-napi/native-artifact-fingerprint.cjs
+            crates/jazz-napi/native-loader.provenance.json
           if-no-files-found: error
 
   build-jazz-rn-android:
