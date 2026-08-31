@@ -2220,17 +2220,47 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
     let _connection = crate::db::block_on(connection);
 }
 
+/// Test-only marker for an authenticated SYSTEM backend transport. Ordinary
+/// session links must not send `SessionClaims`: their authenticated handshake
+/// is the authority for those claims.
+struct DelegationCapableTransport {
+    inner: Box<dyn Transport>,
+}
+
+impl Transport for DelegationCapableTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), crate::wire::TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 // SessionClaims has no distinct public state once the receiving NodeState has
-// ignored an identical map, so wire-count coverage must inspect the transport.
-// The policy-visible integration coverage lives above this facade; this test
-// protects the otherwise unobservable wire-chatter contract.
+// ignored an identical map, so wire-count coverage must inspect a delegation-
+// capable backend transport. The policy-visible integration coverage lives
+// above this facade; this test protects its otherwise unobservable wire-
+// chatter contract without granting the same ability to ordinary sessions.
 #[test]
-fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
+fn repeated_identical_session_claims_emit_once_on_a_delegation_capable_connection() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: client_transport,
+        },
+    )));
     let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
     client.set_test_provider_claims(client_author, claims.clone());
     client.set_test_provider_claims(client_author, claims);
@@ -2246,11 +2276,30 @@ fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
     );
 }
 
+#[test]
+fn ordinary_session_links_do_not_forward_claims() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    client.set_test_provider_claims(
+        client_author,
+        BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]),
+    );
+    client.tick().unwrap();
+
+    assert!(
+        upstream_transport.try_recv().is_none(),
+        "ordinary session links must rely on their authenticated handshake, not smuggle SessionClaims"
+    );
+}
+
 // This is lower-level for the same reason as the wire-count test above. In
 // particular, it is the regression that a global deduplication would miss:
 // each newly attached transport must receive the current map independently.
 #[test]
-fn current_session_claims_reach_late_and_reconnected_upstreams() {
+fn current_session_claims_reach_late_and_reconnected_delegation_capable_upstreams() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
@@ -2262,7 +2311,11 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
 
     client.set_test_provider_claims(client_author, claims.clone());
     let (first_transport, mut first_upstream_transport) = duplex();
-    let first_upstream = crate::db::block_on(client.connect_upstream(first_transport));
+    let first_upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: first_transport,
+        },
+    )));
     client.tick().unwrap();
     assert!(matches!(
         first_upstream_transport.try_recv(),
@@ -2275,7 +2328,11 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
     assert!(client.detach_connection(&first_upstream));
 
     let (reconnected_transport, mut reconnected_upstream_transport) = duplex();
-    let _reconnected_upstream = crate::db::block_on(client.connect_upstream(reconnected_transport));
+    let _reconnected_upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: reconnected_transport,
+        },
+    )));
     client.tick().unwrap();
     assert!(matches!(
         reconnected_upstream_transport.try_recv(),
@@ -2286,12 +2343,16 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
 }
 
 #[test]
-fn changed_session_claims_advance_delivery_after_an_identical_call() {
+fn changed_session_claims_advance_delivery_on_a_delegation_capable_connection() {
     let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::db::block_on(client.connect_upstream(Box::new(
+        DelegationCapableTransport {
+            inner: client_transport,
+        },
+    )));
     let reader = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
     let writer = BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]);
     let reader_admitted = BTreeMap::from([(

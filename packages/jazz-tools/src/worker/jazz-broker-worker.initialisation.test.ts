@@ -1322,6 +1322,44 @@ describe("broker worker context initialization", () => {
     expect(mocks.fromDb).toHaveBeenCalledOnce();
   });
 
+  it("rejects a tab whose policy claims differ from the worker upstream session", async () => {
+    const initOptions = {
+      ...options("single-upstream-claims"),
+      sessionClaims: { role: "reader", teams: ["band-a"] },
+    };
+    const first = await connect(initOptions, "first-tab");
+    const second = await connect(initOptions, "second-tab");
+    const firstResult = first.port.waitForEvent(
+      (event) => event.type === "result" && event.id === 1,
+    );
+    first.port.emitMessage({
+      type: "init",
+      id: 1,
+      // Deliberately reorder keys: admission compares claim semantics rather
+      // than the transport's incidental object insertion order.
+      sessionClaims: { teams: ["band-a"], role: "reader" },
+    });
+    await firstResult;
+
+    const secondResult = second.port.waitForEvent(
+      (event) => event.type === "result" && event.id === 2,
+    );
+    second.port.emitMessage({
+      type: "init",
+      id: 2,
+      sessionClaims: { role: "writer", teams: ["band-a"] },
+    });
+    await expect(secondResult).resolves.toMatchObject({
+      type: "result",
+      id: 2,
+      error: {
+        message:
+          "Browser tab claims differ from the persistent worker's authenticated upstream session",
+      },
+    });
+    expect(mocks.runtimes[0]?.acceptPeerWhenIdle).toHaveBeenCalledOnce();
+  });
+
   it("rejects a second context with a different owner before it can reuse a live physical root", async () => {
     const alice = {
       ...options("shared-physical-root"),
@@ -1386,6 +1424,50 @@ describe("broker worker context initialization", () => {
       });
       expect(await port.waitForEvent((event) => event.type === "transport-state")).toMatchObject({
         explicitlyDisconnected: false,
+      });
+    }
+  });
+
+  it("publishes reconnected claims to every tab only after upstream admission", async () => {
+    const initOptions = { ...options("reconnect-shared-claims"), serverUrl: "ws://server.test" };
+    const owner = await connect(initOptions, "owner-tab");
+    const editor = await connect(initOptions, "editor-tab");
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = () => ({
+      setAuxiliaryTraceEnabled: vi.fn(),
+      setOutboundScheduler: vi.fn(),
+      clearOutboundScheduler: vi.fn(),
+      recvWireFrames: vi.fn(() => []),
+      sendWireFrame: vi.fn(),
+      updateAuthenticatedClaims: vi.fn(async () => undefined),
+    });
+    const ownerSubscriber = subscriber();
+    const editorSubscriber = subscriber();
+    runtime.acceptPeerWhenIdle
+      .mockResolvedValueOnce(ownerSubscriber)
+      .mockResolvedValueOnce(editorSubscriber);
+    await initializeFollower(owner.port, 1);
+    await initializeFollower(editor.port, 1);
+
+    const upstreamAdmission = deferred<void>();
+    runtime.connect.mockClear();
+    runtime.waitForUpstreamServerConnection.mockImplementationOnce(() => upstreamAdmission.promise);
+    const result = owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    owner.port.emitMessage({
+      type: "reconnect",
+      id: 2,
+      authJson: '{"jwt_token":"fresh"}',
+      sessionClaims: { role: "writer" },
+    });
+    await vi.waitFor(() => expect(runtime.connect).toHaveBeenCalledOnce());
+    expect(ownerSubscriber.updateAuthenticatedClaims).not.toHaveBeenCalled();
+    expect(editorSubscriber.updateAuthenticatedClaims).not.toHaveBeenCalled();
+
+    upstreamAdmission.resolve();
+    await result;
+    for (const attached of [ownerSubscriber, editorSubscriber]) {
+      expect(attached.updateAuthenticatedClaims).toHaveBeenCalledExactlyOnceWith({
+        role: "writer",
       });
     }
   });

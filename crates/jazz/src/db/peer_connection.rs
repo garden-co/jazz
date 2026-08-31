@@ -1565,6 +1565,7 @@ where
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
+        let permits_delegated_sessions = self.transport.permits_delegated_sessions();
         self.observe_shared_subscriber_dirty_epoch();
         let session_claim_binding = self.subscriber_session_claim_binding();
         self.bind_subscriber_session_claims();
@@ -1592,8 +1593,8 @@ where
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
                         if let Some(request) = pending_row_version_fetches.front().cloned() {
-                            let delegated_session = (request.policy_binding.0
-                                != AuthorSubject::SYSTEM)
+                            let delegated_session = (permits_delegated_sessions
+                                && request.policy_binding.0 != AuthorSubject::SYSTEM)
                                 .then_some(crate::protocol::DelegatedSessionBinding {
                                     identity: request.policy_binding.0,
                                     claims: request.policy_binding.1,
@@ -1631,28 +1632,30 @@ where
                             self.auxiliary_pump.acknowledge_outbound(&message);
                         }
                         pending.extend(upstream_subscriptions.borrow_mut().drain(..));
-                        let claims = self.node.borrow().session_claims_with_revisions();
-                        for (identity, claims, revision) in claims {
-                            if sent_session_claim_revisions
-                                .get(&identity)
-                                .is_some_and(|sent| *sent >= revision)
-                            {
-                                continue;
-                            }
-                            if let Err(error) = self
-                                .transport
-                                .send(SyncMessage::SessionClaims { identity, claims })
-                            {
-                                if handle_transport_backpressure(
-                                    &self.node,
-                                    &self.scheduler,
-                                    &error,
-                                ) {
-                                    return Ok(true);
+                        if permits_delegated_sessions {
+                            let claims = self.node.borrow().session_claims_with_revisions();
+                            for (identity, claims, revision) in claims {
+                                if sent_session_claim_revisions
+                                    .get(&identity)
+                                    .is_some_and(|sent| *sent >= revision)
+                                {
+                                    continue;
                                 }
-                                return Err(transport_error(error));
+                                if let Err(error) = self
+                                    .transport
+                                    .send(SyncMessage::SessionClaims { identity, claims })
+                                {
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) {
+                                        return Ok(true);
+                                    }
+                                    return Err(transport_error(error));
+                                }
+                                sent_session_claim_revisions.insert(identity, revision);
                             }
-                            sent_session_claim_revisions.insert(identity, revision);
                         }
                         let pending_index = 0;
                         while pending_index < pending.len() {
@@ -1720,9 +1723,9 @@ where
                                         subscription: pending_subscription.subscription,
                                         values,
                                         known_state,
-                                        delegated_session: pending_subscription
-                                            .policy_binding
-                                            .clone()
+                                        delegated_session: permits_delegated_sessions
+                                            .then(|| pending_subscription.policy_binding.clone())
+                                            .flatten()
                                             .map(|(identity, claims)| {
                                                 crate::protocol::DelegatedSessionBinding {
                                                     identity,

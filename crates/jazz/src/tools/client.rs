@@ -1557,13 +1557,16 @@ impl ClientDbInner {
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
         Ok(db
-            .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
-                connected.transport,
-                connected.protocol_version,
-                connected.features,
-                None,
-                connected.session_context,
-            )))
+            .connect_upstream(Box::new(
+                WireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                    connected.transport,
+                    connected.protocol_version,
+                    connected.features,
+                    None,
+                    connected.session_context,
+                    connected.permits_delegated_sessions,
+                ),
+            ))
             .await)
     }
 

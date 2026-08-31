@@ -114,6 +114,8 @@ impl NativeTransportConnector for NativeWebSocketConnector {
 
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
+            let permits_delegated_sessions = request.peer_identity == AuthorSubject::SYSTEM
+                && (request.auth.backend_secret.is_some() || request.auth.admin_secret.is_some());
             let mut transport = WebSocketTransport::connect_with_wake(
                 request.server_url,
                 request.app_id,
@@ -133,6 +135,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 protocol_version,
                 features,
                 session_context,
+                permits_delegated_sessions,
                 terminal,
             })
         })

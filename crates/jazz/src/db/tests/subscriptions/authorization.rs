@@ -2,6 +2,28 @@
 
 use super::*;
 
+struct TrustedBackendRelayTransport {
+    inner: Box<dyn crate::db::Transport>,
+}
+
+impl crate::db::Transport for TrustedBackendRelayTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), crate::wire::TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<crate::db::ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+
+    fn permits_delegated_sessions(&self) -> bool {
+        true
+    }
+}
+
 #[test]
 fn maintained_physical_point_subscriptions_keep_policy_scopes_live() {
     let schema = owner_read_schema();
@@ -2008,7 +2030,11 @@ fn served_table_rows_via_relay(
         Value::String("delegated".to_owned()),
     );
     let (relay_transport, core_transport) = duplex();
-    let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
+    let _relay_upstream = crate::db::block_on(relay.connect_upstream(Box::new(
+        TrustedBackendRelayTransport {
+            inner: relay_transport,
+        },
+    )));
     // A relay sends its downstream session's immutable policy binding to its
     // upstream. Only the dedicated trusted-backend link may carry that
     // delegated binding; an ordinary SYSTEM session must not be able to
@@ -2078,6 +2104,73 @@ fn served_table_rows_via_relay(
     (rows.into_iter().collect(), client_one_shot, relay_one_shot)
 }
 
+/// A browser worker is a relay, but not a trusted backend: its upstream
+/// session is the same authenticated session as its foreground client.  It
+/// must therefore receive the authority's direct policy binding without
+/// trying to forward either delegated-session or SessionClaims frames.
+fn served_table_rows_via_ordinary_browser_worker(
+    schema: &JazzSchema,
+    server: &CoreDb,
+    author: AuthorSubject,
+    table: &str,
+) -> Vec<RowUuid> {
+    let worker = open_db(0x73, author, schema);
+    let client = open_db(0x74, author, schema);
+    let claims = test_provider_claims(author);
+    let (worker_transport, core_transport) = duplex();
+    let _worker_upstream = crate::db::block_on(worker.connect_upstream(worker_transport));
+    let core_subscriber =
+        server.accept_subscriber_with_claims(core_transport, author, claims.clone());
+    let (client_transport, worker_sub_transport) = duplex();
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _worker_subscriber =
+        worker.accept_subscriber_with_claims(worker_sub_transport, author, claims.clone());
+
+    let query = Query::from(table);
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    let mut rows = BTreeSet::new();
+    for _ in 0..20 {
+        client.tick().unwrap();
+        worker.tick().unwrap();
+        server.server.tick().unwrap();
+        worker.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            {
+                if reset {
+                    rows.clear();
+                }
+                for row in removed {
+                    rows.remove(&row.row_uuid);
+                }
+                for row in added.into_iter().chain(updated) {
+                    rows.insert(row.row_uuid());
+                }
+            }
+        }
+    }
+    let connection = core_subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        panic!("browser worker's core-facing connection must be a subscriber link");
+    };
+    assert!(
+        state
+            .coverage_groups
+            .values()
+            .any(|group| group.policy_binding == (author, claims.clone())),
+        "the core must use the worker upstream's authenticated session binding"
+    );
+    rows.into_iter().collect()
+}
+
 #[test]
 fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity() {
     let schema = benchmark_shaped_recursive_reachable_read_schema();
@@ -2123,4 +2216,10 @@ fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity(
     assert_eq!(spy_relay_one_shot, 0);
     assert_eq!(spy_client_one_shot, 0);
     assert!(spy_relay_rows.is_empty());
+
+    assert_eq!(
+        served_table_rows_via_ordinary_browser_worker(&schema, &server, member, "group_entry"),
+        (0..42).map(|i| row(0xc1 + i)).collect::<Vec<_>>(),
+        "an ordinary browser-worker relay receives its authenticated session's authority view"
+    );
 }

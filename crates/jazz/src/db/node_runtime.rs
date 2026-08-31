@@ -4065,6 +4065,13 @@ pub trait Transport {
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         None
     }
+
+    /// Whether this upstream is an authenticated SYSTEM backend link that may
+    /// carry another session's policy binding. Ordinary session links must
+    /// always let the remote peer use the identity it authenticated itself.
+    fn permits_delegated_sessions(&self) -> bool {
+        false
+    }
 }
 
 /// Handshake/session facts for one accepted connection.
