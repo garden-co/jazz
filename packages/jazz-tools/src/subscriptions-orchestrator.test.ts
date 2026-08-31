@@ -223,7 +223,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     await expect(deferred).rejects.toBe(reason);
   });
 
-  it("SO-U07 makeQueryKey includes appId, normalized options, and query payload", async () => {
+  it("SO-U07 makeQueryKey includes appId, public options, and query payload", async () => {
     const harness = createUnitHarness("app-so-u07");
     const query = makeQuery({
       table: "todos",
@@ -231,16 +231,10 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     });
 
     try {
-      const key = harness.manager.makeQueryKey(query, {
-        tier: "edge",
-        localUpdates: "deferred",
-        propagation: "local-only",
-      });
+      const key = harness.manager.makeQueryKey(query, { tier: "edge" });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
           tier: "edge",
-          localUpdates: "deferred",
-          propagation: "local-only",
         })}:${query._build()}`,
       );
     } finally {
@@ -248,18 +242,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U07c makeQueryKey changes when localUpdates or propagation changes", async () => {
+  it("SO-U07c makeQueryKey changes when the public read tier changes", async () => {
     const harness = createUnitHarness("app-so-u07c");
     const query = makeQuery();
 
     try {
       const defaultKey = harness.manager.makeQueryKey(query);
-      const deferredKey = harness.manager.makeQueryKey(query, { localUpdates: "deferred" });
-      const localOnlyKey = harness.manager.makeQueryKey(query, { propagation: "local-only" });
+      const remoteKey = harness.manager.makeQueryKey(query, { tier: "remote" });
+      const localFirstKey = harness.manager.makeQueryKey(query, { tier: "local-first" });
 
-      expect(deferredKey).not.toBe(defaultKey);
-      expect(localOnlyKey).not.toBe(defaultKey);
-      expect(localOnlyKey).not.toBe(deferredKey);
+      expect(remoteKey).not.toBe(defaultKey);
+      expect(localFirstKey).not.toBe(defaultKey);
+      expect(localFirstKey).not.toBe(remoteKey);
     } finally {
       await harness.manager.shutdown();
     }
@@ -292,13 +286,11 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U09b getCacheEntry forwards full QueryOptions to the delta source", async () => {
+  it("SO-U09b getCacheEntry forwards public QueryOptions to the delta source", async () => {
     const harness = createUnitHarness();
     try {
       const options = {
-        tier: "global",
-        localUpdates: "deferred",
-        propagation: "local-only",
+        tier: "remote",
       } satisfies QueryOptions;
       const key = harness.manager.makeQueryKey(makeQuery(), options);
 
