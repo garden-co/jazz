@@ -939,6 +939,7 @@ describe("broker worker context initialization", () => {
     expect((await connect(secondOptions, "second-tab")).outcome).toMatchObject({
       type: "runtime-error",
       error: {
+        name: "Error",
         message:
           "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
       },
@@ -960,6 +961,7 @@ describe("broker worker context initialization", () => {
     expect((await connect(secondOptions, "second-tab")).outcome).toMatchObject({
       type: "runtime-error",
       error: {
+        name: "Error",
         message:
           "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
       },
@@ -975,7 +977,7 @@ describe("broker worker context initialization", () => {
     const failed = await connect(enabledTelemetryOptions("telemetry-failure"), "failed-tab");
     expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      error: { message: "telemetry installation failed" },
+      error: { name: "Error", message: "telemetry installation failed" },
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
     // Durable root admission deliberately precedes all process-wide WASM and
@@ -1006,6 +1008,7 @@ describe("broker worker context initialization", () => {
     expect(failed.outcome).toMatchObject({
       type: "runtime-error",
       error: {
+        name: "Error",
         message:
           "IndexedDB database explicit-owner is already owned by a different Jazz browser session",
       },
@@ -1033,7 +1036,7 @@ describe("broker worker context initialization", () => {
     const failed = await connect(enabledTelemetryOptions("page-store-failure"), "failed-tab");
     expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      error: { message: "page-store open failed" },
+      error: { name: "Error", message: "page-store open failed" },
     });
     expect(mocks.loadWasmModule).not.toHaveBeenCalled();
     expect(mocks.installWasmTelemetry).not.toHaveBeenCalled();
@@ -1087,7 +1090,7 @@ describe("broker worker context initialization", () => {
     const failed = await connect(enabledTelemetryOptions("browser-db-failure"), "failed-tab");
     expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      error: { message: "browser DB open failed" },
+      error: { name: "Error", message: "browser DB open failed" },
     });
     expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
     expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
@@ -1145,7 +1148,7 @@ describe("broker worker context initialization", () => {
     const failed = await connect(enabledTelemetryOptions("adapter-failure"), "failed-tab");
     expect(failed.outcome).toMatchObject({
       type: "runtime-error",
-      error: { message: "adapter construction failed" },
+      error: { name: "Error", message: "adapter construction failed" },
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
     expect(rawDb.close).toHaveBeenCalledOnce();
@@ -1226,6 +1229,7 @@ describe("broker worker context initialization", () => {
     expect((await connect(bob, "bob-tab")).outcome).toMatchObject({
       type: "runtime-error",
       error: {
+        name: "Error",
         message:
           "IndexedDB database shared-physical-root is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts",
       },

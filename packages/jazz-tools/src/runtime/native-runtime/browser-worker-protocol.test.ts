@@ -58,15 +58,30 @@ describe("BrowserRelayError protocol", () => {
     );
     expect(serializeBrowserRelayError(oversizedCode)).not.toHaveProperty("code");
 
+    // A code is a stable machine-readable discriminator, never an optional
+    // display string. An empty string must therefore be omitted on the way
+    // out and rejected at the untrusted MessagePort boundary. This is a
+    // planted sensitivity guard for `validBrowserRelayCode`'s non-empty
+    // invariant: removing its `length > 0` check makes both assertions fail.
+    const emptyCode = codedError("empty code", "");
+    expect(serializeBrowserRelayError(emptyCode)).not.toHaveProperty("code");
+
     const rejected = deserializeBrowserRelayError({
       name: "Error",
       message: "untrusted",
       code: "x".repeat(BROWSER_RELAY_ERROR_MAX_CODE_CHARS + 1),
     });
-    expect(rejected).toMatchObject({
-      name: "BrowserRelayErrorProtocolError",
-      code: "browser_relay_error_protocol_violation",
+    const emptyInboundCode = deserializeBrowserRelayError({
+      name: "Error",
+      message: "untrusted",
+      code: "",
     });
+    for (const error of [rejected, emptyInboundCode]) {
+      expect(error).toMatchObject({
+        name: "BrowserRelayErrorProtocolError",
+        code: "browser_relay_error_protocol_violation",
+      });
+    }
   });
 
   it("bounds a 12k-deep causal chain without recursive serialization or deserialization", () => {
