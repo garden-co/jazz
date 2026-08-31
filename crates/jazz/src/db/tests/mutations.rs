@@ -2539,8 +2539,10 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
         CommitUnitTrust::TrustedBackend,
     );
 
+    // The serving link's backend identity, not an attributed user's claimed
+    // permission subject, supplies the policy claims.
     backend.set_test_provider_claims(
-        editor_author,
+        backend_author,
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
     let write = backend
@@ -2549,7 +2551,6 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
             cells("claim-backed", false, editor_author),
             crate::db::InsertOptions {
                 row_id: Some(row(0xe1)),
-                identity: crate::db::WriteIdentity::Session(editor_author),
                 ..Default::default()
             },
         )
@@ -2566,6 +2567,52 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row(0xe1));
+}
+
+/// A raw uploaded transaction can carry an arbitrary `permission_subject`.
+/// This wire-level fixture therefore uses the public client upload topology to
+/// prove that a trusted backend link still evaluates policy as its admitted
+/// backend identity, rather than accepting the payload's asserted subject.
+#[test]
+fn trusted_backend_upload_cannot_forge_a_users_permission_subject() {
+    let schema = editor_claim_write_schema();
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let editor_author = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let backend = open_db(0xb0, backend_author, &schema);
+
+    let (backend_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        backend_author,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    backend.set_test_provider_claims(
+        editor_author,
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    );
+    let write = backend
+        .insert(
+            "todos",
+            cells("forged-subject", false, editor_author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xe3)),
+                identity: crate::db::WriteIdentity::Session(editor_author),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    backend.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+
+    let error = block_on(write.wait(DurabilityTier::Global))
+        .expect_err("a trusted backend must not select another policy principal");
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
 }
 
 #[test]

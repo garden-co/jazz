@@ -437,7 +437,13 @@ where
                 }
                 match context.trust {
                     CommitUnitTrust::Session => context.identity,
-                    CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
+                    // A trusted backend may choose provenance (`made_by`), but
+                    // it must not be able to choose the policy principal in
+                    // the uploaded payload. That principal is the identity
+                    // authenticated for this link; otherwise a backend could
+                    // forge another user's `permission_subject` and inherit
+                    // that user's write authority.
+                    CommitUnitTrust::TrustedBackend => context.identity,
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }
             }
