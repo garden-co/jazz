@@ -860,10 +860,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
     // native ordering from the old workaround that waited before subscribing.
     const client = (
       db as unknown as {
-        getClient(schema: typeof todos._schema): { subscribe: (...args: never[]) => number };
+        getClient(schema: typeof todos._schema): {
+          subscribeInternal: (...args: never[]) => number;
+        };
       }
     ).getClient(todos._schema);
-    const nativeSubscribe = vi.spyOn(client, "subscribe");
+    const nativeSubscribe = vi.spyOn(client, "subscribeInternal");
     const source = getDbSubscriptionSource(db);
     const firstDeltas: unknown[] = [];
     const secondDeltas: unknown[] = [];

@@ -36,8 +36,8 @@ function makeClient() {
     connectTransport: vi.fn(),
     disconnectTransport: vi.fn(async () => undefined),
     onMutationError: vi.fn(),
-    query: vi.fn(async () => []),
-    subscribe: vi.fn((_query, callback: (delta: RuntimeSubscriptionDelta) => void) => {
+    queryInternal: vi.fn(async () => []),
+    subscribeInternal: vi.fn((_query, callback: (delta: RuntimeSubscriptionDelta) => void) => {
       const id = nextSubscription++;
       subscriptionCallbacks.set(id, callback);
       return id;
@@ -48,8 +48,8 @@ function makeClient() {
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;
     disconnectTransport: ReturnType<typeof vi.fn>;
-    query: ReturnType<typeof vi.fn>;
-    subscribe: ReturnType<typeof vi.fn>;
+    queryInternal: ReturnType<typeof vi.fn>;
+    subscribeInternal: ReturnType<typeof vi.fn>;
     unsubscribe: ReturnType<typeof vi.fn>;
     subscriptionCallbacks: Map<number, (delta: RuntimeSubscriptionDelta) => void>;
   };
@@ -119,8 +119,8 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.all(query(), { tier: ReadTier.RemoteIfPossible });
     await db.reconnect();
 
-    expect(client.query).toHaveBeenCalledOnce();
-    expect(client.query.mock.calls[0]?.[1]).toMatchObject({ tier: "local" });
+    expect(client.queryInternal).toHaveBeenCalledOnce();
+    expect(client.queryInternal.mock.calls[0]?.[1]).toMatchObject({ tier: "local" });
   });
 
   it("does not fall back to local when an edge read fails or times out", async () => {
@@ -141,7 +141,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     vi.spyOn(connection, "ensureReady").mockRejectedValue(timeout);
 
     await expect(db.all(query(), { tier: ReadTier.RemoteIfPossible })).rejects.toBe(timeout);
-    expect(client.query).not.toHaveBeenCalled();
+    expect(client.queryInternal).not.toHaveBeenCalled();
   });
 
   it("does not publish a local seed while a connected remote subscription is slow", async () => {
@@ -162,11 +162,11 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     });
     await settle();
 
-    expect(client.subscribe).toHaveBeenCalledOnce();
-    expect(client.subscribe.mock.calls[0]?.[2]).toMatchObject({
+    expect(client.subscribeInternal).toHaveBeenCalledOnce();
+    expect(client.subscribeInternal.mock.calls[0]?.[2]).toMatchObject({
       tier: "remote-if-possible",
     });
-    expect(client.query).not.toHaveBeenCalled();
+    expect(client.queryInternal).not.toHaveBeenCalled();
     expect(callback).not.toHaveBeenCalled();
     unsubscribe();
   });
@@ -174,7 +174,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
   it("does not change an outstanding remote one-shot after an explicit disconnect", async () => {
     const client = makeClient();
     const result = deferred<never[]>();
-    client.query.mockImplementationOnce(() => result.promise);
+    client.queryInternal.mockImplementationOnce(() => result.promise);
     const db = await createDbWithRuntimeSource(
       {
         appId: "read-tier-outstanding-one-shot",
@@ -187,13 +187,13 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     const read = db.all(query(), { tier: ReadTier.RemoteIfPossible });
     await settle();
-    expect(client.query).toHaveBeenCalledOnce();
-    expect(client.query.mock.calls[0]?.[1]).toMatchObject({ tier: "remote-if-possible" });
+    expect(client.queryInternal).toHaveBeenCalledOnce();
+    expect(client.queryInternal.mock.calls[0]?.[1]).toMatchObject({ tier: "remote-if-possible" });
 
     await db.disconnect();
     result.resolve([]);
     await expect(read).resolves.toEqual([]);
-    expect(client.query).toHaveBeenCalledOnce();
+    expect(client.queryInternal).toHaveBeenCalledOnce();
   });
 
   it("chooses remote once for concurrent reads already waiting for connection", async () => {
@@ -216,13 +216,13 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     const first = db.all(query(), { tier: ReadTier.RemoteIfPossible });
     const second = db.all(query(), { tier: ReadTier.RemoteIfPossible });
     await settle();
-    expect(client.query).not.toHaveBeenCalled();
+    expect(client.queryInternal).not.toHaveBeenCalled();
 
     await db.disconnect();
     connectionReady.resolve();
     await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
-    expect(client.query).toHaveBeenCalledTimes(2);
-    for (const call of client.query.mock.calls) {
+    expect(client.queryInternal).toHaveBeenCalledTimes(2);
+    for (const call of client.queryInternal.mock.calls) {
       expect(call[1]).toMatchObject({ tier: "remote-if-possible" });
     }
   });
@@ -280,12 +280,12 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     const disconnect = db.disconnect();
     const read = db.all(query(), { tier: ReadTier.RemoteIfPossible });
     await settle();
-    expect(client.query).toHaveBeenCalledOnce();
+    expect(client.queryInternal).toHaveBeenCalledOnce();
 
     disconnectResult.reject(failure);
     await expect(disconnect).rejects.toBe(failure);
     await expect(read).resolves.toEqual([]);
-    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({
+    expect(client.queryInternal.mock.calls.at(-1)?.[1]).toMatchObject({
       tier: "remote-if-possible",
     });
   });
@@ -343,15 +343,15 @@ describe("Db ReadTier.RemoteIfPossible", () => {
       tier: ReadTier.RemoteIfPossible,
     });
 
-    expect(client.subscribe).toHaveBeenCalledOnce();
-    expect(client.subscribe.mock.calls[0]?.[2]).toMatchObject({ tier: "local" });
+    expect(client.subscribeInternal).toHaveBeenCalledOnce();
+    expect(client.subscribeInternal.mock.calls[0]?.[2]).toMatchObject({ tier: "local" });
 
     await db.reconnect();
     await settle();
 
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
-    expect(client.subscribe).toHaveBeenCalledTimes(2);
-    expect(client.subscribe.mock.calls[1]?.[2]).toMatchObject({ tier: "edge" });
+    expect(client.subscribeInternal).toHaveBeenCalledTimes(2);
+    expect(client.subscribeInternal.mock.calls[1]?.[2]).toMatchObject({ tier: "edge" });
 
     unsubscribe();
   });
@@ -388,14 +388,14 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     await db.reconnect();
     await settle();
-    expect(client.subscribe).toHaveBeenCalledOnce();
+    expect(client.subscribeInternal).toHaveBeenCalledOnce();
     expect(client.unsubscribe).not.toHaveBeenCalled();
 
     localCallback(added("during", "during handoff"));
     expect(publications.at(-1)).toEqual(["during handoff"]);
 
     edgeReady.resolve();
-    await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(client.subscribeInternal).toHaveBeenCalledTimes(2));
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
     const publicationCount = publications.length;
     localCallback(added("stale", "retired local"));
@@ -424,13 +424,13 @@ describe("Db ReadTier.RemoteIfPossible", () => {
       (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
     );
-    client.subscribe.mockImplementationOnce((_query, callback) => {
+    client.subscribeInternal.mockImplementationOnce((_query, callback) => {
       callback(added("remote", "synchronous remote"));
       return 2;
     });
 
     await db.reconnect();
-    await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(client.subscribeInternal).toHaveBeenCalledTimes(2));
 
     expect(publications).toEqual([[], ["synchronous remote"]]);
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
@@ -457,7 +457,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     );
     const localCallback = client.subscriptionCallbacks.get(1)!;
     const failure = new Error("replacement subscribe failed after callback");
-    client.subscribe.mockImplementationOnce((_query, callback) => {
+    client.subscribeInternal.mockImplementationOnce((_query, callback) => {
       callback(added("remote", "must stay buffered"));
       throw failure;
     });
@@ -471,7 +471,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
       await db.reconnect();
       for (let turn = 0; turn < 8; turn++) await Promise.resolve();
 
-      expect(client.subscribe).toHaveBeenCalledTimes(2);
+      expect(client.subscribeInternal).toHaveBeenCalledTimes(2);
       expect(deferredErrors).toHaveLength(1);
       expect(publications).toEqual([[]]);
       localCallback(added("local", "local resumes"));
@@ -513,7 +513,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
       second();
     }
 
-    expect(client.subscribe).toHaveBeenCalledTimes(12);
+    expect(client.subscribeInternal).toHaveBeenCalledTimes(12);
     expect(client.unsubscribe).toHaveBeenCalledTimes(12);
   });
 
@@ -538,7 +538,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await reconnect;
     await settle();
 
-    expect(client.subscribe).toHaveBeenCalledOnce();
+    expect(client.subscribeInternal).toHaveBeenCalledOnce();
     expect(client.unsubscribe).toHaveBeenCalledOnce();
     expect(client.unsubscribe).toHaveBeenCalledWith(1);
   });
