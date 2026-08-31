@@ -400,7 +400,10 @@ export interface UpsertOptions {
   author?: Uint8Array
   head?: JsonValue
   base?: JsonValue
-  /** Legacy alias for `head` when `base` is omitted. Do not combine it with `head` or `base`. */
+  /**
+   * Legacy alias for `head` when `base` is omitted. It must not be combined
+   * with either branch-view field.
+   */
   branch?: JsonValue
   updatedAtMs?: number
 }
