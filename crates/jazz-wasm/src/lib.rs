@@ -889,6 +889,34 @@ impl WasmDbInner {
         }
     }
 
+    async fn transaction_relation_snapshot(
+        &self,
+        tx_id: OpenTransactionId,
+        kind: WasmTxKind,
+        query: PreparedQuery,
+        author: Option<AuthorSubject>,
+        opts: ReadOpts,
+    ) -> Result<jazz::node::RelationSnapshot, Error> {
+        match self {
+            Self::Memory(db) => {
+                let pending =
+                    start_transaction_relation_snapshot(db, tx_id, kind, query, author, opts);
+                db.drive_queued_mutation_once();
+                pending.await.map_err(transaction_read_cancelled)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                let pending =
+                    start_transaction_relation_snapshot(db, tx_id, kind, query, author, opts);
+                pending.await.map_err(transaction_read_cancelled)?
+            }
+            Self::Closed => Err(Error {
+                code: ErrorCode::Protocol,
+                message: "WasmDb is closed".into(),
+            }),
+        }
+    }
+
     fn abandon_transaction(&self, tx_id: OpenTransactionId) -> Result<(), jazz::db::Error> {
         match self {
             Self::Memory(db) => {
@@ -1122,6 +1150,48 @@ where
                 owner
                     .exclusive_tx_ref(tx_id)
                     .all_prepared_with_opts(&query, opts)
+                    .await
+            }
+        }
+    })
+}
+
+fn start_transaction_relation_snapshot<S>(
+    db: &Rc<Db<S>>,
+    tx_id: OpenTransactionId,
+    kind: WasmTxKind,
+    query: PreparedQuery,
+    author: Option<AuthorSubject>,
+    opts: ReadOpts,
+) -> oneshot::Receiver<Result<jazz::node::RelationSnapshot, Error>>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let owner = Rc::clone(db);
+    db.enqueue_transaction_read(tx_id, async move {
+        match (kind, author) {
+            (WasmTxKind::Mergeable, Some(author)) => {
+                owner
+                    .mergeable_tx_ref(tx_id)
+                    .relation_snapshot_prepared_for_identity_with_opts(&query, author, opts)
+                    .await
+            }
+            (WasmTxKind::Mergeable, None) => {
+                owner
+                    .mergeable_tx_ref(tx_id)
+                    .relation_snapshot_prepared_with_opts(&query, opts)
+                    .await
+            }
+            (WasmTxKind::Exclusive, Some(author)) => {
+                owner
+                    .exclusive_tx_ref(tx_id)
+                    .relation_snapshot_prepared_for_identity_with_opts(&query, author, opts)
+                    .await
+            }
+            (WasmTxKind::Exclusive, None) => {
+                owner
+                    .exclusive_tx_ref(tx_id)
+                    .relation_snapshot_prepared_with_opts(&query, opts)
                     .await
             }
         }
@@ -1908,6 +1978,28 @@ impl WasmDb {
     ) -> Result<js_sys::Promise, JsValue> {
         let author = author_id_from_bytes(&author)?;
         transaction_rows_promise(&self.open_inner()?, query, tx, Some(author), opts, true)
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshotInTransaction)]
+    pub fn all_relation_snapshot_in_transaction(
+        &self,
+        query: &WasmPreparedQuery,
+        tx: &WasmTx,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        transaction_relation_snapshot_promise(&self.open_inner()?, query, tx, None, opts)
+    }
+
+    #[wasm_bindgen(js_name = allRelationSnapshotInTransactionForIdentity)]
+    pub fn all_relation_snapshot_in_transaction_for_identity(
+        &self,
+        query: &WasmPreparedQuery,
+        tx: &WasmTx,
+        author: Vec<u8>,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let author = author_id_from_bytes(&author)?;
+        transaction_relation_snapshot_promise(&self.open_inner()?, query, tx, Some(author), opts)
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
@@ -3311,6 +3403,28 @@ fn transaction_rows_promise(
             rows.truncate(1);
         }
         bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
+    }))
+}
+
+fn transaction_relation_snapshot_promise(
+    db: &WasmDbInner,
+    query: &WasmPreparedQuery,
+    tx: &WasmTx,
+    author: Option<AuthorSubject>,
+    opts: JsValue,
+) -> Result<js_sys::Promise, JsValue> {
+    ensure_transaction_runtime(db, tx)?;
+    let opts = read_opts_from_js(opts)?;
+    let tx_id = tx.open_tx_for_read()?;
+    let db = db.clone();
+    let query = query.inner.clone();
+    let kind = tx.kind;
+    Ok(future_to_promise(async move {
+        let snapshot = db
+            .transaction_relation_snapshot(tx_id, kind, query, author, opts)
+            .await
+            .map_err(to_js_error)?;
+        bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
     }))
 }
 

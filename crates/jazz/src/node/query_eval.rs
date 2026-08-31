@@ -2892,6 +2892,98 @@ where
         .await
     }
 
+    /// Evaluate a query and its relation payload inside an open transaction.
+    ///
+    /// This uses the same transaction snapshot and staged overlay as
+    /// [`Self::tx_query_with_options`].  In particular, it must not fall back
+    /// to the ordinary maintained relation view: doing so would silently omit
+    /// writes staged by the transaction.
+    pub(crate) async fn tx_relation_snapshot_with_options(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        include_deleted: bool,
+    ) -> Result<RelationSnapshot, Error> {
+        self.tx_relation_snapshot_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            AuthorSubject::SYSTEM,
+            include_deleted,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    /// Evaluate a relation payload inside an open transaction as its bound
+    /// serving identity.
+    pub(crate) async fn tx_relation_snapshot_for_identity_with_options(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        include_deleted: bool,
+    ) -> Result<RelationSnapshot, Error> {
+        self.tx_relation_snapshot_in_authorization_mode(
+            tx_id,
+            shape,
+            binding,
+            identity,
+            include_deleted,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn tx_relation_snapshot_in_authorization_mode(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        include_deleted: bool,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
+        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
+        let program = self
+            .compile_open_tx_query_program(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                CurrentQueryProgramOutput::RelationSnapshot,
+                include_deleted,
+                authorization_mode,
+            )
+            .await?;
+        let snapshots = self
+            .database
+            .query_graphs(lowered_program_sinks(&program))
+            .await
+            .map_err(Error::Groove)?;
+        let snapshot = self
+            .materialize_relation_snapshot_from_query_engine(
+                shape,
+                &ReadViewSpec::default(),
+                &snapshots,
+            )
+            .await?;
+        let predicate_read = PredicateRead {
+            table: shape.query().table.clone(),
+            shape_id: shape.shape_id(),
+            shape: shape.query().clone(),
+            binding_id: binding.binding_id(),
+            binding_values: binding.values().clone(),
+        };
+        let open_tx = self.open_tx_mut(tx_id)?;
+        open_tx.predicate_reads.truncate(predicate_len);
+        open_tx.predicate_reads.push(predicate_read);
+        Ok(snapshot)
+    }
+
     async fn tx_query_in_authorization_mode(
         &mut self,
         tx_id: OpenTransactionId,
@@ -2901,39 +2993,7 @@ where
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let identity = match self.open_tx(tx_id)?.kind {
-            OpenTransactionKind::Exclusive {
-                bound_author: Some(bound_identity),
-            } => {
-                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
-                    && identity != bound_identity
-                {
-                    return Err(Error::OpenTransactionIdentityMismatch);
-                }
-                // Explicitly bound exclusive transactions are identity capabilities:
-                // ordinary and serving reads use the identity fixed at begin.
-                bound_identity
-            }
-            OpenTransactionKind::Exclusive { bound_author: None } => identity,
-            OpenTransactionKind::Mergeable {
-                permission_subject: Some(bound_identity),
-                ..
-            } => {
-                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
-                    && identity != bound_identity
-                {
-                    return Err(Error::OpenTransactionIdentityMismatch);
-                }
-                // A serving-side mergeable batch is also an identity
-                // capability. The raw foreign-function argument selects no
-                // authority beyond the subject fixed at begin.
-                bound_identity
-            }
-            OpenTransactionKind::Mergeable {
-                permission_subject: None,
-                ..
-            } => identity,
-        };
+        let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
@@ -2969,6 +3029,47 @@ where
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
         Ok(rows)
+    }
+
+    fn transaction_query_identity(
+        &self,
+        tx_id: OpenTransactionId,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<AuthorSubject, Error> {
+        Ok(match self.open_tx(tx_id)?.kind {
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound_identity),
+            } => {
+                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                    && identity != bound_identity
+                {
+                    return Err(Error::OpenTransactionIdentityMismatch);
+                }
+                // Explicitly bound exclusive transactions are identity capabilities:
+                // ordinary and serving reads use the identity fixed at begin.
+                bound_identity
+            }
+            OpenTransactionKind::Exclusive { bound_author: None } => identity,
+            OpenTransactionKind::Mergeable {
+                permission_subject: Some(bound_identity),
+                ..
+            } => {
+                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                    && identity != bound_identity
+                {
+                    return Err(Error::OpenTransactionIdentityMismatch);
+                }
+                // A serving-side mergeable batch is also an identity
+                // capability. The raw foreign-function argument selects no
+                // authority beyond the subject fixed at begin.
+                bound_identity
+            }
+            OpenTransactionKind::Mergeable {
+                permission_subject: None,
+                ..
+            } => identity,
+        })
     }
 
     pub(crate) async fn prepared_query_plan(

@@ -315,6 +315,19 @@ type NativeDb = {
     author: Uint8Array,
     opts: unknown,
   ): NativeReadResult | Promise<NativeReadResult>;
+  /** Relation snapshots must use the transaction's snapshot and staged overlay. */
+  allRelationSnapshotInTransaction?(
+    query: PreparedQuery,
+    tx: Tx,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
+  /** Trusted-serving relation snapshots retain the identity fixed at begin. */
+  allRelationSnapshotInTransactionForIdentity?(
+    query: PreparedQuery,
+    tx: Tx,
+    author: Uint8Array,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -1906,14 +1919,10 @@ export class NativeRuntimeAdapter implements Runtime {
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-    // These bindings currently have transaction-aware row reads only. Calling
-    // the relation/snapshot APIs here would evaluate the ordinary owner view
-    // and silently omit staged writes, so reject until the relation evaluator
-    // can be retained behind the same transaction queue.
-    if (
-      pendingTx &&
-      (queryUsesNativeRelationApi(coreQueryJson) || queryHasArraySubqueries(coreQueryJson))
-    ) {
+    // Relation-IR lowering still has a JSON-only binding API.  Array includes
+    // below use the transaction-aware snapshot ABI instead, so they preserve
+    // staged writes and do not fall back to the owner's ordinary view.
+    if (pendingTx && queryUsesNativeRelationApi(coreQueryJson)) {
       throw new Error("Native runtime does not support relation reads inside a transaction");
     }
     // Browser runtimes still materialize row bodies from their in-memory
@@ -1948,6 +1957,40 @@ export class NativeRuntimeAdapter implements Runtime {
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
+        if (pendingTx) {
+          const payload =
+            this.readAuthorizationHost === "trusted-serving" && pendingTx.identity
+              ? this.db.allRelationSnapshotInTransactionForIdentity
+                ? await this.awaitNativeRead(
+                    this.db.allRelationSnapshotInTransactionForIdentity(
+                      query,
+                      this.txForRead(pendingTx),
+                      pendingTx.identity,
+                      opts,
+                    ),
+                  )
+                : (() => {
+                    throw new Error(
+                      "Native runtime does not support trusted-serving transaction relation reads",
+                    );
+                  })()
+              : this.db.allRelationSnapshotInTransaction
+                ? await this.awaitNativeRead(
+                    this.db.allRelationSnapshotInTransaction(
+                      query,
+                      this.txForRead(pendingTx),
+                      opts,
+                    ),
+                  )
+                : (() => {
+                    throw new Error("Native runtime does not support transaction relation reads");
+                  })();
+          return rowsFromRelationSnapshot(
+            readRelationSnapshot(payload),
+            this.schema,
+            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+          );
+        }
         if (this.readAuthorizationHost === "trusted-serving") {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");

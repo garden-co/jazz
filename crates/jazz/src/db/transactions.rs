@@ -969,6 +969,74 @@ where
         .await
     }
 
+    pub(super) async fn transaction_relation_snapshot(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.transaction_relation_snapshot_in_authorization_mode(
+            tx_id,
+            prepared,
+            self.identity.author,
+            opts,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    pub(crate) async fn transaction_relation_snapshot_for_identity(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.transaction_relation_snapshot_in_authorization_mode(
+            tx_id,
+            prepared,
+            author,
+            opts,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn transaction_relation_snapshot_in_authorization_mode(
+        &self,
+        tx_id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, Error> {
+        ensure_default_read_view(&opts)?;
+        let mut node = self.node.node.lock().await;
+        let mut snapshot = match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => node
+                .tx_relation_snapshot_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    opts.include_deleted,
+                )
+                .await
+                .map_err(Error::from)?,
+            QueryAuthorizationMode::TrustedServing => node
+                .tx_relation_snapshot_for_identity_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    author,
+                    opts.include_deleted,
+                )
+                .await
+                .map_err(Error::from)?,
+        };
+        node.hydrate_current_rows(&mut snapshot.rows).await?;
+        Ok(snapshot)
+    }
+
     async fn transaction_all_in_authorization_mode(
         &self,
         tx_id: OpenTransactionId,

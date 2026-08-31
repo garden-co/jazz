@@ -937,7 +937,7 @@ where
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
-            let (base, descriptor) = if include_deleted {
+            let (base, descriptor, metadata) = if include_deleted {
                 let rows = rows
                     .into_iter()
                     .map(|row| {
@@ -945,19 +945,37 @@ where
                         (row, deleted)
                     })
                     .collect();
-                (
-                    inline_snapshot_include_deleted_current_graph(&table, rows).map_err(|_| {
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
+                    .map_err(|_| {
                         source_resolution_error(request, SourceGap::TransactionReadOverlay)
-                    })?,
-                    include_deleted_current_row_descriptor(&table),
+                    })?;
+                inline_snapshot_include_deleted_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "open-transaction",
+                    &request.requirements,
                 )
+                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?
             } else {
-                (
-                    inline_current_graph(&table, rows).map_err(|_| {
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
+                    .map_err(|_| {
                         source_resolution_error(request, SourceGap::TransactionReadOverlay)
-                    })?,
-                    current_row_descriptor(&table),
+                    })?;
+                inline_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    schema_version_alias,
+                    "open-transaction",
+                    &request.requirements,
                 )
+                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?
             };
             // An open transaction is a snapshot plus its staged overlay, not
             // an authorization result. Filter the effective rows through the
@@ -1032,7 +1050,7 @@ where
                         .graph
                 }
             };
-            (graph, descriptor, BTreeMap::new(), BTreeSet::new())
+            (graph, descriptor, metadata, BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
             && self.needs_projected_current_source(&request.source.table)
         {
@@ -3266,6 +3284,20 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
     metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
     branch_columns_nonnullable: bool,
 ) -> RecordDescriptor {
+    current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
+        table,
+        metadata,
+        branch_columns_nonnullable,
+        false,
+    )
+}
+
+fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
+    table: &TableSchema,
+    metadata: &BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    branch_columns_nonnullable: bool,
+    include_deletion_marker: bool,
+) -> RecordDescriptor {
     let mut fields = std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
@@ -3327,6 +3359,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
             "settle_position".to_owned(),
             ValueType::Nullable(Box::new(ValueType::U64)),
         ));
+    }
+    if include_deletion_marker {
+        fields.push(("__jazz_deleted".to_owned(), ValueType::Bool));
     }
     RecordDescriptor::new(fields)
 }
@@ -4060,6 +4095,36 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
     ),
     Error,
 > {
+    let metadata = inline_source_metadata(requirements, branch_witness.map(|(field, _)| field));
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
+        table,
+        &metadata,
+        branch_witness.is_some(),
+    );
+    let records = rows
+        .iter()
+        .map(|row| {
+            inline_current_record_with_source_metadata(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                coverage,
+                branch_witness,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        GraphBuilder::inline_records(descriptor.clone(), records),
+        descriptor,
+        metadata,
+    ))
+}
+
+fn inline_source_metadata(
+    requirements: &SourceRequirements,
+    branch_witness_field: Option<&str>,
+) -> BTreeMap<SourceMetadataRequirement, SourceMetadataFields> {
     let mut metadata = BTreeMap::new();
     // Provenance is carried by the same content-version witness as ordinary
     // table sources.  Inline candidates must expose that full capability too:
@@ -4079,7 +4144,7 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
                 schema_version_field: "schema_version".to_owned(),
                 tx_time_field: "tx_time".to_owned(),
                 tx_node_field: "tx_node_id".to_owned(),
-                branch_or_prefix_field: branch_witness.map(|(field, _)| field.to_owned()),
+                branch_or_prefix_field: branch_witness_field.map(str::to_owned),
             },
         );
     }
@@ -4115,30 +4180,7 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
             );
         }
     }
-
-    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch(
-        table,
-        &metadata,
-        branch_witness.is_some(),
-    );
-    let records = rows
-        .iter()
-        .map(|row| {
-            inline_current_record_with_source_metadata(
-                table,
-                &descriptor,
-                row,
-                schema_version_alias,
-                coverage,
-                branch_witness,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        GraphBuilder::inline_records(descriptor.clone(), records),
-        descriptor,
-        metadata,
-    ))
+    metadata
 }
 
 fn inline_current_record_with_source_metadata(
@@ -4148,6 +4190,26 @@ fn inline_current_record_with_source_metadata(
     schema_version_alias: SchemaVersionAlias,
     coverage: &str,
     branch_witness: Option<(&str, &BranchKey)>,
+) -> Result<Vec<u8>, Error> {
+    inline_current_record_with_source_metadata_and_deletion(
+        table,
+        descriptor,
+        row,
+        schema_version_alias,
+        coverage,
+        branch_witness,
+        None,
+    )
+}
+
+fn inline_current_record_with_source_metadata_and_deletion(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    branch_witness: Option<(&str, &BranchKey)>,
+    deletion_marker: Option<bool>,
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
@@ -4199,41 +4261,49 @@ fn inline_current_record_with_source_metadata(
     if descriptor.field_index("settle_position").is_some() {
         values.push(Value::Nullable(None));
     }
+    if let Some(deleted) = deletion_marker {
+        values.push(Value::Bool(deleted));
+    }
     Ok(descriptor.create(&values)?)
 }
 
-fn inline_snapshot_include_deleted_current_graph(
+fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
     table: &TableSchema,
     rows: Vec<(CurrentRow, bool)>,
-) -> Result<GraphBuilder, Error> {
-    let descriptor = include_deleted_current_row_descriptor(table);
-    let mut records = Vec::with_capacity(rows.len());
-    for (row, deleted) in rows {
-        let mut values = Vec::with_capacity(table.columns.len() + 8);
-        values.push(Value::Uuid(row.row_uuid().0));
-        for column in &table.columns {
-            values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
-        }
-        if let Some(provenance) = row.provenance()? {
-            values.push(Value::String(provenance.created_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.created_at));
-            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.updated_at));
-        } else {
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
-            values.push(Value::U64(0));
-            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
-            values.push(Value::U64(0));
-        }
-        let (tx_time, tx_node_alias) = row
-            .projected_tx_alias()
-            .unwrap_or((TxTime(0), NodeAlias(0)));
-        values.push(Value::U64(tx_time.0));
-        values.push(Value::U64(tx_node_alias.0));
-        values.push(Value::Bool(deleted));
-        records.push(descriptor.create(&values)?);
-    }
-    Ok(GraphBuilder::inline_records(descriptor, records))
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    let metadata = inline_source_metadata(requirements, None);
+    let descriptor = current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
+        table, &metadata, false, true,
+    );
+    let records = rows
+        .iter()
+        .map(|(row, deleted)| {
+            inline_current_record_with_source_metadata_and_deletion(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                coverage,
+                None,
+                Some(*deleted),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        GraphBuilder::inline_records(descriptor.clone(), records),
+        descriptor,
+        metadata,
+    ))
 }
 
 #[cfg(test)]

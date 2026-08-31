@@ -3355,6 +3355,29 @@ where
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
             .await
     }
+
+    /// Read a relation snapshot with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot(self.tx_id(), prepared, opts)
+            .await
+    }
+
+    /// Read a relation snapshot as `author` with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot_for_identity(self.tx_id(), prepared, author, opts)
+            .await
+    }
 }
 
 /// Owning, Rust-facing handle for a group of mergeable writes.
@@ -3507,6 +3530,29 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
+            .await
+    }
+
+    /// Read a relation snapshot with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot(self.tx_id(), prepared, opts)
+            .await
+    }
+
+    /// Read a relation snapshot as `author` with this transaction's pending writes overlaid.
+    async fn relation_snapshot_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorSubject,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.db()
+            .transaction_relation_snapshot_for_identity(self.tx_id(), prepared, author, opts)
             .await
     }
 
