@@ -260,16 +260,32 @@ until such a host boundary exists.
 
 Subscription finalization is also asynchronous ownership work. Dropping a
 stream MUST synchronously enqueue one idempotent finalization command without
-borrowing the storage-owning node; the next node tick drains it under ordinary
-async node ownership, retiring both the local maintained-view subscription and
-any upstream coverage ownership/unsubscribe. `SubscriptionStream::close()`
-enqueues that same command and awaits its drain acknowledgement; dropping the
-`close()` future cannot lose cleanup because the command was queued first, and
-the stream is terminal immediately after `close()` is invoked: later polls MUST
-return `None`. Finalization commands identify the owned subscription state, not
-a snapshot of a Groove ID, so a catalogue/runtime refresh cannot replace a
-handle between enqueue and drain. Enqueue synchronously marks that state closed;
-refresh MUST NOT rehydrate it while retirement is waiting for the node mutex.
+borrowing the storage-owning node; the next node-owner turn, including an
+ordinary node tick or database shutdown, drains it. `SubscriptionStream::close()`
+enqueues that same command and directly drives its drain under ordinary async
+node ownership, so an uncontended explicit close does not require an external
+tick. The stream MUST retain the in-flight completion before `close()` first
+awaits. If that caller future is cancelled while waiting for the node owner, a
+later `close()` MUST resume and await the same command; it MUST NOT return
+success merely because cleanup was already enqueued. Once close begins, the
+`Stream`, `next_event()`, and `try_next_event()` surfaces are terminal and MUST
+return `None`.
+
+The close acknowledgement is a local ownership-retirement boundary. It means
+the local maintained-view subscription is retired, every propagated coverage
+owner/refcount held by that stream is released, and an Unsubscribe for the last
+shared owner has been applied locally and queued for the upstream connection.
+It does not mean that a wire Unsubscribe has already been delivered or accepted;
+that remains connection-tick work with the connection's transport error
+semantics. Closing one of several shared owners MUST preserve the upstream
+subscription; closing the last MUST queue exactly one retirement. Repeated
+close, concurrent drain, and shutdown overlap MUST remain deterministic and
+idempotent.
+
+Finalization commands identify the owned subscription state, not a snapshot of
+a Groove ID, so a catalogue/runtime refresh cannot replace a handle between
+enqueue and drain. Enqueue synchronously marks that state closed; refresh MUST
+NOT rehydrate it while retirement is waiting for the node mutex.
 
 Database shutdown closes finalization admission and snapshots every live stream
 into its retirement set before its first storage await. It drains that set,
