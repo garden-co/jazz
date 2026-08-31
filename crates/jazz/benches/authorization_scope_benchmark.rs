@@ -38,7 +38,9 @@ fn other_author() -> AuthorSubject {
 
 fn authorization_schema(extra_columns: usize) -> JazzSchema {
     let mut table = TableSchemaBuilder::new("items")
-        .column("owner_id", ColumnType::Uuid)
+        // `session.user` is Jazz's canonical issuer-and-subject identity, so
+        // model the owner column with the same portable text representation.
+        .column("owner_id", ColumnType::Text)
         .column("name", ColumnType::Text)
         .column("score", ColumnType::Timestamp)
         .policies(
@@ -79,7 +81,10 @@ fn item_cells(index: usize, extra_columns: usize) -> BTreeMap<String, Value> {
         other_author()
     };
     let mut cells = BTreeMap::from([
-        ("owner_id".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "owner_id".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
         ("name".to_owned(), Value::String(format!("Item {index}"))),
         ("score".to_owned(), Value::U64(index as u64)),
     ]);
