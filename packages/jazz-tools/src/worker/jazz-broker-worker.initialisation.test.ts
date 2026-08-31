@@ -165,12 +165,17 @@ vi.mock("../runtime/native-runtime/schema-codec.js", () => ({
 
 type RuntimeOutcome = Extract<
   BrowserSharedWorkerConnectResponse,
-  { type: "runtime-ready" | "runtime-error" }
+  { type: "runtime-ready" | "runtime-error" | "worker-closing" }
 >;
 
 type ForegroundLeaseOutcome = Extract<
   BrowserForegroundNodeLeaseAcquireResponse,
-  { type: "foreground-node-lease-ready" | "foreground-node-lease-error" }
+  {
+    type:
+      | "foreground-node-lease-ready"
+      | "foreground-node-lease-busy"
+      | "foreground-node-lease-error";
+  }
 >;
 
 type ForegroundLeaseProbeOutcome = Extract<
@@ -218,7 +223,11 @@ class TestPort {
       | BrowserFollowerPortEvent
       | BrowserForegroundNodeLeaseAcquireResponse,
   ): void {
-    if (message.type === "runtime-ready" || message.type === "runtime-error") {
+    if (
+      message.type === "runtime-ready" ||
+      message.type === "runtime-error" ||
+      message.type === "worker-closing"
+    ) {
       const waiter = this.outcomeWaiters.shift();
       if (waiter) waiter(message);
       else this.outcomes.push(message);
@@ -238,6 +247,7 @@ class TestPort {
     }
     if (
       message.type === "foreground-node-lease-ready" ||
+      message.type === "foreground-node-lease-busy" ||
       message.type === "foreground-node-lease-error"
     ) {
       const waiter = this.leaseOutcomeWaiters.shift();
@@ -528,6 +538,14 @@ describe("broker worker context initialization", () => {
       attemptId: "probe-after-termination-ack",
     });
     expect(successor.port.close).toHaveBeenCalledOnce();
+
+    // The normal runtime bootstrap gets an equally explicit handoff signal.
+    // It can advance its SharedWorker generation instead of waiting for a
+    // doomed port's generic timeout, while ordinary idle close remains
+    // cancelable through its bootstrap reservation.
+    await expect(connect(initOptions, "runtime-after-termination")).resolves.toMatchObject({
+      outcome: { type: "worker-closing" },
+    });
     inspector.close();
   });
 
@@ -694,6 +712,35 @@ describe("broker worker context initialization", () => {
       }),
     );
     expect((globalThis as WorkerGlobal).close).not.toHaveBeenCalled();
+  });
+
+  it("retries only a classified external physical-owner conflict", async () => {
+    const { BrowserPhysicalDatabaseBusyError } =
+      await import("../runtime/browser-physical-database-epoch.js");
+    const busy = new BrowserPhysicalDatabaseBusyError("busy-lease-root");
+    mocks.openPageStore.mockRejectedValueOnce(busy).mockRejectedValueOnce(new Error("bad storage"));
+
+    const busyLease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: "busy-lease-root",
+      storageOwner: "owner",
+    });
+    await expect(busyLease.outcome).resolves.toEqual({
+      type: "foreground-node-lease-busy",
+      message: busy.message,
+    });
+    expect(busyLease.port.close).toHaveBeenCalledOnce();
+
+    const permanentFailure = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: "terminal-lease-root",
+      storageOwner: "owner",
+    });
+    await expect(permanentFailure.outcome).resolves.toEqual({
+      type: "foreground-node-lease-error",
+      message: "bad storage",
+    });
+    expect(permanentFailure.port.close).toHaveBeenCalledOnce();
   });
 
   it("does not expose retained lifecycle entries across browser auth scopes", async () => {

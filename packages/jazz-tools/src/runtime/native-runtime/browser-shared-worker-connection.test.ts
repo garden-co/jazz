@@ -3,6 +3,7 @@ import {
   createBrowserSharedWorkerBaseName,
   installWorkerTerminationGenerationHandoff,
   SharedBrowserForegroundNodeLease,
+  SharedBrowserWorkerConnection,
 } from "./browser-shared-worker-connection.js";
 
 type LeaseMessage =
@@ -27,6 +28,7 @@ class DelayedLeasePort {
     private readonly acknowledgeProbe = true,
     private readonly probeDelayMs = 0,
     private readonly closing = false,
+    private readonly busyMessage: string | null = null,
   ) {}
 
   start(): void {}
@@ -61,6 +63,13 @@ class DelayedLeasePort {
       return;
     }
     if (message.type === "acquire-foreground-node-lease") {
+      if (this.busyMessage) {
+        setTimeout(
+          () => this.emit({ type: "foreground-node-lease-busy", message: this.busyMessage }),
+          0,
+        );
+        return;
+      }
       // This is intentionally just beyond the historical one-second budget.
       // Cold IDB admission is allowed to take this long before the foreground
       // has received its first durable identity.
@@ -93,6 +102,38 @@ class DelayedLeasePort {
 
   acknowledgeCancellationNow(): void {
     this.emit({ type: "foreground-node-lease-cancelled" });
+  }
+}
+
+class ScriptedRuntimePort {
+  private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
+  closed = false;
+
+  constructor(private readonly onPost: (message: { type?: string; id?: number }) => void) {}
+
+  start(): void {}
+
+  close(): void {
+    this.closed = true;
+  }
+
+  addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    const registered = this.listeners.get(type) ?? new Set();
+    registered.add(listener);
+    this.listeners.set(type, registered);
+  }
+
+  removeEventListener(type: string, listener: (event: MessageEvent) => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  postMessage(message: { type?: string; id?: number }): void {
+    this.onPost(message);
+  }
+
+  emit(message: unknown): void {
+    for (const listener of this.listeners.get("message") ?? [])
+      listener({ data: message } as MessageEvent);
   }
 }
 
@@ -264,6 +305,112 @@ describe("browser SharedWorker realm identity", () => {
     const retired = lease.retire();
     await vi.runAllTimersAsync();
     await retired;
+  });
+
+  it("retries a safely classified physical-owner busy lease without advancing generations", async () => {
+    vi.useFakeTimers();
+    const busyPort = new DelayedLeasePort(0, true, true, 0, false, "owner is releasing");
+    const readyPort = new DelayedLeasePort(0);
+    const workerNames: string[] = [];
+    let workerCount = 0;
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = ++workerCount === 1 ? busyPort : readyPort;
+
+        constructor(_url: URL, options: { name: string }) {
+          workerNames.push(options.name);
+        }
+      },
+    );
+
+    const acquiring = SharedBrowserForegroundNodeLease.acquire({
+      dbName: "busy-physical-owner-root",
+      storageOwner: "owner",
+    });
+    await vi.runAllTimersAsync();
+    const lease = await acquiring;
+
+    expect(workerNames).toHaveLength(2);
+    expect(workerNames[0]).toContain(":generation-0");
+    expect(workerNames[1]).toContain(":generation-0");
+    expect(busyPort.closed).toBe(true);
+    expect(readyPort.closed).toBe(false);
+
+    const retired = lease.retire();
+    await vi.runAllTimersAsync();
+    await retired;
+  });
+
+  it("moves a runtime bootstrap out of an inspector-terminating realm", async () => {
+    const dbName = "runtime-closing-root";
+    const workers: Array<{ name: string; port: ScriptedRuntimePort }> = [];
+    const generationStorage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => generationStorage.get(key) ?? null,
+      setItem: (key: string, value: string) => generationStorage.set(key, value),
+    });
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port: ScriptedRuntimePort;
+
+        constructor(_url: URL, options: { name: string }) {
+          const index = workers.length;
+          this.port = new ScriptedRuntimePort((message) => {
+            if (message.type === "connect-runtime") {
+              this.port.emit(index === 0 ? { type: "worker-closing" } : { type: "runtime-ready" });
+            } else if (message.type === "init" || message.type === "close") {
+              this.port.emit({ type: "result", id: message.id });
+            }
+          });
+          workers.push({ name: options.name, port: this.port });
+        }
+      },
+    );
+    const runtime = {
+      connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
+      onPeerTransportWork: () => () => undefined,
+      progressPeerTransport: async () => undefined,
+      retirePeerTransport: async () => undefined,
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+      flushLocalSettlements: async () => undefined,
+    };
+    const callbacks = {
+      onAuthFailure: vi.fn(),
+      onAuthRestored: vi.fn(),
+      onExplicitOfflineChange: vi.fn(),
+      onFailure: vi.fn(),
+      onStorageReset: vi.fn(),
+      onStorageInvalidated: vi.fn(),
+    };
+
+    const connection = new SharedBrowserWorkerConnection(
+      runtime as never,
+      {
+        schema: {},
+        dbName,
+        author: new Uint8Array(16),
+        initialSyncFlushEvery: 1,
+        appId: "app",
+        storageOwner: "owner",
+        authSessionKey: "scope-a",
+        authJson: "{}",
+        sessionClaims: {},
+      },
+      "runtime-fingerprint",
+      callbacks,
+    );
+
+    await expect(connection.ready()).resolves.toBeUndefined();
+    expect(workers.map((worker) => worker.name)).toEqual([
+      expect.stringContaining(":generation-0"),
+      expect.stringContaining(":generation-1"),
+    ]);
+    expect(workers[0]?.port.closed).toBe(true);
+    await connection.shutdown();
+    expect(workers[1]?.port.closed).toBe(true);
   });
 
   it("does not advance generations when a healthy busy worker delays its probe", async () => {

@@ -1231,6 +1231,48 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(afterReinsert[0].done).toBe(true);
   });
 
+  it("shuts down immediately after a storage reset and reopens the cleared root", async () => {
+    const dbName = uniqueDbName("delete-storage-shutdown");
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    await db.insert(todos, { title: "Before reset", done: false }).wait({ tier: "local" });
+    await db.deleteClientStorage();
+
+    await withTimeout(
+      db.shutdown(),
+      5_000,
+      "Db shutdown did not settle immediately after resetting SharedWorker storage",
+    );
+    untrack(db);
+
+    const reopened = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    expect(await reopened.all(allTodos, { tier: "local" })).toEqual([]);
+
+    await reopened
+      .insert(todos, { title: "Fresh after reset and reopen", done: true })
+      .wait({ tier: "local" });
+    expect(await reopened.all(allTodos, { tier: "local" })).toMatchObject([
+      { title: "Fresh after reset and reopen", done: true },
+    ]);
+
+    await withTimeout(
+      reopened.shutdown(),
+      5_000,
+      "Reopened Db shutdown did not settle after resetting SharedWorker storage",
+    );
+    untrack(reopened);
+  });
+
   it("resolves a storage reset requested before any schema use", async () => {
     const db = track(
       await createDb({

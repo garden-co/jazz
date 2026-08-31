@@ -3,6 +3,7 @@ import { loadWasmModule, type WasmModule } from "../runtime/client.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
 import {
   acquireBrowserPhysicalDatabaseEpoch,
+  BrowserPhysicalDatabaseBusyError,
   type BrowserPhysicalDatabaseEpoch,
 } from "../runtime/browser-physical-database-epoch.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
@@ -366,7 +367,13 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
     ) {
       const message = messageEvent.data;
       if (workerTerminationScheduled) {
-        if (
+        // This is the inspector's acknowledged, intentionally one-way
+        // termination handoff. It is deliberately narrower than
+        // `pendingWorkerClose`: an ordinary idle close remains cancelable by
+        // the bootstrap reservation created in `onconnect`.
+        if (message?.type === "connect-runtime") {
+          post(port, { type: "worker-closing" } satisfies BrowserSharedWorkerConnectResponse);
+        } else if (
           message?.type === "probe-foreground-node-lease-worker" ||
           message?.type === "acquire-foreground-node-lease"
         ) {
@@ -644,10 +651,20 @@ async function acquireForegroundNodeLease(
       return;
     }
     cleanup();
-    post(port, {
-      type: "foreground-node-lease-error",
-      message: asError(error).message,
-    } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    if (error instanceof BrowserPhysicalDatabaseBusyError) {
+      // A Web-Lock conflict means this request has not acquired a durable
+      // owner or lease identity. The page may retry it on the same generation;
+      // every other bootstrap error remains terminal and causal.
+      post(port, {
+        type: "foreground-node-lease-busy",
+        message: error.message,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    } else {
+      post(port, {
+        type: "foreground-node-lease-error",
+        message: asError(error).message,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    }
     port.close();
   }
 }
