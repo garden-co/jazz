@@ -58,7 +58,7 @@ fn ordinary_current_content_member(member: &ResultMemberEntry) -> bool {
 }
 
 impl PeerState {
-    pub(super) fn has_maintained_subscription(&self, subscription: SubscriptionKey) -> bool {
+    pub(crate) fn has_maintained_subscription(&self, subscription: SubscriptionKey) -> bool {
         self.publication_states
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())

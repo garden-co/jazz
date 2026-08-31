@@ -5,7 +5,7 @@
 
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    mutation_error_event, take_pending_mutation_error_delivery,
+    coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
 use crate::time::TxTime;
@@ -1959,11 +1959,7 @@ where
                         }
                         peer.forget_subscription_with_node(
                             &mut node,
-                            SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: coverage.opts.read_view_key(),
-                            },
+                            coverage_group_subscription_key(&coverage),
                         );
                     }
                     scope_aggregates.clear();

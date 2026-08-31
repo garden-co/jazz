@@ -831,7 +831,10 @@ fn current_row_subscription_key_rejects_ordinary_whole_table_collision() {
         assert!(state.coverage_groups.is_empty());
         assert_eq!(state.served_current_rows.len(), 1);
         assert_eq!(
-            state.served_current_rows.get(&current_rows_subscription),
+            state
+                .served_current_rows
+                .get(&current_rows_subscription)
+                .map(|served| &served.table),
             Some(&"todos".to_owned())
         );
         assert!(

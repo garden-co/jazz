@@ -3,7 +3,7 @@
 use super::*;
 use crate::db::peer_connection::{
     ConnectionLink, PendingRowVersionFetch, PendingSubscriberControlResponse,
-    dispatch_admitted_subscriber_message,
+    coverage_group_subscription_key, dispatch_admitted_subscriber_message,
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
@@ -1438,6 +1438,585 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     assert_eq!(
         hydration_count, 3,
         "each 0→1→2 authority claim transition must reject stale evidence and rehydrate"
+    );
+}
+
+/// A host-authenticated claim refresh replaces a direct subscription's policy
+/// snapshot, without borrowing a same-subject sibling's snapshot.
+///
+/// ```text
+/// alice/A ──direct view──► Core ──A-owned rows
+/// alice/B ──direct view──► Core ──B-owned rows
+/// alice/A refreshes to none ─────► Core ──no rows
+/// ```
+///
+/// The server's legacy author map intentionally ends at B in this setup. The
+/// refreshed A link must use its own new snapshot, while the independent B
+/// link remains visible. Deleting the direct-origin replacement in
+/// `rebind_subscriber_views_after_claim_change` leaves A on its stale rows and
+/// makes this test fail.
+#[test]
+fn direct_subscription_claim_refresh_replaces_membership_without_touching_same_subject_sibling() {
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let a_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let b_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let a_row = server
+        .insert("todos", cells("owned by A", false, a_owner))
+        .unwrap()
+        .row_uuid();
+    let b_row = server
+        .insert("todos", cells("owned by B", false, b_owner))
+        .unwrap()
+        .row_uuid();
+
+    let a_claims = test_provider_claims(a_owner);
+    let b_claims = test_provider_claims(b_owner);
+    let no_access_claims = test_provider_claims(AuthorSubject::for_test_bytes([0xb3; 16]));
+    let a_client = open_db(0xa1, session_subject, &schema);
+    let b_client = open_db(0xa2, session_subject, &schema);
+    a_client.set_test_provider_claims(session_subject, a_claims.clone());
+    b_client.set_test_provider_claims(session_subject, b_claims.clone());
+    let (a_transport, a_server_transport) = duplex();
+    let a_upstream = crate::db::block_on(a_client.connect_upstream(a_transport));
+    let a_subscriber =
+        server.accept_subscriber_with_claims(a_server_transport, session_subject, a_claims);
+    let (b_transport, b_server_transport) = duplex();
+    let b_upstream = crate::db::block_on(b_client.connect_upstream(b_transport));
+    let _b_subscriber =
+        server.accept_subscriber_with_claims(b_server_transport, session_subject, b_claims);
+
+    let query = Query::from("todos");
+    let a_prepared = prepared(&a_client, &query);
+    let b_prepared = prepared(&b_client, &query);
+    let a_attachment = a_client
+        .attach_query_with_opts(&a_prepared, global_subscribe_opts())
+        .unwrap();
+    let b_attachment = b_client
+        .attach_query_with_opts(&b_prepared, global_subscribe_opts())
+        .unwrap();
+    for _ in 0..64 {
+        a_client.tick().unwrap();
+        b_client.tick().unwrap();
+        server.tick().unwrap();
+        a_upstream.borrow_mut().tick().unwrap();
+        b_upstream.borrow_mut().tick().unwrap();
+        if a_client.query_attachment_is_covered(&a_attachment)
+            && b_client.query_attachment_is_covered(&b_attachment)
+        {
+            break;
+        }
+    }
+    assert!(a_client.query_attachment_is_covered(&a_attachment));
+    assert!(b_client.query_attachment_is_covered(&b_attachment));
+    assert_eq!(
+        row_ids(&prepared_all(&a_client, &query, global_subscribe_opts())),
+        vec![a_row]
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&b_client, &query, global_subscribe_opts())),
+        vec![b_row]
+    );
+
+    // Keep the consumer and trusted serving link in the same newly admitted
+    // state. The B sibling remains live under B while A becomes unprivileged.
+    a_client.set_test_provider_claims(session_subject, no_access_claims.clone());
+    a_subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(no_access_claims);
+    for _ in 0..64 {
+        a_client.tick().unwrap();
+        server.tick().unwrap();
+        a_subscriber.borrow_mut().tick().unwrap();
+        a_upstream.borrow_mut().tick().unwrap();
+        if prepared_all(&a_client, &query, global_subscribe_opts()).is_empty() {
+            break;
+        }
+    }
+    assert!(
+        prepared_all(&a_client, &query, global_subscribe_opts()).is_empty(),
+        "the refreshed direct subscriber must lose A's stale membership"
+    );
+    assert_eq!(
+        row_ids(&prepared_all(&b_client, &query, global_subscribe_opts())),
+        vec![b_row],
+        "one same-subject connection cannot rewrite its sibling's binding"
+    );
+}
+
+/// Whole-table current-row serving is also a maintained, policy-bound usage
+/// site. Refreshing direct admission must discard its retained receiver and
+/// emit a fresh reset, rather than letting its normal delta path retain the
+/// old session's rows.
+#[test]
+fn direct_current_rows_claim_refresh_reopens_under_new_binding() {
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert("todos", cells("A only", false, allowed_owner))
+        .unwrap();
+    let client = open_db(0xa1, session_subject, &schema);
+    let allowed_claims =
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(allowed_owner.test_uuid()))]);
+    let denied_claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(denied_owner.test_uuid()))]);
+    client.set_test_provider_claims(session_subject, allowed_claims.clone());
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let _attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    subscriber.borrow_mut().serve_current_rows("todos").unwrap();
+    client.tick().unwrap();
+
+    client.set_test_provider_claims(session_subject, denied_claims.clone());
+    let expected_denied_claims = denied_claims.clone();
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(denied_claims);
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(update)
+                    if update.reset_result_set
+                        && update.result_member_adds.is_empty()
+                        && update.result_member_removes.is_empty()
+            )
+        }),
+        "claim refresh must publish an empty current-row reset"
+    );
+    let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
+        unreachable!("accepted client is served by a subscriber link")
+    };
+    let subscription = server
+        .node()
+        .borrow()
+        .whole_table_subscription_key("todos")
+        .unwrap();
+    let served = state
+        .served_current_rows
+        .get(&subscription)
+        .expect("current-row usage stays registered");
+    assert_eq!(served.policy_binding.1, expected_denied_claims);
+    assert_eq!(
+        served.policy_binding_origin,
+        CoveragePolicyBindingOrigin::DirectAdmitted
+    );
+}
+
+/// A delegated usage site is immutable even when its trusted relay transport
+/// refreshes its own admitted snapshot. This deliberately delegates SYSTEM:
+/// provenance comes from the admitted wire form, not identity equality.
+#[test]
+fn delegated_subscription_binding_survives_relay_claim_refresh() {
+    let schema = owner_read_schema();
+    let delegated_identity = AuthorSubject::SYSTEM;
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let delegated_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
+    )]);
+    let (mut relay_transport, server_transport) = duplex();
+    let subscriber = server.server.accept_subscriber_with_claims_and_trust(
+        server_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    relay_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    relay_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: delegated_identity,
+                claims: delegated_claims.clone(),
+            }),
+        }))
+        .unwrap();
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let coverage = {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("the core connection serves the trusted relay")
+        };
+        state.served[&subscription].clone()
+    };
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(BTreeMap::from([(
+            "relay_refresh".to_owned(),
+            Value::Bool(true),
+        )]));
+    subscriber.borrow_mut().tick().unwrap();
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!("the core connection remains a subscriber link")
+    };
+    let group = &state.coverage_groups[&coverage];
+    assert_eq!(
+        group.policy_binding_origin,
+        CoveragePolicyBindingOrigin::Delegated
+    );
+    assert_eq!(
+        group.policy_binding,
+        (delegated_identity, delegated_claims.clone())
+    );
+    assert_eq!(
+        state.peer.subscription_policy_binding(subscription),
+        Some((delegated_identity, delegated_claims)),
+        "refreshing the relay transport must not retarget a delegated usage site"
+    );
+}
+
+/// Closing a subscriber must retire the group-owned maintained receiver, not
+/// merely its concrete wire usage. Direct coverage uses the ordinary binding
+/// key, while a trusted relay's delegated coverage is policy-partitioned; both
+/// ownership forms must leave no Groove work behind after normal detach.
+#[test]
+fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
+    let direct_schema = schema();
+    let direct_identity = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let direct_server = open_core(0x5e, AuthorSubject::SYSTEM, &direct_schema);
+    let direct_client = open_db(0xc1, direct_identity, &direct_schema);
+    let direct_baseline = direct_server
+        .node()
+        .borrow()
+        .runtime_stats_for_test()
+        .active_subscriptions;
+    let (direct_client_transport, direct_server_transport) = duplex();
+    let _direct_upstream =
+        crate::db::block_on(direct_client.connect_upstream(direct_client_transport));
+    let direct_subscriber =
+        direct_server.accept_subscriber(direct_server_transport, direct_identity);
+    let direct_query = Query::from("todos");
+    let direct_prepared = prepared(&direct_client, &direct_query);
+    let direct_attachment = direct_client
+        .attach_query_with_opts(&direct_prepared, global_subscribe_opts())
+        .unwrap();
+    for _ in 0..8 {
+        direct_client.tick().unwrap();
+        direct_server.tick().unwrap();
+        direct_client.tick().unwrap();
+    }
+    let direct_maintained = {
+        let connection = direct_subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("direct client is served by a subscriber link")
+        };
+        let coverage = &state.served[&direct_attachment.subscription()];
+        let maintained = coverage_group_subscription_key(coverage);
+        assert!(
+            coverage.policy_binding.is_none(),
+            "direct coverage is not policy-partitioned"
+        );
+        assert_eq!(
+            maintained,
+            SubscriptionKey {
+                shape_id: coverage.shape_id,
+                binding_id: coverage.binding_id,
+                read_view: coverage.opts.read_view_key(),
+            },
+            "ordinary direct coverage uses the unpartitioned maintained key"
+        );
+        assert!(state.peer.has_maintained_subscription(maintained));
+        maintained
+    };
+    assert_eq!(
+        direct_server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        direct_baseline + 1,
+        "the direct coverage group owns one maintained Groove receiver"
+    );
+    assert!(direct_server.server.detach_connection(&direct_subscriber));
+    assert!(matches!(
+        &direct_subscriber.borrow().link,
+        ConnectionLink::Subscriber(state)
+            if !state.peer.has_maintained_subscription(direct_maintained)
+    ));
+    assert_eq!(
+        direct_server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        direct_baseline,
+        "direct detach must retire maintained receiver {direct_maintained:?}"
+    );
+
+    let delegated_schema = owner_read_schema();
+    let delegated_identity = AuthorSubject::SYSTEM;
+    let delegated_server = open_core(0x6e, AuthorSubject::SYSTEM, &delegated_schema);
+    let delegated_baseline = delegated_server
+        .node()
+        .borrow()
+        .runtime_stats_for_test()
+        .active_subscriptions;
+    let shape = Query::from("todos").validate(&delegated_schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let delegated_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::Uuid(AuthorSubject::for_test_bytes([0xb1; 16]).test_uuid()),
+    )]);
+    let (mut relay_transport, delegated_server_transport) = duplex();
+    let delegated_subscriber = delegated_server
+        .server
+        .accept_subscriber_with_claims_and_trust(
+            delegated_server_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
+    relay_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    relay_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: Some(crate::protocol::DelegatedSessionBinding {
+                identity: delegated_identity,
+                claims: delegated_claims,
+            }),
+        }))
+        .unwrap();
+    for _ in 0..8 {
+        delegated_subscriber.borrow_mut().tick().unwrap();
+    }
+    let delegated_maintained = {
+        let connection = delegated_subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("trusted relay is served by a subscriber link")
+        };
+        let coverage = &state.served[&subscription];
+        let maintained = coverage_group_subscription_key(coverage);
+        assert_ne!(
+            maintained, subscription,
+            "delegated policy coverage must use an isolated maintained key"
+        );
+        assert!(state.peer.has_maintained_subscription(maintained));
+        maintained
+    };
+    assert_eq!(
+        delegated_server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        delegated_baseline + 1,
+        "the delegated coverage group owns one maintained Groove receiver"
+    );
+    assert!(
+        delegated_server
+            .server
+            .detach_connection(&delegated_subscriber)
+    );
+    assert!(matches!(
+        &delegated_subscriber.borrow().link,
+        ConnectionLink::Subscriber(state)
+            if !state.peer.has_maintained_subscription(delegated_maintained)
+    ));
+    assert_eq!(
+        delegated_server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        delegated_baseline,
+        "delegated detach must retire maintained receiver {delegated_maintained:?}"
+    );
+}
+
+/// A direct session served by an Edge must replace its propagated, delegated
+/// Core usage site on refresh. Rebinding only the Edge-local evaluator makes a
+/// broader session permanently miss Core-only rows; retaining the old handle
+/// also leaves the old policy-bearing Core receiver resident.
+#[test]
+fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let remote_row = core
+        .insert("todos", cells("only at core", false, allowed_owner))
+        .unwrap()
+        .row_uuid();
+    let edge = open_db(0xe1, AuthorSubject::SYSTEM, &schema);
+    edge.set_relay_authority_session_owner();
+    let client = open_db(0xc1, session_subject, &schema);
+    let allowed_claims = test_provider_claims(allowed_owner);
+    let denied_claims = test_provider_claims(denied_owner);
+    client.set_test_provider_claims(session_subject, allowed_claims.clone());
+
+    let (edge_transport, core_transport) = duplex();
+    let _edge_upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
+    let core_edge = core.accept_subscriber_with_trust(
+        core_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (client_transport, edge_client_transport, _client_sent, edge_sent) = duplex_with_taps();
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let edge_client =
+        edge.accept_subscriber_with_claims(edge_client_transport, session_subject, allowed_claims);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    for _ in 0..96 {
+        client.tick().unwrap();
+        edge.tick().unwrap();
+        core.tick().unwrap();
+        edge.tick().unwrap();
+        client.tick().unwrap();
+        if client.query_attachment_is_covered(&attachment)
+            && row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![remote_row]
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![remote_row]
+    );
+    let (downstream_subscription, old_upstream_subscription, old_maintained_subscription) = {
+        let connection = edge_client.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("edge serves the direct client")
+        };
+        let downstream_subscription = attachment.subscription();
+        let coverage = &state.served[&downstream_subscription];
+        (
+            downstream_subscription,
+            state.coverage_groups[coverage].upstream_subscription,
+            coverage_group_subscription_key(coverage),
+        )
+    };
+    assert!(matches!(
+        &core_edge.borrow().link,
+        ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
+    ));
+    assert!(matches!(
+        &edge_client.borrow().link,
+        ConnectionLink::Subscriber(state) if state.peer.has_maintained_subscription(old_maintained_subscription)
+    ));
+
+    client.set_test_provider_claims(session_subject, denied_claims.clone());
+    edge_client
+        .borrow_mut()
+        .update_authenticated_session_claims(denied_claims);
+    let mut saw_fresh_downstream_reset = false;
+    for _ in 0..96 {
+        client.tick().unwrap();
+        edge.tick().unwrap();
+        core.tick().unwrap();
+        edge.tick().unwrap();
+        saw_fresh_downstream_reset |= edge_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(update)
+                    if update.subscription == downstream_subscription
+                        && update.reset_result_set
+                        && update.result_member_adds.is_empty()
+                        && update.result_member_removes.is_empty()
+            )
+        });
+        client.tick().unwrap();
+        if saw_fresh_downstream_reset
+            && !matches!(
+                &core_edge.borrow().link,
+                ConnectionLink::Subscriber(state) if state.served.contains_key(&old_upstream_subscription)
+            )
+        {
+            break;
+        }
+    }
+    let connection = edge_client.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!("edge keeps serving the direct client")
+    };
+    let coverage = &state.served[&downstream_subscription];
+    let fresh_upstream_subscription = state.coverage_groups[coverage].upstream_subscription;
+    drop(connection);
+    let core_fresh = match &core_edge.borrow().link {
+        ConnectionLink::Subscriber(state) => (
+            state
+                .peer
+                .subscription_policy_binding(fresh_upstream_subscription),
+            state
+                .peer
+                .subscription_result_sets(fresh_upstream_subscription),
+        ),
+        ConnectionLink::Upstream(_) => (None, None),
+    };
+    assert_ne!(fresh_upstream_subscription, old_upstream_subscription);
+    assert!(
+        saw_fresh_downstream_reset,
+        "the refreshed remote policy must publish a new empty membership reset"
+    );
+    assert!(matches!(
+        &core_edge.borrow().link,
+        ConnectionLink::Subscriber(state)
+            if !state.served.contains_key(&old_upstream_subscription)
+                && state.served.contains_key(&fresh_upstream_subscription)
+    ));
+    assert!(
+        matches!(
+            &edge_client.borrow().link,
+            ConnectionLink::Subscriber(state)
+                if !state.peer.has_maintained_subscription(old_maintained_subscription)
+        ),
+        "claim refresh must retire the old policy-bound maintained receiver"
+    );
+    assert_eq!(
+        core_fresh.1,
+        Some(BTreeSet::new()),
+        "the fresh Core usage must have an empty B-bound result set"
     );
 }
 
