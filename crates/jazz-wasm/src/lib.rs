@@ -4281,7 +4281,9 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 #[cfg(test)]
 mod dynamic_schema_view_tests {
     use super::*;
-    use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps};
+    #[cfg(not(target_arch = "wasm32"))]
+    use jazz::db::ExclusiveTxOps;
+    use jazz::db::{DbConfig, DbIdentity};
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
@@ -4881,8 +4883,8 @@ mod dynamic_schema_view_tests {
     }
     /// A short-lived WASM schema attachment must not abandon its owner's open
     /// transaction when the JavaScript wrapper is collected.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn attached_tx_drop_preserves_owner_batch() {
         let source = SchemaBuilder::new()
             .table(
@@ -4963,155 +4965,261 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
+    }
 
-        // The public WASM transaction surface binds Alice at begin. A later request
-        // cannot switch the transaction-local authorization subject to Bob.
-        // JsValue construction requires an actual wasm runtime.
-        #[cfg(target_arch = "wasm32")]
-        {
-            let binding = WasmDb {
-                inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
-                owns_runtime: false,
-                trusted_backend: false,
-            };
-            let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
-            let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
-            let bound = OpenTransactionId::new();
-            binding
-                .begin_transaction(
-                    bound.to_string(),
-                    "exclusive".to_owned(),
-                    Some(alice.canonical().as_bytes().to_vec()),
-                )
-                .unwrap();
-            let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
-            let query = WasmPreparedQuery {
-                inner: owner.prepare_query(&owner.table("items")).unwrap(),
-            };
-            assert!(
-                binding
-                    .all_in_transaction_for_identity(
-                        &query,
-                        &tx,
-                        alice.canonical().as_bytes().to_vec(),
-                        JsValue::NULL
-                    )
-                    .is_ok(),
-                "planted positive: Alice retains the bound capability"
-            );
-            let view_binding = WasmDb {
-                inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&view))))),
-                owns_runtime: false,
-                trusted_backend: false,
-            };
-            let view_query = WasmPreparedQuery {
-                inner: view.prepare_query(&view.table("items")).unwrap(),
-            };
-            assert!(view_binding
+    /// Transaction reads cross the WASM boundary as promises: a valid
+    /// transaction must resolve them, while a transaction attached to another
+    /// database runtime must still fail synchronously before a promise is
+    /// created. Keeping both checks here makes the binding contract explicit
+    /// rather than accidentally only type-checking the promise construction.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn attached_transaction_reads_are_async_and_runtime_bound() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = jazz::schema::JazzSchema::new(&source)
+            .expect("WASM transaction fixture public schema compiles");
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+        let owner = Rc::new(
+            Db::open(DbConfig::new(
+                schema.clone(),
+                MemoryStorage::new(&refs).expect("valid memory storage families"),
+                DbIdentity {
+                    node: jazz::ids::NodeUuid::from_bytes([0x45; 16]),
+                    author: alice,
+                },
+            ))
+            .await
+            .expect("open owner runtime"),
+        );
+        let view = Rc::new(
+            owner
+                .register_schema_view(schema.clone())
+                .await
+                .expect("register schema facade"),
+        );
+        let attached_batch = OpenTransactionId::new();
+        owner
+            .begin_mergeable(attached_batch)
+            .await
+            .expect("begin attached schema transaction");
+        drop(WasmTx {
+            db: WasmDbInner::Memory(Rc::clone(&view)),
+            kind: WasmTxKind::Mergeable,
+            open_tx: Some(attached_batch),
+            owns_lifetime: false,
+        });
+        view.mergeable_tx_ref(attached_batch)
+            .insert(
+                "items",
+                BTreeMap::from([("label".to_owned(), Value::String("kept".to_owned()))]),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([1; 16])),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("attached facade preserves the owner batch");
+        let attached_query = view.prepare_query(&view.table("items")).unwrap();
+        let attached_rows = WasmDbInner::Memory(Rc::clone(&view))
+            .transaction_rows(
+                attached_batch,
+                WasmTxKind::Mergeable,
+                attached_query,
+                None,
+                ReadOpts::default(),
+            )
+            .await
+            .expect("attached facade reads its staged row");
+        assert_eq!(
+            attached_rows.len(),
+            1,
+            "dropping an attachment keeps its batch"
+        );
+        owner
+            .commit_mergeable_handle(attached_batch)
+            .await
+            .expect("commit attached schema transaction");
+
+        let attached_exclusive = OpenTransactionId::new();
+        owner
+            .begin_exclusive(attached_exclusive)
+            .await
+            .expect("begin attached exclusive transaction");
+        drop(WasmTx {
+            db: WasmDbInner::Memory(Rc::clone(&view)),
+            kind: WasmTxKind::Exclusive,
+            open_tx: Some(attached_exclusive),
+            owns_lifetime: false,
+        });
+        view.exclusive_tx_ref(attached_exclusive)
+            .insert(
+                "items",
+                BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("exclusive-kept".to_owned()),
+                )]),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([2; 16])),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("attached facade preserves the exclusive owner batch");
+        owner
+            .commit_exclusive_handle(attached_exclusive)
+            .await
+            .expect("commit attached exclusive transaction");
+
+        let binding = WasmDb {
+            inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
+            owns_runtime: false,
+            trusted_backend: false,
+        };
+        let tx_id = OpenTransactionId::new();
+        binding
+            .begin_transaction(
+                tx_id.to_string(),
+                "exclusive".to_owned(),
+                Some(alice.canonical().as_bytes().to_vec()),
+            )
+            .expect("begin owner transaction");
+        let tx = binding
+            .attach_exclusive_tx(tx_id.to_string())
+            .expect("attach owner transaction");
+        let view_binding = WasmDb {
+            inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&view))))),
+            owns_runtime: false,
+            trusted_backend: false,
+        };
+        let view_query = WasmPreparedQuery {
+            inner: view.prepare_query(&view.table("items")).unwrap(),
+        };
+
+        // All four public overloads must run through the promise rather than
+        // merely returning a promise object. The view shares its owner's
+        // transaction runtime, so every read resolves.
+        wasm_bindgen_futures::JsFuture::from(
+            view_binding
                 .all_in_transaction(&view_query, &tx, JsValue::NULL)
-                .is_ok());
-            assert!(view_binding
+                .expect("create all transaction read promise"),
+        )
+        .await
+        .expect("all transaction read resolves");
+        wasm_bindgen_futures::JsFuture::from(
+            view_binding
                 .all_in_transaction_for_identity(
                     &view_query,
                     &tx,
                     alice.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
-                .is_ok());
-            assert!(view_binding
+                .expect("create attributed all transaction read promise"),
+        )
+        .await
+        .expect("attributed all transaction read resolves");
+        wasm_bindgen_futures::JsFuture::from(
+            view_binding
                 .one_in_transaction(&view_query, &tx, JsValue::NULL)
-                .is_ok());
-            assert!(
-                view_binding
-                    .one_in_transaction_for_identity(
-                        &view_query,
-                        &tx,
-                        alice.canonical().as_bytes().to_vec(),
-                        JsValue::NULL,
-                    )
-                    .is_ok(),
-                "registered schema facades share all owner transaction read overloads"
-            );
-
-            let other_owner = Rc::new(
-                block_on(Db::open(DbConfig::new(
-                    schema.clone(),
-                    MemoryStorage::new(&refs).expect("valid memory storage families"),
-                    DbIdentity {
-                        node: jazz::ids::NodeUuid::from_bytes([0x47; 16]),
-                        author: alice,
-                    },
-                )))
-                .unwrap(),
-            );
-            let other_binding = WasmDb {
-                inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(
-                    &other_owner,
-                ))))),
-                owns_runtime: false,
-                trusted_backend: false,
-            };
-            other_binding
-                .begin_transaction(
-                    bound.to_string(),
-                    "exclusive".to_owned(),
-                    Some(alice.canonical().as_bytes().to_vec()),
+                .expect("create one transaction read promise"),
+        )
+        .await
+        .expect("one transaction read resolves");
+        wasm_bindgen_futures::JsFuture::from(
+            view_binding
+                .one_in_transaction_for_identity(
+                    &view_query,
+                    &tx,
+                    alice.canonical().as_bytes().to_vec(),
+                    JsValue::NULL,
                 )
-                .unwrap();
-            block_on(other_owner.exclusive_tx_ref(bound).insert(
-                "items",
-                BTreeMap::from([(
-                    "label".to_owned(),
-                    Value::String("receiver-secret".to_owned()),
-                )]),
-                jazz::db::InsertOptions {
-                    row_id: Some(RowUuid::from_bytes([3; 16])),
-                    ..Default::default()
-                },
-            ))
-            .unwrap();
-            let other_query = WasmPreparedQuery {
-                inner: other_owner
-                    .prepare_query(&other_owner.table("items"))
-                    .unwrap(),
-            };
-            let assert_foreign = |result: Result<Vec<u8>, JsValue>| {
-                assert!(result
-                    .unwrap_err()
-                    .as_string()
-                    .is_some_and(|message| { message.contains("different database runtime") }));
-            };
-            assert_foreign(other_binding.all_in_transaction(&other_query, &tx, JsValue::NULL));
-            assert_foreign(other_binding.all_in_transaction_for_identity(
-                &other_query,
-                &tx,
-                alice.canonical().as_bytes().to_vec(),
-                JsValue::NULL,
-            ));
-            assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
-            assert_foreign(other_binding.one_in_transaction_for_identity(
-                &other_query,
-                &tx,
-                alice.canonical().as_bytes().to_vec(),
-                JsValue::NULL,
-            ));
-            let error = binding
+                .expect("create attributed one transaction read promise"),
+        )
+        .await
+        .expect("attributed one transaction read resolves");
+
+        // Identity validation happens inside the transaction-read future. A
+        // caller cannot reuse Alice's transaction capability while asking the
+        // runtime to evaluate the read as Bob.
+        let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
+        let owner_query = WasmPreparedQuery {
+            inner: owner.prepare_query(&owner.table("items")).unwrap(),
+        };
+        let identity_error = wasm_bindgen_futures::JsFuture::from(
+            binding
                 .all_in_transaction_for_identity(
-                    &query,
+                    &owner_query,
                     &tx,
                     bob.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
-                .unwrap_err();
-            assert!(error
+                .expect("identity mismatch is reported by the transaction read promise"),
+        )
+        .await
+        .expect_err("Bob must not read through Alice's transaction capability");
+        assert!(identity_error
+            .as_string()
+            .is_some_and(|message| message.contains("bound identity")));
+
+        let other_owner = Rc::new(
+            Db::open(DbConfig::new(
+                schema,
+                MemoryStorage::new(&refs).expect("valid second memory storage families"),
+                DbIdentity {
+                    node: jazz::ids::NodeUuid::from_bytes([0x47; 16]),
+                    author: alice,
+                },
+            ))
+            .await
+            .expect("open independent runtime"),
+        );
+        let other_binding = WasmDb {
+            inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(
+                &other_owner,
+            ))))),
+            owns_runtime: false,
+            trusted_backend: false,
+        };
+        let other_query = WasmPreparedQuery {
+            inner: other_owner
+                .prepare_query(&other_owner.table("items"))
+                .unwrap(),
+        };
+        let assert_foreign = |result: Result<js_sys::Promise, JsValue>| {
+            assert!(result
+                .expect_err("foreign transaction must fail before producing a promise")
                 .as_string()
-                .is_some_and(|message| message.contains("bound identity")));
-            binding
-                .commit_transaction(bound.to_string(), Some("exclusive".to_owned()))
-                .unwrap();
-            other_binding
-                .rollback_transaction(bound.to_string())
-                .unwrap();
-        }
+                .is_some_and(|message| message.contains("different database runtime")));
+        };
+        assert_foreign(other_binding.all_in_transaction(&other_query, &tx, JsValue::NULL));
+        assert_foreign(other_binding.all_in_transaction_for_identity(
+            &other_query,
+            &tx,
+            alice.canonical().as_bytes().to_vec(),
+            JsValue::NULL,
+        ));
+        assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
+        assert_foreign(other_binding.one_in_transaction_for_identity(
+            &other_query,
+            &tx,
+            alice.canonical().as_bytes().to_vec(),
+            JsValue::NULL,
+        ));
+        binding
+            .rollback_transaction(tx_id.to_string())
+            .expect("cleanup owner transaction");
     }
 }
