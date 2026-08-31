@@ -60,7 +60,9 @@ export type BrowserForegroundNodeLeaseAcquireResponse =
       /** @internal Test-worker realm marker, never shipped in production. */
       workerRealmId: string;
     }
+  | { type: "foreground-node-lease-busy"; message: string }
   | { type: "foreground-node-lease-error"; message: string }
+  | { type: "worker-closing" }
   /**
    * The worker observed cancellation and either had no lease to clean up or
    * durably retired the lease that finished concurrently with cancellation.
@@ -84,7 +86,8 @@ export type BrowserForegroundNodeLeasePortEvent = {
 export type BrowserSharedWorkerConnectResponse =
   | { type: "worker-alive" }
   | { type: "runtime-ready" }
-  | { type: "runtime-error"; message: string };
+  | { type: "runtime-error"; message: string }
+  | { type: "worker-closing" };
 
 export type BrowserFollowerPortRequest =
   | { type: "init"; id: number; sessionClaims: Record<string, unknown> }

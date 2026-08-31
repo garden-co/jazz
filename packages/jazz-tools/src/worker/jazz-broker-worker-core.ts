@@ -3,6 +3,7 @@ import { loadWasmModule, type WasmModule } from "../runtime/client.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
 import {
   acquireBrowserPhysicalDatabaseEpoch,
+  BrowserPhysicalDatabaseBusyError,
   type BrowserPhysicalDatabaseEpoch,
 } from "../runtime/browser-physical-database-epoch.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
@@ -130,6 +131,9 @@ let wasmModulePromise: Promise<WasmModule> | null = null;
 let wasmModuleSource: string | null = null;
 let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
+let activeBootstrapAdmissions = 0;
+let workerClosing = false;
+let workerClosePromise: Promise<void> | null = null;
 
 /**
  * Open a physical root only after holding its origin-wide liveness fence.
@@ -267,12 +271,34 @@ export function installJazzBrokerWorker(options: JazzBrokerWorkerOptions = {}): 
         return;
       }
       port.removeEventListener("message", onBootstrapMessage);
-      if (message.type === "connect-runtime") {
-        post(port, { type: "worker-alive" });
-        void connectTab(port, message);
-      } else {
-        void acquireForegroundNodeLease(port, message);
+      if (workerClosing) {
+        try {
+          post(port, { type: "worker-closing" });
+        } finally {
+          port.close();
+        }
+        return;
       }
+      // Admission is synchronous with the closing-state check. The worker
+      // therefore cannot cross into global shutdown between accepting this
+      // bootstrap and accounting for its asynchronous work.
+      activeBootstrapAdmissions += 1;
+      void (async () => {
+        try {
+          if (message.type === "connect-runtime") {
+            post(port, { type: "worker-alive" });
+            await connectTab(port, message);
+          } else {
+            await acquireForegroundNodeLease(port, message);
+          }
+        } finally {
+          activeBootstrapAdmissions -= 1;
+          // Give an immediate retry one task to claim admission synchronously.
+          // The deferred check still closes an idle realm, while preserving the
+          // one-way barrier once `maybeCloseWorker` begins global shutdown.
+          setTimeout(maybeCloseWorker, 0);
+        }
+      })();
     };
     port.addEventListener("message", onBootstrapMessage);
     port.start();
@@ -496,10 +522,17 @@ async function acquireForegroundNodeLease(
       return;
     }
     cleanup();
-    post(port, {
-      type: "foreground-node-lease-error",
-      message: asError(error).message,
-    } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    if (error instanceof BrowserPhysicalDatabaseBusyError) {
+      post(port, {
+        type: "foreground-node-lease-busy",
+        message: error.message,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    } else {
+      post(port, {
+        type: "foreground-node-lease-error",
+        message: asError(error).message,
+      } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+    }
     port.close();
   }
 }
@@ -1271,24 +1304,34 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
 }
 
 function maybeCloseWorker(): void {
+  if (workerClosing || workerClosePromise || activeBootstrapAdmissions !== 0) return;
   const hasActiveForegroundLease = [...foregroundLeaseOwners.values()].some(
     (owner) => owner.activeLeaseIds.size > 0 || owner.pendingLeaseAllocations > 0,
   );
-  if (contexts.size === 0 && inspectorControlPorts.size === 0 && !hasActiveForegroundLease) {
-    const databaseNames = new Set<string>([
-      ...foregroundLeaseOwners.keys(),
-      ...physicalDatabaseOwners.keys(),
-    ]);
-    // The physical owner writes/deletes its epoch before closing the shared
-    // page-store handle below. Closing lease aliases first would turn an
-    // otherwise clean handoff into a stale durable epoch.
-    foregroundLeaseOwners.clear();
-    void Promise.all([...databaseNames].map((dbName) => releasePhysicalDatabaseOwner(dbName)))
-      .catch(() => undefined)
-      // Unit harnesses execute the module outside an actual worker global;
-      // production SharedWorkerGlobal always supplies `close`.
-      .finally(() => workerGlobal.close?.());
-  }
+  if (contexts.size !== 0 || inspectorControlPorts.size !== 0 || hasActiveForegroundLease) return;
+
+  // Closing is a one-way admission barrier. Set it before starting any
+  // physical-owner release so no later bootstrap can enter IndexedDB or WASM
+  // work while the prior realm is handing off its durable roots.
+  workerClosing = true;
+  const databaseNames = new Set<string>([
+    ...foregroundLeaseOwners.keys(),
+    ...physicalDatabaseOwners.keys(),
+  ]);
+  // The physical owner writes/deletes its epoch before closing the shared
+  // page-store handle below. Closing lease aliases first would turn an
+  // otherwise clean handoff into a stale durable epoch.
+  foregroundLeaseOwners.clear();
+  workerClosePromise = Promise.all(
+    [...databaseNames].map((dbName) => releasePhysicalDatabaseOwner(dbName)),
+  )
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    // Unit harnesses execute the module outside an actual worker global;
+    // production SharedWorkerGlobal always supplies `close`.
+    .finally(() => workerGlobal.close?.());
 }
 
 function closeContextPeers(context: RuntimeContext): void {

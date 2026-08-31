@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BrowserFollowerPortEvent,
   BrowserFollowerPortRequest,
+  BrowserForegroundNodeLeaseAcquireRequest,
+  BrowserForegroundNodeLeaseAcquireResponse,
   BrowserSharedWorkerConnectRequest,
   BrowserSharedWorkerConnectResponse,
   BrowserWorkerInitOptions,
@@ -148,8 +150,13 @@ vi.mock("../runtime/native-runtime/schema-codec.js", () => ({
 
 type RuntimeOutcome = Extract<
   BrowserSharedWorkerConnectResponse,
-  { type: "runtime-ready" | "runtime-error" }
+  { type: "runtime-ready" | "runtime-error" | "worker-closing" }
 >;
+
+type TestPortMessage =
+  | BrowserSharedWorkerConnectResponse
+  | BrowserForegroundNodeLeaseAcquireResponse
+  | BrowserFollowerPortEvent;
 
 type WorkerGlobal = typeof globalThis & {
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
@@ -159,6 +166,11 @@ class TestPort {
   readonly close = vi.fn();
   readonly start = vi.fn();
   private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
+  readonly messages: TestPortMessage[] = [];
+  private readonly messageWaiters: Array<{
+    predicate: (message: TestPortMessage) => boolean;
+    resolve: (message: TestPortMessage) => void;
+  }> = [];
   private readonly outcomes: RuntimeOutcome[] = [];
   private readonly outcomeWaiters: Array<(outcome: RuntimeOutcome) => void> = [];
   private readonly events: BrowserFollowerPortEvent[] = [];
@@ -177,8 +189,17 @@ class TestPort {
     this.listeners.get(type)?.delete(listener);
   }
 
-  postMessage(message: BrowserSharedWorkerConnectResponse | BrowserFollowerPortEvent): void {
-    if (message.type === "runtime-ready" || message.type === "runtime-error") {
+  postMessage(message: TestPortMessage): void {
+    this.messages.push(message);
+    const messageWaiterIndex = this.messageWaiters.findIndex(({ predicate }) => predicate(message));
+    if (messageWaiterIndex >= 0) {
+      this.messageWaiters.splice(messageWaiterIndex, 1)[0]!.resolve(message);
+    }
+    if (
+      message.type === "runtime-ready" ||
+      message.type === "runtime-error" ||
+      message.type === "worker-closing"
+    ) {
       const waiter = this.outcomeWaiters.shift();
       if (waiter) waiter(message);
       else this.outcomes.push(message);
@@ -187,13 +208,27 @@ class TestPort {
     // Bootstrap liveness is intentionally not a follower event or a runtime
     // connection outcome; tests only retain the latter two protocol classes.
     if (message.type === "worker-alive") return;
+    if (
+      message.type === "foreground-node-lease-ready" ||
+      message.type === "foreground-node-lease-test-allocated" ||
+      message.type === "foreground-node-lease-busy" ||
+      message.type === "foreground-node-lease-error" ||
+      message.type === "foreground-node-lease-cancelled"
+    ) {
+      return;
+    }
     const waiterIndex = this.eventWaiters.findIndex(({ predicate }) => predicate(message));
     if (waiterIndex >= 0) {
       this.eventWaiters.splice(waiterIndex, 1)[0]!.resolve(message);
     } else this.events.push(message);
   }
 
-  emitMessage(message: BrowserSharedWorkerConnectRequest | BrowserFollowerPortRequest): void {
+  emitMessage(
+    message:
+      | BrowserSharedWorkerConnectRequest
+      | BrowserForegroundNodeLeaseAcquireRequest
+      | BrowserFollowerPortRequest,
+  ): void {
     for (const listener of this.listeners.get("message") ?? []) {
       listener({ data: message } as MessageEvent);
     }
@@ -204,6 +239,13 @@ class TestPort {
     if (outcome) return Promise.resolve(outcome);
     const waiter = deferred<RuntimeOutcome>();
     this.outcomeWaiters.push(waiter.resolve);
+    return waiter.promise;
+  }
+  waitForMessage(predicate: (message: TestPortMessage) => boolean): Promise<TestPortMessage> {
+    const message = this.messages.find(predicate);
+    if (message) return Promise.resolve(message);
+    const waiter = deferred<TestPortMessage>();
+    this.messageWaiters.push({ predicate, resolve: waiter.resolve });
     return waiter.promise;
   }
 
@@ -253,17 +295,22 @@ function enabledTelemetryOptions(dbName: string): BrowserWorkerInitOptions {
   };
 }
 
-async function connect(
-  initOptions: BrowserWorkerInitOptions,
-  tabId: string,
-): Promise<{ outcome: RuntimeOutcome; port: TestPort }> {
+function openBootstrapPort(): TestPort {
   const port = new TestPort();
-  const outcome = port.waitForOutcome();
   const onconnect = (globalThis as WorkerGlobal).onconnect;
   if (!onconnect) throw new Error("broker worker did not install its connect handler");
   onconnect({ ports: [port as unknown as MessagePort] } as MessageEvent & {
     ports: MessagePort[];
   });
+  return port;
+}
+
+async function connect(
+  initOptions: BrowserWorkerInitOptions,
+  tabId: string,
+): Promise<{ outcome: RuntimeOutcome; port: TestPort }> {
+  const port = openBootstrapPort();
+  const outcome = port.waitForOutcome();
   port.emitMessage({
     type: "connect-runtime",
     tabId,
@@ -366,11 +413,11 @@ describe("broker worker context initialization", () => {
       message: "telemetry installation failed",
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
-    // Durable root admission deliberately precedes all process-wide WASM and
-    // telemetry work. A telemetry failure therefore closes the already
-    // admitted handle before allowing a retry.
+    // The failed runtime context is evicted immediately, while its admitted
+    // physical root remains open through the retry task. This lets the retry
+    // synchronously retain the realm before global idle close becomes eligible.
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
-    expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
 
     expect(
       (await connect(enabledTelemetryOptions("telemetry-failure"), "retry-tab")).outcome,
@@ -379,6 +426,8 @@ describe("broker worker context initialization", () => {
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
     expect(mocks.installWasmTelemetry).toHaveBeenCalledTimes(2);
+    expect(mocks.openPageStore).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
   });
 
   it("rejects a conflicting page-store owner before WASM, telemetry, native open, or peer admission", async () => {
@@ -411,6 +460,68 @@ describe("broker worker context initialization", () => {
     // rejection after posting the operation-level error.
     await Promise.resolve();
     expect(failed.port.hasEvent((event) => event.type === "result")).toBe(false);
+  });
+
+  it("classifies a busy physical realm without converting permanent lease failures", async () => {
+    expect((await connect(options("lease-classification-anchor"), "anchor-tab")).outcome).toEqual({
+      type: "runtime-ready",
+    });
+    mocks.openPageStore.mockClear();
+    // Resolve after `vi.resetModules()` so the planted error shares the class
+    // identity imported by this test's freshly evaluated worker module.
+    const { BrowserPhysicalDatabaseBusyError } =
+      await import("../runtime/browser-physical-database-epoch.js");
+    const busyError = new BrowserPhysicalDatabaseBusyError("lease-busy");
+    mocks.openPageStore
+      .mockRejectedValueOnce(busyError)
+      .mockRejectedValueOnce(new Error("lease initialization failed"));
+
+    const busyPort = openBootstrapPort();
+    const busyResponse = busyPort.waitForMessage(
+      (message) =>
+        message.type === "foreground-node-lease-busy" ||
+        message.type === "foreground-node-lease-error",
+    );
+    busyPort.emitMessage({
+      type: "acquire-foreground-node-lease",
+      dbName: "lease-busy",
+      storageOwner: "busy-owner",
+    });
+    expect(await busyResponse).toEqual({
+      type: "foreground-node-lease-busy",
+      message: busyError.message,
+    });
+    expect(busyPort.messages).toEqual([
+      {
+        type: "foreground-node-lease-busy",
+        message: busyError.message,
+      },
+    ]);
+    expect(busyPort.close).toHaveBeenCalledOnce();
+
+    const failedPort = openBootstrapPort();
+    const failedResponse = failedPort.waitForMessage(
+      (message) =>
+        message.type === "foreground-node-lease-busy" ||
+        message.type === "foreground-node-lease-error",
+    );
+    failedPort.emitMessage({
+      type: "acquire-foreground-node-lease",
+      dbName: "lease-permanent-failure",
+      storageOwner: "failed-owner",
+    });
+    expect(await failedResponse).toEqual({
+      type: "foreground-node-lease-error",
+      message: "lease initialization failed",
+    });
+    expect(failedPort.messages).toEqual([
+      {
+        type: "foreground-node-lease-error",
+        message: "lease initialization failed",
+      },
+    ]);
+    expect(failedPort.close).toHaveBeenCalledOnce();
+    expect(mocks.openPageStore).toHaveBeenCalledTimes(2);
   });
 
   it("does not start WASM or telemetry when page-store opening fails and retries the same key", async () => {
@@ -464,7 +575,7 @@ describe("broker worker context initialization", () => {
     expect(mocks.fromDb.mock.calls[0]?.[2]).not.toBe(mocks.pageStores[0]?.canonicalReplicaNode);
   });
 
-  it("closes the page store and telemetry when browser DB opening fails, then retries", async () => {
+  it("disposes telemetry but retains the physical page store when browser DB opening fails, then retries", async () => {
     const rejectedConfig = Uint8Array.from([0xd4]);
     const retryConfig = Uint8Array.from([0xe5]);
     mocks.openConfig.mockReturnValueOnce(rejectedConfig).mockReturnValueOnce(retryConfig);
@@ -475,7 +586,7 @@ describe("broker worker context initialization", () => {
       type: "runtime-error",
       message: "browser DB open failed",
     });
-    expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
     expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
 
     expect(
@@ -483,15 +594,14 @@ describe("broker worker context initialization", () => {
     ).toEqual({
       type: "runtime-ready",
     });
-    expect(mocks.pageStores).toHaveLength(2);
-    expect(mocks.pageStores[1]?.close).not.toHaveBeenCalled();
+    expect(mocks.pageStores).toHaveLength(1);
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
     expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
-    // A failed WASM open evicts its context and retries from a newly opened
-    // page-store handle. Each attempt must derive its opaque config from that
-    // attempt's admitted physical-replica identity.
+    // Both context attempts use the still-admitted physical replica identity,
+    // while each native open retains the opaque config created for that attempt.
     expect(mocks.openConfig.mock.calls[0]?.[0]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
-    expect(mocks.openConfig.mock.calls[1]?.[0]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
+    expect(mocks.openConfig.mock.calls[1]?.[0]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
     expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
   });
@@ -518,7 +628,7 @@ describe("broker worker context initialization", () => {
     expect(mocks.browserDbs[0]?.setRelayAuthoritySessionOwner).toHaveBeenCalledOnce();
   });
 
-  it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
+  it("closes an unowned browser DB, retains the physical page store, and retries", async () => {
     const rawDb = mocks.createBrowserDb();
     mocks.openBrowser.mockResolvedValueOnce(rawDb);
     const rejectedConfig = Uint8Array.from([0xd4]);
@@ -535,30 +645,25 @@ describe("broker worker context initialization", () => {
     });
     expect(failed.port.close).toHaveBeenCalledOnce();
     expect(rawDb.close).toHaveBeenCalledOnce();
-    expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
     expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
 
     expect(
       (await connect(enabledTelemetryOptions("adapter-failure"), "retry-tab")).outcome,
     ).toEqual({ type: "runtime-ready" });
     expect(rawDb.close).toHaveBeenCalledOnce();
-    expect(mocks.pageStores).toHaveLength(2);
-    expect(mocks.pageStores[1]?.close).not.toHaveBeenCalled();
+    expect(mocks.pageStores).toHaveLength(1);
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
     expect(mocks.telemetryDisposers).toHaveLength(2);
     expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
     expect(mocks.fromDb).toHaveBeenCalledTimes(2);
-    // The failed context has a different persisted node and config from its
-    // retry. Verify both native opens and both adapter constructions retain
-    // their own pairing rather than silently substituting a constant node.
-    expect(mocks.pageStores[0]?.canonicalReplicaNode).not.toEqual(
-      mocks.pageStores[1]?.canonicalReplicaNode,
-    );
+    // The retry reuses the admitted physical node, but each native open and
+    // adapter construction still receives its own opaque open configuration.
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
     expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
     expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
-    expect(mocks.fromDb.mock.calls[1]?.[2]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
-    expect(mocks.fromDb.mock.calls[0]?.[2]).not.toEqual(mocks.fromDb.mock.calls[1]?.[2]);
+    expect(mocks.fromDb.mock.calls[1]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
   });
 
   it("shares one successful initialization between concurrent connections for the same key", async () => {
@@ -617,6 +722,85 @@ describe("broker worker context initialization", () => {
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
+  });
+
+  it("publishes closing before releasing the last physical owner and rejects new bootstraps", async () => {
+    vi.useFakeTimers();
+    const releaseGate = deferred<void>();
+    const workerClosed = deferred<void>();
+    const closeWorker = vi.fn(() => workerClosed.resolve());
+    const previousClose = Object.getOwnPropertyDescriptor(globalThis, "close");
+    Object.defineProperty(globalThis, "close", {
+      configurable: true,
+      value: closeWorker,
+    });
+
+    try {
+      const initOptions = options("closing-owner");
+      const owner = await connect(initOptions, "owner-tab");
+      expect(owner.outcome).toEqual({ type: "runtime-ready" });
+      const pageStore = mocks.pageStores[0]!;
+      pageStore.releaseBrowserWorkerEpoch.mockReturnValueOnce(releaseGate.promise);
+
+      const closeResult = owner.port.waitForEvent(
+        (event) => event.type === "result" && event.id === 1,
+      );
+      owner.port.emitMessage({
+        type: "close",
+        id: 1,
+        releaseContext: true,
+      });
+      await closeResult;
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(pageStore.releaseBrowserWorkerEpoch).toHaveBeenCalledOnce();
+      expect(closeWorker).not.toHaveBeenCalled();
+
+      const runtimePort = openBootstrapPort();
+      runtimePort.emitMessage({
+        type: "connect-runtime",
+        tabId: "late-runtime-tab",
+        fingerprint: "shared-fingerprint",
+        options: initOptions,
+      });
+      const leasePort = openBootstrapPort();
+      leasePort.emitMessage({
+        type: "acquire-foreground-node-lease",
+        dbName: initOptions.dbName,
+        storageOwner: initOptions.storageOwner,
+      });
+
+      expect(runtimePort.messages).toEqual([{ type: "worker-closing" }]);
+      expect(runtimePort.close).toHaveBeenCalledOnce();
+      expect(leasePort.messages).toEqual([{ type: "worker-closing" }]);
+      expect(leasePort.close).toHaveBeenCalledOnce();
+      expect(mocks.openPageStore).toHaveBeenCalledOnce();
+      expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
+      expect(mocks.installWasmTelemetry).toHaveBeenCalledOnce();
+      expect(mocks.openConfig).toHaveBeenCalledOnce();
+      expect(mocks.openBrowser).toHaveBeenCalledOnce();
+      expect(mocks.fromDb).toHaveBeenCalledOnce();
+      expect(mocks.runtimes).toHaveLength(1);
+
+      releaseGate.resolve();
+      await workerClosed.promise;
+      await Promise.resolve();
+
+      expect(pageStore.close).toHaveBeenCalledOnce();
+      expect(closeWorker).toHaveBeenCalledOnce();
+      expect(mocks.openPageStore).toHaveBeenCalledOnce();
+      expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
+      expect(mocks.installWasmTelemetry).toHaveBeenCalledOnce();
+      expect(mocks.openConfig).toHaveBeenCalledOnce();
+      expect(mocks.openBrowser).toHaveBeenCalledOnce();
+      expect(mocks.fromDb).toHaveBeenCalledOnce();
+      expect(mocks.runtimes).toHaveLength(1);
+    } finally {
+      releaseGate.resolve();
+      vi.useRealTimers();
+      if (previousClose) Object.defineProperty(globalThis, "close", previousClose);
+      else Reflect.deleteProperty(globalThis, "close");
+    }
   });
 
   it("serializes cross-port disconnect and reconnect before publishing state", async () => {
