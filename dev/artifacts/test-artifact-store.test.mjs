@@ -247,7 +247,9 @@ test("producer manifest binds sealed artifacts to every relevant source input", 
       nativeExpectation("EXPECTED_WASM_ARTIFACT_FINGERPRINT", "a".repeat(64)),
     );
     assert.doesNotThrow(() => correctnessArtifactConsumerEnvironment(root));
-    assert.doesNotThrow(() => verifyCorrectnessArtifactConsumerEnvironment(root, consumerEnvironment));
+    assert.doesNotThrow(() =>
+      verifyCorrectnessArtifactConsumerEnvironment(root, consumerEnvironment),
+    );
 
     // A later mutable WASM package publication is not consumer authority: the
     // content-addressed snapshot remains selected by the producer manifest.

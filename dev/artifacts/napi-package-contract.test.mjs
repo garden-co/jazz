@@ -173,7 +173,7 @@ test("NAPI prepack publishes the validated generation bytes despite source inter
       beforePublish: () => {
         writeFileSync(binding, "planted replacement native bytes\n");
         writeFileSync(loader, "planted replacement loader\n");
-        writeFileSync(manifest, "{\"planted\":true}\n");
+        writeFileSync(manifest, '{"planted":true}\n');
       },
     });
 
@@ -181,7 +181,10 @@ test("NAPI prepack publishes the validated generation bytes despite source inter
       readFileSync(join(fixtureRoot.packageDir, `jazz-napi.${target}.node`)),
       expected.binding,
     );
-    assert.deepEqual(readFileSync(join(fixtureRoot.packageDir, "native-loader.cjs")), expected.loader);
+    assert.deepEqual(
+      readFileSync(join(fixtureRoot.packageDir, "native-loader.cjs")),
+      expected.loader,
+    );
     assert.deepEqual(
       readFileSync(join(fixtureRoot.packageDir, `jazz-napi.${target}.manifest.json`)),
       expected.manifest,

@@ -588,15 +588,16 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const sealBaseline = shard.steps.find(
     (step) => step.name === "Seal clean checked-out source baseline",
   );
-  const checkout = shard.steps.find(
-    (step) => step.uses?.startsWith("actions/checkout@"),
-  );
+  const checkout = shard.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
   assert.equal(
     checkout?.with?.clean,
     false,
     "shadow checkout must preserve residue for the source-baseline receipt",
   );
-  assert.ok(preCheckout, "shadow must inspect its inherited workspace before checkout can mutate it");
+  assert.ok(
+    preCheckout,
+    "shadow must inspect its inherited workspace before checkout can mutate it",
+  );
   assert.match(preCheckout.run, /git -C "\$workspace" status --short --untracked-files=all/);
   assert.match(preCheckout.run, /pre-checkout workspace contains source residue/);
   assert.ok(

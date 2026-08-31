@@ -110,7 +110,9 @@ export function stageNapiLoader(root, platform, { beforePublish = undefined } = 
     bindingBytes,
   );
   if (provenanceProblem)
-    throw new Error(`active NAPI generation manifest is invalid for ${platform}: ${provenanceProblem}`);
+    throw new Error(
+      `active NAPI generation manifest is invalid for ${platform}: ${provenanceProblem}`,
+    );
   beforePublish?.();
   // A working tree can retain root-level outputs from another platform build.
   // Clear only the package-admitted generated-artifact namespace, leaving
