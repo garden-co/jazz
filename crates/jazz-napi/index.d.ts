@@ -398,7 +398,8 @@ export interface UpdateOptions {
 
 export interface UpsertOptions {
   author?: Uint8Array
-  branch?: JsonValue
+  head?: JsonValue
+  base?: JsonValue
   updatedAtMs?: number
 }
 

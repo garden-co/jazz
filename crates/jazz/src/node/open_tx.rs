@@ -589,6 +589,7 @@ where
             branch,
             known_fresh_row,
             None,
+            false,
         )
     }
 
@@ -611,6 +612,7 @@ where
         branch: BranchSelector,
         known_fresh_row: bool,
         verified_inherited_cells: Option<BTreeMap<String, Value>>,
+        replace_pending_deletion: bool,
     ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
@@ -638,6 +640,7 @@ where
                 known_fresh_row,
                 verified_inherited_cells,
             },
+            replace_pending_deletion,
         )
     }
 
@@ -678,6 +681,7 @@ where
             patch,
             now_ms,
             BranchSelector::default(),
+            false,
         )
         .await
     }
@@ -692,6 +696,7 @@ where
         patch: BTreeMap<String, Value>,
         now_ms: Option<u64>,
         branch: BranchSelector,
+        replace_pending_deletion: bool,
     ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
@@ -702,17 +707,9 @@ where
             ));
         }
         let mut staged_cells = self
-            .visible_current_cells_in_branch(table, &branch, row_uuid)
+            .tx_visible_current_cells_in_branch(tx_id, table, row_uuid, &branch)
             .await?
             .unwrap_or_default();
-        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
-            write.table == table && write.row_uuid == row_uuid && write.branch == branch
-        }) {
-            match &write.cells {
-                PendingCells::Replace(cells) => staged_cells = cells.clone(),
-                PendingCells::Patch(patch) => staged_cells.extend(patch.clone()),
-            }
-        }
         staged_cells.extend(patch.clone());
         validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
@@ -732,6 +729,69 @@ where
                 known_fresh_row: false,
                 verified_inherited_cells: None,
             },
+            replace_pending_deletion,
+        )
+    }
+
+    pub(crate) async fn tx_current_row_state_in_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_uuid: RowUuid,
+        branch: &BranchSelector,
+    ) -> Result<TransactionBranchRowState, Error> {
+        let mut cells = self
+            .visible_current_cells_in_branch(table, branch, row_uuid)
+            .await?;
+        let mut pending_deletion = false;
+        let mut staged_content = false;
+        for write in self.open_tx(tx_id)?.writes.iter().filter(|write| {
+            write.table == table && write.row_uuid == row_uuid && &write.branch == branch
+        }) {
+            match write.deletion {
+                Some(DeletionEvent::Deleted) => {
+                    cells = None;
+                    pending_deletion = true;
+                    continue;
+                }
+                Some(DeletionEvent::Restored) => pending_deletion = false,
+                None => {}
+            }
+            staged_content = true;
+            match &write.cells {
+                PendingCells::Replace(replacement) => cells = Some(replacement.clone()),
+                PendingCells::Patch(patch) => cells.get_or_insert_default().extend(patch.clone()),
+            }
+        }
+        if pending_deletion {
+            return Ok(TransactionBranchRowState::PendingDeletion);
+        }
+        Ok(match cells {
+            Some(cells) => TransactionBranchRowState::Visible {
+                cells,
+                staged: staged_content,
+            },
+            None => TransactionBranchRowState::Absent,
+        })
+    }
+
+    pub(crate) async fn tx_visible_current_cells_in_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row_uuid: RowUuid,
+        branch: &BranchSelector,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        Ok(
+            match self
+                .tx_current_row_state_in_branch(tx_id, table, row_uuid, branch)
+                .await?
+            {
+                TransactionBranchRowState::Visible { cells, .. } => Some(cells),
+                TransactionBranchRowState::PendingDeletion | TransactionBranchRowState::Absent => {
+                    None
+                }
+            },
         )
     }
 
@@ -739,11 +799,24 @@ where
         &mut self,
         tx_id: OpenTransactionId,
         mut pending: PendingWrite,
+        replace_pending_deletion: bool,
     ) -> Result<(), Error> {
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
             .base_snapshot_rows
             .retain(|(_, table, row), _| table != &pending.table || *row != pending.row_uuid);
+        // A branch-view upsert may supersede a delete staged by this same
+        // transaction. Reach this point only after validating the replacement,
+        // then remove exactly that coordinate's pending tombstone atomically
+        // with staging the visible content.
+        if replace_pending_deletion {
+            open_tx.writes.retain(|write| {
+                write.table != pending.table
+                    || write.row_uuid != pending.row_uuid
+                    || write.branch != pending.branch
+                    || write.deletion != Some(DeletionEvent::Deleted)
+            });
+        }
         if pending.deletion.is_none() {
             if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
                 write.table == pending.table
@@ -1528,6 +1601,22 @@ where
         }
         Ok((cells, deleted))
     }
+}
+
+/// Exact-branch row state after applying one open transaction's staged writes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TransactionBranchRowState {
+    /// Visible content, with whether this transaction supplied any of it.
+    Visible {
+        /// Current exact-branch cells after applying the staged overlay.
+        cells: BTreeMap<String, Value>,
+        /// Whether at least one visible content write came from this transaction.
+        staged: bool,
+    },
+    /// A delete staged by this transaction hides otherwise visible content.
+    PendingDeletion,
+    /// Neither committed nor staged content exists in the exact branch.
+    Absent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

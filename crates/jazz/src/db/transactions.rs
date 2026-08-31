@@ -240,6 +240,7 @@ where
             now_ms,
             known_fresh_row,
             None,
+            false,
         )
         .await
     }
@@ -257,6 +258,7 @@ where
         now_ms: Option<u64>,
         known_fresh_row: bool,
         verified_inherited_cells: Option<RowCells>,
+        replace_pending_deletion: bool,
     ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
@@ -275,6 +277,7 @@ where
             branch,
             known_fresh_row,
             verified_inherited_cells,
+            replace_pending_deletion,
         )?;
         Ok(())
     }
@@ -348,6 +351,7 @@ where
                     patch,
                     now_ms,
                     head,
+                    false,
                 )
                 .await?;
             return Ok(());
@@ -376,6 +380,7 @@ where
             now_ms,
             false,
             Some(verified_inherited_cells),
+            false,
         )
         .await
     }
@@ -385,9 +390,14 @@ where
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
+        let exists = self.transaction_read(tx_id, table, row).await?.is_some();
+        if !exists {
+            self.ensure_row_not_deleted(table, row).await?;
+        }
         self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
-            .await
+            .await?;
+        Ok(exists)
     }
 
     async fn require_mergeable_transaction_read_visibility(
@@ -437,6 +447,136 @@ where
             return Err(read_for_write_denied(operation, table));
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn stage_mergeable_upsert_in_branch_view(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
+        self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
+            .await?;
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
+        let mut node = self.node.node.lock().await;
+        let (head_exists, staged_head, replace_pending_deletion) = match node
+            .tx_current_row_state_in_branch(tx_id, table, row, &head)
+            .await?
+        {
+            TransactionBranchRowState::Visible { staged, .. } => (true, staged, false),
+            TransactionBranchRowState::PendingDeletion => (
+                node.visible_current_cells_in_branch(table, &head, row)
+                    .await?
+                    .is_some(),
+                false,
+                true,
+            ),
+            TransactionBranchRowState::Absent => (false, false, false),
+        };
+        let inherited = if head_exists {
+            None
+        } else {
+            node.visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                .await?
+        };
+        drop(node);
+
+        if head_exists {
+            if let Some(identity) = permission_subject {
+                let visible = if staged_head {
+                    match self.table_schema(table)?.read_policy.clone() {
+                        None => true,
+                        Some(_) if identity == AuthorSubject::SYSTEM => true,
+                        Some(policy) => {
+                            self.node
+                                .node
+                                .lock()
+                                .await
+                                .read_policy_query_allows_open_tx_row(
+                                    tx_id,
+                                    &policy,
+                                    self.schema_version_id,
+                                    row,
+                                    identity,
+                                )
+                                .await?
+                        }
+                    }
+                } else {
+                    self.visible_branch_view_cells_for_identity(
+                        table,
+                        &head,
+                        base.as_ref(),
+                        row,
+                        identity,
+                    )
+                    .await?
+                    .is_some()
+                };
+                if !visible {
+                    return Err(read_for_write_denied("UPSERT", table));
+                }
+            }
+            if cells.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "branch upsert update requires at least one authored column",
+                ));
+            }
+            let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+            self.node
+                .node
+                .lock()
+                .await
+                .tx_patch_mergeable_in_schema_and_branch(
+                    tx_id,
+                    self.schema_version_id,
+                    table,
+                    row,
+                    cells,
+                    now_ms,
+                    head,
+                    replace_pending_deletion,
+                )
+                .await?;
+            return Ok(());
+        }
+
+        if inherited.is_some()
+            && let Some(identity) = permission_subject
+            && self
+                .visible_branch_view_cells_for_identity(table, &head, base.as_ref(), row, identity)
+                .await?
+                .is_none()
+        {
+            return Err(read_for_write_denied("UPSERT", table));
+        }
+        let verified_inherited_cells = inherited.clone();
+        let mut inserted = inherited.unwrap_or_default();
+        inserted.extend(cells);
+        self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
+            tx_id,
+            table,
+            head,
+            row,
+            inserted,
+            now_ms,
+            false,
+            verified_inherited_cells,
+            replace_pending_deletion,
+        )
+        .await
     }
 
     pub(super) async fn stage_mergeable_delete(

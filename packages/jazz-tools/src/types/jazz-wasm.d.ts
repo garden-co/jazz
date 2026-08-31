@@ -66,12 +66,12 @@ declare module "jazz-wasm" {
     base?: unknown;
   };
 
-  export type UpsertOptions = WriteOptions & {
-    branch?: unknown;
-  };
+  export type UpsertOptions = UpdateOptions;
 
   export type DeleteOptions = UpdateOptions;
-  export type RestoreOptions = UpsertOptions;
+  export type RestoreOptions = WriteOptions & {
+    branch?: unknown;
+  };
 
   export class WasmTx {
     insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;

@@ -1272,7 +1272,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: TimestampOverrideOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
   ): WriteHandle {
@@ -1287,7 +1287,7 @@ export class JazzClient {
     table: string,
     objectId: string,
     values: InsertValues,
-    options?: TimestampOverrideOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
     openTransactionId?: OpenTransactionId,
@@ -1298,6 +1298,7 @@ export class JazzClient {
       attribution,
       openTransactionId,
       options?.updatedAt,
+      options?.branch,
     );
     return this.runtime.upsert(table, objectId, values, writeContext);
   }

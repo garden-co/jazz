@@ -442,11 +442,25 @@ describe("JazzClient transaction query plumbing", () => {
         branch: { head, base: { kind: "current", branch: base } },
       },
     );
+    client.upsert(
+      "todos",
+      "00000000-0000-0000-0000-000000000002",
+      {},
+      {
+        branch: { head, base: { kind: "current", branch: base } },
+      },
+    );
 
     expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
       branch_view: { head: { values: { workspace: [1, 4, 7, 0, 0, 0] } } },
     });
     expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
+      branch_view: {
+        head: { values: { workspace: [1, 4, 7, 0, 0, 0] } },
+        base: { Current: { values: { workspace: [1, 4, 1, 0, 0, 0] } } },
+      },
+    });
+    expect(JSON.parse(runtime.upsert.mock.calls[0][3] as string)).toMatchObject({
       branch_view: {
         head: { values: { workspace: [1, 4, 7, 0, 0, 0] } },
         base: { Current: { values: { workspace: [1, 4, 1, 0, 0, 0] } } },

@@ -390,6 +390,51 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("rejects a removed upsert branch option by JavaScript property presence", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const db = NapiDb.openMemory(
+      encodeSchema(TEST_SCHEMA),
+      openConfig(
+        deterministicBytes("napi-upsert-removed-branch:node"),
+        testAuthorBytes("napi-upsert-removed-branch:author"),
+        1,
+        true,
+      ),
+    );
+    const upsert = (options: object) =>
+      // The rejected options must win over deliberately invalid row bytes: this
+      // exercises the raw native JavaScript boundary, not only the Rust parser.
+      (
+        db as unknown as {
+          upsertEncoded(
+            table: string,
+            rowId: Uint8Array,
+            cells: Uint8Array,
+            options: object,
+          ): unknown;
+        }
+      ).upsertEncoded("todos", new Uint8Array(16), new Uint8Array(), options);
+
+    const removed = /option `branch` is not supported; use `head`/;
+    expect(() => upsert({ branch: undefined })).toThrow(removed);
+    expect(() => upsert({ branch: null })).toThrow(removed);
+    expect(() => upsert({ branch: undefined, head: { branch: "draft" } })).toThrow(removed);
+
+    const inherited = Object.create({ branch: undefined });
+    expect(() => upsert(inherited)).toThrow(removed);
+
+    const getter = Object.defineProperty({}, "branch", {
+      get() {
+        throw new Error("removed branch getter must never be evaluated");
+      },
+    });
+    expect(() => upsert(getter)).toThrow(removed);
+
+    const proxied = new Proxy({}, { has: (_target, key) => key === "branch" });
+    expect(() => upsert(proxied)).toThrow(removed);
+    db.close?.();
+  });
+
   it("selects and filters public provenance authors as canonical text", async () => {
     const { NapiDb } = await loadNapiModule();
     const authorSeed = "jazz-napi-public-provenance:author";
