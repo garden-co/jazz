@@ -731,6 +731,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
+  private readonly queryCoverageTraceListeners = new Set<
+    (entry: {
+      stage: "attach" | "covered";
+      peerActivityEpoch: number;
+      peerProcessedActivityEpoch: number;
+    }) => void
+  >();
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
   // A non-durable follower needs a worker response before trusting native
@@ -899,6 +906,32 @@ export class NativeRuntimeAdapter implements Runtime {
         this.serverTransport?.setAuxiliaryTraceEnabled?.(false);
       }
     };
+  }
+
+  /** @internal Redacted browser-worker lifecycle diagnostics. */
+  onQueryCoverageTrace(
+    listener: (entry: {
+      stage: "attach" | "covered";
+      peerActivityEpoch: number;
+      peerProcessedActivityEpoch: number;
+    }) => void,
+  ): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onQueryCoverageTrace(listener);
+    this.queryCoverageTraceListeners.add(listener);
+    return () => this.queryCoverageTraceListeners.delete(listener);
+  }
+
+  private emitQueryCoverageTrace(stage: "attach" | "covered"): void {
+    if (this !== this.ownerRuntime) {
+      this.ownerRuntime.emitQueryCoverageTrace(stage);
+      return;
+    }
+    const entry = {
+      stage,
+      peerActivityEpoch: this.peerTransportActivityEpoch,
+      peerProcessedActivityEpoch: this.peerTransportProcessedActivityEpoch,
+    };
+    for (const listener of this.queryCoverageTraceListeners) listener(entry);
   }
 
   notifyPeerTransportActivity(): void {
@@ -2750,6 +2783,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } else {
       attachment = this.db.attachQuery(query, opts);
     }
+    this.emitQueryCoverageTrace("attach");
     if (!this.db.queryAttachmentIsCovered) return attachment;
     const coverageKey = this.coverageKey(session);
     const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
@@ -2793,6 +2827,7 @@ export class NativeRuntimeAdapter implements Runtime {
       confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
       this.peerCoveredQueries.set(query, confirmations);
     }
+    this.emitQueryCoverageTrace("covered");
     return attachment;
   }
 

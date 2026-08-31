@@ -89,6 +89,13 @@ export type BrowserSharedWorkerConnectResponse =
 export type BrowserFollowerPortRequest =
   | { type: "init"; id: number; sessionClaims: Record<string, unknown> }
   | { type: "frames"; frames: Uint8Array[] }
+  /** @internal Trace-only redacted query-coverage progress from a foreground tab. */
+  | {
+      type: "diagnostic-query-coverage";
+      stage: "attach" | "covered";
+      peerActivityEpoch: number;
+      peerProcessedActivityEpoch: number;
+    }
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
@@ -116,6 +123,32 @@ export interface BrowserInspectorContext {
 }
 
 /**
+ * Bounded, redacted lifecycle evidence for diagnosing browser-worker stalls.
+ * It deliberately carries no query text, row data, credentials, or wire
+ * frames: ordering and counters are enough to establish handoff progress.
+ */
+export type BrowserWorkerLifecycleTrace = {
+  sequence: number;
+  event:
+    | "bootstrap-start"
+    | "lease-request"
+    | "lease-admitted"
+    | "peer-attached"
+    | "peer-frames"
+    | "query-attach"
+    | "query-covered"
+    | "owner-release-start"
+    | "owner-release-finished";
+  dbName: string;
+  peerCount: number;
+  pendingBootstraps: number;
+  activeLeases: number;
+  frameCount?: number;
+  peerActivityEpoch?: number;
+  peerProcessedActivityEpoch?: number;
+};
+
+/**
  * Redacted flight-recorder entry for a browser chunk relay. Hashes and
  * locators are short fingerprints; no retrieval capability is exposed.
  */
@@ -134,6 +167,7 @@ export type BrowserRelayTrace = {
 
 export type BrowserInspectorControlRequest =
   | { type: "list-contexts"; id: number }
+  | { type: "lifecycle-trace"; id: number }
   | { type: "terminate-worker"; id: number }
   | {
       type: "attach-context";
@@ -146,6 +180,7 @@ export type BrowserInspectorControlRequest =
 
 export type BrowserInspectorControlEvent =
   | { type: "contexts"; id: number; contexts: BrowserInspectorContext[] }
+  | { type: "lifecycle-trace"; id: number; entries: BrowserWorkerLifecycleTrace[] }
   | { type: "result"; id: number; error?: string };
 
 export type BrowserFollowerPortEvent =

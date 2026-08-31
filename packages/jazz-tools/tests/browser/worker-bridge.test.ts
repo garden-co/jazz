@@ -82,6 +82,21 @@ async function listWorkerContexts(port: MessagePort): Promise<BrowserInspectorCo
   });
 }
 
+async function listWorkerLifecycle(
+  port: MessagePort,
+): Promise<Extract<BrowserInspectorControlEvent, { type: "lifecycle-trace" }>["entries"]> {
+  const id = nextInspectorRequestId++;
+  return new Promise((resolve) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "lifecycle-trace" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      resolve(event.data.entries);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "lifecycle-trace", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
 async function waitForWorkerContextRelease(port: MessagePort, dbName: string): Promise<void> {
   await waitForCondition(
     async () => !(await listWorkerContexts(port)).some((context) => context.dbName === dbName),
@@ -845,6 +860,43 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     expect(db).toBeDefined();
     expect(db).toBeInstanceOf(Db);
+  });
+
+  it("exposes a bounded redacted worker lifecycle ledger to the owning inspector", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("worker-lifecycle-ledger");
+    const db = track(
+      await createDb({
+        appId: syncServer.appId,
+        serverUrl: syncServer.serverUrl,
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: uniqueDbName("worker-lifecycle-ledger") },
+        logLevel: "trace",
+        schema: app,
+      }),
+    );
+    // `createDb` resolves after the foreground runtime is available; the
+    // worker follower is installed on the first public read.
+    await db.all(allTodos, { tier: "local" });
+    const inspector = await db.openInspectorControlPort();
+    inspector.start();
+    try {
+      const entries = await listWorkerLifecycle(inspector);
+      expect(entries.map((entry) => entry.event)).toEqual(
+        expect.arrayContaining(["bootstrap-start", "peer-attached"]),
+      );
+      expect(entries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sequence: expect.any(Number),
+            peerCount: expect.any(Number),
+            pendingBootstraps: expect.any(Number),
+            activeLeases: expect.any(Number),
+          }),
+        ]),
+      );
+    } finally {
+      inspector.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+    }
   });
 
   it("registers concurrent local subscriptions before worker admission while withholding openings", async () => {
