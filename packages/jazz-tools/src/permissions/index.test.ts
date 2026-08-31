@@ -443,10 +443,12 @@ describe("permissions DSL", () => {
 
   it("rejects an unbranded policy expression on a table without a type column", () => {
     // Simulate plain JavaScript or an outdated structurally typed helper bypassing the type brand.
-    const unbrandedExpression = { type: "True" } as unknown as PermissionExpressionInput;
+    const unbrandedExpression = { type: "True" };
 
     expect(() =>
-      definePermissions(app, ({ policy }) => [policy.todos.allowRead.where(unbrandedExpression)]),
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where(unbrandedExpression as never),
+      ]),
     ).toThrowError(
       'Unbranded permission condition with policy expression discriminator "True" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).',
     );
@@ -457,7 +459,7 @@ describe("permissions DSL", () => {
 
     expect(() =>
       definePermissions(app, ({ policy }) => [
-        policy.todos.allowRead.where(policy.projects.exists.where(unbrandedExpression)),
+        policy.todos.allowRead.where(policy.projects.exists.where(unbrandedExpression as never)),
       ]),
     ).toThrowError(
       'Unbranded permission condition with policy expression discriminator "True" cannot be treated as row data because this table has no "type" column. Wrap manually-authored policy IR with raw(...).',
@@ -497,11 +499,9 @@ describe("permissions DSL", () => {
   });
 
   it("keeps non-discriminator type comparisons in nested table exists conditions", () => {
-    const ordinaryTypeComparison = {
-      type: "custom-row-kind",
-    } as unknown as PermissionExpressionInput;
+    const ordinaryTypeComparison = { type: "custom-row-kind" };
     const compiled = definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.where(policy.projects.exists.where(ordinaryTypeComparison)),
+      policy.todos.allowRead.where(policy.projects.exists.where(ordinaryTypeComparison as never)),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
