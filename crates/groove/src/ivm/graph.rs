@@ -1577,7 +1577,7 @@ impl NodeDescriptor {
                 for &field_idx in arg_max_by
                     .group_field_indices
                     .iter()
-                    .chain(&arg_max_by.primary_key_field_indices)
+                    .chain(&arg_max_by.comparison_field_indices)
                 {
                     if field_idx >= input_outputs[0].fields().len() {
                         return Err(GraphValidationError::FieldIndexOutOfBounds {
@@ -1595,7 +1595,7 @@ impl NodeDescriptor {
                 for &field_idx in arg_min_by
                     .group_field_indices
                     .iter()
-                    .chain(&arg_min_by.primary_key_field_indices)
+                    .chain(&arg_min_by.comparison_field_indices)
                 {
                     if field_idx >= input_outputs[0].fields().len() {
                         return Err(GraphValidationError::FieldIndexOutOfBounds {

@@ -300,7 +300,7 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| resolve_field_ref(&output, field))
                     .collect::<Result<Vec<_>, _>>()?;
-                let primary_key_field_indices =
+                let comparison_field_indices =
                     if let GraphBuilder::Table { table, .. } = input.as_ref() {
                         let table_schema = self
                             .schema
@@ -329,11 +329,7 @@ impl IvmRuntime {
                         )?;
                         primary_key_field_indices
                     } else {
-                        group_field_indices
-                            .iter()
-                            .chain(&order_field_indices)
-                            .copied()
-                            .collect()
+                        arg_by_comparison_field_indices(&group_field_indices, &order_field_indices)
                     };
                 let group_field_names = group_field_indices
                     .iter()
@@ -355,7 +351,7 @@ impl IvmRuntime {
                             group_fields: group_field_names,
                             order_fields: order_field_names,
                             group_field_indices,
-                            primary_key_field_indices,
+                            comparison_field_indices,
                         }),
                         [arrangement],
                         output,
@@ -385,7 +381,7 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| resolve_field_ref(&output, field))
                     .collect::<Result<Vec<_>, _>>()?;
-                let primary_key_field_indices =
+                let comparison_field_indices =
                     if let GraphBuilder::Table { table, .. } = input.as_ref() {
                         let table_schema = self
                             .schema
@@ -414,11 +410,7 @@ impl IvmRuntime {
                         )?;
                         primary_key_field_indices
                     } else {
-                        group_field_indices
-                            .iter()
-                            .chain(&order_field_indices)
-                            .copied()
-                            .collect()
+                        arg_by_comparison_field_indices(&group_field_indices, &order_field_indices)
                     };
                 let group_field_names = group_field_indices
                     .iter()
@@ -440,7 +432,7 @@ impl IvmRuntime {
                             group_fields: group_field_names,
                             order_fields: order_field_names,
                             group_field_indices,
-                            primary_key_field_indices,
+                            comparison_field_indices,
                         }),
                         [arrangement],
                         output,
@@ -1480,4 +1472,15 @@ impl IvmRuntime {
 
 fn graph_builder_key(graph: &GraphBuilder) -> usize {
     std::ptr::from_ref(graph).addr()
+}
+
+fn arg_by_comparison_field_indices(
+    group_field_indices: &[usize],
+    order_field_indices: &[usize],
+) -> Vec<usize> {
+    group_field_indices
+        .iter()
+        .chain(order_field_indices)
+        .copied()
+        .collect()
 }

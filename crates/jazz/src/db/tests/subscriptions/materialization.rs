@@ -45,12 +45,43 @@ fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
         Default::default(),
     )
     .unwrap();
-    let SubscriptionEvent::Delta { updated, .. } = block_on(subscription.next_raw()).unwrap()
+    let SubscriptionEvent::Delta { updated, .. } =
+        block_on(subscription.next_event()).expect("target-row point-subscription delta")
     else {
         panic!("expected target-row point-subscription delta");
     };
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0].row_uuid(), target);
+    assert_eq!(
+        updated[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("changed".to_owned()))
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the physical completion of an unchanged projection is not a public delta"
+    );
+
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("changed again".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    let SubscriptionEvent::Delta { updated, .. } =
+        block_on(subscription.next_event()).expect("second target-row point-subscription delta")
+    else {
+        panic!("expected second target-row point-subscription delta");
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row_uuid(), target);
+    assert_eq!(
+        updated[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("changed again".to_owned()))
+    );
 }
 
 /// A deferred local write refreshes a projected current-view subscription on
