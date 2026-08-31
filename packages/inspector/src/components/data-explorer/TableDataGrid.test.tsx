@@ -1366,6 +1366,118 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("1 staged insert")).toBeNull();
   });
 
+  it("drops a cancellation made before a submitted insert is definitively rejected", async () => {
+    let rejectSave: ((error: Error) => void) | undefined;
+    mockTransactionWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel staged insert" }));
+    expect(screen.queryByText("staged")).toBeNull();
+    expect(screen.getByText("1 row will be deleted")).not.toBeNull();
+
+    await act(async () =>
+      rejectSave?.(
+        new PersistedWriteRejectedError(
+          "rejected-insert" as never,
+          "permission_denied",
+          "insert rejected by policy",
+        ),
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("insert rejected by policy");
+      expect(screen.queryByText("staged")).toBeNull();
+      expect(screen.queryByText("1 row will be deleted")).toBeNull();
+    });
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
+
+  it("queues selected submitted staged rows for deletion after they settle", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockTransactionWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(2));
+    const insertedIds = [getMockInsertId(0), getMockInsertId(1)];
+
+    const stagedBadges = screen.getAllByText("staged");
+    fireEvent.click(stagedBadges[0] as HTMLElement);
+    fireEvent.click(stagedBadges[1] as HTMLElement, { shiftKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Delete row(s)" }));
+    expect(screen.queryByText("staged")).toBeNull();
+    expect(screen.getByText("2 rows will be deleted")).not.toBeNull();
+
+    await act(async () => resolveSave?.());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockDelete).toHaveBeenCalledTimes(2);
+      expect(mockDelete).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ _table: "todos" }),
+        insertedIds[0],
+      );
+      expect(mockDelete).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        insertedIds[1],
+      );
+    });
+  });
+
+  it("turns a keyboard cancellation of a submitted staged row into a queued delete", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockTransactionWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
+    const insertedId = getMockInsertId();
+
+    const stagedTitleCell = getCellsInRowContaining("staged")[1] as HTMLElement;
+    fireEvent.mouseDown(stagedTitleCell);
+    fireEvent.keyDown(stagedTitleCell, { key: "Delete" });
+    expect(screen.queryByText("staged")).toBeNull();
+    expect(screen.getByText("1 row will be deleted")).not.toBeNull();
+
+    await act(async () => resolveSave?.());
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      expect(mockDelete).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        insertedId,
+      );
+    });
+  });
+
   it("selects only the clicked row on plain cell clicks", () => {
     renderGrid();
 

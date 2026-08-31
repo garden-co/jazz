@@ -21,6 +21,7 @@ const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy
   policy.todos.allowRead.where({ owner_id: session.user });
   policy.todos.allowInsert.where({ owner_id: session.user });
   policy.todos.allowUpdate.where({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 
 let currentDb: Db | null = null;
@@ -52,12 +53,14 @@ type InstrumentedDb = {
   db: Db;
   transactionCount(): number;
   insertIds: string[];
+  deleteIds: string[];
 };
 
 function instrumentDb(db: Db, interruptFirstConfirmation = false): InstrumentedDb {
   let transactionCount = 0;
   let confirmationInterrupted = false;
   const insertIds: string[] = [];
+  const deleteIds: string[] = [];
 
   const transaction = async <TResult,>(
     callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
@@ -73,6 +76,12 @@ function instrumentDb(db: Db, interruptFirstConfirmation = false): InstrumentedD
               if (options && typeof options === "object" && "id" in options) {
                 insertIds.push(String(options.id));
               }
+              return Reflect.apply(value, target, args);
+            };
+          }
+          if (property === "delete" && typeof value === "function") {
+            return (...args: unknown[]) => {
+              deleteIds.push(String(args[1]));
               return Reflect.apply(value, target, args);
             };
           }
@@ -116,6 +125,7 @@ function instrumentDb(db: Db, interruptFirstConfirmation = false): InstrumentedD
     db: instrumented,
     transactionCount: () => transactionCount,
     insertIds,
+    deleteIds,
   };
 }
 
@@ -222,6 +232,57 @@ describe("TableDataGrid real Db save retries", () => {
     ]);
     expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toHaveLength(1);
+  }, 30_000);
+
+  it("turns a pre-confirmation staged-row cancellation into a real delete", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    const instrumented = instrumentDb(setup.db, true);
+    currentDb = instrumented.db;
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "cancel after ambiguity");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(
+      () => {
+        expect(screen.getByText("Confirmation pending")).not.toBeNull();
+        expect(screen.getByRole("button", { name: "Retry confirmation" })).not.toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+    const insertedId = instrumented.insertIds[0];
+    expect(insertedId).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel staged insert" }));
+    expect(screen.queryByText("staged")).toBeNull();
+    expect(screen.getByText("1 row will be deleted")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry confirmation" }));
+    await waitFor(
+      () => {
+        expect(screen.queryByText("Confirmation pending")).toBeNull();
+        expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+
+    await expect(
+      setup.db.all(inspectorSaveApp.todos.where({ id: insertedId }), { tier: "edge" }),
+    ).resolves.toEqual([]);
+    expect(instrumented.transactionCount()).toBe(2);
+    expect(instrumented.insertIds).toEqual([insertedId]);
+    expect(instrumented.deleteIds).toEqual([insertedId]);
   }, 30_000);
 
   it("reuses a staged id after real authority rejection when the insert becomes permitted", async () => {

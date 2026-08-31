@@ -289,6 +289,41 @@ function settleSubmittedTableSave(
   };
 }
 
+function discardCanceledRejectedInserts(
+  previous: TableMutationState,
+  rejectedSave: SubmittedTableSave,
+): TableMutationState {
+  const rejectedInsertIds = new Set(rejectedSave.submittedStagedInserts.map((insert) => insert.id));
+  const canceledRejectedInsertIds = new Set(
+    [...previous.queuedDeletes].filter((rowId) => rejectedInsertIds.has(rowId)),
+  );
+  if (canceledRejectedInsertIds.size === 0) {
+    return previous;
+  }
+
+  const nextQueuedEdits = { ...previous.queuedEdits };
+  const nextQueuedEditRevisions = { ...previous.queuedEditRevisions };
+  const nextQueuedDeletes = new Set(previous.queuedDeletes);
+  const nextQueuedDeleteRevisions = { ...previous.queuedDeleteRevisions };
+  for (const rowId of canceledRejectedInsertIds) {
+    delete nextQueuedEdits[rowId];
+    delete nextQueuedEditRevisions[rowId];
+    nextQueuedDeletes.delete(rowId);
+    delete nextQueuedDeleteRevisions[rowId];
+  }
+
+  return {
+    ...previous,
+    queuedEdits: nextQueuedEdits,
+    stagedInserts: previous.stagedInserts.filter(
+      (insert) => !canceledRejectedInsertIds.has(insert.id),
+    ),
+    queuedEditRevisions: nextQueuedEditRevisions,
+    queuedDeletes: nextQueuedDeletes,
+    queuedDeleteRevisions: nextQueuedDeleteRevisions,
+  };
+}
+
 interface EditableGridRow extends AnimatedGridRow {
   row: DynamicTableRow;
   sourceRow: DynamicTableRow;
@@ -1160,6 +1195,28 @@ export function TableDataGrid() {
     setQueuedDeletes(new Set());
     setQueuedSaveError(null);
   };
+  const cancelStagedInserts = (stagedInsertIds: ReadonlySet<string>): void => {
+    if (stagedInsertIds.size === 0) return;
+
+    setQueuedSaveError(null);
+    const pendingSave = pendingSaveByTable.get(table);
+    const submittedInsertIds = new Set(
+      pendingSave?.submittedStagedInserts.map((insert) => insert.id) ?? [],
+    );
+    const cancellationDeleteIds = [...stagedInsertIds].filter((id) => submittedInsertIds.has(id));
+    setStagedInserts((currentStagedInserts) =>
+      currentStagedInserts.filter((stagedInsert) => !stagedInsertIds.has(stagedInsert.id)),
+    );
+    if (cancellationDeleteIds.length > 0) {
+      setQueuedDeletes((currentQueuedDeletes) => {
+        const nextQueuedDeletes = new Set(currentQueuedDeletes);
+        for (const rowId of cancellationDeleteIds) {
+          nextQueuedDeletes.add(rowId);
+        }
+        return nextQueuedDeletes;
+      });
+    }
+  };
   const handleQueueSelectedDeletes = (): void => {
     if (selectedVisibleRowIds.size === 0) {
       return;
@@ -1173,11 +1230,7 @@ export function TableDataGrid() {
         .map((stagedInsert) => stagedInsert.id),
     );
     if (selectedStagedInsertIds.size > 0) {
-      setStagedInserts((currentStagedInserts) =>
-        currentStagedInserts.filter(
-          (stagedInsert) => !selectedStagedInsertIds.has(stagedInsert.id),
-        ),
-      );
+      cancelStagedInserts(selectedStagedInsertIds);
     }
 
     const selectedRealRowIds = visibleRows
@@ -1295,8 +1348,9 @@ export function TableDataGrid() {
         };
       });
     } catch (error) {
-      if (pendingSave && error instanceof PersistedWriteRejectedError) {
-        const rejectedSave = pendingSave;
+      const rejectedSave =
+        pendingSave && error instanceof PersistedWriteRejectedError ? pendingSave : undefined;
+      if (rejectedSave) {
         setPendingSaveByTable((current) => {
           if (current.get(mutationTable) !== rejectedSave) return current;
           const next = new Map(current);
@@ -1304,16 +1358,23 @@ export function TableDataGrid() {
           return next;
         });
       }
-      setMutationStateByTable((current) => ({
-        ...current,
-        [mutationTable]: {
-          ...(current[mutationTable] ?? createTableMutationState()),
-          queuedSaveError:
-            error instanceof Error || (typeof Error.isError === "function" && Error.isError(error))
-              ? error.message
-              : "Could not persist queued cell edits.",
-        },
-      }));
+      setMutationStateByTable((current) => {
+        const previous = current[mutationTable] ?? createTableMutationState();
+        const next = rejectedSave
+          ? discardCanceledRejectedInserts(previous, rejectedSave)
+          : previous;
+        return {
+          ...current,
+          [mutationTable]: {
+            ...next,
+            queuedSaveError:
+              error instanceof Error ||
+              (typeof Error.isError === "function" && Error.isError(error))
+                ? error.message
+                : "Could not persist queued cell edits.",
+          },
+        };
+      });
     } finally {
       setMutationStateByTable((current) => ({
         ...current,
@@ -1421,6 +1482,7 @@ export function TableDataGrid() {
               onSortColumnsChange={handleSortColumnsChange}
               onQueuedEditsChange={setQueuedEdits}
               onStagedInsertsChange={setStagedInserts}
+              onCancelStagedInserts={cancelStagedInserts}
               onSelectedRowIdsChange={setSelectedRowIds}
               onQueuedSaveErrorChange={setQueuedSaveError}
               onQueuedDeletesChange={setQueuedDeletes}
@@ -2045,6 +2107,7 @@ function PlainTableView({
   onSortColumnsChange,
   onQueuedEditsChange,
   onStagedInsertsChange,
+  onCancelStagedInserts,
   onSelectedRowIdsChange,
   onQueuedSaveErrorChange,
   onQueuedDeletesChange,
@@ -2065,6 +2128,7 @@ function PlainTableView({
   onSortColumnsChange: (sortColumns: SortColumn[]) => void;
   onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
   onStagedInsertsChange: Dispatch<SetStateAction<StagedInsert[]>>;
+  onCancelStagedInserts: (stagedInsertIds: ReadonlySet<string>) => void;
   onSelectedRowIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onQueuedSaveErrorChange: (value: string | null) => void;
   onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
@@ -2378,12 +2442,9 @@ function PlainTableView({
                 }}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onQueuedSaveErrorChange(null);
-                  onStagedInsertsChange((currentStagedInserts) =>
-                    currentStagedInserts.filter(
-                      (stagedInsert) => stagedInsert.id !== row.stagedInsertId,
-                    ),
-                  );
+                  if (row.stagedInsertId) {
+                    onCancelStagedInserts(new Set([row.stagedInsertId]));
+                  }
                 }}
               >
                 <CrossIcon className={styles.buttonIcon} />
@@ -2424,6 +2485,7 @@ function PlainTableView({
     return [...dataColumns, actionsColumn];
   }, [
     gridColumns,
+    onCancelStagedInserts,
     onStagedInsertsChange,
     onQueuedSaveErrorChange,
     queueCellEdit,
@@ -2538,12 +2600,9 @@ function PlainTableView({
 
           event.preventGridDefault();
           if (args.row?.isStagedInsert) {
-            onQueuedSaveErrorChange(null);
             const stagedInsertId = args.row.stagedInsertId;
             if (stagedInsertId) {
-              onStagedInsertsChange((currentStagedInserts) =>
-                currentStagedInserts.filter((stagedInsert) => stagedInsert.id !== stagedInsertId),
-              );
+              onCancelStagedInserts(new Set([stagedInsertId]));
             }
           } else {
             toggleQueuedDelete(rowId);
