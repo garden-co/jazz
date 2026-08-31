@@ -1398,7 +1398,7 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         .insert_with_id("todos", stale, cells("live", false, owner))
         .unwrap();
 
-    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let (client_transport, server_transport, client_sent, server_sent) = duplex_with_taps();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos").filter(eq(col("title"), lit("live")));
@@ -1461,6 +1461,17 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         .unwrap();
     let failed_subscription = failed_attachment.subscription();
     client.tick().unwrap();
+    let failed_subscribe = client_sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            SyncMessage::Subscribe(subscribe) if subscribe.subscription == failed_subscription => {
+                Some(subscribe.clone())
+            }
+            _ => None,
+        })
+        .expect("the failed clone must have a concrete wire admission to retry");
     // `server_sent` is the upstream connection's live inbound queue. Keep the
     // receiver idle until the subscription-addressed ordering is inspected.
     for _ in 0..32 {
@@ -1558,15 +1569,89 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
     );
     drop(messages);
 
+    // This test stays at the connection seam because the injected clone reset
+    // failure is deliberately below the public client API. The rejected usage
+    // must leave no served registration, policy binding, or shared-group
+    // ownership behind; the two established siblings remain intact.
+    {
+        let connection = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("core keeps serving the client link");
+        };
+        let coverage = state.served[&first_subscription].clone();
+        let group = &state.coverage_groups[&coverage];
+        assert!(!state.served.contains_key(&failed_subscription));
+        assert_eq!(
+            group.subscribers,
+            BTreeSet::from([first_subscription, second_subscription])
+        );
+        assert_eq!(
+            group.pending_initial_subscribers,
+            BTreeSet::new(),
+            "a rejected usage cannot remain eligible for a later initial reset"
+        );
+        assert!(
+            state
+                .peer
+                .subscription_policy_binding(failed_subscription)
+                .is_none(),
+            "rejection must discard the usage-site authorization snapshot"
+        );
+    }
+
+    let later = row(0x67);
+    server
+        .insert_with_id("todos", later, cells("live", false, owner))
+        .unwrap();
+    for _ in 0..8 {
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    assert!(
+        server_sent.borrow().iter().all(|message| !matches!(
+            message,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
+                if *subscription == failed_subscription
+        )),
+        "later canonical deltas must not resurrect a rejected usage"
+    );
+    // Replay the exact rejected wire handle. This is intentionally not a new
+    // attachment: callers may retry after a transient server failure, and the
+    // usage-site id must be cleanly reusable.
+    client_sent
+        .borrow_mut()
+        .push_back(SyncMessage::Subscribe(failed_subscribe));
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
+                    if *subscription == failed_subscription
+            )
+        }) {
+            break;
+        }
+    }
+    assert!(
+        server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
+                    if *subscription == failed_subscription
+            )
+        }),
+        "the same usage-site id must be admitted after its failed clone reset is rolled back"
+    );
+
     for _ in 0..32 {
         upstream.borrow_mut().tick().unwrap();
-        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![fresh] {
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![fresh, later] {
             break;
         }
     }
     assert_eq!(
         row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
-        vec![fresh],
+        vec![fresh, later],
         "established siblings must converge even though the new clone was rejected"
     );
 }

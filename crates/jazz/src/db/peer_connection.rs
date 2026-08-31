@@ -4449,6 +4449,18 @@ where
                                         continue;
                                     }
                                     Err(crate::node::Error::QueryCapability(detail)) => {
+                                        rollback_rejected_subscriber_admission(
+                                            &self.node,
+                                            peer,
+                                            served,
+                                            coverage_groups,
+                                            scope_purposes,
+                                            scope_aggregates,
+                                            &self.relay_upstream_subscription_owners,
+                                            upstream_subscriptions,
+                                            connection_epoch,
+                                            subscription,
+                                        );
                                         queue_direct_control(
                                             &mut self.pending_control_responses,
                                             unsupported_shape_capability_rejection_message(
@@ -4460,6 +4472,18 @@ where
                                         return Ok(true);
                                     }
                                     Err(error) => {
+                                        rollback_rejected_subscriber_admission(
+                                            &self.node,
+                                            peer,
+                                            served,
+                                            coverage_groups,
+                                            scope_purposes,
+                                            scope_aggregates,
+                                            &self.relay_upstream_subscription_owners,
+                                            upstream_subscriptions,
+                                            connection_epoch,
+                                            subscription,
+                                        );
                                         queue_direct_control(
                                             &mut self.pending_control_responses,
                                             server_subscription_failure_rejection_message(
@@ -4574,6 +4598,18 @@ where
                                     continue;
                                 }
                                 Err(crate::node::Error::QueryCapability(detail)) => {
+                                    rollback_rejected_subscriber_admission(
+                                        &self.node,
+                                        peer,
+                                        served,
+                                        coverage_groups,
+                                        scope_purposes,
+                                        scope_aggregates,
+                                        &self.relay_upstream_subscription_owners,
+                                        upstream_subscriptions,
+                                        connection_epoch,
+                                        subscription,
+                                    );
                                     queue_direct_control(&mut self.pending_control_responses,
                                         unsupported_shape_capability_rejection_message(
                                             subscription,
@@ -4584,6 +4620,18 @@ where
                                     return Ok(true);
                                 }
                                 Err(error) => {
+                                    rollback_rejected_subscriber_admission(
+                                        &self.node,
+                                        peer,
+                                        served,
+                                        coverage_groups,
+                                        scope_purposes,
+                                        scope_aggregates,
+                                        &self.relay_upstream_subscription_owners,
+                                        upstream_subscriptions,
+                                        connection_epoch,
+                                        subscription,
+                                    );
                                     queue_direct_control(&mut self.pending_control_responses,
                                         server_subscription_failure_rejection_message(
                                             subscription,
@@ -5542,6 +5590,104 @@ pub(super) fn remove_scope_aggregate_member(
     };
     if empty {
         aggregates.remove(key);
+    }
+}
+
+/// Undo a served usage-site admission that failed before its opening reset was
+/// accepted. A coverage group owns shared canonical state, so preserve it for
+/// siblings while removing every per-usage registration. If this was the last
+/// usage, retire the group and cancel (or withdraw) its upstream ownership too.
+fn rollback_rejected_subscriber_admission<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    served: &mut BTreeMap<SubscriptionKey, CoverageKey>,
+    coverage_groups: &mut BTreeMap<CoverageKey, CoverageGroup>,
+    scope_purposes: &mut BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
+    scope_aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
+    relay_upstream_subscription_owners: &RelayUpstreamSubscriptionOwners,
+    upstream_subscriptions: &PendingUpstreamCommands,
+    connection_epoch: u64,
+    subscription: SubscriptionKey,
+) where
+    S: OrderedKvStorage,
+{
+    let Some(coverage) = served.remove(&subscription) else {
+        return;
+    };
+    if let Some(purpose) = scope_purposes.remove(&subscription) {
+        remove_scope_aggregate_member(scope_aggregates, &purpose.key, subscription);
+    }
+
+    let Some(group) = coverage_groups.get_mut(&coverage) else {
+        // Admission always installs the group before `served`; avoid retaining
+        // the usage-site state if an earlier invariant violation broke that
+        // ordering.
+        let mut node = node.borrow_mut();
+        node.apply_unsubscribe(subscription);
+        peer.forget_subscription(subscription);
+        return;
+    };
+    group.subscribers.remove(&subscription);
+    group.pending_initial_subscribers.remove(&subscription);
+    if group.upstream_opts.propagate_upstream {
+        if let Some(owner) = relay_upstream_subscription_owners
+            .borrow_mut()
+            .get_mut(&group.upstream_subscription)
+            && owner.downstream_connection_epoch == connection_epoch
+            && owner.coverage == coverage
+        {
+            owner.downstream_subscriptions.remove(&subscription);
+        }
+    }
+    let retire_group = group.subscribers.is_empty();
+    let upstream = retire_group.then_some((
+        group.upstream_subscription,
+        group.upstream_opts.propagate_upstream,
+    ));
+
+    let mut node = node.borrow_mut();
+    node.apply_unsubscribe(subscription);
+    peer.forget_subscription(subscription);
+    if !retire_group {
+        return;
+    }
+
+    peer.forget_subscription_with_node(&mut node, coverage_group_subscription_key(&coverage));
+    coverage_groups.remove(&coverage);
+    let Some((upstream_subscription, propagated_upstream)) = upstream else {
+        return;
+    };
+    if !propagated_upstream
+        || retire_relay_upstream_subscription(
+            relay_upstream_subscription_owners,
+            upstream_subscription,
+            connection_epoch,
+            &coverage,
+        )
+        .is_none()
+    {
+        return;
+    }
+    let mut pending = upstream_subscriptions.borrow_mut();
+    let open_was_pending = pending.iter().any(|command| {
+        matches!(
+            command,
+            PendingUpstreamCommand::Subscribe(open)
+                if open.subscription == upstream_subscription
+        )
+    });
+    pending.retain(|command| {
+        !matches!(
+            command,
+            PendingUpstreamCommand::Subscribe(open)
+                if open.subscription == upstream_subscription
+        )
+    });
+    if !open_was_pending {
+        pending.push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
     }
 }
 
