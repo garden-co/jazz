@@ -57,7 +57,8 @@ use crate::protocol::{
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionRecord,
 };
 use crate::protocol_limits::{
-    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
+    MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_fetch_row_versions,
+    validate_known_state_declaration, validate_shape_registration_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -1865,6 +1866,14 @@ enum SubscriberShapeRegistration {
     Registered(RegisterShapeOptions),
     PendingCatalogueAdmission(RegisterShapeOptions),
     RejectedUnsupportedCapability(String),
+}
+impl SubscriberShapeRegistration {
+    fn owns_node_shape(&self) -> bool {
+        matches!(
+            self,
+            Self::Registered(_) | Self::PendingCatalogueAdmission(_)
+        )
+    }
 }
 
 fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value) -> Value {
