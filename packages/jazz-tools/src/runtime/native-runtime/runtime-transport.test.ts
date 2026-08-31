@@ -42,6 +42,116 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it.each([
+    [
+      "transport mentioning a nested rejection",
+      new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+    ],
+    ["not-observed", new Error("NotObserved: transaction is not resident")],
+    ["schema", new Error("Schema: invalid authored branch value")],
+    ["cancellation", Object.assign(new Error("operation cancelled"), { name: "AbortError" })],
+    ["unknown", new Error("unknown lifecycle failure")],
+  ])("preserves %s lifecycle errors from native write waits", async (_kind, nativeError) => {
+    const write = {
+      ...fakeWrite(),
+      wait: async () => {
+        throw nativeError;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ insertEncoded: () => write, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "lifecycle passthrough" } },
+      null,
+      "00000000-0000-0000-0000-000000000010",
+    );
+
+    await expect(runtime.waitForTransaction(await committedTxId(inserted), "local")).rejects.toBe(
+      nativeError,
+    );
+
+    const admissionRuntime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertEncoded: () => {
+              throw nativeError;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    let admissionError: unknown;
+    try {
+      admissionRuntime.insert(
+        "todos",
+        { title: { type: "Text", value: "admission passthrough" } },
+        null,
+        "00000000-0000-0000-0000-000000000012",
+      );
+    } catch (error) {
+      admissionError = error;
+    }
+    expect(admissionError).toBe(nativeError);
+  });
+
+  it("normalizes a terminal native WriteRejected error", async () => {
+    const write = {
+      ...fakeWrite(),
+      wait: async () => {
+        throw new Error("WriteRejected: queued write was denied");
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ insertEncoded: () => write, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "terminal rejection" } },
+      null,
+      "00000000-0000-0000-0000-000000000011",
+    );
+
+    await expect(
+      runtime.waitForTransaction(await committedTxId(inserted), "local"),
+    ).rejects.toMatchObject({
+      kind: "rejected",
+      transactionId: await committedTxId(inserted),
+      code: "write_rejected",
+      reason: "queued write was denied",
+    });
+  });
+
   it("connects the native upstream transport to the scoped websocket endpoint", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

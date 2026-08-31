@@ -4489,7 +4489,22 @@ function rejectedWaitError(
   message: string;
 } | null {
   const message = errorMessage(error);
-  if (!message.includes("WriteRejected")) return null;
+  if (extractWriteRejectedReason(message) === null) return null;
+  return queuedWriteRejection(transactionId, error);
+}
+
+function queuedWriteRejection(
+  transactionId: TxId,
+  error: unknown,
+): {
+  kind: "rejected";
+  transactionId: TxId;
+  code: string;
+  reason: string;
+  /** An Error-compatible diagnostic for direct native callers. */
+  message: string;
+} {
+  const message = errorMessage(error);
   const rejection: {
     kind: "rejected";
     transactionId: TxId;
@@ -4518,8 +4533,8 @@ function writeOrNormalizeRejection<T>(
     return write();
   } catch (error) {
     const message = errorMessage(error);
-    if (message.includes("WriteRejected")) {
-      const reason = rejectionReason(message);
+    const reason = extractWriteRejectedReason(message);
+    if (reason !== null) {
       throw new Error(`${operation} failed: WriteError("${reason}")`);
     }
     throw error;
@@ -4570,8 +4585,16 @@ function rejectionCode(message: string): string {
 }
 
 function rejectionReason(message: string): string {
-  if (message.includes("AuthorizationDenied")) return "Write rejected by server authorization";
-  return message.replace(/^.*WriteRejected:?\s*/, "") || "Write rejected";
+  const reason = extractWriteRejectedReason(message);
+  if (reason === null) return message;
+  if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
+  return reason || "Write rejected";
+}
+
+/** Parse the exact stable Rust `Error` display prefix without matching quoted diagnostics. */
+function extractWriteRejectedReason(message: string): string | null {
+  const match = /^WriteRejected:\s*(.*)$/s.exec(message);
+  return match ? match[1]! : null;
 }
 
 function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
