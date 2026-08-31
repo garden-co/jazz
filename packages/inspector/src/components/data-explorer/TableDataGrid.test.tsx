@@ -1,16 +1,16 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { PersistedWriteRejectedError } from "jazz-tools";
 import { Link, MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 import { DataExplorer } from "../../pages/data-explorer";
 
 const mockUseAll = vi.fn();
+const mockTransaction = vi.fn();
+const mockTransactionWait = vi.fn();
 const mockUpdate = vi.fn();
 const mockInsert = vi.fn();
 const mockDelete = vi.fn();
-const mockUpdateWait = vi.fn();
-const mockInsertWait = vi.fn();
-const mockDeleteWait = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 let currentReferenceRowsByTable: Record<string, Array<Record<string, unknown>>>;
 let currentTable: string;
@@ -43,6 +43,17 @@ function getLastTodosQuery(): { _build: () => string } {
       if (!query || typeof query !== "object" || !("_build" in query)) return false;
       return JSON.parse(query._build()).table === "todos";
     })!;
+}
+
+function getMockInsertId(index = 0): string {
+  const options: unknown = mockInsert.mock.calls[index]?.[2];
+  if (!options || typeof options !== "object" || !("id" in options)) {
+    throw new Error(`Insert call ${index + 1} did not include an explicit id`);
+  }
+  if (typeof options.id !== "string") {
+    throw new Error(`Insert call ${index + 1} included a non-string id`);
+  }
+  return options.id;
 }
 
 function renderGridUi() {
@@ -106,9 +117,7 @@ const mockWasmSchema = {
 vi.mock("jazz-tools/react", () => ({
   useAll: (...args: unknown[]) => mockUseAll(...args),
   useDb: () => ({
-    update: (...args: unknown[]) => mockUpdate(...args),
-    insert: (...args: unknown[]) => mockInsert(...args),
-    delete: (...args: unknown[]) => mockDelete(...args),
+    transaction: (...args: unknown[]) => mockTransaction(...args),
   }),
 }));
 
@@ -173,24 +182,33 @@ describe("TableDataGrid", () => {
       ],
     };
 
+    mockTransaction.mockReset();
+    mockTransactionWait.mockReset();
     mockUpdate.mockReset();
     mockInsert.mockReset();
     mockDelete.mockReset();
-    mockUpdateWait.mockReset();
-    mockInsertWait.mockReset();
-    mockDeleteWait.mockReset();
-    mockUpdateWait.mockResolvedValue(undefined);
-    mockInsertWait.mockResolvedValue(undefined);
-    mockDeleteWait.mockResolvedValue(undefined);
-    mockUpdate.mockImplementation(() => ({
-      wait: (...args: unknown[]) => mockUpdateWait(...args),
-    }));
-    mockInsert.mockImplementation(() => ({
-      wait: (...args: unknown[]) => mockInsertWait(...args),
-    }));
-    mockDelete.mockImplementation(() => ({
-      wait: (...args: unknown[]) => mockDeleteWait(...args),
-    }));
+    mockTransactionWait.mockResolvedValue(undefined);
+    mockTransaction.mockImplementation(
+      async (
+        callback: (tx: {
+          kind: "mergeable";
+          update: (...args: unknown[]) => unknown;
+          insert: (...args: unknown[]) => unknown;
+          delete: (...args: unknown[]) => unknown;
+        }) => unknown,
+      ) => {
+        const value = await callback({
+          kind: "mergeable",
+          update: (...args: unknown[]) => mockUpdate(...args),
+          insert: (...args: unknown[]) => mockInsert(...args),
+          delete: (...args: unknown[]) => mockDelete(...args),
+        });
+        return {
+          value,
+          wait: (...args: unknown[]) => mockTransactionWait(...args),
+        };
+      },
+    );
     mockUseAll.mockReset();
     mockUseAll.mockImplementation((query) => {
       const builtQuery =
@@ -471,7 +489,44 @@ describe("TableDataGrid", () => {
           title: "zeta updated",
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
+    });
+  });
+
+  it("creates new transaction work after a definitive authority rejection", async () => {
+    mockTransactionWait.mockRejectedValueOnce(
+      new PersistedWriteRejectedError(
+        "rejected-save" as never,
+        "permission_denied",
+        "save rejected by policy",
+      ),
+    );
+    renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), {
+      target: { value: "zeta updated" },
+    });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "alpha" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), {
+      target: { value: "alpha updated" },
+    });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("save rejected by policy");
+      expect(screen.getByText("2 edits across 2 rows")).not.toBeNull();
+    });
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      expect(mockTransaction).toHaveBeenCalledTimes(2);
+      expect(mockUpdate).toHaveBeenCalledTimes(4);
+      expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
     });
   });
 
@@ -627,7 +682,7 @@ describe("TableDataGrid", () => {
           meta: null,
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -654,7 +709,7 @@ describe("TableDataGrid", () => {
           title: "zeta queued",
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
 
     expect(screen.queryByText(/queued change across/i)).toBeNull();
@@ -682,7 +737,7 @@ describe("TableDataGrid", () => {
           done: true,
         }),
       );
-      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -861,13 +916,13 @@ describe("TableDataGrid", () => {
 
   it("keeps a completed save scoped to its originating table after navigation", async () => {
     let resolveSave: (() => void) | undefined;
-    mockUpdateWait.mockImplementationOnce(
+    mockTransactionWait.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           resolveSave = resolve;
         }),
     );
-    mockUpdateWait.mockImplementationOnce(() => Promise.reject(new Error("B save failed")));
+    mockTransactionWait.mockImplementationOnce(() => Promise.reject(new Error("B save failed")));
     const { rerender } = renderGrid();
 
     fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
@@ -899,7 +954,7 @@ describe("TableDataGrid", () => {
 
   it("preserves a later same-table edit when an earlier save completes", async () => {
     let resolveSave: (() => void) | undefined;
-    mockUpdateWait.mockImplementationOnce(
+    mockTransactionWait.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           resolveSave = resolve;
@@ -926,7 +981,7 @@ describe("TableDataGrid", () => {
 
   it("admits only one same-table save before React disables the button", async () => {
     let resolveSave: (() => void) | undefined;
-    mockUpdateWait.mockImplementationOnce(
+    mockTransactionWait.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           resolveSave = resolve;
@@ -945,7 +1000,7 @@ describe("TableDataGrid", () => {
 
   it("keeps a failed save error scoped to its originating table after navigation", async () => {
     let rejectSave: ((error: Error) => void) | undefined;
-    mockUpdateWait.mockImplementationOnce(
+    mockTransactionWait.mockImplementationOnce(
       () =>
         new Promise<void>((_resolve, reject) => {
           rejectSave = reject;
@@ -978,9 +1033,9 @@ describe("TableDataGrid", () => {
     expect(screen.getByRole("alert").textContent).toContain("A save failed");
   });
 
-  it("retains a deferred save failure across the schema route", async () => {
+  it("keeps an ambiguous save visibly pending across the schema route", async () => {
     let rejectSave: ((error: Error) => void) | undefined;
-    mockUpdateWait.mockImplementationOnce(
+    mockTransactionWait.mockImplementationOnce(
       () =>
         new Promise<void>((_resolve, reject) => {
           rejectSave = reject;
@@ -994,15 +1049,28 @@ describe("TableDataGrid", () => {
     await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("link", { name: "Schema" }));
     expect(screen.getByText("Return to data")).not.toBeNull();
-    await act(async () => rejectSave?.(new Error("route save failed")));
+    await act(async () => rejectSave?.(new Error("route save confirmation failed")));
     fireEvent.click(screen.getByRole("link", { name: "Return to data" }));
+
     expect(screen.getByText("route draft")).not.toBeNull();
-    expect(screen.getByRole("alert").textContent).toContain("route save failed");
+    expect(screen.getByText("Confirmation pending")).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("route save confirmation failed");
+    expect((screen.getByRole("button", { name: "Discard" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry confirmation" }));
+    await waitFor(() => {
+      expect(mockTransactionWait).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText("Confirmation pending")).toBeNull();
+    });
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
   });
 
   it("retains a deferred save success across the schema route", async () => {
     let resolveSave: (() => void) | undefined;
-    mockUpdateWait.mockImplementationOnce(
+    mockTransactionWait.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           resolveSave = resolve;
@@ -1069,16 +1137,90 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ _table: "todos" }), {
-        title: "new todo",
-        done: true,
-        meta: null,
-        owner_id: null,
-      });
-      expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockInsert).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        {
+          title: "new todo",
+          done: true,
+          meta: null,
+          owner_id: null,
+        },
+        {
+          id: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          ),
+        },
+      );
+      expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
 
     expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
+  });
+
+  it("keeps an ambiguous insert non-discardable and submits later edits only after confirmation", async () => {
+    mockTransactionWait.mockRejectedValueOnce(new Error("connection closed after commit"));
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), {
+      target: { value: "submitted before ambiguity" },
+    });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("connection closed after commit");
+    });
+    expect(screen.getByText("Confirmation pending")).not.toBeNull();
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    const insertedId = getMockInsertId();
+    expect(insertedId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+
+    const discard = screen.getByRole("button", { name: "Discard" });
+    expect((discard as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(discard);
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "submitted before ambiguity" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), {
+      target: { value: "edited after ambiguous save" },
+    });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry confirmation" }));
+    await waitFor(() => {
+      expect(mockTransactionWait).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText("Confirmation pending")).toBeNull();
+      expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull();
+    });
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(getMockInsertId()).toBe(insertedId);
+    expect(screen.queryByText("1 staged insert")).toBeNull();
+    expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      expect(mockTransaction).toHaveBeenCalledTimes(2);
+      expect(mockTransactionWait).toHaveBeenCalledTimes(3);
+      expect(mockUpdate).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+        expect.objectContaining({ title: "edited after ambiguous save" }),
+      );
+      expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    });
+    expect(mockUpdate).toHaveBeenCalledTimes(2);
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(getMockInsertId()).toBe(insertedId);
   });
 
   it("reports the Db insert error", async () => {
@@ -1110,12 +1252,16 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ _table: "todos" }), {
-        title: "",
-        done: false,
-        meta: null,
-        owner_id: null,
-      });
+      expect(mockInsert).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        {
+          title: "",
+          done: false,
+          meta: null,
+          owner_id: null,
+        },
+        { id: expect.any(String) },
+      );
     });
   });
 
@@ -1155,19 +1301,29 @@ describe("TableDataGrid", () => {
 
     await waitFor(() => {
       expect(mockInsert).toHaveBeenCalledTimes(2);
-      expect(mockInsert).toHaveBeenNthCalledWith(1, expect.objectContaining({ _table: "todos" }), {
-        title: "first todo",
-        done: true,
-        meta: null,
-        owner_id: null,
-      });
-      expect(mockInsert).toHaveBeenNthCalledWith(2, expect.objectContaining({ _table: "todos" }), {
-        title: "second todo",
-        done: false,
-        meta: null,
-        owner_id: null,
-      });
-      expect(mockInsertWait).toHaveBeenCalledTimes(2);
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ _table: "todos" }),
+        {
+          title: "first todo",
+          done: true,
+          meta: null,
+          owner_id: null,
+        },
+        { id: expect.any(String) },
+      );
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        {
+          title: "second todo",
+          done: false,
+          meta: null,
+          owner_id: null,
+        },
+        { id: expect.any(String) },
+      );
+      expect(mockTransactionWait).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1223,7 +1379,7 @@ describe("TableDataGrid", () => {
         expect.objectContaining({ _table: "todos" }),
         "row-1",
       );
-      expect(mockDeleteWait).toHaveBeenCalledTimes(2);
+      expect(mockTransactionWait).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1269,7 +1425,7 @@ describe("TableDataGrid", () => {
         expect.objectContaining({ _table: "todos" }),
         "row-2",
       );
-      expect(mockDeleteWait).toHaveBeenCalledWith({ tier: "local" });
+      expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
