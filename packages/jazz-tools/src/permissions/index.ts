@@ -735,6 +735,24 @@ export type WhereInputOrCallback<WhereInput, Row> =
   | PermissionExpressionInput
   | ((row: RowContext<Row>) => WhereInput | PermissionExpressionInput);
 
+type DirectWhereInputGuard<Input, WhereInput> = [Input] extends [(...args: never[]) => unknown]
+  ? [error: "Callbacks must use the callback overload"]
+  : [Input] extends [PermissionExpressionInput]
+    ? []
+    : [Input, PolicyExpr] extends [PolicyExpr, Input]
+      ? [error: "Unbranded PolicyExpr inputs must be passed through raw(...)"]
+      : [Input] extends [PermissionWhereInput<WhereInput>]
+        ? [Input] extends [readonly unknown[]]
+          ? []
+          : [Input] extends [object]
+            ? string extends keyof Input
+              ? []
+              : Exclude<keyof Input, keyof WhereInput | `${string}.${string}`> extends never
+                ? []
+                : [error: "Input contains keys outside the allowed where input type"]
+            : []
+        : [error: "Input is not assignable to the allowed where input type"];
+
 export type SessionContext = {
   /** Opaque canonical JSON `[iss,sub]` identity used by provenance columns. */
   readonly user: SessionRefValue;
@@ -776,7 +794,10 @@ interface ExistsBuilder<WhereInput> {
 }
 
 interface ActionBuilder<WhereInput, Row> {
-  where(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): Rule;
+  where(
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
+  ): Rule;
+  where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
   always(): Rule;
   never(): Rule;
 }
@@ -860,7 +881,11 @@ class UpdateRuleBuilder<WhereInput, Row> {
     private readonly registerRule?: (ruleLike: RuleLike) => void,
   ) {}
 
-  where(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): Rule {
+  where(
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
+  ): Rule;
+  where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
+  where(input: unknown, ..._guard: unknown[]): Rule {
     const condition = resolveWhereInput(input, this.hasTypeColumn);
     const rule: Rule = {
       table: this.table,
@@ -880,13 +905,21 @@ class UpdateRuleBuilder<WhereInput, Row> {
     return this.where(alwaysCondition());
   }
 
-  whereOld(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): this {
+  whereOld(
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
+  ): this;
+  whereOld<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
+  whereOld(input: unknown, ..._guard: unknown[]): this {
     this.oldCondition = resolveWhereInput(input, this.hasTypeColumn);
     this.registerBuilder();
     return this;
   }
 
-  whereNew(input: WhereInputOrCallback<PermissionWhereInput<WhereInput>, Row>): this {
+  whereNew(
+    input: (row: RowContext<Row>) => PermissionWhereInput<WhereInput> | PermissionExpressionInput,
+  ): this;
+  whereNew<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
+  whereNew(input: unknown, ..._guard: unknown[]): this {
     this.newCondition = resolveWhereInput(input, this.hasTypeColumn);
     this.registerBuilder();
     return this;
@@ -1054,32 +1087,32 @@ function buildTablePolicyBuilder(
     return rule;
   };
   const read: ActionBuilder<unknown, unknown> = {
-    where: (input) =>
+    where: ((input: unknown) =>
       registerRule({
         table,
         action: "read",
         using: resolveWhereInput(input, hasTypeColumn),
-      }),
+      })) as ActionBuilder<unknown, unknown>["where"],
     always: () => read.where(alwaysCondition()),
     never: () => read.where(neverCondition()),
   };
   const insert: ActionBuilder<unknown, unknown> = {
-    where: (input) =>
+    where: ((input: unknown) =>
       registerRule({
         table,
         action: "insert",
         withCheck: resolveWhereInput(input, hasTypeColumn),
-      }),
+      })) as ActionBuilder<unknown, unknown>["where"],
     always: () => insert.where(alwaysCondition()),
     never: () => insert.where(neverCondition()),
   };
   const del: ActionBuilder<unknown, unknown> = {
-    where: (input) =>
+    where: ((input: unknown) =>
       registerRule({
         table,
         action: "delete",
         using: resolveWhereInput(input, hasTypeColumn),
-      }),
+      })) as ActionBuilder<unknown, unknown>["where"],
     always: () => del.where(alwaysCondition()),
     never: () => del.where(neverCondition()),
   };
