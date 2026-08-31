@@ -3160,7 +3160,7 @@ where
                         for subscription in group.subscribers {
                             node.apply_unsubscribe(subscription);
                             if subscription != group_subscription {
-                                peer.forget_subscription(subscription);
+                                peer.forget_subscription_with_node(&mut node, subscription);
                             }
                             served.remove(&subscription);
                             if let Some(purpose) = scope_purposes.remove(&subscription) {
@@ -4408,44 +4408,187 @@ where
                         if group.awaiting_upstream_settlement && !settled_handoff {
                             continue;
                         }
-                        let pending_initial = std::mem::take(
-                            &mut group.pending_initial_subscribers,
-                        );
+                        let pending_initial =
+                            std::mem::take(&mut group.pending_initial_subscribers);
                         let serving_initial = !pending_initial.is_empty();
-                        for subscription in pending_initial {
-                            let update_result = {
-                                let mut node = self.node.lock().await;
-                                let mut node = node.scoped_active_session_claims(
-                                    session_claim_binding.as_ref().expect("subscriber claims").0,
-                                    session_claim_binding.as_ref().expect("subscriber claims").1.clone(),
-                                );
-                                if group.initialized
-                                    || peer.has_maintained_subscription(group_subscription)
-                                {
-                                    peer.rehydrate_query_for_subscription_from_maintained_subscription_and_waker(
-                                        &mut node,
-                                        group_subscription,
-                                        subscription,
-                                        &group.shape,
-                                        progress_waker.as_ref(),
-                                    )
-                                    .await
-                                } else {
-                                    peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                        if serving_initial {
+                            let mut established_subscribers = group
+                                .subscribers
+                                .difference(&pending_initial)
+                                .copied()
+                                .collect::<BTreeSet<_>>();
+                            for subscription in pending_initial {
+                            let cloning_existing = group.initialized
+                                || peer.has_maintained_subscription(group_subscription);
+                            let reconciled = if cloning_existing {
+                                let result = {
+                                    let mut node = self.node.lock().await;
+                                    let mut node = node.scoped_active_session_claims(
+                                        session_claim_binding.as_ref().expect("subscriber claims").0,
+                                        session_claim_binding
+                                            .as_ref()
+                                            .expect("subscriber claims")
+                                            .1
+                                            .clone(),
+                                    );
+                                    peer.reconcile_maintained_subscription_for_clone(
                                         &mut node,
                                         group_subscription,
                                         &group.shape,
                                         &group.binding,
-                                        coverage.opts.clone(),
+                                        &coverage.opts,
                                         progress_waker.as_ref(),
                                     )
                                     .await
-                                    .map(|update| {
-                                        update.map(|update| {
-                                            retarget_view_update(update, subscription)
-                                        })
-                                    })
+                                };
+                                let reconciled = match result {
+                                    Ok(Some(reconciled)) => reconciled,
+                                    Ok(None) => {
+                                        group.pending_initial_subscribers.insert(subscription);
+                                        serve_again = true;
+                                        continue;
+                                    }
+                                    Err(crate::node::Error::QueryCapability(detail)) => {
+                                        rollback_rejected_subscriber_admission(
+                                            &self.node,
+                                            peer,
+                                            served,
+                                            coverage_groups,
+                                            scope_purposes,
+                                            scope_aggregates,
+                                            &self.relay_upstream_subscription_owners,
+                                            upstream_subscriptions,
+                                            connection_epoch,
+                                            subscription,
+                                        );
+                                        queue_direct_control(
+                                            &mut self.pending_control_responses,
+                                            unsupported_shape_capability_rejection_message(
+                                                subscription,
+                                                detail,
+                                            ),
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
+                                    }
+                                    Err(error) => {
+                                        rollback_rejected_subscriber_admission(
+                                            &self.node,
+                                            peer,
+                                            served,
+                                            coverage_groups,
+                                            scope_purposes,
+                                            scope_aggregates,
+                                            &self.relay_upstream_subscription_owners,
+                                            upstream_subscriptions,
+                                            connection_epoch,
+                                            subscription,
+                                        );
+                                        queue_direct_control(
+                                            &mut self.pending_control_responses,
+                                            server_subscription_failure_rejection_message(
+                                                subscription,
+                                                &error,
+                                            ),
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
+                                    }
+                                };
+                                Some(reconciled)
+                            } else {
+                                None
+                            };
+                            if let Some(canonical_update) = reconciled
+                                .as_ref()
+                                .and_then(|reconciled| reconciled.canonical_update.as_ref())
+                            {
+                                // Reconciliation has already advanced the canonical
+                                // maintained state. Publish that durable transition to
+                                // every established usage before any fallible reset
+                                // assembly for the new usage can fail.
+                                for sibling in established_subscribers.iter().copied() {
+                                    let mut sibling_update =
+                                        retarget_view_update(canonical_update.clone(), sibling);
+                                    stamp_view_update_authorization_progress_from(
+                                        peer,
+                                        group_subscription,
+                                        &mut sibling_update,
+                                    );
+                                    let receipt =
+                                        scope_purposes.get(&sibling).and_then(|purpose| {
+                                            aggregate_authorization_scope_receipt_for_view(
+                                                scope_aggregates,
+                                                &self.node.borrow(),
+                                                peer,
+                                                ingest_context.identity,
+                                                connection_epoch,
+                                                purpose,
+                                                &sibling_update,
+                                            )
+                                        });
+                                    send_subscriber_with_sync_context(
+                                        &self.node,
+                                        peer,
+                                        self.transport.as_mut(),
+                                        &self.local_fate_routes,
+                                        &self.downstream_fates,
+                                        sibling_update,
+                                    )?;
+                                    if let Some((subscription, receipt)) = receipt {
+                                        queue_direct_control(
+                                            &mut self.pending_control_responses,
+                                            SyncMessage::AuthorizationScopeReceipt {
+                                                subscription,
+                                                receipt,
+                                            },
+                                        );
+                                    }
+                                    sent_view_update = true;
                                 }
+                            }
+                            let update_result = if let Some(reconciled) = reconciled {
+                                let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding
+                                        .as_ref()
+                                        .expect("subscriber claims")
+                                        .1
+                                        .clone(),
+                                );
+                                peer
+                                    .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
+                                        &mut node,
+                                        group_subscription,
+                                        subscription,
+                                        &group.shape,
+                                        reconciled,
+                                    )
+                                .await
+                                .map(Some)
+                            } else {
+                                let mut node = self.node.lock().await;
+                                let mut node = node.scoped_active_session_claims(
+                                    session_claim_binding.as_ref().expect("subscriber claims").0,
+                                    session_claim_binding
+                                        .as_ref()
+                                            .expect("subscriber claims")
+                                            .1
+                                            .clone(),
+                                );
+                                peer.rehydrate_query_for_subscription_with_opts_and_waker(
+                                    &mut node,
+                                    group_subscription,
+                                    &group.shape,
+                                    &group.binding,
+                                    coverage.opts.clone(),
+                                    progress_waker.as_ref(),
+                                )
+                                .await
+                                .map(|update| {
+                                    update.map(|update| retarget_view_update(update, subscription))
+                                })
                             };
                             let mut update = match update_result {
                                 Ok(Some(update)) => update,
@@ -4455,6 +4598,18 @@ where
                                     continue;
                                 }
                                 Err(crate::node::Error::QueryCapability(detail)) => {
+                                    rollback_rejected_subscriber_admission(
+                                        &self.node,
+                                        peer,
+                                        served,
+                                        coverage_groups,
+                                        scope_purposes,
+                                        scope_aggregates,
+                                        &self.relay_upstream_subscription_owners,
+                                        upstream_subscriptions,
+                                        connection_epoch,
+                                        subscription,
+                                    );
                                     queue_direct_control(&mut self.pending_control_responses,
                                         unsupported_shape_capability_rejection_message(
                                             subscription,
@@ -4465,6 +4620,18 @@ where
                                     return Ok(true);
                                 }
                                 Err(error) => {
+                                    rollback_rejected_subscriber_admission(
+                                        &self.node,
+                                        peer,
+                                        served,
+                                        coverage_groups,
+                                        scope_purposes,
+                                        scope_aggregates,
+                                        &self.relay_upstream_subscription_owners,
+                                        upstream_subscriptions,
+                                        connection_epoch,
+                                        subscription,
+                                    );
                                     queue_direct_control(&mut self.pending_control_responses,
                                         server_subscription_failure_rejection_message(
                                             subscription,
@@ -4513,6 +4680,8 @@ where
                                 return Ok(true);
                             }
                             sent_view_update = true;
+                            established_subscribers.insert(subscription);
+                        }
                         }
                         if serving_initial {
                             continue;
@@ -5243,6 +5412,15 @@ where
     Ok(())
 }
 
+pub(super) fn authorization_progress_for_view_receipt(
+    peer_payload_inventory: &crate::protocol::PeerPayloadInventory,
+    usage_site_progress: u64,
+) -> u64 {
+    peer_payload_inventory
+        .authorization_progress
+        .unwrap_or(usage_site_progress)
+}
+
 fn authorization_scope_receipt_for_view<S>(
     node: &NodeState<S>,
     peer: &PeerState,
@@ -5257,6 +5435,7 @@ where
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
+        peer_payload_inventory,
         ..
     }) = update
     else {
@@ -5272,7 +5451,10 @@ where
             claims_revision: node.session_claim_revision(link_identity),
             policy_epoch: node.active_catalogue_seq(),
             settled_through: *settled_through,
-            authorization_progress: peer.authorization_progress_for_subscription(*subscription),
+            authorization_progress: authorization_progress_for_view_receipt(
+                peer_payload_inventory,
+                peer.authorization_progress_for_subscription(*subscription),
+            ),
         },
     ))
 }
@@ -5408,6 +5590,104 @@ pub(super) fn remove_scope_aggregate_member(
     };
     if empty {
         aggregates.remove(key);
+    }
+}
+
+/// Undo a served usage-site admission that failed before its opening reset was
+/// accepted. A coverage group owns shared canonical state, so preserve it for
+/// siblings while removing every per-usage registration. If this was the last
+/// usage, retire the group and cancel (or withdraw) its upstream ownership too.
+fn rollback_rejected_subscriber_admission<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    served: &mut BTreeMap<SubscriptionKey, CoverageKey>,
+    coverage_groups: &mut BTreeMap<CoverageKey, CoverageGroup>,
+    scope_purposes: &mut BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
+    scope_aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
+    relay_upstream_subscription_owners: &RelayUpstreamSubscriptionOwners,
+    upstream_subscriptions: &PendingUpstreamCommands,
+    connection_epoch: u64,
+    subscription: SubscriptionKey,
+) where
+    S: OrderedKvStorage,
+{
+    let Some(coverage) = served.remove(&subscription) else {
+        return;
+    };
+    if let Some(purpose) = scope_purposes.remove(&subscription) {
+        remove_scope_aggregate_member(scope_aggregates, &purpose.key, subscription);
+    }
+
+    let Some(group) = coverage_groups.get_mut(&coverage) else {
+        // Admission always installs the group before `served`; avoid retaining
+        // the usage-site state if an earlier invariant violation broke that
+        // ordering.
+        let mut node = node.borrow_mut();
+        node.apply_unsubscribe(subscription);
+        peer.forget_subscription(subscription);
+        return;
+    };
+    group.subscribers.remove(&subscription);
+    group.pending_initial_subscribers.remove(&subscription);
+    if group.upstream_opts.propagate_upstream {
+        if let Some(owner) = relay_upstream_subscription_owners
+            .borrow_mut()
+            .get_mut(&group.upstream_subscription)
+            && owner.downstream_connection_epoch == connection_epoch
+            && owner.coverage == coverage
+        {
+            owner.downstream_subscriptions.remove(&subscription);
+        }
+    }
+    let retire_group = group.subscribers.is_empty();
+    let upstream = retire_group.then_some((
+        group.upstream_subscription,
+        group.upstream_opts.propagate_upstream,
+    ));
+
+    let mut node = node.borrow_mut();
+    node.apply_unsubscribe(subscription);
+    peer.forget_subscription(subscription);
+    if !retire_group {
+        return;
+    }
+
+    peer.forget_subscription_with_node(&mut node, coverage_group_subscription_key(&coverage));
+    coverage_groups.remove(&coverage);
+    let Some((upstream_subscription, propagated_upstream)) = upstream else {
+        return;
+    };
+    if !propagated_upstream
+        || retire_relay_upstream_subscription(
+            relay_upstream_subscription_owners,
+            upstream_subscription,
+            connection_epoch,
+            &coverage,
+        )
+        .is_none()
+    {
+        return;
+    }
+    let mut pending = upstream_subscriptions.borrow_mut();
+    let open_was_pending = pending.iter().any(|command| {
+        matches!(
+            command,
+            PendingUpstreamCommand::Subscribe(open)
+                if open.subscription == upstream_subscription
+        )
+    });
+    pending.retain(|command| {
+        !matches!(
+            command,
+            PendingUpstreamCommand::Subscribe(open)
+                if open.subscription == upstream_subscription
+        )
+    });
+    if !open_was_pending {
+        pending.push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
     }
 }
 
@@ -5657,7 +5937,7 @@ where
     send_sync_message_chunked(transport, message)
 }
 
-fn send_subscriber_with_sync_context<S>(
+pub(super) fn send_subscriber_with_sync_context<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,

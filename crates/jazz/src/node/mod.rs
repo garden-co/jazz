@@ -824,6 +824,18 @@ struct QueryServing {
     ///
     /// Local ownership pins a shared shape after the last remote owner leaves.
     locally_registered_shapes: BTreeSet<ShapeId>,
+    /// Served publications retaining each shape, keyed by the peer-state
+    /// instance and concrete usage subscription that opened the publication.
+    ///
+    /// These are deliberately distinct from `peer_shape_owners`: the latter
+    /// tracks an inbound peer's `RegisterShape` lifetime, while this records
+    /// this node serving a downstream peer. Both kinds of owner may retain the
+    /// same shape concurrently.
+    outbound_shape_owners: BTreeMap<ShapeId, BTreeSet<(u64, SubscriptionKey)>>,
+    /// Served publications retaining each concrete binding view.  This keeps
+    /// one peer's retirement from leaving its binding receipts resident, while
+    /// still permitting multiple peer states to share an identical binding.
+    outbound_binding_owners: BTreeMap<SubscriptionKey, BTreeSet<u64>>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
     // A wire subscription is identified by its usage binding handle *and* read
     // view. The same canonical binding id may legitimately be registered at

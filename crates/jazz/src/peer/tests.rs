@@ -377,7 +377,10 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
 
     let update = peer
         .rehydrate_query_for_subscription_from_maintained_subscription(
-            &mut core, canonical, target, &shape,
+            &mut core,
+            canonical,
+            target,
+            &shape,
         )
         .unwrap()
         .expect("expected view update");
@@ -1655,6 +1658,89 @@ fn non_global_peer_query_subscriptions_use_maintained_path() {
         .unwrap();
 }
 
+/// A served publication is a local owner of its shape even though it did not
+/// arrive through the inbound `RegisterShape` stream.  Inbound registration
+/// teardown therefore must not reclaim the common shape (and its bindings or
+/// settled caches) while either a direct or reconnected peer still publishes
+/// it.  The last served owner still releases the shape so this pin cannot leak.
+#[test]
+fn outbound_publications_hold_shapes_across_inbound_and_peer_retirement() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x45));
+    let (shape, binding) = title_shape_binding("shared");
+    let subscription = subscription_key(&shape, &binding);
+    let edge_opts = RegisterShapeOptions {
+        tier: DurabilityTier::Edge,
+        ..RegisterShapeOptions::default()
+    };
+    let edge_subscription = subscription_key_with_opts(&shape, &binding, &edge_opts);
+    let mut first_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x45; 16]));
+    let mut cloned_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x47; 16]));
+    let mut reconnected_peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x46; 16]));
+
+    first_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    // A separate peer can reconnect with an identical concrete binding.  It
+    // must keep that binding alive when the first peer later retires.
+    cloned_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    // Refreshing the same publication replaces, rather than duplicates, its
+    // owner record.
+    first_peer
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    core.register_shape_for_peer(
+        0xfeed,
+        shape.shape_id(),
+        ShapeAst::from_validated(&shape),
+    )
+    .unwrap();
+    reconnected_peer
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, edge_opts)
+        .unwrap();
+    assert_eq!(
+        core.outbound_shape_owner_count_for_test(shape.shape_id()),
+        3,
+        "each independently served peer must own its live publication"
+    );
+
+    // This was the P1 order: an unrelated inbound peer becomes the last
+    // inbound owner and unsubscribes after an outbound publication is live.
+    core.release_shape_for_peer(0xfeed, shape.shape_id());
+    assert!(
+        core.registered_shape(shape.shape_id()).is_some(),
+        "a live outbound publication must retain its shared shape after inbound teardown"
+    );
+    assert_eq!(core.registered_query_binding_count_for_test(), 2);
+
+    first_peer.forget_subscription_with_node(&mut core, subscription);
+    assert!(
+        core.registered_shape(shape.shape_id()).is_some(),
+        "other peers and policy partitions remain shape owners"
+    );
+    assert_eq!(
+        core.registered_query_binding_count_for_test(),
+        2,
+        "an identical binding remains live until its second peer retires"
+    );
+
+    cloned_peer.forget_subscription_with_node(&mut core, subscription);
+    assert_eq!(
+        core.registered_query_binding_count_for_test(),
+        1,
+        "retiring the final owner of one binding must preserve the other partition"
+    );
+    assert!(core.registered_shape(shape.shape_id()).is_some());
+
+    reconnected_peer.forget_subscription_with_node(&mut core, edge_subscription);
+    assert!(
+        core.registered_shape(shape.shape_id()).is_none(),
+        "the final outbound owner must reclaim shape registrations and caches"
+    );
+    assert_eq!(core.registered_query_binding_count_for_test(), 0);
+}
+
 fn row_result_set(
     peer: &PeerState,
     subscription: SubscriptionKey,
@@ -2024,7 +2110,10 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
     };
     let duplicate = peer
         .rehydrate_query_for_subscription_from_maintained_subscription(
-            &mut core, canonical, target, &shape,
+            &mut core,
+            canonical,
+            target,
+            &shape,
         )
         .unwrap()
         .expect("duplicate structured usage receives a reset");
@@ -5367,4 +5456,98 @@ fn incremental_query_result_sets_match_full_rehydrate_after_seeded_commits() {
             "incremental whole-table result set diverged from full rehydrate at step {step}"
         );
     }
+}
+
+
+#[test]
+fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x93));
+    let live = row(0x48);
+    let live_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")),
+        )
+        .unwrap();
+    accept_global(&mut core, live_tx, 1);
+
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let canonical = subscription_key(&shape, &binding);
+    let target = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x48)),
+        ..canonical
+    };
+    let mut peer = PeerState::new();
+    peer.rehydrate_query_for_subscription_with_opts(
+        &mut core,
+        canonical,
+        &shape,
+        &binding,
+        RegisterShapeOptions::default(),
+    )
+    .unwrap();
+    let old_receiver = maintained_subscription_id(&peer, canonical)
+        .expect("canonical maintained receiver missing");
+
+    let deleted_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", live, 2_000).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, deleted_tx, 2);
+
+    let reconciled = peer
+        .reconcile_maintained_subscription_for_clone(
+            &mut core,
+            canonical,
+            &shape,
+            &binding,
+            &RegisterShapeOptions::default(),
+            None,
+        )
+        .unwrap()
+        .expect("expected canonical reconciliation");
+
+    assert!(row_result_set(&peer, canonical).unwrap().is_empty());
+    let canonical_update = reconciled
+        .canonical_update
+        .as_ref()
+        .expect("authoritative reconciliation must remain owner-visible");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        reset_result_set,
+        result_member_removes,
+        ..
+    }) = canonical_update
+    else {
+        panic!("expected canonical view update");
+    };
+    assert_eq!(*subscription, canonical);
+    assert!(!*reset_result_set);
+    assert_eq!(result_member_removes.len(), 1);
+
+    let target_reset = peer
+        .rehydrate_query_for_subscription_from_reconciled_maintained_subscription(
+            &mut core,
+            canonical,
+            target,
+            &shape,
+            reconciled,
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        result_member_adds,
+        ..
+    }) = target_reset
+    else {
+        panic!("expected target view update");
+    };
+    assert!(result_member_adds.is_empty());
+    let retained_receiver = maintained_subscription_id(&peer, canonical)
+        .expect("canonical maintained receiver missing after reconciliation");
+    assert_eq!(
+        old_receiver, retained_receiver,
+        "incremental canonical reconciliation should retain the active receiver"
+    );
+    assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
 }

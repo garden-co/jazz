@@ -64,6 +64,11 @@ impl PeerState {
     {
         let Some(mut state) = self.publication_states.remove(&subscription) else {
             self.downstream_known_states.remove(&subscription);
+            // `ensure_query_subscription_registered` may have installed the
+            // node-side shape before this peer had enough state to create a
+            // maintained receiver. Retire that owner too; the node-side
+            // removal is idempotent for an already-forgotten publication.
+            node.release_query_subscription_for_peer(self.publication_owner, subscription);
             return false;
         };
         self.downstream_known_states.remove(&subscription);
@@ -78,6 +83,7 @@ impl PeerState {
             false
         };
         drop(state);
+        node.release_query_subscription_for_peer(self.publication_owner, subscription);
         unsubscribed
     }
 
