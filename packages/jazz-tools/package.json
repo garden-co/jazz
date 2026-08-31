@@ -70,10 +70,6 @@
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
     },
-    "./dev/inspector": {
-      "types": "./dist/dev/inspector-query.d.ts",
-      "default": "./dist/dev/inspector-query.js"
-    },
     "./_dev/schema-hash": {
       "types": "./dist/_dev/schema-hash.d.ts",
       "default": "./dist/_dev/schema-hash.js"

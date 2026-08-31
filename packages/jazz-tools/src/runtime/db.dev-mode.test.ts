@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, createInspectorLocalQueryOptions, type Db, type QueryBuilder } from "./db.js";
+import { createDb, type Db, type QueryBuilder } from "./db.js";
+import { createInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const schema: WasmSchema = {

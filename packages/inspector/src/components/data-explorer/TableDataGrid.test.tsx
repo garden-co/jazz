@@ -112,10 +112,6 @@ vi.mock("jazz-tools/react", () => ({
   }),
 }));
 
-vi.mock("jazz-tools/dev/inspector", () => ({
-  inspectorLocalQueryOptions: () => ({}),
-}));
-
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: mockWasmSchema,
@@ -426,7 +422,13 @@ describe("TableDataGrid", () => {
   it("subscribes with the Inspector local-read capability in overlay mode", () => {
     renderGrid();
 
-    expect(mockUseAll).toHaveBeenCalledWith(expect.any(Object), expect.any(Object));
+    const options = mockUseAll.mock.calls[0]?.[1];
+    expect(options).toBeDefined();
+    expect(Object.isFrozen(options)).toBe(true);
+    // The bridge's capability is non-enumerable, so it remains invisible to
+    // ordinary application option serialization while Db can recognize it.
+    expect(Object.keys(options as object)).toEqual([]);
+    expect(Object.getOwnPropertySymbols(options as object)).toHaveLength(1);
   });
 
   it("adds a where clause and compiles it into query conditions", () => {

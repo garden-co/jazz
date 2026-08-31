@@ -10,7 +10,7 @@ import {
   type RowOf,
 } from "../../src/index.js";
 import { createJazzClient } from "../../src/web/create-jazz-client.js";
-import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import {

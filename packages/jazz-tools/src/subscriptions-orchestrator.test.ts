@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "./runtime/context.js";
-import {
-  createInspectorLocalQueryOptions,
-  type QueryBuilder,
-  type QueryOptions,
-  type SubscriptionHandle,
-} from "./runtime/db.js";
+import { type QueryBuilder, type QueryOptions, type SubscriptionHandle } from "./runtime/db.js";
+import { createInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 import {
   SubscriptionsOrchestrator,

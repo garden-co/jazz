@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as packageRoot from "./index.js";
 import * as runtime from "./runtime/index.js";
 import type { QueryExecutionOptions } from "./runtime/index.js";
+
+// @ts-expect-error The Inspector-only local-read capability is not an installed-app entrypoint.
+import type { inspectorLocalQueryOptions as InspectorCapability } from "jazz-tools/dev/inspector";
+
+void (null as unknown as InspectorCapability);
 
 const canonicalQueryExecutionOptions: QueryExecutionOptions = {
   branch: "draft",
@@ -421,6 +427,22 @@ describe("package root public API", () => {
     ]) {
       expect(exportedPaths, removedPathFragment).not.toContain(removedPathFragment);
     }
+
+    // The Inspector's local-only query capability is compiled into the private
+    // Inspector bundle, never made available to an installed application.
+    expect(exportedPaths).not.toContain("./dev/inspector");
+    expect(exportedPaths).not.toContain("inspector-query");
+    expect(exportedPaths).not.toContain("./internal/");
+  });
+
+  it("rejects the former Inspector capability subpath at runtime", () => {
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        ["--input-type=module", "--eval", 'await import("jazz-tools/dev/inspector")'],
+        { cwd: join(packageRootDir, ".."), stdio: ["ignore", "ignore", "pipe"] },
+      ),
+    ).toThrow(/Package subpath ['"]\.\/dev\/inspector['"] is not defined by "exports"/);
   });
 
   it("publishes restored React Native and Expo entrypoints", () => {

@@ -1,12 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReadTier, type JazzClient } from "./client.js";
-import {
-  createDbWithRuntimeSource,
-  createInspectorLocalQueryOptions,
-  type Db,
-  type DbConfig,
-  type QueryBuilder,
-} from "./db.js";
+import { createDbWithRuntimeSource, type Db, type DbConfig, type QueryBuilder } from "./db.js";
+import { createInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../drivers/types.js";
 

@@ -12,7 +12,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { createDb, type Db, type DbConfig } from "../../src/runtime/db.js";
 import {

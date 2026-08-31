@@ -50,6 +50,7 @@ function makeClient() {
   const client = {
     getSchema: () => new Map(Object.entries(app.wasmSchema)),
     query,
+    queryInternal: query,
     beginTransaction,
     onMutationError: vi.fn(),
   } as unknown as JazzClient;
@@ -109,6 +110,28 @@ describe("Db.one", () => {
     expect(beginTransaction).toHaveBeenCalledWith("mergeable", undefined, undefined);
     expect(rootLimit(firstQueryJson(query))).toBe(1);
     expect(query.mock.calls[0]?.[1]).toMatchObject({
+      openTransactionId: "00000000000070008000000000000001",
+    });
+  });
+
+  it("lowers public options before adding transaction-owned read controls", async () => {
+    const { client, query } = makeClient();
+    const db = new TestDb(client);
+    const tx = db.beginTransaction();
+
+    await tx.all(app.todos.where({ done: false }), {
+      tier: "local",
+      // JavaScript callers can supply these despite their absence from the
+      // public type. They must not override transaction semantics.
+      propagation: "local-only",
+      localUpdates: "visible",
+      openTransactionId: "forged-open-transaction",
+      runtimeSettledTier: "global",
+    } as any);
+
+    expect(query.mock.calls[0]?.[1]).toEqual({
+      tier: "local",
+      localUpdates: "deferred",
       openTransactionId: "00000000000070008000000000000001",
     });
   });

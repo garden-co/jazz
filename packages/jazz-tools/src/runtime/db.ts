@@ -54,6 +54,7 @@ import {
   resolveClientInternalSessionSync,
 } from "./client-session.js";
 import { createBrowserPhysicalDatabaseName } from "./browser-worker-config.js";
+import { isInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import { authSecretSeedForMinting } from "./auth-secret-codec.js";
 import {
   getDbInternalSession,
@@ -187,40 +188,6 @@ export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
   base?: BranchBase;
 };
 
-// A module-private capability makes the Inspector's offline local reads an
-// explicit internal dependency. It is intentionally not representable by an
-// application-supplied object (including one cast through `any`).
-const INSPECTOR_LOCAL_READ_CAPABILITY = Symbol("jazz.inspectorLocalRead");
-
-/**
- * Create options for the Jazz Inspector's deliberately local-only reads.
- *
- * This is exported through `jazz-tools/dev`, not the application query API.
- * The returned capability is the only supported route to local-only query
- * propagation; ordinary query options are copied at the Db boundary.
- */
-export function createInspectorLocalQueryOptions(
-  options: Omit<QueryOptions, "tier"> = {},
-): QueryOptions {
-  const capabilityOptions: QueryOptions = { ...options };
-  Object.defineProperty(capabilityOptions, INSPECTOR_LOCAL_READ_CAPABILITY, {
-    value: true,
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
-  return Object.freeze(capabilityOptions);
-}
-
-/** @internal Keep Inspector-local subscriptions distinct from product query cache entries. */
-export function isInspectorLocalQueryOptions(options?: QueryOptions): boolean {
-  return (
-    (options as { [INSPECTOR_LOCAL_READ_CAPABILITY]?: unknown } | undefined)?.[
-      INSPECTOR_LOCAL_READ_CAPABILITY
-    ] === true
-  );
-}
-
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   tier?: InternalQueryExecutionOptions["tier"];
 };
@@ -237,7 +204,6 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
     tier?: unknown;
     branch?: unknown;
     base?: unknown;
-    [INSPECTOR_LOCAL_READ_CAPABILITY]?: unknown;
   };
   const lowered: InternalDbQueryOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
@@ -1389,7 +1355,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    // Transactions accept the same public options surface as Db. Lower before
+    // reaching native options so JavaScript callers cannot smuggle runtime
+    // controls (for example `localUpdates` or `openTransactionId`) through this
+    // otherwise separate execution path.
+    const queryOptions = nativeDbQueryOptions(
+      query._schema,
+      builtQuery.table,
+      lowerPublicDbQueryOptions(options),
+    );
     const rows = await client.queryInternal(
       translateQuery(builderJson, planningSchema),
       {

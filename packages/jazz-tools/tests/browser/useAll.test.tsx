@@ -7,7 +7,7 @@ import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/d
 import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
 import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
 import { useAll } from "../../src/react-core/use-all.js";
-import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 
 const schema: WasmSchema = {
   orgs: {

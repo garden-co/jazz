@@ -1,10 +1,6 @@
 import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
-import {
-  isInspectorLocalQueryOptions,
-  type DbSubscriptionSource,
-  type QueryBuilder,
-  type QueryOptions,
-} from "./runtime/db.js";
+import { type DbSubscriptionSource, type QueryBuilder, type QueryOptions } from "./runtime/db.js";
+import { isInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { Session } from "./runtime/context.js";
 
 type UseAllStatePending<T> = {

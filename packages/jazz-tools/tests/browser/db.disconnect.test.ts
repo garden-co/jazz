@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
-import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";

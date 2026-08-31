@@ -27,4 +27,3 @@ export { jazzPlugin, type JazzPluginOptions, type JazzServerOptions } from "./vi
 export { withJazz } from "./next.js";
 export { withJazz as withJazzExpo } from "./expo.js";
 export { jazzSvelteKit } from "./sveltekit.js";
-export { inspectorLocalQueryOptions } from "./inspector-query.js";

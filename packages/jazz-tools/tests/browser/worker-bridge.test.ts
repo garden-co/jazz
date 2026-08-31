@@ -15,7 +15,7 @@ import {
   resolveDefaultPersistentDbName,
   type QueryBuilder,
 } from "../../src/runtime/db.js";
-import { inspectorLocalQueryOptions } from "../../src/dev/inspector-query.js";
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {

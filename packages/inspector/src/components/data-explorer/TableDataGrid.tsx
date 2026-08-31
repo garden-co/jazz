@@ -12,7 +12,7 @@ import {
 } from "react-data-grid";
 import type { ColumnDescriptor, ColumnType, QueryOptions, TableProxy, Value } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
-import { inspectorLocalQueryOptions } from "jazz-tools/dev/inspector";
+import { inspectorLocalQueryOptions } from "../../inspector-query.js";
 import type { DynamicTableRow } from "../../utility/generic-query-builder.js";
 import {
   useEffect,
