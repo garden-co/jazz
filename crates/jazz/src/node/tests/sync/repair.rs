@@ -165,6 +165,90 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
     ));
 }
 
+/// Internal boundary test: the public browser topology tests exercise the
+/// admitted foreground link. Here we prove the lower serving capability cannot
+/// fall back to a fresh policy evaluation or live result membership. Alice's
+/// authority-delivered row remains repairable after policy would reject Bob;
+/// a never-recorded physical version remains hidden.
+#[test]
+fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    relay_node.set_relay_authority_session_owner_for_test();
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    install_test_uuid_sub_claim(&mut relay_node, bob);
+    let row_uuid = row(0x29);
+    let tx_id = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", row_uuid, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "retained authority delivery")),
+    );
+    let request = crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id);
+    let hidden_row = row(0x2a);
+    let hidden_tx = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", hidden_row, 11)
+            .made_by(alice)
+            .cells(owner_cells(alice, "not delivered to this scope")),
+    );
+    let update = relay_node.view_update_for_current_rows("todos").unwrap();
+    let SyncMessage::ViewUpdate(payload) = update else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let bundles = bundles
+        .into_iter()
+        .filter(|bundle| bundle.tx.tx_id == tx_id)
+        .collect::<Vec<_>>();
+    assert_eq!(bundles.len(), 1, "test setup must retain one delivered body");
+    relay_node
+        .record_scope_relay_authoritative_bundles(&bundles)
+        .resolve()
+        .unwrap();
+
+    assert!(
+        !relay_node
+            .dry_run_read_current_allows("todos", row_uuid, bob)
+            .unwrap(),
+        "planted control: a fresh Bob authority evaluation rejects this row"
+    );
+    let mut relay = PeerState::relay();
+    let retained_response = relay
+        .serve_row_versions(
+            &mut relay_node,
+            std::slice::from_ref(&request),
+            crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+        )
+        .resolve()
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = retained_response.as_slice()
+    else {
+        panic!("expected retained same-scope repair response");
+    };
+    assert_eq!(version_bundles.len(), 1);
+
+    let hidden = crate::protocol::RowVersionRef::new("todos", hidden_row, hidden_tx);
+    let hidden_response = relay
+        .serve_row_versions(
+            &mut relay_node,
+            &[hidden],
+            crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
+        )
+        .resolve()
+        .unwrap();
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = hidden_response.as_slice()
+    else {
+        panic!("expected retained same-scope repair response");
+    };
+    assert!(version_bundles.is_empty(), "unrecorded ref stays hidden");
+}
+
 #[test]
 fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
