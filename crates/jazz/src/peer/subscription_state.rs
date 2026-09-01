@@ -119,6 +119,14 @@ pub(super) struct PeerSubscriptionState {
     /// Immutable admitted policy context for this usage site. Relay links can
     /// multiplex sessions, so this must not be inferred from connection role.
     pub(super) policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    /// Exact upstream authority receipt consumed by this served usage site.
+    ///
+    /// A relay's maintained receiver has its own synthetic subscription key
+    /// so that downstream policy scopes do not share a runtime. Its source,
+    /// however, is the separately registered upstream usage site. Keeping the
+    /// source key here preserves that relationship without trying to recover
+    /// it from the (non-unique) canonical binding view.
+    pub(super) authority_result_source: Option<AuthorityResultKey>,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
     pub(super) member_index: BTreeMap<MemberIndexKey, MemberSlot>,

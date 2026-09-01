@@ -1782,6 +1782,11 @@ where
                                             pending_subscription.subscription,
                                             &values,
                                             pending_subscription.identity,
+                                            if permits_delegated_sessions {
+                                                pending_subscription.policy_binding.as_ref()
+                                            } else {
+                                                None
+                                            },
                                         )
                                         .await?;
                                     let subscribe = Subscribe {
@@ -4011,7 +4016,20 @@ where
                             let local_waiting_for_upstream_settlement = local_subscriber
                                 && opts.propagate_upstream
                                 && opts.tier > DurabilityTier::Local
-                                && !self.node.borrow().has_settled_result_set(upstream_binding_view);
+                                && {
+                                    // This incoming usage site was just
+                                    // registered with its exact policy
+                                    // binding. A same-shaped sibling's
+                                    // receipt must neither settle nor block
+                                    // it.
+                                    let node = self.node.borrow();
+                                    !node
+                                        .authority_result_key_for_subscription(subscription)
+                                        .ok()
+                                        .is_some_and(|key| {
+                                            node.has_settled_authority_result(&key)
+                                        })
+                                };
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())
@@ -4203,6 +4221,16 @@ where
                                             )
                                             .is_some()
                                             {
+                                                // The relay owns both the
+                                                // local exact authority
+                                                // receipt and its wire usage
+                                                // site. Retiring only the
+                                                // remote wire handle leaks a
+                                                // settled receipt until a
+                                                // later lifecycle sweep.
+                                                self.node
+                                                    .borrow_mut()
+                                                    .apply_unsubscribe(upstream_subscription);
                                                 upstream_subscriptions.borrow_mut().push(
                                                     PendingUpstreamCommand::Unsubscribe(
                                                         upstream_subscription,
@@ -4521,14 +4549,34 @@ where
                             group_subscription,
                             group.policy_binding.clone(),
                         );
-                        let settled_handoff = group.awaiting_upstream_settlement
-                            && self.node.borrow().has_settled_result_set(BindingViewKey {
-                                shape_id: group.shape.shape_id(),
-                                binding_id: group.binding.binding_id(),
-                                read_view: group.upstream_opts.read_view_key(),
-                            });
+                        // The maintained receiver is addressed by the
+                        // policy-partitioned coverage-group key, while the
+                        // selected membership belongs to its separately
+                        // registered upstream usage key. Keep that exact
+                        // association even for groups that did not have to
+                        // wait on this turn; strict relay materialization
+                        // always needs it.
+                        let upstream_authority_result_key = self
+                            .node
+                            .borrow()
+                            .authority_result_key_for_subscription(group.upstream_subscription)
+                            .ok();
+                        let upstream_authority_is_settled = {
+                            let node = self.node.borrow();
+                            upstream_authority_result_key
+                                .as_ref()
+                                .is_some_and(|key| node.has_settled_authority_result(key))
+                        };
+                        let settled_handoff =
+                            group.awaiting_upstream_settlement && upstream_authority_is_settled;
                         if group.awaiting_upstream_settlement && !settled_handoff {
                             continue;
+                        }
+                        if let Some(authority_result_key) = upstream_authority_result_key {
+                            peer.set_subscription_authority_result_source(
+                                group_subscription,
+                                authority_result_key,
+                            );
                         }
                         let pending_initial =
                             std::mem::take(&mut group.pending_initial_subscribers);

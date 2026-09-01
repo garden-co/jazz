@@ -519,7 +519,7 @@ where
                     .local_materialized_window_binding_views
                     .insert(binding_view_key);
             } else {
-                self.clear_settled_result_view(authority_result_key);
+                self.retire_authority_result_view(authority_result_key);
             }
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
@@ -632,7 +632,7 @@ where
             .cloned()
             .collect::<Vec<_>>();
         for authority_result_key in authority_result_keys {
-            self.clear_settled_result_view(authority_result_key);
+            self.retire_authority_result_view(authority_result_key);
         }
         self.query.settled_program_facts.remove(&binding_view_key);
         self.query
@@ -651,20 +651,6 @@ where
             .deferred_publication_binding_views
             .remove(&binding_view_key);
         true
-    }
-
-    pub(crate) fn has_settled_result_set(&self, binding_view_key: BindingViewKey) -> bool {
-        self.unique_authority_result_key_for_binding_view(binding_view_key)
-            .is_some_and(|key| {
-                self.query
-                    .authority_results
-                    .get(&key)
-                    .is_some_and(|state| state.settled_through.is_some())
-            })
-            && !self
-                .query
-                .local_materialized_window_binding_views
-                .contains(&binding_view_key)
     }
 
     /// Exact receipt variant for a usage subscription that carries delegated
@@ -1023,13 +1009,30 @@ where
         subscription: SubscriptionKey,
         values: &[Value],
         identity: AuthorSubject,
+        policy_binding: Option<&(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> Result<Option<KnownStateDeclaration>, Error> {
         let binding_view_key = BindingViewKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
             read_view: subscription.read_view,
         };
-        if !self.has_settled_result_set(binding_view_key) {
+        // This declaration is assembled before the outbound Subscribe is
+        // registered locally, so resolve its exact future receipt from the
+        // same immutable delegated policy snapshot that will be sent with it.
+        // Do not inspect a sibling receipt just because it shares the
+        // canonical binding view.
+        let authority_result_key = policy_binding
+            .map(|(identity, claims)| {
+                AuthorityResultKey::policy_scoped(
+                    binding_view_key,
+                    crate::protocol::PolicyBindingKey::from_canonical_parts(
+                        *identity,
+                        claims.clone(),
+                    ),
+                )
+            })
+            .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
+        if !self.has_settled_authority_result(&authority_result_key) {
             let _ = self.load_known_state_fact(binding_view_key).await?;
             // Slow exact declarations are still known-state declarations: they
             // must describe a binding view the server has previously settled
@@ -1039,9 +1042,16 @@ where
             // responses suppress local live state.
             return Ok(None);
         }
-        if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
+        if let Some(position) = self
+            .query
+            .authority_results
+            .get(&authority_result_key)
+            .and_then(|state| state.settled_through)
+        {
             let authorization_progress = self
-                .authority_result_state_for_binding_view(binding_view_key)
+                .query
+                .authority_results
+                .get(&authority_result_key)
                 .and_then(|state| state.authorization_progress);
             return Ok(Some(match authorization_progress {
                 Some(authorization_progress) => {
@@ -1095,8 +1105,8 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Result<bool, Error> {
-        let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
-            Ok(binding_view_key) => binding_view_key,
+        let authority_result_key = match self.authority_result_key_for_subscription(subscription) {
+            Ok(authority_result_key) => authority_result_key,
             Err(Error::InvalidStoredValue(
                 "subscription referenced unregistered shape"
                 | "subscription referenced unregistered binding",
@@ -1105,8 +1115,9 @@ where
         };
         Ok(self
             .query
-            .known_state_declared_binding_views
-            .contains(&binding_view_key))
+            .authority_results
+            .get(&authority_result_key)
+            .is_some_and(|state| state.known_state_declared))
     }
 
     pub(crate) fn binding_view_key_for_subscription(

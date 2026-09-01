@@ -1660,6 +1660,19 @@ where
             .remove(&authority_result_key.binding_view);
     }
 
+    /// Retire a receipt whose exact usage-site ownership has ended.
+    ///
+    /// This is deliberately distinct from [`Self::clear_settled_result_view`]:
+    /// an authority reset replaces membership while preserving its lifecycle
+    /// generation, whereas an unsubscribe or ownerless-recovery invalidation
+    /// must not leave a settled stamp that could satisfy the next usage site.
+    fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        self.query.authority_results.remove(&authority_result_key);
+        self.query
+            .local_materialized_window_binding_views
+            .remove(&authority_result_key.binding_view);
+    }
+
     async fn open_catalogue_stage<T>(
         schema: JazzSchema,
         storage: T,

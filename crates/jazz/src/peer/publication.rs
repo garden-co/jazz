@@ -314,6 +314,21 @@ impl PeerState {
             .policy_binding = Some(binding);
     }
 
+    /// Associate a relay-owned maintained receiver with the precise upstream
+    /// authority receipt that supplies its membership. This is intentionally
+    /// separate from its policy binding: the former is a local lifecycle
+    /// handle, while the latter is the admitted authorization context.
+    pub(crate) fn set_subscription_authority_result_source(
+        &mut self,
+        subscription: SubscriptionKey,
+        authority_result_key: AuthorityResultKey,
+    ) {
+        self.publication_states
+            .entry(subscription)
+            .or_default()
+            .authority_result_source = Some(authority_result_key);
+    }
+
     pub(crate) fn subscription_policy_binding(
         &self,
         subscription: SubscriptionKey,
@@ -1288,9 +1303,24 @@ impl PeerState {
         // The downstream usage registration chose this policy scope.  Carry
         // that exact receipt into source resolution; the shared binding-view
         // key alone is not an authority identity in a multiplexed relay.
-        let source_authority_result_key = relay_edge_requires_authority_source
-            .then(|| node.authority_result_key_for_subscription(subscription))
-            .transpose()?;
+        let source_authority_result_key = if relay_edge_requires_authority_source {
+            // The downstream opening can be serviced before the relay's
+            // upstream Subscribe has been registered locally. That is normal
+            // owner-loop ordering, not an invalid subscription. Suspend this
+            // opening until the connection records its exact upstream usage
+            // source; guessing from the group key would leak or erase a
+            // sibling policy's membership.
+            let Some(source) = self
+                .publication_states
+                .get(&subscription)
+                .and_then(|state| state.authority_result_source.clone())
+            else {
+                return Ok(None);
+            };
+            Some(source)
+        } else {
+            None
+        };
         let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
@@ -1749,6 +1779,15 @@ impl PeerState {
                 .has_served_authorization_progress
                 .then_some(state.authorization_progress)
         });
+        // `forget_subscription_with_node` below retires the old maintained
+        // runtime, but the relay's exact upstream receipt is immutable
+        // lifecycle metadata for this usage site. Carry it through the
+        // replacement rather than making the new receiver rediscover a
+        // source from its synthetic group key.
+        let authority_result_source = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.authority_result_source.clone());
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
         // Retire the old publication before retaining its replacement.  The
         // served policy helper creates a lightweight publication state, so
@@ -1770,6 +1809,7 @@ impl PeerState {
         state.program_fact_set = previous_program_fact_set;
         state.member_index = previous_member_index;
         state.policy_binding = Some(policy_binding);
+        state.authority_result_source = authority_result_source;
         if let Some(authorization_progress) = retained_authorization {
             state.authorization_progress = authorization_progress;
             state.has_served_authorization_progress = true;

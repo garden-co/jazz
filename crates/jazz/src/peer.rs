@@ -30,9 +30,10 @@ use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe, SubscriptionKey,
-    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, expand_version_carriers,
+    AuthorityResultKey, DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
+    expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
