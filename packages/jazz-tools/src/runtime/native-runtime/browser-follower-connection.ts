@@ -29,15 +29,6 @@ type BrowserFollowerPortRpcRequest =
   | { type: "abort-storage-reset" }
   | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
-function relayFrameFingerprints(frames: readonly Uint8Array[]): string[] {
-  // Temporary full-frame trace: the subscription key is after the envelope
-  // prefix, so a prefix fingerprint cannot distinguish a routed room update
-  // from an empty reply for a sibling query.
-  return frames.map((frame) =>
-    [...frame].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
-  );
-}
-
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
   private readonly pump: BrowserWorkerTransportPump;
@@ -89,13 +80,6 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       runtime,
       transport,
       (frames) => {
-        if (traceRelay) {
-          console.debug("JAZZ_RELAY_TAB", "tab->worker", {
-            dbName: this.dbName,
-            frameCount: frames.length,
-            frames: relayFrameFingerprints(frames),
-          });
-        }
         const copies = transferableFrames(frames);
         this.port.postMessage(
           { type: "frames", frames: copies } satisfies BrowserFollowerPortRequest,
@@ -123,12 +107,9 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
             // Vitest forwards page-console diagnostics, unlike SharedWorker
             // console output. This surfaces the complete worker relay trace
             // from focused browser fixtures without exposing capabilities.
-            // Serialize the temporary semantic flight recorder explicitly:
-            // browser-test console forwarding otherwise abbreviates a batch
-            // as `[Object]`, which defeats end-to-end correlation.
             console.debug(
               "JAZZ_AUX_RELAY",
-              JSON.stringify(entries.map((entry) => ({ ...entry, hop: "tab-worker" }))),
+              entries.map((entry) => ({ ...entry, hop: "tab-worker" })),
             );
           }
         : undefined,
@@ -245,13 +226,6 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private readonly onMessage = (event: MessageEvent<BrowserFollowerPortEvent>): void => {
     const message = event.data;
     if (message.type === "frames") {
-      if (this.traceRelay) {
-        console.debug("JAZZ_RELAY_TAB", "worker->tab", {
-          dbName: this.dbName,
-          frameCount: message.frames.length,
-          frames: relayFrameFingerprints(message.frames),
-        });
-      }
       this.pump.receive(message.frames);
       return;
     }
@@ -297,9 +271,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       return;
     }
     if (message.type === "relay-trace") {
-      if (this.traceRelay) {
-        console.debug("JAZZ_AUX_RELAY", JSON.stringify(message.entries));
-      }
+      if (this.traceRelay) console.debug("JAZZ_AUX_RELAY", message.entries);
       return;
     }
     if (message.type === "error") {

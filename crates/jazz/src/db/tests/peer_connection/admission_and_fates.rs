@@ -1038,7 +1038,6 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
     let node = server.node();
     let mut peer = PeerState::new();
     let (_receiver, mut transport) = duplex();
-    let semantic_trace = Rc::new(RefCell::new(VecDeque::new()));
     let local_fate_routes = Rc::new(RefCell::new(BTreeMap::new()));
     let downstream_fates = Rc::new(RefCell::new(Vec::new()));
     let tx_id = TxId::new(TxTime(7), NodeUuid::from_bytes([0x61; 16]));
@@ -1082,7 +1081,6 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
 
     send_subscriber_with_sync_context(
         &node,
-        &semantic_trace,
         &mut peer,
         transport.as_mut(),
         &local_fate_routes,

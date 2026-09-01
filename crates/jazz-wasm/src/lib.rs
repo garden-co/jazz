@@ -549,28 +549,6 @@ impl Clone for WasmTransportInner {
 }
 
 impl WasmTransportInner {
-    fn take_semantic_trace(&self) -> Vec<String> {
-        match self {
-            Self::Memory { connection, .. } => jazz::db::block_on(async {
-                connection
-                    .as_ref()
-                    .expect("new transport has a connection")
-                    .lock()
-                    .await
-                    .take_semantic_trace()
-            }),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser { connection, .. } => jazz::db::block_on(async {
-                connection
-                    .as_ref()
-                    .expect("new transport has a connection")
-                    .lock()
-                    .await
-                    .take_semantic_trace()
-            }),
-        }
-    }
-
     fn auxiliary_pump(&self) -> jazz::db::PeerIoPump {
         match self {
             Self::Memory { connection, .. } => jazz::db::block_on(async {
@@ -3154,22 +3132,6 @@ impl WasmTransport {
             if let Some(storage_error) = trace.storage_error {
                 set("storageError", JsValue::from_str(storage_error));
             }
-            entries.push(&entry);
-        }
-        // Temporary semantic relay diagnostic, surfaced through the existing
-        // test-only trace channel.  It has no production routing effect.
-        for event in self.inner.take_semantic_trace() {
-            let entry = js_sys::Object::new();
-            let set = |name: &str, value: JsValue| {
-                let _ = js_sys::Reflect::set(&entry, &JsValue::from_str(name), &value);
-            };
-            set("event", JsValue::from_str(&event));
-            set("role", JsValue::from_str("upstream"));
-            set("connection", JsValue::from_str("semantic"));
-            set("requestId", JsValue::from_str("0"));
-            set("remainingHops", JsValue::from_f64(0.0));
-            set("objectHash", JsValue::from_str(""));
-            set("locatorFingerprint", JsValue::from_str(""));
             entries.push(&entry);
         }
         entries

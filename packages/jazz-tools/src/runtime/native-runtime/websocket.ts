@@ -266,14 +266,6 @@ export class WebSocketCarrier {
       },
     );
     this.socket.addEventListener("message", (event) => {
-      console.debug("JAZZ_RELAY_WS", "message", {
-        bytes:
-          event.data instanceof ArrayBuffer
-            ? event.data.byteLength
-            : event.data instanceof Blob
-              ? event.data.size
-              : typeof event.data,
-      });
       void this.handleMessage(event.data).catch((error) => {
         this.reportTerminal(
           {
@@ -359,9 +351,7 @@ export class WebSocketCarrier {
   }
 
   private async handleMessage(data: unknown): Promise<void> {
-    const frames = decodeWebSocketFrameBatch(await bytesFromWebSocketMessage(data));
-    console.debug("JAZZ_RELAY_WS", "decoded", { frameCount: frames.length });
-    for (const frame of frames) {
+    for (const frame of decodeWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
       if (this.closing) return;
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
@@ -400,7 +390,6 @@ export class WebSocketCarrier {
         this.onError?.(decodeWireError(frame));
         continue;
       }
-      console.debug("JAZZ_RELAY_WS", "semantic-frame", { bytes: frame.byteLength });
       this.onFrame(frame);
     }
   }

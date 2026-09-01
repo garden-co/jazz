@@ -135,10 +135,6 @@ where
     pub(super) next_write_state_waiter_id: Cell<u64>,
     pub(super) next_subscription_nonce: Cell<u64>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
-    // Temporary integration diagnostic shared by every connection belonging
-    // to this node. This lets a browser worker correlate an upstream U apply
-    // with the separately-owned subscriber link which must publish D.
-    pub(super) semantic_trace: Rc<RefCell<VecDeque<String>>>,
     pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
@@ -223,7 +219,6 @@ where
             admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
             admitted_upstream_authority: Rc::new(RefCell::new(None)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
-            semantic_trace: Rc::new(RefCell::new(VecDeque::new())),
             edge_cache_budget: Cell::new(None),
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
@@ -1898,7 +1893,6 @@ where
                 connection_epoch,
                 PeerIoPumpRole::Upstream,
             ),
-            semantic_trace: Rc::clone(&self.semantic_trace),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -2233,7 +2227,6 @@ where
                 connection_epoch,
                 PeerIoPumpRole::Subscriber,
             ),
-            semantic_trace: Rc::clone(&self.semantic_trace),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);

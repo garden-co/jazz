@@ -48,11 +48,6 @@ const RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
 const COVERAGE_GROUP_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("19fdc830-2dd8-5876-ae31-a8f526512ac5");
 
-// Temporarily retain a complete browser-relay lifecycle while tracing the
-// opening-pending handoff. This is deliberately bounded so diagnostic runs do
-// not perturb the owner loop with unbounded state.
-const MAX_SEMANTIC_TRACE_EVENTS: usize = 1_024;
-
 /// Wall-clock time used exclusively for authority admission checks.
 ///
 /// This must not use `UploadRetryClock`: that clock is deliberately monotonic
@@ -498,29 +493,6 @@ where
     pub(super) link: ConnectionLink,
     pub(super) last_resume_bytes: Option<usize>,
     pub(super) auxiliary_pump: PeerIoPump,
-    // Temporary native-worker diagnostic flight recorder. It is deliberately
-    // separate from the redacted chunk trace: semantic ViewUpdate state is
-    // needed only to locate an integration regression and is never product
-    // protocol data.
-    pub(super) semantic_trace: Rc<RefCell<VecDeque<String>>>,
-}
-
-impl<S> PeerConnection<S>
-where
-    S: OrderedKvStorage,
-{
-    #[doc(hidden)]
-    pub fn take_semantic_trace(&self) -> Vec<String> {
-        self.semantic_trace.borrow_mut().drain(..).collect()
-    }
-}
-
-fn record_semantic_trace(trace: &Rc<RefCell<VecDeque<String>>>, entry: String) {
-    let mut trace = trace.borrow_mut();
-    if trace.len() >= MAX_SEMANTIC_TRACE_EVENTS {
-        trace.pop_front();
-    }
-    trace.push_back(entry);
 }
 
 /// A connection-owned response that has been produced but not yet admitted by
@@ -1351,7 +1323,6 @@ where
                 });
                 send_subscriber_with_sync_context(
                     &self.node,
-                    &self.semantic_trace,
                     peer,
                     self.transport.as_mut(),
                     &self.local_fate_routes,
@@ -1397,7 +1368,6 @@ where
             };
             send_subscriber_with_sync_context(
                 &self.node,
-                &self.semantic_trace,
                 peer,
                 self.transport.as_mut(),
                 &self.local_fate_routes,
@@ -1460,13 +1430,6 @@ where
         };
         self.last_resume_bytes = Some(serialized_sync_message_len(&update));
         debug_assert_eq!(view_update_subscription(&update), Some(subscription));
-        record_semantic_trace(
-            &self.semantic_trace,
-            format!(
-                "send-current-rows epoch={} table={table} subscription={subscription:?}",
-                self.connection_epoch,
-            ),
-        );
         send_sync_message_chunked(self.transport.as_mut(), update)?;
         served_current_rows.insert(
             subscription,
@@ -1558,7 +1521,6 @@ where
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let session_claim_binding = self.subscriber_session_claim_binding();
         let connection_epoch = self.connection_epoch;
-        let semantic_trace = Rc::clone(&self.semantic_trace);
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
             coverage_groups,
@@ -1611,12 +1573,6 @@ where
                 // rehydrate this group.
                 if scope_relay {
                     *serve_dirty = true;
-                    record_semantic_trace(
-                        &semantic_trace,
-                        format!(
-                            "rehydrate-group epoch={connection_epoch} group={group_subscription:?} source={authority_result_subscription:?} missing-source",
-                        ),
-                    );
                     continue;
                 };
                 continue;
@@ -1637,12 +1593,6 @@ where
                 // Edge coverage and releases D (thereby retiring U) before
                 // the actual authority result arrives.
                 *serve_dirty = true;
-                record_semantic_trace(
-                    &semantic_trace,
-                    format!(
-                        "rehydrate-group epoch={connection_epoch} group={group_subscription:?} source={authority_result_subscription:?} awaiting-selected-authority",
-                    ),
-                );
                 continue;
             }
             peer.set_subscription_authority_result_source(
@@ -1677,22 +1627,6 @@ where
                 *serve_dirty = true;
                 continue;
             };
-            let update_summary = match &update {
-                SyncMessage::ViewUpdate(payload) => format!(
-                    "adds={} removes={} reset={} opening={}",
-                    payload.result_member_adds.len(),
-                    payload.result_member_removes.len(),
-                    payload.reset_result_set,
-                    payload.peer_payload_inventory.opening_pending,
-                ),
-                _ => "non-view-update".to_owned(),
-            };
-            record_semantic_trace(
-                &semantic_trace,
-                format!(
-                    "rehydrate-materialized epoch={connection_epoch} group={group_subscription:?} {update_summary}",
-                ),
-            );
             for subscription in subscribers {
                 let mut update = retarget_view_update(update.clone(), subscription);
                 stamp_view_update_authorization_progress_from(
@@ -1737,7 +1671,6 @@ where
                 });
                 send_subscriber_with_sync_context(
                     &self.node,
-                    &self.semantic_trace,
                     peer,
                     self.transport.as_mut(),
                     &self.local_fate_routes,
@@ -1794,7 +1727,6 @@ where
             .as_ref()
             .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
-        let semantic_trace = Rc::clone(&self.semantic_trace);
         // The host-admitted scope-isolated worker owns one immutable foreground
         // session and may forward that exact binding upstream. A generic
         // multiplexed relay has no per-binding admission capability and must
@@ -2615,10 +2547,6 @@ where
                                 settled_through,
                                 ..
                             }) => {
-                                eprintln!(
-                                    "RELTRACE upstream-recv epoch={} subscription={subscription:?} settled={settled_through:?} eligible={authority_receipt_eligible}",
-                                    self.connection_epoch,
-                                );
                                 scope_receipts.remove(&subscription);
                                 #[cfg(not(feature = "sync-autopsy"))]
                                 let _ = subscription;
@@ -4123,13 +4051,6 @@ where
                             } else {
                                 subscription
                             };
-                            eprintln!(
-                                "RELTRACE admit local={} downstream={} source={} upstream={}",
-                                local_subscriber,
-                                subscription.binding_id.0,
-                                authority_result_subscription.binding_id.0,
-                                upstream_subscription.binding_id.0,
-                            );
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
@@ -4282,11 +4203,6 @@ where
                                             node.has_settled_authority_result(&key)
                                         })
                                     };
-                            eprintln!(
-                                "RELTRACE selected-source-wait scope_relay={scope_relay} local={local_subscriber} tier={:?} propagate={} source={authority_result_subscription:?} waiting={waiting_for_selected_authority_settlement}",
-                                opts.tier,
-                                opts.propagate_upstream,
-                            );
                             if let Some(purpose) = scope_purpose {
                                 let aggregate = scope_aggregates
                                     .entry(purpose.key.clone())
@@ -4364,14 +4280,6 @@ where
                             }
                             served.insert(subscription, coverage);
                             if let Some(mut update) = opening_pending {
-                                record_semantic_trace(
-                                    &semantic_trace,
-                                    format!(
-                                        "send-opening-pending epoch={} downstream={subscription:?} tier={:?} scope-relay={scope_relay}",
-                                        self.connection_epoch,
-                                        opts.tier,
-                                    ),
-                                );
                                 stamp_view_update_authorization_progress_from(
                                     peer,
                                     group_subscription,
@@ -4397,7 +4305,6 @@ where
                                     });
                                 send_subscriber_with_sync_context(
                                     &self.node,
-                                    &semantic_trace,
                                     peer,
                                     self.transport.as_mut(),
                                     &self.local_fate_routes,
@@ -4497,13 +4404,6 @@ where
                                             )
                                             .is_some()
                                             {
-                                                record_semantic_trace(
-                                                    &semantic_trace,
-                                                    format!(
-                                                        "downstream-last-unsubscribe epoch={} downstream={subscription:?} u={upstream_subscription:?}",
-                                                        self.connection_epoch,
-                                                    ),
-                                                );
                                                 // The relay owns both the
                                                 // local exact authority
                                                 // receipt and its wire usage
@@ -4681,20 +4581,10 @@ where
                                 if matches!(response, SyncMessage::FateUpdate { .. }) {
                                     self.downstream_fates.borrow_mut().push(response);
                                 } else {
-                                    record_semantic_trace(
-                                        &semantic_trace,
-                                        format!(
-                                            "send-inbound-response epoch={} {}",
-                                            self.connection_epoch,
-                                            summarize_sync_message_for_trace(&response),
-                                        ),
-                                    );
-                                    send_with_sync_context_traced(
+                                    send_with_sync_context(
                                         &self.node,
-                                        &semantic_trace,
                                         peer,
                                         self.transport.as_mut(),
-                                        "inbound-response",
                                         response,
                                     )?;
                                 }
@@ -4773,20 +4663,10 @@ where
                                 &response,
                             );
                         } else {
-                            record_semantic_trace(
-                                &semantic_trace,
-                                format!(
-                                    "send-upstream-response epoch={} {}",
-                                    self.connection_epoch,
-                                    summarize_sync_message_for_trace(&response),
-                                ),
-                            );
-                            send_with_sync_context_traced(
+                            send_with_sync_context(
                                 &self.node,
-                                &semantic_trace,
                                 peer,
                                 self.transport.as_mut(),
-                                "upstream-response",
                                 response,
                             )?;
                         }
@@ -4845,16 +4725,6 @@ where
                         ingest_context.trust,
                     )
                 {
-                    record_semantic_trace(
-                        &semantic_trace,
-                        format!(
-                            "subscriber-serve-start epoch={} local={} scope-relay={} groups={}",
-                            self.connection_epoch,
-                            local_receiver,
-                            self.node.borrow().client_relay_scope().is_some(),
-                            coverage_groups.len(),
-                        ),
-                    );
                     let mut serve_again = false;
                     for (coverage, group) in coverage_groups.iter_mut() {
                         let group_subscription = coverage_group_subscription_key(coverage);
@@ -4896,18 +4766,6 @@ where
                         };
                         let settled_handoff =
                             group.awaiting_upstream_settlement && upstream_authority_is_settled;
-                        if !upstream_authority_is_settled {
-                            eprintln!(
-                                "RELTRACE unsettled local={} coverage={:?} shape={:?} source={:?} upstream={:?} authority={upstream_authority_result_key:?} awaiting={} subscribers={}",
-                                local_receiver,
-                                coverage,
-                                group.shape.shape_id(),
-                                group.authority_result_subscription,
-                                group.upstream_subscription,
-                                group.awaiting_upstream_settlement,
-                                group.subscribers.len(),
-                            );
-                        }
                         if group.awaiting_upstream_settlement && !settled_handoff {
                             continue;
                         }
@@ -4953,16 +4811,6 @@ where
                                 let reconciled = match result {
                                     Ok(Some(reconciled)) => reconciled,
                                     Ok(None) => {
-                                        record_semantic_trace(
-                                            &semantic_trace,
-                                            format!(
-                                                "initial-clone-pending epoch={} group={group_subscription:?} source={} initialized={} maintained={}",
-                                                self.connection_epoch,
-                                                group.authority_result_subscription.binding_id.0,
-                                                group.initialized,
-                                                peer.has_maintained_subscription(group_subscription),
-                                            ),
-                                        );
                                         group.pending_initial_subscribers.insert(subscription);
                                         serve_again = true;
                                         continue;
@@ -5048,7 +4896,6 @@ where
                                         });
                                     send_subscriber_with_sync_context(
                                         &self.node,
-                                        &semantic_trace,
                                         peer,
                                         self.transport.as_mut(),
                                         &self.local_fate_routes,
@@ -5113,22 +4960,6 @@ where
                             let mut update = match update_result {
                                 Ok(Some(update)) => update,
                                 Ok(None) => {
-                                    eprintln!(
-                                        "RELTRACE initial-open-pending group={group_subscription:?} source={} initialized={} maintained={} settled_handoff={settled_handoff}",
-                                        group.authority_result_subscription.binding_id.0,
-                                        group.initialized,
-                                        peer.has_maintained_subscription(group_subscription),
-                                    );
-                                    record_semantic_trace(
-                                        &semantic_trace,
-                                        format!(
-                                            "initial-open-pending epoch={} group={group_subscription:?} source={} initialized={} maintained={}",
-                                            self.connection_epoch,
-                                            group.authority_result_subscription.binding_id.0,
-                                            group.initialized,
-                                            peer.has_maintained_subscription(group_subscription),
-                                        ),
-                                    );
                                     group.pending_initial_subscribers.insert(subscription);
                                     serve_again = true;
                                     continue;
@@ -5197,23 +5028,8 @@ where
                                     &update,
                                 )
                             });
-                            record_semantic_trace(
-                                &semantic_trace,
-                                format!(
-                                    "send-initial epoch={} downstream={subscription:?} source={} reset={} opening={} awaiting={} propagate={} upstream-propagate={} tier={:?} settled_handoff={settled_handoff}",
-                                    self.connection_epoch,
-                                    group.authority_result_subscription.binding_id.0,
-                                    matches!(&update, SyncMessage::ViewUpdate(payload) if payload.reset_result_set),
-                                    matches!(&update, SyncMessage::ViewUpdate(payload) if payload.peer_payload_inventory.opening_pending),
-                                    group.awaiting_upstream_settlement,
-                                    coverage.opts.propagate_upstream,
-                                    group.upstream_opts.propagate_upstream,
-                                    coverage.opts.tier,
-                                ),
-                            );
                             send_subscriber_with_sync_context(
                                 &self.node,
-                                &semantic_trace,
                                 peer,
                                 self.transport.as_mut(),
                                 &self.local_fate_routes,
@@ -5297,15 +5113,6 @@ where
                         let update = match update_result {
                             Ok(Some(update)) => update,
                             Ok(None) => {
-                                record_semantic_trace(
-                                    &semantic_trace,
-                                    format!(
-                                        "materialize-group epoch={} group={group_subscription:?} source={} pending-initial={} outcome=none",
-                                        self.connection_epoch,
-                                        group.authority_result_subscription.binding_id.0,
-                                        serving_initial,
-                                    ),
-                                );
                                 serve_again = true;
                                 continue;
                             }
@@ -5322,21 +5129,6 @@ where
                                 return Ok(true);
                             }
                         };
-                        let update_summary = match &update {
-                            SyncMessage::ViewUpdate(payload) => format!(
-                                "adds={} removes={} reset={} opening={}",
-                                payload.result_member_adds.len(),
-                                payload.result_member_removes.len(),
-                                payload.reset_result_set,
-                                payload.peer_payload_inventory.opening_pending,
-                            ),
-                            _ => "non-view-update".to_owned(),
-                        };
-                        record_semantic_trace(&semantic_trace, format!(
-                            "materialize-group epoch={} group={group_subscription:?} source={} {update_summary}",
-                            self.connection_epoch,
-                            group.authority_result_subscription.binding_id.0,
-                        ));
                         if settled_handoff {
                             group.awaiting_upstream_settlement = false;
                             peer.set_subscription_awaiting_selected_authority_source(
@@ -5345,12 +5137,6 @@ where
                             );
                         }
                         if settled_handoff || !view_update_is_empty(&update) {
-                            eprintln!(
-                                "RELTRACE publish source={} handoff={} empty={}",
-                                group.authority_result_subscription.binding_id.0,
-                                settled_handoff,
-                                view_update_is_empty(&update),
-                            );
                             #[cfg(feature = "sync-autopsy")]
                             sync_autopsy::record(format!(
                                 "subscriber generated group delta group={} update={}",
@@ -5376,16 +5162,6 @@ where
                                             &update,
                                         )
                                     });
-                                record_semantic_trace(
-                                    &semantic_trace,
-                                    format!(
-                                        "send-group-delta epoch={} downstream={subscription:?} source={} reset={} opening={} handoff={settled_handoff}",
-                                        self.connection_epoch,
-                                        group.authority_result_subscription.binding_id.0,
-                                        matches!(&update, SyncMessage::ViewUpdate(payload) if payload.reset_result_set),
-                                        matches!(&update, SyncMessage::ViewUpdate(payload) if payload.peer_payload_inventory.opening_pending),
-                                    ),
-                                );
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "subscriber send group delta {}",
@@ -5393,7 +5169,6 @@ where
                                 ));
                                 send_subscriber_with_sync_context(
                                     &self.node,
-                                    &semantic_trace,
                                     peer,
                                     self.transport.as_mut(),
                                     &self.local_fate_routes,
@@ -5423,7 +5198,6 @@ where
                         if !view_update_is_empty(&update) {
                             send_subscriber_with_sync_context(
                                 &self.node,
-                                &semantic_trace,
                                 peer,
                                 self.transport.as_mut(),
                                 &self.local_fate_routes,
@@ -5491,10 +5265,6 @@ where
             &mut self.link
         {
             *serve_dirty = true;
-            record_semantic_trace(
-                &self.semantic_trace,
-                format!("subscriber-dirty-observed epoch={epoch}"),
-            );
         }
     }
 
@@ -5524,20 +5294,6 @@ fn serialized_sync_message_len(message: &SyncMessage) -> usize {
         encoded.as_ref().map_or(0, Vec::len),
     );
     encoded.map_or(0, |bytes| bytes.len())
-}
-
-fn summarize_sync_message_for_trace(message: &SyncMessage) -> String {
-    match message {
-        SyncMessage::ViewUpdate(payload) => format!(
-            "ViewUpdate subscription={:?} reset={} opening={} adds={} removes={}",
-            payload.subscription,
-            payload.reset_result_set,
-            payload.peer_payload_inventory.opening_pending,
-            payload.result_member_adds.len(),
-            payload.result_member_removes.len(),
-        ),
-        other => format!("{other:?}"),
-    }
 }
 
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
@@ -6540,7 +6296,6 @@ where
         ..
     }) = &mut message
     {
-        eprintln!("RELTRACE transport-send subscription={subscription:?}");
         peer_payload_inventory
             .authorization_progress
             .get_or_insert_with(|| peer.authorization_progress_for_subscription(*subscription));
@@ -6553,35 +6308,8 @@ where
     send_sync_message_chunked(transport, message)
 }
 
-/// Test-only flight-recorder wrapper for the few subscriber paths which can
-/// produce a `ViewUpdate` without going through the ordinary publication
-/// helper.  Keeping the tag at the physical send boundary lets browser tests
-/// identify a premature result producer rather than guessing from a missing
-/// stderr line.
-fn send_with_sync_context_traced<S>(
-    node: &SharedNodeState<S>,
-    semantic_trace: &Rc<RefCell<VecDeque<String>>>,
-    peer: &mut PeerState,
-    transport: &mut dyn Transport,
-    callsite: &'static str,
-    message: SyncMessage,
-) -> Result<(), Error>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    record_semantic_trace(
-        semantic_trace,
-        format!(
-            "send-with-context callsite={callsite} {}",
-            summarize_sync_message_for_trace(&message),
-        ),
-    );
-    send_with_sync_context(node, peer, transport, message)
-}
-
 pub(super) fn send_subscriber_with_sync_context<S>(
     node: &SharedNodeState<S>,
-    semantic_trace: &Rc<RefCell<VecDeque<String>>>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
     local_fate_routes: &LocalFateRoutes,
@@ -6600,14 +6328,6 @@ where
         let source_settled = source
             .as_ref()
             .is_some_and(|source| node.borrow().has_settled_authority_result(source));
-        eprintln!(
-            "RELTRACE scope-send subscription={:?} source={source:?} source-settled={source_settled} reset={} opening={} adds={} removes={}",
-            payload.subscription,
-            payload.reset_result_set,
-            payload.peer_payload_inventory.opening_pending,
-            payload.result_member_adds.len(),
-            payload.result_member_removes.len(),
-        );
         if source.is_some() && !source_settled {
             // This D belongs to a non-authoritative scope relay. Its selected U
             // source exists conceptually at admission but has not delivered a
@@ -6617,16 +6337,6 @@ where
             // the authority reply can arrive.
             payload.peer_payload_inventory.opening_pending = true;
         }
-        record_semantic_trace(
-            semantic_trace,
-            format!(
-                "send-subscriber scope subscription={:?} source-present={} source-settled={source_settled} reset={} opening={}",
-                payload.subscription,
-                source.is_some(),
-                payload.reset_result_set,
-                payload.peer_payload_inventory.opening_pending,
-            ),
-        );
     }
     let mut pending_tx_ids = BTreeSet::new();
     if let SyncMessage::ViewUpdate(payload) = &message {
@@ -6642,13 +6352,6 @@ where
         }
     }
 
-    record_semantic_trace(
-        semantic_trace,
-        format!(
-            "send-subscriber callsite=publication {}",
-            summarize_sync_message_for_trace(&message),
-        ),
-    );
     send_with_sync_context(node, peer, transport, message)?;
     for tx_id in pending_tx_ids {
         register_local_fate_observer(local_fate_routes, tx_id, downstream_fates);
