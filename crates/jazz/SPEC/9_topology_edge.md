@@ -41,6 +41,7 @@ Invariant digest:
 - `INV-EDGE-22`: Authoritative result state retained by a relay MUST be identified by the complete canonical query identity and exact immutable policy binding; result members, generations, receipts, repair state, and persistence from different policy bindings MUST never share a mutable result identity.
 - `INV-EDGE-23`: A scope-isolated client relay MAY answer same-scope row-version repair without re-evaluating policy only for a version in that scope's previously delivered authorized payload closure or a same-scope authored pending version. Other relays MUST prove that exact closure membership or forward repair to an authority.
 - `INV-EDGE-24`: Application and wire callers MUST NOT choose internal authority-result source identities or policy bindings. The receiving topology assigns and validates them from the authenticated connection and admitted session.
+- `INV-EDGE-25`: A fate authority receiving a mergeable commit through a scope-isolated client relay MUST authorize it only under that relay attachment's immutable server-admitted foreground binding, then pass an internal non-wire proof into terminal admission. Transaction authorship, relay transport, `SYSTEM`, persisted state, stale epochs, and mutable session-claim refresh MUST NOT substitute for or widen that binding.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
@@ -172,6 +173,16 @@ remains unbound and cannot request a user's narrowed result. The worker
 cannot invent, alter, or refresh delegated claims through application query or
 wire fields (`INV-EDGE-24`).
 
+This delegation exists only inside a closed, server-issued relay capability.
+After authenticating the requested scope-isolated relay attachment, the server
+binds the canonical foreground identity and claims to that exact durable scope
+and mints a fresh admission epoch. An inbound delegated request is valid only
+while that capability is live and only when its binding, scope, and epoch match
+exactly. A disconnect, authority switch, or transport replacement retires the
+epoch. Reconnect and process-local transport resume MUST mint a new epoch and
+re-admit the preserved binding; persisted result state, a stale receipt, or a
+replayed `(identity, claims)` snapshot never constitutes live admission.
+
 Every retained authoritative result has a collision-free identity containing:
 
 - the canonical query shape, binding, and read-view identity; and
@@ -266,6 +277,17 @@ serving link is explicitly trusted as a backend. For a backend link, policy is
 evaluated under the backend link identity and `made_by` is stored only as
 attribution (`INV-RLS-18`, ch. 7). This is where per-user read narrowing happens:
 the last hop to the client.
+
+A commit relayed from a scope-isolated client is different from both cases. The
+relay transport has no permission subject, so the receiving fate authority
+proves the mergeable commit under the immutable foreground binding in the live,
+server-issued relay capability. Only that proof may enable terminal admission;
+it is internal state and is never accepted from the wire. `Transaction.made_by`
+remains authorship rather than permission evidence, and neither `SYSTEM`, a
+persisted result, a stale admission epoch, nor a mutable subscriber-claims field
+may substitute for or widen the capability. Disconnect or transport replacement
+invalidates the proof and requires authorization under the freshly admitted
+epoch (`INV-EDGE-25`).
 
 ### 9.5 Mergeable fate authority
 
