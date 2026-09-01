@@ -71,6 +71,18 @@ pub(super) struct IncrementalEvaluation<'a> {
     notification_publication: Option<PublicationId>,
     defer_notifications_until_durable: bool,
     pending_resident_publication: Option<PendingResidentPublication>,
+    /// All evaluator-owned state is prepared here and installed only after the
+    /// complete direct tick reaches Ready. This keeps failed ticks atomic while
+    /// allowing a suspended evaluation to retain its exact continuation.
+    operator_states: HashMap<OperatorStateKey, OperatorState>,
+    arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
+    eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo_bytes: usize,
+    memo_use_clock: u64,
+    node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    pending_binding_retractions: usize,
+    pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
 }
 
 #[derive(Clone)]
@@ -184,6 +196,7 @@ impl PendingIncrementalState {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PendingEvaluation {
     Incremental(IncrementalEvaluation<'static>),
     SubscriptionHydration(PendingSubscriptionHydration),
@@ -607,6 +620,22 @@ impl IncrementalEvaluation<'_> {
             .retain(|node, _| !nodes.contains(node));
     }
 
+    fn install(&mut self, runtime: &mut IvmRuntime) {
+        runtime.operator_states = std::mem::take(&mut self.operator_states);
+        runtime.arrangement_states = std::mem::take(&mut self.arrangement_states);
+        runtime.arrangement_keys_by_input = std::mem::take(&mut self.arrangement_keys_by_input);
+        runtime.eval_memo = std::mem::take(&mut self.eval_memo);
+        runtime.eval_memo_bytes = self.eval_memo_bytes;
+        runtime.memo_use_clock = self.memo_use_clock;
+        runtime.node_meta = std::mem::take(&mut self.node_meta);
+        runtime.table_frontiers = std::mem::take(&mut self.table_frontiers);
+        runtime.binding_frontiers = std::mem::take(&mut self.binding_frontiers);
+        runtime.current_tick = self.current_tick;
+        runtime
+            .pending_binding_retractions
+            .drain(..self.pending_binding_retractions);
+    }
+
     fn poll(
         &mut self,
         runtime: &mut IvmRuntime,
@@ -628,7 +657,7 @@ impl IncrementalEvaluation<'_> {
             inputs.install(ready);
         }
 
-        let mut dropped_subscriptions = Vec::new();
+        let dropped_subscriptions = Vec::new();
         let mut evaluator = TickEvaluator {
             schema: &runtime.schema,
             graph: &runtime.graph,
@@ -637,15 +666,15 @@ impl IncrementalEvaluation<'_> {
             binding_deltas: &self.binding_deltas,
             binding_snapshots: &self.binding_snapshots,
             current_tick: self.current_tick,
-            operator_states: &mut runtime.operator_states,
-            arrangement_states: &mut runtime.arrangement_states,
-            arrangement_keys_by_input: &mut runtime.arrangement_keys_by_input,
-            eval_memo: &mut runtime.eval_memo,
-            eval_memo_bytes: &mut runtime.eval_memo_bytes,
+            operator_states: &mut self.operator_states,
+            arrangement_states: &mut self.arrangement_states,
+            arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
+            eval_memo: &mut self.eval_memo,
+            eval_memo_bytes: &mut self.eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
             binding_frontiers: &self.binding_frontiers,
-            memo_use_clock: &mut runtime.memo_use_clock,
-            node_meta: &mut runtime.node_meta,
+            memo_use_clock: &mut self.memo_use_clock,
+            node_meta: &mut self.node_meta,
             storage: Some(self.storage.as_ref()),
             evaluation_inputs: self.evaluation_inputs.as_mut(),
             context: EvalContext::root(),
@@ -908,28 +937,7 @@ impl IncrementalEvaluation<'_> {
                 .or(self.notification_publication);
             queued.publication = notification_publication;
             if !queued.deltas.is_empty() {
-                if let Some(pending) = &self.pending_resident_publication
-                    && notification_publication.is_none()
-                {
-                    pending
-                        .notifications
-                        .borrow_mut()
-                        .push((*subscription_id, queued));
-                } else if self.defer_notifications_until_durable
-                    && notification_publication.is_some_and(|publication| {
-                        !runtime
-                            .durable_notification_publications
-                            .contains(&publication)
-                    })
-                {
-                    runtime
-                        .deferred_notifications
-                        .entry(notification_publication.expect("checked publication"))
-                        .or_default()
-                        .push((*subscription_id, queued));
-                } else if subscription.sender.send(queued).is_err() {
-                    dropped_subscriptions.push(*subscription_id);
-                }
+                self.pending_notifications.push((*subscription_id, queued));
             }
             self.published_subscriptions.insert(*subscription_id);
         }
@@ -941,9 +949,40 @@ impl IncrementalEvaluation<'_> {
         }
 
         drop(evaluator);
+        self.install(runtime);
         runtime
             .operator_states
             .retain(|key, _| key.scope == ScopeId::root());
+        let notifications = std::mem::take(&mut self.pending_notifications);
+        let mut dropped_subscriptions = dropped_subscriptions;
+        for (subscription_id, queued) in notifications {
+            if self.defer_notifications_until_durable
+                && queued.publication.is_some_and(|publication| {
+                    !runtime
+                        .durable_notification_publications
+                        .contains(&publication)
+                })
+            {
+                runtime
+                    .deferred_notifications
+                    .entry(queued.publication.expect("checked publication"))
+                    .or_default()
+                    .push((subscription_id, queued));
+            } else if let Some(pending) = &self.pending_resident_publication
+                && queued.publication.is_none()
+            {
+                pending
+                    .notifications
+                    .borrow_mut()
+                    .push((subscription_id, queued));
+            } else if runtime
+                .multisink_subscriptions
+                .get(&subscription_id)
+                .is_some_and(|subscription| subscription.sender.send(queued).is_err())
+            {
+                dropped_subscriptions.push(subscription_id);
+            }
+        }
         for subscription_id in dropped_subscriptions {
             runtime.unsubscribe(subscription_id);
         }
@@ -2018,9 +2057,18 @@ impl IvmRuntime {
             changed_tables.iter().copied(),
             changed_bindings.iter().copied(),
         );
-        // Do not commit tick lifecycle state until fallible durable evaluation
-        // has completed. In particular, queued binding retractions must remain
-        // retryable when preparing a tick encounters a storage error.
+        // Every mutable evaluator map is a prepared snapshot. The maps are
+        // shallow clones where their values use COW, so a suspended or failed
+        // tick cannot mutate committed runtime state.
+        let mut operator_states = self.operator_states.clone();
+        let mut arrangement_states = self.arrangement_states.clone();
+        let mut arrangement_keys_by_input = self.arrangement_keys_by_input.clone();
+        let mut eval_memo = self.eval_memo.clone();
+        let mut eval_memo_bytes = self.eval_memo_bytes;
+        let mut memo_use_clock = self.memo_use_clock;
+        let mut node_meta = self.node_meta.clone();
+        let mut table_frontiers = self.table_frontiers.clone();
+        let mut binding_frontiers = self.binding_frontiers.clone();
         let current_tick = self.current_tick + 1;
         let table_delta_records = table_deltas
             .iter()
@@ -2031,12 +2079,25 @@ impl IvmRuntime {
             &affected_nodes,
             current_tick,
             storage.as_ref(),
+            &mut operator_states,
+            &mut arrangement_states,
+            &mut arrangement_keys_by_input,
+            &mut eval_memo,
+            &mut eval_memo_bytes,
+            &mut memo_use_clock,
+            &mut node_meta,
+            &table_frontiers,
+            &binding_frontiers,
         )
         .await?;
-        self.current_tick = current_tick;
-        self.bump_input_frontiers(&table_deltas, &binding_deltas);
-        self.pending_binding_retractions
-            .drain(..pending_binding_retractions);
+        bump_input_frontiers_staged(
+            &self.graph,
+            &table_deltas,
+            &binding_deltas,
+            &mut table_frontiers,
+            &mut binding_frontiers,
+            &mut node_meta,
+        );
         let metrics = TickMetrics {
             tick: current_tick,
             table_delta_records,
@@ -2088,8 +2149,8 @@ impl IvmRuntime {
             table_deltas,
             binding_deltas,
             binding_snapshots,
-            table_frontiers: self.table_frontiers.clone(),
-            binding_frontiers: self.binding_frontiers.clone(),
+            table_frontiers,
+            binding_frontiers,
             current_tick,
             metrics,
             storage,
@@ -2105,6 +2166,15 @@ impl IvmRuntime {
             notification_publication,
             defer_notifications_until_durable,
             pending_resident_publication,
+            operator_states,
+            arrangement_states,
+            arrangement_keys_by_input,
+            eval_memo,
+            eval_memo_bytes,
+            memo_use_clock,
+            node_meta,
+            pending_binding_retractions,
+            pending_notifications: Vec::new(),
         })
     }
 
@@ -2113,29 +2183,14 @@ impl IvmRuntime {
         table_deltas: &[TableDelta],
         binding_deltas: &[BindingDelta],
     ) {
-        let mut changed_tables = Vec::new();
-        for delta in table_deltas.iter().filter(|delta| !delta.deltas.is_empty()) {
-            *self.table_frontiers.entry(delta.table.clone()).or_default() += 1;
-            changed_tables.push(delta.table.as_str());
-        }
-        let mut changed_bindings = Vec::new();
-        for delta in binding_deltas
-            .iter()
-            .filter(|delta| !delta.deltas.is_empty() || delta.initializes_snapshot)
-        {
-            *self.binding_frontiers.entry(delta.key.clone()).or_default() += 1;
-            changed_bindings.push(&delta.key);
-        }
-        if changed_tables.is_empty() && changed_bindings.is_empty() {
-            return;
-        }
-        for node in self.graph.affected_nodes(
-            changed_tables.iter().copied(),
-            changed_bindings.iter().copied(),
-        ) {
-            let meta = self.node_meta.entry(node).or_default();
-            meta.input_generation = meta.input_generation.wrapping_add(1);
-        }
+        bump_input_frontiers_staged(
+            &self.graph,
+            table_deltas,
+            binding_deltas,
+            &mut self.table_frontiers,
+            &mut self.binding_frontiers,
+            &mut self.node_meta,
+        );
     }
 
     fn evict_eval_memo(&mut self) {
@@ -2327,12 +2382,22 @@ impl IvmRuntime {
         Ok(false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn tick_durable_nodes(
-        &mut self,
+        &self,
         table_deltas: &[TableDelta],
         affected_nodes: &std::collections::HashSet<NodeId>,
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
+        operator_states: &mut HashMap<OperatorStateKey, OperatorState>,
+        arrangement_states: &mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+        arrangement_keys_by_input: &mut HashMap<NodeId, HashSet<ArrangementKey>>,
+        eval_memo: &mut HashMap<EvalMemoKey, EvalMemoEntry>,
+        eval_memo_bytes: &mut usize,
+        memo_use_clock: &mut u64,
+        node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
+        table_frontiers: &HashMap<String, u64>,
+        binding_frontiers: &HashMap<BindingSourceKey, u64>,
     ) -> Result<(), IvmRuntimeError> {
         let durable_nodes = affected_nodes
             .iter()
@@ -2365,15 +2430,15 @@ impl IvmRuntime {
                     binding_deltas: &[],
                     binding_snapshots: &binding_snapshots,
                     current_tick,
-                    operator_states: &mut self.operator_states,
-                    arrangement_states: &mut self.arrangement_states,
-                    arrangement_keys_by_input: &mut self.arrangement_keys_by_input,
-                    eval_memo: &mut self.eval_memo,
-                    eval_memo_bytes: &mut self.eval_memo_bytes,
-                    table_frontiers: &self.table_frontiers,
-                    binding_frontiers: &self.binding_frontiers,
-                    memo_use_clock: &mut self.memo_use_clock,
-                    node_meta: &mut self.node_meta,
+                    operator_states,
+                    arrangement_states,
+                    arrangement_keys_by_input,
+                    eval_memo,
+                    eval_memo_bytes,
+                    table_frontiers,
+                    binding_frontiers,
+                    memo_use_clock,
+                    node_meta,
                     storage: Some(storage),
                     evaluation_inputs: None,
                     context: EvalContext::root(),
@@ -2485,4 +2550,37 @@ fn terminal_delta_for_hydrated_output(
         has_public_collector,
         (!has_public_collector).then_some(fallback).flatten(),
     ))
+}
+
+fn bump_input_frontiers_staged(
+    graph: &IvmGraph,
+    table_deltas: &[TableDelta],
+    binding_deltas: &[BindingDelta],
+    table_frontiers: &mut HashMap<String, u64>,
+    binding_frontiers: &mut HashMap<BindingSourceKey, u64>,
+    node_meta: &mut HashMap<NodeId, NodeRuntimeMeta>,
+) {
+    let mut changed_tables = Vec::new();
+    for delta in table_deltas.iter().filter(|delta| !delta.deltas.is_empty()) {
+        *table_frontiers.entry(delta.table.clone()).or_default() += 1;
+        changed_tables.push(delta.table.as_str());
+    }
+    let mut changed_bindings = Vec::new();
+    for delta in binding_deltas
+        .iter()
+        .filter(|delta| !delta.deltas.is_empty() || delta.initializes_snapshot)
+    {
+        *binding_frontiers.entry(delta.key.clone()).or_default() += 1;
+        changed_bindings.push(&delta.key);
+    }
+    if changed_tables.is_empty() && changed_bindings.is_empty() {
+        return;
+    }
+    for node in graph.affected_nodes(
+        changed_tables.iter().copied(),
+        changed_bindings.iter().copied(),
+    ) {
+        let meta = node_meta.entry(node).or_default();
+        meta.input_generation = meta.input_generation.wrapping_add(1);
+    }
 }
