@@ -59,9 +59,12 @@ pub(super) struct IncrementalEvaluation<'a> {
     requests: EvaluationRequests<'a>,
     evaluation_inputs: Option<EvaluationInputs>,
     work_queue: EvaluationWorkQueue,
+    /// Graph slice whose state is staged by this evaluation. Unrelated
+    /// runtime state remains live and is merged only when the tick commits.
+    relevant_nodes: HashSet<NodeId>,
     published_subscriptions: HashSet<SubscriptionId>,
-    affected_nodes: HashSet<NodeId>,
     affected_subscriptions: HashSet<SubscriptionId>,
+    affected_nodes: HashSet<NodeId>,
     /// Relational output retained while logical terminal materialization waits
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
@@ -621,13 +624,55 @@ impl IncrementalEvaluation<'_> {
     }
 
     fn install(&mut self, runtime: &mut IvmRuntime) {
-        runtime.operator_states = std::mem::take(&mut self.operator_states);
-        runtime.arrangement_states = std::mem::take(&mut self.arrangement_states);
-        runtime.arrangement_keys_by_input = std::mem::take(&mut self.arrangement_keys_by_input);
-        runtime.eval_memo = std::mem::take(&mut self.eval_memo);
-        runtime.eval_memo_bytes = self.eval_memo_bytes;
-        runtime.memo_use_clock = self.memo_use_clock;
-        runtime.node_meta = std::mem::take(&mut self.node_meta);
+        // Drop the committed entries before folding staged COW state. This
+        // makes recursive closures and arrangement bases uniquely owned while
+        // leaving unrelated graph state untouched.
+        runtime
+            .operator_states
+            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
+        for state in self.operator_states.values_mut() {
+            if let OperatorState::Recursive(recursive) = state {
+                recursive.value_mut().commit_staged_positive();
+            }
+        }
+        runtime
+            .operator_states
+            .extend(std::mem::take(&mut self.operator_states));
+
+        runtime
+            .arrangement_states
+            .retain(|key, _| !self.relevant_nodes.contains(&key.input));
+        for state in self.arrangement_states.values_mut() {
+            state.value_mut().commit_overlay();
+        }
+        runtime
+            .arrangement_states
+            .extend(std::mem::take(&mut self.arrangement_states));
+        runtime
+            .arrangement_keys_by_input
+            .retain(|node, _| !self.relevant_nodes.contains(node));
+        runtime
+            .arrangement_keys_by_input
+            .extend(std::mem::take(&mut self.arrangement_keys_by_input));
+
+        runtime
+            .eval_memo
+            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
+        runtime
+            .eval_memo
+            .extend(std::mem::take(&mut self.eval_memo));
+        runtime.eval_memo_bytes = runtime
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
+        runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
+        runtime
+            .node_meta
+            .retain(|node, _| !self.relevant_nodes.contains(node));
+        runtime
+            .node_meta
+            .extend(std::mem::take(&mut self.node_meta));
         runtime.table_frontiers = std::mem::take(&mut self.table_frontiers);
         runtime.binding_frontiers = std::mem::take(&mut self.binding_frontiers);
         runtime.current_tick = self.current_tick;
@@ -2057,16 +2102,44 @@ impl IvmRuntime {
             changed_tables.iter().copied(),
             changed_bindings.iter().copied(),
         );
-        // Every mutable evaluator map is a prepared snapshot. The maps are
-        // shallow clones where their values use COW, so a suspended or failed
-        // tick cannot mutate committed runtime state.
-        let mut operator_states = self.operator_states.clone();
-        let mut arrangement_states = self.arrangement_states.clone();
-        let mut arrangement_keys_by_input = self.arrangement_keys_by_input.clone();
-        let mut eval_memo = self.eval_memo.clone();
-        let mut eval_memo_bytes = self.eval_memo_bytes;
+        // Capture only the graph slice reached from changed inputs. The
+        // evaluator may need unchanged sibling inputs (for example the other
+        // side of a join), so discovery walks ancestors of every affected
+        // node, while unrelated graph state remains in the live runtime.
+        let (relevant_nodes, _) = EvaluationWorkQueue::new(affected_nodes.iter().copied())
+            .discover_incremental(&self.graph)?;
+        let mut operator_states = self
+            .operator_states
+            .iter()
+            .filter(|(key, _)| relevant_nodes.contains(&key.node))
+            .map(|(key, state)| (key.clone(), state.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut arrangement_states = self
+            .arrangement_states
+            .iter()
+            .filter(|(key, _)| relevant_nodes.contains(&key.input))
+            .map(|(key, state)| (key.clone(), state.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut arrangement_keys_by_input = self
+            .arrangement_keys_by_input
+            .iter()
+            .filter(|(input, _)| relevant_nodes.contains(input))
+            .map(|(input, keys)| (*input, keys.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut eval_memo = self
+            .eval_memo
+            .iter()
+            .filter(|(key, _)| relevant_nodes.contains(&key.node))
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
         let mut memo_use_clock = self.memo_use_clock;
-        let mut node_meta = self.node_meta.clone();
+        let mut node_meta = self
+            .node_meta
+            .iter()
+            .filter(|(node, _)| relevant_nodes.contains(node))
+            .map(|(node, meta)| (*node, meta.clone()))
+            .collect::<HashMap<_, _>>();
         let mut table_frontiers = self.table_frontiers.clone();
         let mut binding_frontiers = self.binding_frontiers.clone();
         let current_tick = self.current_tick + 1;
@@ -2158,6 +2231,7 @@ impl IvmRuntime {
             evaluation_inputs,
             work_queue,
             published_subscriptions: HashSet::default(),
+            relevant_nodes,
             affected_nodes,
             affected_subscriptions,
             pending_subscription_outputs: HashMap::default(),
