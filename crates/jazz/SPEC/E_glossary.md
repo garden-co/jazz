@@ -105,6 +105,11 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   **Implementation status (verified).**
   `edge_defers_mergeable_fate_until_permission_scope_settles` verifies that the
   edge assigns mergeable fate after its permission scope settles.
+- **scope-isolated client relay** — a non-authority persistent relay whose store
+  and attached foreground runtimes belong to exactly one app/environment/auth
+  scope. It serves retained authorized knowledge to those foregrounds without
+  re-evaluating policy; upstream authorities still narrow delegated requests
+  under topology-admitted immutable session bindings (ch. 9).
 - **payload coverage / peer payload inventory** — the sync vocabulary for what
   payload bytes a peer can safely reference instead of resending. Inventory facts
   are deliberately narrow today: **complete-tx payload dedup / complete tx

@@ -41,6 +41,7 @@ Invariant digest:
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
 - `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or edge broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
+- `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
 
@@ -234,6 +235,16 @@ the same checks for every commit unit. The fate authority first parks — and do
 not decide — any unit that is missing parent transactions or schema versions.
 It decides only once all prerequisites are present; a
 duplicate parked unit parks only once (`INV-TX-5`).
+
+Client-side staging is deliberately not an authorization boundary. It may reject
+malformed input, an invalid schema operation, or a mutation whose required local
+preimage is unavailable for construction, but it MUST NOT evaluate read or write
+policy and turn partial local evidence into a definitive denial. In particular,
+an update or existing-row upsert still requires read visibility
+(`INV-RLS-20`); that rule is decided by the fate authority against its complete
+admitted policy inputs, not by the originating client. Local permission probes
+remain non-authoritative advice and return `Unknown` when completeness is not
+established (ch. 13, `INV-API-28`).
 
 After prerequisites are present, the authority rejects units that violate
 history causality or clock-skew limits. A version parent is an exact prior
