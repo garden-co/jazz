@@ -1762,7 +1762,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-
     #[tokio::test]
     async fn builder_uses_global_tier_without_upstream() {
         let built = ServerBuilder::new(AppId::from_name("global-builder-tier"))
