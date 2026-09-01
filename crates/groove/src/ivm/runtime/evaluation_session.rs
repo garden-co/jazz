@@ -533,6 +533,11 @@ impl<'a> EvaluationRequests<'a> {
         !self.pending.is_empty()
     }
 
+    pub(super) fn retain(&mut self, retained: &HashSet<EvaluationRequestKey>) {
+        self.pending.retain(|key, _| retained.contains(key));
+        self.ready.retain(|key, _| retained.contains(key));
+    }
+
     pub(super) fn drain_ready(
         &mut self,
     ) -> Result<

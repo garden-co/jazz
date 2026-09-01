@@ -496,6 +496,25 @@ impl ArrangementState {
         }
     }
 
+    pub(super) fn commit_overlay(&mut self) {
+        if self.overlay.is_empty() {
+            return;
+        }
+        let overlay = std::mem::take(&mut self.overlay);
+        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
+        let index = Rc::make_mut(&mut self.index);
+        for (key, bucket) in overlay {
+            match bucket {
+                Some(bucket) => {
+                    index.insert(key, bucket);
+                }
+                None => {
+                    index.remove(&key);
+                }
+            }
+        }
+    }
+
     pub(super) fn row_count(&self) -> usize {
         let mut keys = self.index.keys().cloned().collect::<HashSet<_>>();
         keys.extend(self.overlay.keys().cloned());

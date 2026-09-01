@@ -604,9 +604,7 @@ fn update_collect_by_root_terminal_state(
             }
         });
     }
-    state
-        .groups
-        .remove_empty_touched(touched_group_keys.into_iter());
+    state.groups.remove_empty_touched(touched_group_keys);
     if !emit {
         return Ok(Vec::new());
     }

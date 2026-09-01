@@ -47,21 +47,11 @@ struct PendingStreamingChecksum {
 pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
 pub(super) type CollectByGroup = BTreeMap<CollectByOrderKey, i64>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct CollectByGroups {
     base: Rc<BTreeMap<Vec<u8>, CollectByGroup>>,
     overlay: Rc<BTreeMap<Vec<u8>, Option<CollectByGroup>>>,
     cleared: bool,
-}
-
-impl Default for CollectByGroups {
-    fn default() -> Self {
-        Self {
-            base: Rc::default(),
-            overlay: Rc::default(),
-            cleared: false,
-        }
-    }
 }
 
 impl CollectByGroups {
@@ -141,21 +131,11 @@ impl CollectByGroups {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct CollectByRoots {
     base: Rc<BTreeMap<CollectByOrderKey, i64>>,
     overlay: Rc<BTreeMap<CollectByOrderKey, Option<i64>>>,
     cleared: bool,
-}
-
-impl Default for CollectByRoots {
-    fn default() -> Self {
-        Self {
-            base: Rc::default(),
-            overlay: Rc::default(),
-            cleared: false,
-        }
-    }
 }
 
 impl CollectByRoots {
