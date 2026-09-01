@@ -133,7 +133,21 @@ fn assert_scheduled_urgencies(
 fn schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+            // Scope-isolated relay tests exercise server-authorized transport,
+            // not missing-policy rejection. Explicitly model the permissive
+            // example-app policy that the old trusted SYSTEM fixture had
+            // accidentally bypassed.
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
             .build(),
     )
 }
@@ -491,6 +505,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     let worker = open_db(0x23, AuthorSubject::SYSTEM, &schema);
     let core = open_core(0x34, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));
@@ -811,6 +826,7 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
     let core = open_core(0x3e, &schema);
     let writer = open_db(0x4e, AuthorSubject::for_test_bytes([0xbc; 16]), &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
@@ -1463,6 +1479,7 @@ fn browser_client_local_only_subscription_stops_at_worker() {
     let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
     let worker = open_db(0x2a, alice, &schema);
     let core = open_core(0x3a, &schema);
+    worker.set_relay_authority_session_owner_for_test();
     worker
         .insert(
             "todos",
@@ -1534,6 +1551,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let worker = open_db(0x27, alice, &schema);
     let core = open_core(0x37, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let seeder = open_db(0x18, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
@@ -1664,6 +1682,7 @@ fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
     let core = open_core(0x43, &schema);
     let seeder = open_db(0x44, alice, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = block_on(main_thread.connect_upstream(main_transport));
@@ -3019,6 +3038,7 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let worker = open_db(0x29, alice, &schema);
     let core = open_core(0x39, &schema);
     main_thread.set_non_durable_client();
+    worker.set_relay_authority_session_owner_for_test();
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = jazz::db::block_on(main_thread.connect_upstream(main_transport));

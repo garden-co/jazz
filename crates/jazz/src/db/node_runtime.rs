@@ -1996,6 +1996,9 @@ where
     /// Admit the one immutable session selected during a scope-isolated relay
     /// handshake. This is crate-private so a host must not turn application
     /// claims or raw frames into a relay capability.
+    // The public serving shell reaches this from a runtime-selected backend;
+    // it is intentionally not a general Node API.
+    #[allow(dead_code)]
     pub(crate) fn accept_scope_isolated_relay_subscriber(
         &self,
         transport: Box<dyn Transport>,
@@ -2130,6 +2133,7 @@ where
                     identity,
                     trust,
                     edge_authority,
+                    admitted_write_authorization: false,
                 },
                 claims,
                 0,

@@ -944,6 +944,11 @@ pub struct CommitUnitIngestContext {
     pub trust: CommitUnitTrust,
     /// Whether this subscriber link is hosted by an edge authority.
     pub edge_authority: bool,
+    /// The authenticated connection admission path has already proved every
+    /// terminal write clause against its immutable delegated session binding.
+    /// This may only be set by the peer-connection authority path immediately
+    /// after that proof; wire messages cannot carry it.
+    pub(crate) admitted_write_authorization: bool,
 }
 
 /// Trust mode for an inbound commit-unit upload.

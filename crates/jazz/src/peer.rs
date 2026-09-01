@@ -121,6 +121,7 @@ impl Default for PeerState {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RelayTransportCapability {
     OrdinarySession,
+    #[allow(dead_code)] // constructed only by the private serving admission path
     ScopeIsolatedClientRelay {
         binding: DelegatedSessionBinding,
         admission_epoch: u64,

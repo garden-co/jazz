@@ -2591,6 +2591,7 @@ fn edge_fate_route_identity_is_shared_across_client_connections() {
         identity: alice,
         trust: CommitUnitTrust::Session,
         edge_authority: true,
+        admitted_write_authorization: false,
     };
 
     let first_outcome = crate::db::block_on(dispatch_admitted_subscriber_message(

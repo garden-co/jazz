@@ -192,6 +192,7 @@ where
                     identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
                     edge_authority: false,
+                    admitted_write_authorization: false,
                 }),
             )
             .await?;
@@ -385,21 +386,18 @@ where
             }
             SyncMessage::CommitUnit { tx, versions }
                 if tx.kind == TxKind::Mergeable
-                    && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+                    && (matches!(peer.role(), PeerRole::ClientLink { .. })
+                        || peer.role() == PeerRole::Relay) =>
             {
-                // A trusted relay authenticates its transport as SYSTEM (or a
-                // backend), but the terminal authorization proof belongs to
-                // the transaction's already-validated permission subject.
-                // Using the transport identity here recompiled `session.*`
-                // policy predicates under SYSTEM after a relayed commit.
+                // Terminal authorization belongs to the immutable session
+                // selected at request admission, never to the relay's
+                // subjectless transport identity. A scope-isolated relay has
+                // already been checked against its server-issued one-binding
+                // capability; a multiplexed relay has passed the corresponding
+                // transport admission check for this request.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
-                    CommitUnitTrust::Relay => {
-                        return Err(Error::new(
-                            ErrorCode::Protocol,
-                            "relay transport cannot prove terminal authorization without an admitted session",
-                        ));
-                    }
+                    CommitUnitTrust::Relay => session_claim_binding.0,
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => ingest_context.identity,
                 };
@@ -419,7 +417,10 @@ where
                     .await
                     .apply_sync_message_with_ingest_context(
                         SyncMessage::CommitUnit { tx, versions },
-                        Some(ingest_context),
+                        Some(CommitUnitIngestContext {
+                            admitted_write_authorization: true,
+                            ..ingest_context
+                        }),
                     )
                     .await?)
             }

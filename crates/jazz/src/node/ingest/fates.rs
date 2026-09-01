@@ -441,7 +441,7 @@ where
                     // write must reach a serving authority through its
                     // topology-owned admission path; it cannot borrow SYSTEM
                     // or the transport identity here.
-                    CommitUnitTrust::Relay => return Ok(false),
+                    CommitUnitTrust::Relay => return Ok(context.admitted_write_authorization),
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }

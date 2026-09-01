@@ -907,6 +907,10 @@ where
     }
 
     /// Server/host-only scope-relay admission after authenticated handshake.
+    // The public serving shell reaches this through its runtime-selected
+    // backend enum. Keep this crate-private so an embedding application cannot
+    // mint a scope-relay capability from caller-controlled claims.
+    #[allow(dead_code)]
     #[doc(hidden)]
     pub(crate) fn accept_scope_isolated_relay_subscriber(
         &self,

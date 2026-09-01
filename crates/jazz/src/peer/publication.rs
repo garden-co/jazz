@@ -154,6 +154,7 @@ impl PeerState {
     /// Construct a subjectless scope-isolated relay with its one
     /// handshake-admitted foreground session. This is topology-private:
     /// callers on the wire never select this value.
+    #[allow(dead_code)] // constructed only by the private serving admission path
     pub(crate) fn scope_isolated_relay(
         identity: AuthorSubject,
         claims: BTreeMap<String, groove::records::Value>,
