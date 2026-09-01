@@ -681,6 +681,13 @@ where
         // later store entry is malformed.
         let mut settled_through_by_binding_view = BTreeMap::new();
         let mut authorization_progress_by_binding_view = BTreeMap::new();
+        // The current in-memory receiver partition is still keyed by its
+        // canonical binding view. Until the following lifecycle slice moves
+        // that partition to `AuthorityResultKey`, reject a reopened store that
+        // contains two policy snapshots for one binding rather than silently
+        // merging their memberships. The durable layout already retains the
+        // full identity needed by that follow-up conversion.
+        let mut recovered_authority_keys_by_binding_view = BTreeMap::new();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[]).await? {
             let authority_result_key = authority_result_key_from_store_prefix(
@@ -696,6 +703,14 @@ where
                 }
             };
             let binding_view_key = authority_result_key.binding_view;
+            if let Some(previous) = recovered_authority_keys_by_binding_view
+                .insert(binding_view_key, authority_result_key.clone())
+                && previous != authority_result_key
+            {
+                return Err(Error::InvalidStoredValue(
+                    "multiple policy-scoped authority results share one in-memory binding view",
+                ));
+            }
             settled_through_by_binding_view.insert(binding_view_key, settled_through);
             match entry.value.get_idx(1)? {
                 Value::U64(progress) if progress != u64::MAX => {
@@ -721,6 +736,17 @@ where
                 prefix,
                 "settled result member binding key must be valid",
             )?;
+            if let Some(previous) = recovered_authority_keys_by_binding_view
+                .insert(
+                    authority_result_key.binding_view,
+                    authority_result_key.clone(),
+                )
+                && previous != authority_result_key
+            {
+                return Err(Error::InvalidStoredValue(
+                    "multiple policy-scoped authority results share one in-memory binding view",
+                ));
+            }
             let member_digest = match member_digest {
                 Value::Bytes(bytes) => bytes,
                 _ => {
@@ -779,6 +805,17 @@ where
                 prefix,
                 "settled program fact binding key must be valid",
             )?;
+            if let Some(previous) = recovered_authority_keys_by_binding_view
+                .insert(
+                    authority_result_key.binding_view,
+                    authority_result_key.clone(),
+                )
+                && previous != authority_result_key
+            {
+                return Err(Error::InvalidStoredValue(
+                    "multiple policy-scoped authority results share one in-memory binding view",
+                ));
+            }
             let fact_digest = match fact_digest {
                 Value::Bytes(bytes) => bytes,
                 _ => {
