@@ -4880,16 +4880,11 @@ fn core_claims_from_json(
     author: CoreAuthorSubject,
     claims: Option<JsonValue>,
 ) -> napi::Result<BTreeMap<String, CoreValue>> {
-    let mut claims = match claims {
+    let claims = match claims {
         None | Some(JsonValue::Null) => BTreeMap::new(),
         Some(JsonValue::Object(map)) => map
             .into_iter()
-            .map(|(key, value)| {
-                Ok((
-                    jazz::query::provider_claim_key(&key),
-                    core_claim_value_from_json(value)?,
-                ))
-            })
+            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
             .collect::<napi::Result<BTreeMap<_, _>>>()?,
         Some(_) => {
             return Err(napi::Error::from_reason(
@@ -4898,44 +4893,19 @@ fn core_claims_from_json(
         }
     };
     // This public NAPI ingress receives either an external canonical subject
-    // or one already verified by a distinct first-party proof ABI. Raw provider
-    // claims are always namespaced, including provider `user` and `authMode`;
-    // the two top-level policy fields are derived here and cannot be spoofed.
-    claims.insert(
-        "user".to_owned(),
-        CoreValue::String(author.canonical().to_owned()),
-    );
-    claims.insert(
-        "authMode".to_owned(),
-        CoreValue::String(auth_mode_for_author(&author).to_owned()),
-    );
-    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
-        .expect("author subjects always have canonical issuer/subject JSON");
-    claims.insert(
-        jazz::query::provider_claim_key("iss"),
-        CoreValue::String(issuer),
-    );
-    claims.insert(
-        jazz::query::provider_claim_key("sub"),
-        CoreValue::String(subject),
-    );
-    Ok(claims)
+    // or one already verified by a distinct first-party proof ABI. The shared
+    // constructor namespaces raw provider values and derives reserved fields.
+    Ok(jazz::tools::policy_claims::canonical_policy_binding_claims(
+        &author,
+        claims,
+        CoreValue::String,
+    ))
 }
 
 /// The public NAPI claim ingress deliberately does not trust an application
 /// supplied `authMode`. It is a property of the already-admitted identity:
 /// verified Jazz-owned issuers carry their matching mode and every other
 /// public subject is external.
-fn auth_mode_for_author(author: &CoreAuthorSubject) -> &'static str {
-    let issuer = serde_json::from_str::<(String, String)>(author.canonical())
-        .ok()
-        .map(|(issuer, _)| issuer);
-    match issuer.as_deref() {
-        Some(CoreAuthorSubject::LOCAL_FIRST_ISSUER) => "local-first",
-        Some(CoreAuthorSubject::ANONYMOUS_ISSUER) => "anonymous",
-        _ => "external",
-    }
-}
 
 fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
     Ok(match value {

@@ -549,6 +549,28 @@ impl Clone for WasmTransportInner {
 }
 
 impl WasmTransportInner {
+    fn take_semantic_trace(&self) -> Vec<String> {
+        match self {
+            Self::Memory { connection, .. } => jazz::db::block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .take_semantic_trace()
+            }),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser { connection, .. } => jazz::db::block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .take_semantic_trace()
+            }),
+        }
+    }
+
     fn auxiliary_pump(&self) -> jazz::db::PeerIoPump {
         match self {
             Self::Memory { connection, .. } => jazz::db::block_on(async {
@@ -3134,6 +3156,22 @@ impl WasmTransport {
             }
             entries.push(&entry);
         }
+        // Temporary semantic relay diagnostic, surfaced through the existing
+        // test-only trace channel.  It has no production routing effect.
+        for event in self.inner.take_semantic_trace() {
+            let entry = js_sys::Object::new();
+            let set = |name: &str, value: JsValue| {
+                let _ = js_sys::Reflect::set(&entry, &JsValue::from_str(name), &value);
+            };
+            set("event", JsValue::from_str(&event));
+            set("role", JsValue::from_str("upstream"));
+            set("connection", JsValue::from_str("semantic"));
+            set("requestId", JsValue::from_str("0"));
+            set("remainingHops", JsValue::from_f64(0.0));
+            set("objectHash", JsValue::from_str(""));
+            set("locatorFingerprint", JsValue::from_str(""));
+            entries.push(&entry);
+        }
         entries
     }
 
@@ -3865,37 +3903,7 @@ fn admit_binding_claims(
     author: AuthorSubject,
     claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
-        .expect("author subjects always have canonical issuer/subject JSON");
-    let mut admitted = claims
-        .into_iter()
-        .map(|(name, value)| (jazz::query::provider_claim_key(&name), value))
-        .collect::<BTreeMap<_, _>>();
-    admitted.insert(
-        jazz::query::provider_claim_key("iss"),
-        Value::String(issuer.clone()),
-    );
-    admitted.insert(
-        jazz::query::provider_claim_key("sub"),
-        Value::String(subject),
-    );
-    admitted.insert(
-        "user".to_owned(),
-        Value::String(author.canonical().to_owned()),
-    );
-    admitted.insert(
-        "authMode".to_owned(),
-        Value::String(auth_mode_for_author(&issuer).to_owned()),
-    );
-    admitted
-}
-
-fn auth_mode_for_author(issuer: &str) -> &'static str {
-    match issuer {
-        AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
-        AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
-        _ => "external",
-    }
+    jazz::tools::policy_claims::canonical_policy_binding_claims(&author, claims, Value::String)
 }
 
 fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {

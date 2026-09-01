@@ -21,7 +21,7 @@ where
     /// Internal test inspection for the retry-payload ownership boundary.
     /// Foreign rejections may be observed for live notification, but they may
     /// not become this database's durable retry payload.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_retained_rejection_for_test(&self, tx_id: TxId) -> bool {
         self.node.has_retained_rejection_for_test(tx_id)
@@ -30,7 +30,7 @@ where
     /// Internal test inspection for browser-relay recovered foreground
     /// transactions. The marker is process-local and must be consumed by
     /// either terminal fate, not only rejection.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn has_recovered_browser_relay_tx_for_test(&self, tx_id: TxId) -> bool {
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
@@ -126,7 +126,7 @@ where
 
     /// Test-only hook for topology fixtures. Production hosts must use the
     /// scope-admitted constructor above; no public binding exposes this toggle.
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn set_relay_authority_session_owner_for_test(&self) {
         // SAFETY: test fixtures use a fixed synthetic host-admitted scope.

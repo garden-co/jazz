@@ -1567,18 +1567,13 @@ where
             .map(|view| view.key)
     }
 
-    /// A browser worker relaying a strict Edge read must publish from its
-    /// dedicated authority-session membership. The worker's local overlay is
-    /// not a complete replacement for that server-selected result: an
-    /// unbounded filtered query can depend on supporting rows which are
-    /// intentionally absent from the overlay. Non-owner relays keep their
-    /// ordinary projection source.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn relay_edge_query_requires_authority_source(
         &self,
         _shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> bool {
-        self.is_relay_authority_session_owner()
+        self.client_relay_scope().is_some()
     }
 
     fn client_settled_binding_view_for_query(

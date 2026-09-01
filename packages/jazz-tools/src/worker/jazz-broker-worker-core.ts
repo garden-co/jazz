@@ -971,6 +971,25 @@ async function initialize(context: RuntimeContext): Promise<void> {
       }
     });
     if (options.logLevel === "trace") {
+      context.runtime.onServerRelayTrace((entry) => {
+        // Reuse the test-only, redacted relay diagnostics channel so browser
+        // tests can observe the worker boundary without exposing a new app API.
+        broadcast(context, {
+          type: "relay-trace",
+          entries: [
+            {
+              event: entry.event,
+              role: "upstream",
+              hop: "worker-server",
+              connection: "worker-server",
+              requestId: `${entry.frameCount}:${entry.frameBytes}`,
+              remainingHops: 0,
+              objectHash: "",
+              locatorFingerprint: entry.frameHex,
+            },
+          ],
+        });
+      });
       context.disposeAuxiliaryTrace = context.runtime.onAuxiliaryTrace((entries) => {
         broadcast(context, {
           type: "relay-trace",
@@ -1196,6 +1215,14 @@ function attachTab(
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   if (message.type === "frames") {
+    if (peer.context.options.logLevel === "trace") {
+      console.debug("JAZZ_RELAY_WORKER", "tab->worker", {
+        tabId: peer.tabId,
+        frameCount: message.frames.length,
+        pump: peer.pump !== null,
+        pendingFrames: peer.pendingFrames.length,
+      });
+    }
     if (peer.context.options.logLevel === "trace") {
       recordWorkerLifecycle(
         "peer-frames",
@@ -1762,6 +1789,12 @@ function attachPeerTransport(
     activeRuntime,
     subscriber,
     (frames) => {
+      if (peer.context.options.logLevel === "trace") {
+        console.debug("JAZZ_RELAY_WORKER", "worker->tab", {
+          tabId: peer.tabId,
+          frameCount: frames.length,
+        });
+      }
       const copies = transferableFrames(frames);
       peer.port.postMessage(
         { type: "frames", frames: copies } satisfies BrowserFollowerPortEvent,

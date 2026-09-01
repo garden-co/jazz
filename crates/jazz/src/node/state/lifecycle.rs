@@ -784,10 +784,6 @@ where
         Ok(())
     }
 
-    pub(crate) fn is_relay_authority_session_owner(&self) -> bool {
-        self.relay_authority_session_owner.is_some()
-    }
-
     /// The immutable host-admitted scope carried by this relay. Downstream
     /// relay/repair setup may observe its presence, but never manufacture one.
     pub(crate) fn client_relay_scope(&self) -> Option<&crate::db::ClientRelayScope> {

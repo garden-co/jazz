@@ -82,6 +82,13 @@ export async function waitForQuery<T>(
         queryTimeoutMs,
         `${label}: db.all did not resolve`,
       );
+      if (label === "peer receives owner invitation") {
+        const localRows = await db.all(queryBuilder, { tier: "local" });
+        console.debug("JAZZ_RELAY_QUERY", {
+          edgeRows: rows.length,
+          localRows: localRows.length,
+        });
+      }
       if (predicate(rows)) {
         return rows;
       }

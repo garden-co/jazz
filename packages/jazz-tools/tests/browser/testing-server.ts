@@ -34,5 +34,13 @@ export async function getJazzServerJwtForUser(
   claims?: Record<string, unknown>,
   appId?: string,
 ): Promise<string> {
-  return jazzServerBrowserCommands().jazzServerJwtForUser(userId, claims, appId);
+  // Browser-command argument serialization elides `undefined` array entries.
+  // Keep the optional `appId` in its third position and preserve the test
+  // issuer's documented default claims rather than accidentally signing the
+  // app ID as a scalar `claims` value.
+  return jazzServerBrowserCommands().jazzServerJwtForUser(
+    userId,
+    claims ?? { role: "user" },
+    appId,
+  );
 }

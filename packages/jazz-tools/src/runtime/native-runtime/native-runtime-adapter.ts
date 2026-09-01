@@ -111,6 +111,15 @@ type NativeReadContext =
   | { readonly kind: "backend-authority" };
 type CoreTickWake = "immediate" | "deferred" | "after-current-turn" | `after:${number}`;
 
+/** Temporary relay-boundary trace used only while diagnosing worker delivery. */
+export type ServerRelayTrace = Readonly<{
+  event: string;
+  frameCount: number;
+  frameBytes: number;
+  /** Temporary, test-only diagnostic payload. Removed with relay tracing. */
+  frameHex: string;
+}>;
+
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
   openMemoryAsBackend?(schema: Uint8Array, config: Uint8Array): NativeDb;
@@ -783,6 +792,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
+  private readonly serverRelayTraceListeners = new Set<(entry: ServerRelayTrace) => void>();
   private readonly queryCoverageTraceListeners = new Set<
     (entry: {
       stage: "attach" | "covered";
@@ -965,6 +975,13 @@ export class NativeRuntimeAdapter implements Runtime {
         this.serverTransport?.setAuxiliaryTraceEnabled?.(false);
       }
     };
+  }
+
+  /** @internal Temporary worker transport instrumentation. */
+  onServerRelayTrace(listener: (entry: ServerRelayTrace) => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onServerRelayTrace(listener);
+    this.serverRelayTraceListeners.add(listener);
+    return () => this.serverRelayTraceListeners.delete(listener);
   }
 
   /** @internal Redacted browser-worker lifecycle diagnostics. */
@@ -2196,6 +2213,7 @@ export class NativeRuntimeAdapter implements Runtime {
       requestedLink: this.scopeIsolatedRelay ? "scope_isolated_client_relay" : undefined,
       onFrame: (frame) => {
         if (generation !== this.serverConnectionGeneration) return;
+        this.emitServerRelayTrace("server-frame-received", [frame]);
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
@@ -3750,6 +3768,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       this.publishAuxiliaryTrace(transport);
       if (canonical.length > 0) {
+        this.emitServerRelayTrace("server-frame-routed", canonical);
         if (transport.sendWireFrames) transport.sendWireFrames(canonical);
         else for (const frame of canonical) transport.sendWireFrame(frame);
       }
@@ -3827,6 +3846,22 @@ export class NativeRuntimeAdapter implements Runtime {
     void carrier.sendBatch(frames).catch((error) => {
       this.handleServerTransportError(error, generation);
     });
+  }
+
+  private emitServerRelayTrace(event: string, frames: readonly Uint8Array[]): void {
+    if (this.serverRelayTraceListeners.size === 0) return;
+    const entry: ServerRelayTrace = {
+      event,
+      frameCount: frames.length,
+      frameBytes: frames.reduce((total, frame) => total + frame.byteLength, 0),
+      // The worker trace is enabled only by the browser test's explicit
+      // `logLevel: "trace"`. Keeping the actual frame here lets the test
+      // diagnose subscription-key routing rather than infer it from size.
+      frameHex: frames
+        .map((frame) => Array.from(frame, (byte) => byte.toString(16).padStart(2, "0")).join(""))
+        .join(","),
+    };
+    for (const listener of this.serverRelayTraceListeners) listener(entry);
   }
 
   private flushQueuedServerFrames(carrier: WebSocketCarrier): void {

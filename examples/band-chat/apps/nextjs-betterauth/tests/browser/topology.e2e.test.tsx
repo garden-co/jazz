@@ -407,6 +407,7 @@ async function openMember(
       appId: server.appId,
       serverUrl: server.serverUrl,
       jwtToken,
+      logLevel: "trace",
       driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
     }),
   );

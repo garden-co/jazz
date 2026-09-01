@@ -2134,6 +2134,11 @@ struct CoverageGroup {
     subscribers: BTreeSet<SubscriptionKey>,
     pending_initial_subscribers: BTreeSet<SubscriptionKey>,
     initialized: bool,
+    /// The usage-site subscription whose authority result supplies this
+    /// group's membership. An authoritative server evaluates the incoming
+    /// downstream subscription directly; a relay that must ask its upstream
+    /// instead uses its separately allocated upstream usage handle.
+    authority_result_subscription: SubscriptionKey,
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,

@@ -365,6 +365,32 @@ impl PeerState {
             .authority_result_source = Some(authority_result_key);
     }
 
+    /// Mark a scope-relay served usage as pending the exact U source installed
+    /// above. This is set only by non-authoritative admission and survives
+    /// maintained-view replacement; definitive publication clears it.
+    pub(crate) fn set_subscription_awaiting_selected_authority_source(
+        &mut self,
+        subscription: SubscriptionKey,
+        awaiting: bool,
+    ) {
+        self.publication_states
+            .entry(subscription)
+            .or_default()
+            .awaiting_selected_authority_source = awaiting;
+    }
+
+    /// The exact authority receipt selected for this concrete downstream
+    /// usage. This is lifecycle metadata, not a permission lookup: callers
+    /// use it only to preserve an opening result until that source settles.
+    pub(crate) fn subscription_authority_result_source(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<&AuthorityResultKey> {
+        self.publication_states
+            .get(&subscription)
+            .and_then(|state| state.authority_result_source.as_ref())
+    }
+
     pub(crate) fn subscription_policy_binding(
         &self,
         subscription: SubscriptionKey,
@@ -470,6 +496,64 @@ impl PeerState {
         self.refresh_maintained_subscription_view_footprint(subscription);
     }
 
+    /// A strict relay query is owned by one exact upstream authority receipt.
+    /// Do not let a cold receiver opened before that receipt was live survive
+    /// the handoff: it has already resolved the empty pre-receipt source and
+    /// can never observe the source becoming populated.  Retiring it lets the
+    /// normal rehydrate path open the *same* receiver against the now-live
+    /// source; it does not create a second result or relax exact binding.
+    fn retire_cold_relay_authority_receiver<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        source: &AuthorityResultKey,
+    ) where
+        S: OrderedKvStorage,
+    {
+        if !node.has_settled_authority_result(source) {
+            return;
+        }
+        let stale = self
+            .publication_states
+            .get_mut(&subscription)
+            .and_then(|state| {
+                state
+                    .maintained_subscription_view
+                    .as_ref()
+                    .is_some_and(|maintained| {
+                        !maintained.initial_received
+                            && maintained.source_authority_result.as_ref() == Some(source)
+                    })
+                    .then(|| state.maintained_subscription_view.take())
+                    .flatten()
+            });
+        if let Some(stale) = stale {
+            node.unsubscribe_groove_subscription(stale.subscription.id());
+            self.refresh_maintained_subscription_view_footprint(subscription);
+        }
+    }
+
+    fn requires_selected_authority_source(
+        &self,
+        subscription: SubscriptionKey,
+        purpose: RehydratePurpose,
+    ) -> bool {
+        purpose == RehydratePurpose::Query
+            && self
+                .publication_states
+                .get(&subscription)
+                .is_some_and(|state| state.awaiting_selected_authority_source)
+    }
+
+    fn selected_authority_source(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<AuthorityResultKey> {
+        self.publication_states
+            .get(&subscription)
+            .and_then(|state| state.authority_result_source.clone())
+    }
+
     fn ensure_query_subscription_registered<S>(
         &self,
         node: &mut NodeState<S>,
@@ -545,6 +629,11 @@ impl PeerState {
             .ok_or(Error::InvalidStoredValue(
                 "maintained subscription view is missing prepared state",
             ))?;
+        if self.requires_selected_authority_source(subscription, RehydratePurpose::Query)
+            && let Some(source) = self.selected_authority_source(subscription)
+        {
+            self.retire_cold_relay_authority_receiver(node, subscription, &source);
+        }
         let previous_member_result_set = self
             .publication_states
             .get(&subscription)
@@ -766,7 +855,7 @@ impl PeerState {
     {
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
-        let Some(state) = self.publication_states.get(&subscription) else {
+        let Some(_) = self.publication_states.get(&subscription) else {
             return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: self.binding_settlement_time(node, subscription, shape, binding),
@@ -780,7 +869,16 @@ impl PeerState {
                 program_fact_removes: Vec::new(),
             })));
         };
-        if state.maintained_subscription_view.is_some() {
+        if self.requires_selected_authority_source(subscription, RehydratePurpose::Query)
+            && let Some(source) = self.selected_authority_source(subscription)
+        {
+            self.retire_cold_relay_authority_receiver(node, subscription, &source);
+        }
+        if self
+            .publication_states
+            .get(&subscription)
+            .is_some_and(|state| state.maintained_subscription_view.is_some())
+        {
             return self.query_update_maintained_subscription_view(
                 node,
                 shape,
@@ -887,12 +985,11 @@ impl PeerState {
             progress_waker,
         )
         .await?;
-        if !self
+        let initial_state = self
             .publication_states
             .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
-            .is_some_and(|maintained| maintained.initial_received)
-        {
+            .and_then(|state| state.maintained_subscription_view.as_ref());
+        if !initial_state.is_some_and(|maintained| maintained.initial_received) {
             return Ok(None);
         }
         let drain_elapsed = trace_start.elapsed();
@@ -1074,7 +1171,8 @@ impl PeerState {
             let drain_reads = drain_reads.expect("trace reads captured");
             let bundle_reads = bundle_reads.expect("trace reads captured");
             eprintln!(
-                "JAZZ_REHYDRATE_TRACE stage=update subscription={subscription:?} drain_ms={} bundle_ms={} adds={} removes={} fact_adds={} fact_removes={} bundles={} fallback={} drain_reads={} drain_ranges={} bundle_reads={} bundle_ranges={}",
+                "JAZZ_REHYDRATE_TRACE stage=update table={} subscription={subscription:?} drain_ms={} bundle_ms={} adds={} removes={} fact_adds={} fact_removes={} bundles={} fallback={} drain_reads={} drain_ranges={} bundle_reads={} bundle_ranges={}",
+                shape.query().table,
                 drain_elapsed.as_millis(),
                 bundle_elapsed.as_millis(),
                 result_add_count,
@@ -1332,10 +1430,8 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let relay_edge_requires_authority_source = purpose == RehydratePurpose::Query
-            && self.role == PeerRole::Relay
-            && tier == DurabilityTier::Edge
-            && node.relay_edge_query_requires_authority_source(shape, binding);
+        let relay_edge_requires_authority_source =
+            self.requires_selected_authority_source(subscription, purpose);
         // The downstream usage registration chose this policy scope.  Carry
         // that exact receipt into source resolution; the shared binding-view
         // key alone is not an authority identity in a multiplexed relay.
@@ -1346,13 +1442,18 @@ impl PeerState {
             // opening until the connection records its exact upstream usage
             // source; guessing from the group key would leak or erase a
             // sibling policy's membership.
-            let Some(source) = self
-                .publication_states
-                .get(&subscription)
-                .and_then(|state| state.authority_result_source.clone())
-            else {
+            let Some(source) = self.selected_authority_source(subscription) else {
                 return Ok(None);
             };
+            // This group is semantically owned by the selected upstream
+            // receipt.  Do not open a cold maintained receiver against an
+            // empty pre-settlement source: it cannot observe the later
+            // membership handoff and would turn a strict read into a
+            // provisional empty result.  The next dirty tick after this
+            // exact source becomes live re-enters this same rehydrate path.
+            if !node.has_settled_authority_result(&source) {
+                return Ok(None);
+            }
             Some(source)
         } else {
             None
@@ -1824,6 +1925,10 @@ impl PeerState {
             .publication_states
             .get(&subscription)
             .and_then(|state| state.authority_result_source.clone());
+        let awaiting_selected_authority_source = self
+            .publication_states
+            .get(&subscription)
+            .is_some_and(|state| state.awaiting_selected_authority_source);
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
         // Retire the old publication before retaining its replacement.  The
         // served policy helper creates a lightweight publication state, so
@@ -1846,6 +1951,7 @@ impl PeerState {
         state.member_index = previous_member_index;
         state.policy_binding = Some(policy_binding);
         state.authority_result_source = authority_result_source;
+        state.awaiting_selected_authority_source = awaiting_selected_authority_source;
         if let Some(authorization_progress) = retained_authorization {
             state.authorization_progress = authorization_progress;
             state.has_served_authorization_progress = true;

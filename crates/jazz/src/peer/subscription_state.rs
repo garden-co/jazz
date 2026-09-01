@@ -127,6 +127,11 @@ pub(super) struct PeerSubscriptionState {
     /// source key here preserves that relationship without trying to recover
     /// it from the (non-unique) canonical binding view.
     pub(super) authority_result_source: Option<AuthorityResultKey>,
+    /// This non-authoritative scope-relay usage must not materialize its
+    /// receiver until `authority_result_source` has a live reset.  It is
+    /// deliberately separate from the source key: direct authorities may
+    /// retain a D source without awaiting an upstream handoff.
+    pub(super) awaiting_selected_authority_source: bool,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
     pub(super) member_index: BTreeMap<MemberIndexKey, MemberSlot>,
