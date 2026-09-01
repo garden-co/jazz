@@ -429,6 +429,83 @@ fn scope_relay_repair_ledger_survives_reopen_only_for_exact_scope() {
     );
 }
 
+/// Foreground pending writes can repair their own versions before upstream
+/// receipt, but only when the admitted foreground session is their author.
+#[test]
+fn scope_relay_authored_pending_repairs_require_exact_author_scope() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_relay_dir, mut relay_node) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut relay_node, alice);
+    install_test_uuid_sub_claim(&mut relay_node, bob);
+    relay_node
+        .configure_scope_isolated_client_relay(unsafe {
+            crate::db::ClientRelayScope::from_admitted_storage_owner(
+                "relay-storage-owner".to_owned(),
+                alice,
+            )
+        })
+        .unwrap();
+    let alice_row = row(0x2d);
+    let alice_tx = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", alice_row, 10)
+            .made_by(alice)
+            .cells(owner_cells(alice, "pending own write")),
+    );
+    let bob_row = row(0x2e);
+    let bob_tx = commit_mergeable_global(
+        &mut writer,
+        &mut relay_node,
+        MergeableCommit::new("todos", bob_row, 11)
+            .made_by(bob)
+            .cells(owner_cells(bob, "pending foreign write")),
+    );
+    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+        panic!("expected authority view update");
+    };
+    let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    let alice_bundle = bundles.iter().find(|bundle| bundle.tx.tx_id == alice_tx).unwrap();
+    let bob_bundle = bundles.iter().find(|bundle| bundle.tx.tx_id == bob_tx).unwrap();
+    let table_id = relay_node
+        .physical_table_id_for_schema(alice_bundle.versions[0].schema_version(), "todos")
+        .unwrap();
+    relay_node
+        .record_scope_relay_authored_pending_versions(
+            &alice_bundle.tx,
+            &alice_bundle.versions,
+            alice,
+        )
+        .resolve()
+        .unwrap();
+    relay_node
+        .record_scope_relay_authored_pending_versions(&bob_bundle.tx, &bob_bundle.versions, alice)
+        .resolve()
+        .unwrap();
+    assert!(
+        relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", alice_row, alice_tx),
+            )
+            .resolve()
+            .unwrap()
+    );
+    assert!(
+        !relay_node
+            .scope_relay_repair_ledger_contains(
+                table_id,
+                &crate::protocol::RowVersionRef::new("todos", bob_row, bob_tx),
+            )
+            .resolve()
+            .unwrap(),
+        "a mismatched transaction author never acquires same-scope repair authority"
+    );
+}
+
 #[test]
 fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));

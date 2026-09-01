@@ -47,10 +47,14 @@ where
         &self,
         tx: &Transaction,
         versions: &[VersionRecord],
+        admitted_session: AuthorSubject,
     ) -> Result<(), Error> {
         let Some(scope) = self.client_relay_scope() else {
             return Ok(());
         };
+        if !scope.admits_session(admitted_session) || tx.made_by != admitted_session {
+            return Ok(());
+        }
         let (owner, subject) = scope.durable_components();
         let digest = scope.durable_digest();
         let store = self.database.direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;

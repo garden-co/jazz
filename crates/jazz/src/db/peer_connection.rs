@@ -248,7 +248,11 @@ where
                     .await?;
                 if same_scope_author {
                     state
-                        .record_scope_relay_authored_pending_versions(&tx, &versions)
+                        .record_scope_relay_authored_pending_versions(
+                            &tx,
+                            &versions,
+                            session_claim_binding.0,
+                        )
                         .await?;
                 }
                 Ok(PublicationOutcome::settled(Vec::new()))
