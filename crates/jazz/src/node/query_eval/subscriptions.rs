@@ -752,20 +752,6 @@ where
             .collect()
     }
 
-    pub(crate) fn take_pending_terminal_operations(
-        &mut self,
-        authority_result_key: &AuthorityResultKey,
-    ) -> Vec<groove::ivm::TerminalOperation> {
-        std::mem::take(
-            &mut self
-                .query
-                .authority_results
-                .entry(authority_result_key.clone())
-                .or_default()
-                .pending_terminal_operations,
-        )
-    }
-
     pub(crate) fn defer_authoritative_reset(&mut self, authority_result_key: &AuthorityResultKey) {
         self.query
             .authority_results

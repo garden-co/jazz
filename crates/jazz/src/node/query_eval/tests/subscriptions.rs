@@ -569,17 +569,6 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_defer_and_terminal_streams_se
         pending,
         BTreeSet::from([alice_key.clone(), bob_key.clone()])
     );
-    assert_eq!(
-        relay.take_pending_terminal_operations(&alice_key)[0].root_key,
-        vec![1],
-        "Alice can consume only her terminal stream"
-    );
-    assert_eq!(
-        relay.take_pending_terminal_operations(&bob_key)[0].root_key,
-        vec![2],
-        "Bob can consume only his terminal stream"
-    );
-
     // Bob can defer a later publication while Alice's opening continues. That
     // deferred marker is also exact-policy state, not binding-view state.
     relay

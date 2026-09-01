@@ -900,13 +900,12 @@ pub(crate) struct AuthorityResultState {
     settled_through: Option<GlobalTime>,
     authorization_progress: Option<u64>,
     /// Per-subscription lifecycle state.  It remains policy-scoped because a
-    /// reset, opening, or terminal operation for Alice must never wake Bob.
+    /// reset or opening transition for Alice must never wake Bob.
     known_state_declared: bool,
     initial_hydration: bool,
     deferred_publication: bool,
     pending_authoritative_reset: bool,
     pending_opening: bool,
-    pending_terminal_operations: Vec<groove::ivm::TerminalOperation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
