@@ -33,8 +33,8 @@ use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregat
 use crate::storage_codec_profile::epoch_1_storage_codec_profile;
 use crate::tools::OpenTransactionId;
 use crate::tools::native_transport_connector::{
-    NativeTransportConnector, NativeTransportRequest, NativeTransportTerminal,
-    NativeTransportTerminalFuture,
+    ConnectedNativeTransport, NativeTransportConnector, NativeTransportRequest,
+    NativeTransportTerminal, NativeTransportTerminalFuture,
 };
 use crate::tools::public_api::types::{
     OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
@@ -197,6 +197,8 @@ struct ClientDbInner {
     upstream: Option<BackendConnection>,
     upstream_generation: u64,
     native_terminal_events: VecDeque<(u64, NativeTransportTerminal)>,
+    upstream_recovery_generation: Option<u64>,
+    upstream_state_notify: Arc<tokio::sync::Notify>,
     write_map: HashMap<TransactionId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<OpenTransactionId, ExclusiveTransactionState>,
@@ -207,6 +209,12 @@ struct ClientDbInner {
     next_subscription_forwarder: u64,
     shutdown_state: ShutdownState,
     shutdown_notify: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for ClientDbInner {
+    fn drop(&mut self) {
+        self.upstream_state_notify.notify_waiters();
+    }
 }
 
 /// A public subscription admission or forwarding task owned by the facade.
@@ -323,10 +331,9 @@ fn tick_driver_retry_delay(attempt: u32) -> Duration {
         .min(TICK_DRIVER_RETRY_MAX_DELAY)
 }
 
-async fn recover_tick_driver_error(
+async fn recover_tick_driver_backpressure(
     inner: &Rc<RefCell<ClientDbInner>>,
     scheduler: &TickSchedulerImpl,
-    class: TickDriverErrorClass,
     error: &CoreDbError,
     attempts: &mut u32,
 ) -> bool {
@@ -340,18 +347,41 @@ async fn recover_tick_driver_error(
 
     #[cfg(feature = "sync-autopsy")]
     crate::db::sync_autopsy::record(format!(
-        "client tick driver retrying {class:?} error attempt {attempts}: {error}"
+        "client tick driver retrying backpressure error attempt {attempts}: {error}"
     ));
     tokio::time::sleep(tick_driver_retry_delay(*attempts)).await;
+    scheduler.wake(TickUrgency::Immediate);
+    true
+}
 
-    if class == TickDriverErrorClass::Reconnect {
-        inner.borrow_mut().disconnect_upstream();
-        if let Err(_reconnect_error) = ClientDbInner::reconnect_upstream(inner).await {
-            #[cfg(feature = "sync-autopsy")]
-            crate::db::sync_autopsy::record(format!(
-                "client tick driver reconnect attempt {attempts} failed: {_reconnect_error}"
+#[cfg(test)]
+async fn recover_tick_driver_error(
+    inner: &Rc<RefCell<ClientDbInner>>,
+    scheduler: &TickSchedulerImpl,
+    class: TickDriverErrorClass,
+    error: &CoreDbError,
+    attempts: &mut u32,
+) -> bool {
+    let expected_generation = inner.borrow().upstream_generation;
+    *attempts = attempts.saturating_add(1);
+    if *attempts > MAX_TICK_DRIVER_RECOVERY_ATTEMPTS {
+        let mut inner_state = inner.borrow_mut();
+        if matches!(inner_state.shutdown_state, ShutdownState::Open)
+            && inner_state.upstream_generation == expected_generation
+            && inner_state.upstream.is_none()
+        {
+            inner_state.record_tick_driver_failure(format!(
+                "recovery exhausted after {MAX_TICK_DRIVER_RECOVERY_ATTEMPTS} attempts for {error}"
             ));
         }
+        return false;
+    }
+
+    tokio::time::sleep(tick_driver_retry_delay(*attempts)).await;
+    if class == TickDriverErrorClass::Reconnect
+        && ClientDbInner::is_current_disconnected_generation(inner, expected_generation)
+    {
+        ClientDbInner::start_upstream_recovery(inner, error.to_string());
     }
     scheduler.wake(TickUrgency::Immediate);
     true
@@ -363,6 +393,23 @@ struct ConnectConfig {
     app_id: crate::tools::AppId,
     auth: WsAuthConfig,
     connector: Arc<dyn NativeTransportConnector>,
+}
+struct UpstreamRecoveryOwner {
+    inner: Weak<RefCell<ClientDbInner>>,
+    generation: u64,
+}
+
+impl Drop for UpstreamRecoveryOwner {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let mut inner_state = inner.borrow_mut();
+        if inner_state.upstream_recovery_generation == Some(self.generation) {
+            inner_state.upstream_recovery_generation = None;
+            inner_state.upstream_state_notify.notify_waiters();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1344,7 +1391,7 @@ impl ClientDb {
         generation: u64,
         terminal: NativeTransportTerminal,
     ) {
-        let reconnect = {
+        let recovery_error = {
             let mut inner_state = inner.borrow_mut();
             if generation != inner_state.upstream_generation
                 || !matches!(inner_state.shutdown_state, ShutdownState::Open)
@@ -1354,16 +1401,18 @@ impl ClientDb {
             match terminal {
                 NativeTransportTerminal::OwnerDropped => {
                     inner_state.disconnect_upstream();
-                    false
+                    None
                 }
-                NativeTransportTerminal::PeerClosed(_) | NativeTransportTerminal::Failed(_) => {
-                    inner_state.disconnect_upstream();
-                    true
+                NativeTransportTerminal::PeerClosed(reason) => {
+                    Some(format!("native transport peer closed: {reason}"))
+                }
+                NativeTransportTerminal::Failed(error) => {
+                    Some(format!("native transport failed: {error}"))
                 }
             }
         };
-        if reconnect {
-            let _ = ClientDbInner::reconnect_upstream(inner).await;
+        if let Some(error) = recovery_error {
+            ClientDbInner::start_upstream_recovery(inner, error);
         }
     }
 
@@ -1373,19 +1422,25 @@ impl ClientDb {
     ) {
         let state = scheduler.wake_handle();
         tokio::task::spawn_local(async move {
-            let mut recovery_attempts = 0;
+            let mut backpressure_attempts = 0;
             loop {
                 state.notify.notified().await;
                 while let Some(urgency) = scheduler.take() {
                     let Some(inner) = inner.upgrade() else {
                         return;
                     };
+                    if inner.borrow().tick_driver_error.is_some() {
+                        return;
+                    }
                     loop {
                         let event = { inner.borrow_mut().native_terminal_events.pop_front() };
                         let Some((generation, terminal)) = event else {
                             break;
                         };
                         ClientDb::handle_native_terminal(&inner, generation, terminal).await;
+                    }
+                    if inner.borrow().tick_driver_error.is_some() {
+                        return;
                     }
 
                     if urgency == TickUrgency::Deferred {
@@ -1398,24 +1453,37 @@ impl ClientDb {
                         Err(_) => return,
                     };
                     let tick_result = backend.tick().await;
+                    if inner.borrow().tick_driver_error.is_some() {
+                        return;
+                    }
                     match tick_result {
-                        Ok(()) => recovery_attempts = 0,
+                        Ok(()) => backpressure_attempts = 0,
                         Err(error) => {
                             let class = classify_tick_driver_error(&error);
-                            let should_exit = if class == TickDriverErrorClass::Fatal {
-                                inner
-                                    .borrow_mut()
-                                    .record_tick_driver_failure(error.to_string());
-                                true
-                            } else {
-                                !recover_tick_driver_error(
-                                    &inner,
-                                    &scheduler,
-                                    class,
-                                    &error,
-                                    &mut recovery_attempts,
-                                )
-                                .await
+                            let should_exit = match class {
+                                TickDriverErrorClass::Fatal => {
+                                    inner
+                                        .borrow_mut()
+                                        .record_tick_driver_failure(error.to_string());
+                                    true
+                                }
+                                TickDriverErrorClass::Retry => {
+                                    !recover_tick_driver_backpressure(
+                                        &inner,
+                                        &scheduler,
+                                        &error,
+                                        &mut backpressure_attempts,
+                                    )
+                                    .await
+                                }
+                                TickDriverErrorClass::Reconnect => {
+                                    backpressure_attempts = 0;
+                                    ClientDbInner::start_upstream_recovery(
+                                        &inner,
+                                        error.to_string(),
+                                    );
+                                    false
+                                }
                             };
                             if should_exit {
                                 #[cfg(feature = "sync-autopsy")]
@@ -1447,6 +1515,8 @@ impl ClientDbInner {
 
     fn disconnect_upstream(&mut self) -> bool {
         self.upstream_generation = self.upstream_generation.wrapping_add(1);
+        self.upstream_recovery_generation = None;
+        self.upstream_state_notify.notify_waiters();
         let Some(connection) = self.upstream.take() else {
             return false;
         };
@@ -1495,6 +1565,8 @@ impl ClientDbInner {
     }
 
     fn record_tick_driver_failure(&mut self, error: String) {
+        self.upstream_recovery_generation = None;
+        self.upstream_state_notify.notify_waiters();
         self.tick_driver_error = Some(error);
         self.tick_driver_error_notify.notify_waiters();
     }
@@ -1536,6 +1608,8 @@ impl ClientDbInner {
             upstream: None,
             upstream_generation: 0,
             native_terminal_events: VecDeque::new(),
+            upstream_recovery_generation: None,
+            upstream_state_notify: Arc::new(tokio::sync::Notify::new()),
             write_map: HashMap::new(),
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
@@ -1550,17 +1624,143 @@ impl ClientDbInner {
         Ok(inner)
     }
 
-    async fn reconnect_upstream(inner: &Rc<RefCell<Self>>) -> Result<bool> {
-        Self::connect_upstream_transport(inner).await
+    fn is_current_disconnected_generation(inner: &Rc<RefCell<Self>>, generation: u64) -> bool {
+        let inner_state = inner.borrow();
+        matches!(inner_state.shutdown_state, ShutdownState::Open)
+            && inner_state.tick_driver_error.is_none()
+            && inner_state.upstream_generation == generation
+            && inner_state.upstream.is_none()
     }
 
-    async fn connect_upstream_transport(inner: &Rc<RefCell<Self>>) -> Result<bool> {
-        let (db, identity, scheduler, config) = {
+    fn is_current_disconnected_generation_weak(
+        inner: &Weak<RefCell<Self>>,
+        generation: u64,
+    ) -> bool {
+        inner
+            .upgrade()
+            .is_some_and(|inner| Self::is_current_disconnected_generation(&inner, generation))
+    }
+
+    fn is_current_recovery(inner: &Weak<RefCell<Self>>, generation: u64) -> bool {
+        let Some(inner) = inner.upgrade() else {
+            return false;
+        };
+        let inner_state = inner.borrow();
+        matches!(inner_state.shutdown_state, ShutdownState::Open)
+            && inner_state.tick_driver_error.is_none()
+            && inner_state.upstream_generation == generation
+            && inner_state.upstream.is_none()
+            && inner_state.upstream_recovery_generation == Some(generation)
+    }
+
+    fn start_upstream_recovery(inner: &Rc<RefCell<Self>>, initial_error: String) {
+        let (generation, scheduler) = {
+            let mut inner_state = inner.borrow_mut();
+            if !matches!(inner_state.shutdown_state, ShutdownState::Open)
+                || inner_state.tick_driver_error.is_some()
+                || inner_state.connect_config.is_none()
+            {
+                return;
+            }
+            if inner_state.upstream.is_none()
+                && inner_state.upstream_recovery_generation == Some(inner_state.upstream_generation)
+            {
+                return;
+            }
+            inner_state.disconnect_upstream();
+            let generation = inner_state.upstream_generation;
+            inner_state.upstream_recovery_generation = Some(generation);
+            (generation, Rc::clone(&inner_state.scheduler))
+        };
+        scheduler.wake(TickUrgency::Immediate);
+        tokio::task::spawn_local(Self::run_upstream_recovery(
+            Rc::downgrade(inner),
+            generation,
+            initial_error,
+        ));
+    }
+
+    async fn run_upstream_recovery(
+        inner: Weak<RefCell<Self>>,
+        generation: u64,
+        initial_error: String,
+    ) {
+        let _owner = UpstreamRecoveryOwner {
+            inner: inner.clone(),
+            generation,
+        };
+        let mut last_error = initial_error;
+        for attempt in 1..=MAX_TICK_DRIVER_RECOVERY_ATTEMPTS {
+            if attempt > 1 {
+                tokio::time::sleep(tick_driver_retry_delay(attempt - 1)).await;
+                if !Self::is_current_recovery(&inner, generation) {
+                    return;
+                }
+            }
+
+            match Self::connect_upstream_for_generation(&inner, generation).await {
+                Ok(true) | Ok(false) => return,
+                Err(error) => {
+                    last_error = error.to_string();
+                    #[cfg(feature = "sync-autopsy")]
+                    crate::db::sync_autopsy::record(format!(
+                        "client native upstream recovery attempt {attempt} failed: {error}"
+                    ));
+                }
+            }
+        }
+
+        let Some(inner) = inner.upgrade() else {
+            return;
+        };
+        let scheduler = {
+            let mut inner_state = inner.borrow_mut();
+            if !matches!(inner_state.shutdown_state, ShutdownState::Open)
+                || inner_state.upstream_generation != generation
+                || inner_state.upstream.is_some()
+                || inner_state.upstream_recovery_generation != Some(generation)
+            {
+                return;
+            }
+            inner_state.upstream_recovery_generation = None;
+            inner_state.record_tick_driver_failure(format!(
+                "native upstream recovery exhausted after \
+                 {MAX_TICK_DRIVER_RECOVERY_ATTEMPTS} attempts: {last_error}"
+            ));
+            Rc::clone(&inner_state.scheduler)
+        };
+        scheduler.wake(TickUrgency::Immediate);
+    }
+
+    async fn reconnect_upstream(inner: &Rc<RefCell<Self>>) -> Result<bool> {
+        let generation = {
             let inner_state = inner.borrow();
             if !matches!(inner_state.shutdown_state, ShutdownState::Open) {
                 return Err(Self::shutdown_error());
             }
-            if inner_state.upstream.is_some() {
+            inner_state.upstream_generation
+        };
+        Self::connect_upstream_for_generation(&Rc::downgrade(inner), generation).await
+    }
+
+    async fn connect_upstream_transport(inner: &Rc<RefCell<Self>>) -> Result<bool> {
+        Self::reconnect_upstream(inner).await
+    }
+
+    async fn connect_upstream_for_generation(
+        inner: &Weak<RefCell<Self>>,
+        expected_generation: u64,
+    ) -> Result<bool> {
+        let (db, identity, scheduler, config, state_notify) = {
+            let Some(inner) = inner.upgrade() else {
+                return Ok(false);
+            };
+            let inner_state = inner.borrow();
+            if !matches!(inner_state.shutdown_state, ShutdownState::Open)
+                || inner_state.tick_driver_error.is_some()
+                || inner_state.upstream_generation != expected_generation
+                || inner_state.upstream.is_some()
+            {
                 return Ok(false);
             }
             let Some(config) = inner_state.connect_config.clone() else {
@@ -1571,24 +1771,72 @@ impl ClientDbInner {
                 inner_state.identity,
                 Rc::clone(&inner_state.scheduler),
                 config,
+                Arc::clone(&inner_state.upstream_state_notify),
             )
         };
-        let (connection, terminal) =
-            Self::connect_with_config(&db, identity, Rc::clone(&scheduler), config).await?;
+
+        let connected = Self::await_native_admission(
+            inner,
+            expected_generation,
+            identity,
+            Rc::clone(&scheduler),
+            config,
+            state_notify,
+        )
+        .await?;
+        let Some(connected) = connected else {
+            return Ok(false);
+        };
+        if !Self::is_current_disconnected_generation_weak(inner, expected_generation) {
+            return Ok(false);
+        }
+
+        let ConnectedNativeTransport {
+            transport,
+            protocol_version,
+            features,
+            session_context,
+            permits_delegated_sessions,
+            terminal,
+        } = connected;
+        let connection = db
+            .connect_upstream(Box::new(
+                WireTransportAdapter::new_with_session_context_and_delegated_sessions(
+                    transport,
+                    protocol_version,
+                    features,
+                    None,
+                    session_context,
+                    permits_delegated_sessions,
+                ),
+            ))
+            .await;
+
+        let Some(inner) = inner.upgrade() else {
+            db.detach_connection(&connection);
+            return Ok(false);
+        };
         let generation = {
             let mut inner_state = inner.borrow_mut();
             if !matches!(inner_state.shutdown_state, ShutdownState::Open)
+                || inner_state.tick_driver_error.is_some()
+                || inner_state.upstream_generation != expected_generation
                 || inner_state.upstream.is_some()
             {
+                drop(inner_state);
                 db.detach_connection(&connection);
                 return Ok(false);
             }
             inner_state.upstream_generation = inner_state.upstream_generation.wrapping_add(1);
             inner_state.upstream = Some(connection);
+            if inner_state.upstream_recovery_generation == Some(expected_generation) {
+                inner_state.upstream_recovery_generation = None;
+            }
+            inner_state.upstream_state_notify.notify_waiters();
             inner_state.upstream_generation
         };
         ClientDb::spawn_native_terminal_watcher(
-            Rc::downgrade(inner),
+            Rc::downgrade(&inner),
             scheduler,
             generation,
             terminal,
@@ -1596,40 +1844,45 @@ impl ClientDbInner {
         Ok(true)
     }
 
-    async fn connect_with_config(
-        db: &Backend,
+    async fn await_native_admission(
+        inner: &Weak<RefCell<Self>>,
+        expected_generation: u64,
         identity: CoreDbIdentity,
         scheduler: Rc<TickSchedulerImpl>,
         config: ConnectConfig,
-    ) -> Result<(BackendConnection, NativeTransportTerminalFuture)> {
+        state_notify: Arc<tokio::sync::Notify>,
+    ) -> Result<Option<ConnectedNativeTransport>> {
         let wake = scheduler.wake_handle();
-        let connected = config
-            .connector
-            .connect(NativeTransportRequest {
-                server_url: config.server_url,
-                app_id: config.app_id,
-                peer_identity: identity.author,
-                auth: config.auth,
-                wake: Arc::new(move || {
-                    wake.immediate.store(true, Ordering::Release);
-                    wake.notify.notify_one();
-                }),
-            })
-            .await
-            .map_err(|error| JazzError::Connection(error.to_string()))?;
-        let connection = db
-            .connect_upstream(Box::new(
-                WireTransportAdapter::new_with_session_context_and_delegated_sessions(
-                    connected.transport,
-                    connected.protocol_version,
-                    connected.features,
-                    None,
-                    connected.session_context,
-                    connected.permits_delegated_sessions,
-                ),
-            ))
-            .await;
-        Ok((connection, connected.terminal))
+        let admission = config.connector.connect(NativeTransportRequest {
+            server_url: config.server_url,
+            app_id: config.app_id,
+            peer_identity: identity.author,
+            auth: config.auth,
+            wake: Arc::new(move || {
+                wake.immediate.store(true, Ordering::Release);
+                wake.notify.notify_one();
+            }),
+        });
+        tokio::pin!(admission);
+        loop {
+            let state_changed = state_notify.notified();
+            tokio::pin!(state_changed);
+            state_changed.as_mut().enable();
+            if !Self::is_current_disconnected_generation_weak(inner, expected_generation) {
+                return Ok(None);
+            }
+            tokio::select! {
+                result = &mut admission => {
+                    if !Self::is_current_disconnected_generation_weak(inner, expected_generation) {
+                        return Ok(None);
+                    }
+                    return result
+                        .map(Some)
+                        .map_err(|error| JazzError::Connection(error.to_string()));
+                }
+                _ = &mut state_changed => {}
+            }
+        }
     }
 
     fn ensure_transaction_open(&self, transaction_id: OpenTransactionId) -> Result<()> {
@@ -3638,24 +3891,10 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
-    #[derive(Default)]
-    struct ControlledWireState {
-        fail_sends: AtomicBool,
-        send_count: AtomicUsize,
-    }
-
-    struct ControlledNativeWireTransport {
-        state: Arc<ControlledWireState>,
-    }
+    struct ControlledNativeWireTransport;
 
     impl WireTransport for ControlledNativeWireTransport {
         fn send_frame(&mut self, _frame: Vec<u8>) -> std::result::Result<(), TransportError> {
-            self.state.send_count.fetch_add(1, Ordering::AcqRel);
-            if self.state.fail_sends.load(Ordering::Acquire) {
-                return Err(TransportError::Failed(
-                    "websocket pump is closed".to_owned(),
-                ));
-            }
             Ok(())
         }
 
@@ -3683,7 +3922,6 @@ mod tests {
         Connected {
             terminal: oneshot::Receiver<NativeTransportTerminal>,
             terminal_observed: Arc<AtomicBool>,
-            wire: Arc<ControlledWireState>,
         },
         Refused(String),
     }
@@ -3693,10 +3931,9 @@ mod tests {
     }
 
     impl ControlledAdmission {
-        fn succeed(&mut self) -> (ControlledTerminal, Arc<ControlledWireState>) {
+        fn succeed(&mut self) -> ControlledTerminal {
             let (terminal, terminal_receiver) = controlled_terminal();
             let terminal_observed = Arc::clone(&terminal.observed);
-            let wire = Arc::new(ControlledWireState::default());
             let _ = self
                 .sender
                 .take()
@@ -3704,9 +3941,8 @@ mod tests {
                 .send(ControlledAdmissionResult::Connected {
                     terminal: terminal_receiver,
                     terminal_observed,
-                    wire: Arc::clone(&wire),
                 });
-            (terminal, wire)
+            terminal
         }
 
         fn refuse(&mut self, error: impl Into<String>) {
@@ -3755,7 +3991,6 @@ mod tests {
                     ControlledAdmissionResult::Connected {
                         terminal,
                         terminal_observed,
-                        wire,
                     } => {
                         let terminal: NativeTransportTerminalFuture = Box::pin(async move {
                             terminal_observed.store(true, Ordering::Release);
@@ -3764,7 +3999,7 @@ mod tests {
                                 .expect("controlled terminal sender remains alive")
                         });
                         Ok(ConnectedNativeTransport {
-                            transport: Box::new(ControlledNativeWireTransport { state: wire }),
+                            transport: Box::new(ControlledNativeWireTransport),
                             protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
                             features: crate::wire::FEATURE_NONE,
                             session_context: None,
@@ -3814,14 +4049,10 @@ mod tests {
         )
     }
 
-    fn successful_controlled_admission() -> (
-        ControlledTerminal,
-        Arc<ControlledWireState>,
-        ControlledAdmissionReceiver,
-    ) {
+    fn successful_controlled_admission() -> (ControlledTerminal, ControlledAdmissionReceiver) {
         let (mut admission, receiver) = controlled_admission();
-        let (terminal, wire) = admission.succeed();
-        (terminal, wire, receiver)
+        let terminal = admission.succeed();
+        (terminal, receiver)
     }
 
     fn refused_controlled_admission(error: impl Into<String>) -> ControlledAdmissionReceiver {
@@ -3852,14 +4083,6 @@ mod tests {
         yield_until(
             || observed.load(Ordering::Acquire),
             "terminal watcher must poll the controlled terminal future",
-        )
-        .await;
-    }
-
-    async fn wait_for_send_count(state: &ControlledWireState, expected: usize) {
-        yield_until(
-            || state.send_count.load(Ordering::Acquire) >= expected,
-            "tick driver must poll the controlled wire transport",
         )
         .await;
     }
@@ -4800,10 +5023,9 @@ mod tests {
     async fn idle_peer_closed_terminal_reconnects_without_semantic_traffic() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (mut first, _first_wire, first_admission) = successful_controlled_admission();
+                let (mut first, first_admission) = successful_controlled_admission();
                 let first_observed = Arc::clone(&first.observed);
-                let (_replacement, _replacement_wire, replacement_admission) =
-                    successful_controlled_admission();
+                let (_replacement, replacement_admission) = successful_controlled_admission();
                 let connector = Arc::new(ControlledNativeConnector::new(vec![
                     first_admission,
                     replacement_admission,
@@ -4831,7 +5053,7 @@ mod tests {
     async fn owner_dropped_terminal_does_not_reconnect() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (mut terminal, _wire, admission) = successful_controlled_admission();
+                let (mut terminal, admission) = successful_controlled_admission();
                 let observed = Arc::clone(&terminal.observed);
                 let connector = Arc::new(ControlledNativeConnector::new(vec![admission]));
                 let client = JazzClient::connect_with_native_transport(
@@ -4859,7 +5081,7 @@ mod tests {
     async fn shutdown_does_not_reconnect_after_terminal() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (mut terminal, _wire, admission) = successful_controlled_admission();
+                let (mut terminal, admission) = successful_controlled_admission();
                 let connector = Arc::new(ControlledNativeConnector::new(vec![admission]));
                 let client = JazzClient::connect_with_native_transport(
                     make_native_context("shutdown-no-reconnect"),
@@ -4896,11 +5118,10 @@ mod tests {
                         NativeTransportTerminal::Failed(NativeTransportError("failed".to_owned())),
                     ),
                 ] {
-                    let (mut first, _wire, first_admission) = successful_controlled_admission();
+                    let (mut first, first_admission) = successful_controlled_admission();
                     let observed = Arc::clone(&first.observed);
                     let refused = refused_controlled_admission("refused");
-                    let (replacement_terminal, _wire, replacement) =
-                        successful_controlled_admission();
+                    let (replacement_terminal, replacement) = successful_controlled_admission();
                     let replacement_observed = Arc::clone(&replacement_terminal.observed);
                     let connector = Arc::new(ControlledNativeConnector::new(vec![
                         first_admission,
@@ -4930,7 +5151,7 @@ mod tests {
     async fn tick_error_and_terminal_coalesce_to_one_recovery_owner() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (mut first, _wire, first_admission) = successful_controlled_admission();
+                let (mut first, first_admission) = successful_controlled_admission();
                 let observed = Arc::clone(&first.observed);
                 let (_replacement, replacement) = controlled_admission();
                 let (_duplicate, duplicate) = controlled_admission();
@@ -4981,7 +5202,7 @@ mod tests {
     async fn stale_admission_completion_cannot_install_after_newer_generation() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (_first, _wire, first) = successful_controlled_admission();
+                let (_first, first) = successful_controlled_admission();
                 let (mut stale, stale_receiver) = controlled_admission();
                 let (mut newer, newer_receiver) = controlled_admission();
                 let connector = Arc::new(ControlledNativeConnector::new(vec![
@@ -5007,7 +5228,7 @@ mod tests {
                     ClientDbInner::reconnect_upstream(&inner).await
                 });
                 wait_for_connect_count(&connector, 3).await;
-                let (_terminal, _wire) = newer.succeed();
+                let _terminal = newer.succeed();
                 assert!(
                     newer_task.await.expect("task").expect("admission"),
                     "newer generation installs"
@@ -5015,7 +5236,7 @@ mod tests {
                 client.db.inner.borrow_mut().disconnect_upstream();
                 let generation = client.db.inner.borrow().upstream_generation;
 
-                let (_terminal, _wire) = stale.succeed();
+                let _terminal = stale.succeed();
                 assert!(
                     !stale_task.await.expect("task").expect("admission"),
                     "stale completion must not install"
@@ -5032,9 +5253,9 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 for shutdown in [false, true] {
-                    let (mut first, _wire, first_admission) = successful_controlled_admission();
+                    let (mut first, first_admission) = successful_controlled_admission();
                     let observed = Arc::clone(&first.observed);
-                    let (_replacement, _wire, replacement) = successful_controlled_admission();
+                    let (_replacement, replacement) = successful_controlled_admission();
                     let connector = Arc::new(ControlledNativeConnector::new(vec![
                         first_admission,
                         replacement,
@@ -5091,8 +5312,8 @@ mod tests {
     async fn stale_exhaustion_does_not_poison_current_generation() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (_first, _wire, first) = successful_controlled_admission();
-                let (_replacement, _wire, replacement) = successful_controlled_admission();
+                let (_first, first) = successful_controlled_admission();
+                let (_replacement, replacement) = successful_controlled_admission();
                 let stale_reconnect =
                     refused_controlled_admission("stale recovery must not reconnect");
                 let connector = Arc::new(ControlledNativeConnector::new(vec![
@@ -5180,25 +5401,33 @@ mod tests {
     async fn local_tick_work_remains_responsive_during_retry_delay() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (_first, wire, first) = successful_controlled_admission();
-                let (_replacement, _wire, replacement) = successful_controlled_admission();
-                let connector = Arc::new(ControlledNativeConnector::new(vec![first, replacement]));
+                let (mut first, first_admission) = successful_controlled_admission();
+                let refused = refused_controlled_admission("replacement refused");
+                let (_replacement, replacement) = successful_controlled_admission();
+                let connector = Arc::new(ControlledNativeConnector::new(vec![
+                    first_admission,
+                    refused,
+                    replacement,
+                ]));
                 let client = JazzClient::connect_with_native_transport(
                     make_native_context("responsive-during-retry"),
-                    connector,
+                    connector.clone(),
                 )
                 .await
                 .expect("connect");
-                wire.fail_sends.store(true, Ordering::Release);
-                let sends = wire.send_count.load(Ordering::Acquire);
-                client
-                    .db
-                    .inner
-                    .borrow()
-                    .scheduler
-                    .wake(TickUrgency::Immediate);
-                wait_for_send_count(&wire, sends + 1).await;
-                wire.fail_sends.store(false, Ordering::Release);
+                let observed = Arc::clone(&first.observed);
+
+                first.send(NativeTransportTerminal::Failed(NativeTransportError(
+                    "controlled terminal failure".to_owned(),
+                )));
+                wait_for_terminal_observation(&observed).await;
+                wait_for_connect_count(&connector, 2).await;
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    connector.connect_count(),
+                    2,
+                    "refused replacement must leave recovery waiting in retry backoff"
+                );
 
                 let (_, _, transaction) = client
                     .insert(
@@ -5222,6 +5451,11 @@ mod tests {
                 assert!(
                     local_wait.is_finished(),
                     "local tick work must not wait for retry delay"
+                );
+                assert_eq!(
+                    connector.connect_count(),
+                    2,
+                    "retry admission must not begin before local durability completes"
                 );
                 local_wait.await.expect("task").expect("local durability");
             })
