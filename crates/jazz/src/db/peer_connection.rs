@@ -4002,7 +4002,8 @@ where
                             }
                             let group_subscription = coverage_group_subscription_key(&coverage);
                             let local_subscriber = *local_receiver;
-                            let upstream_opts = if local_subscriber {
+                            let scope_relay = self.node.borrow().client_relay_scope().is_some();
+                            let upstream_opts = if local_subscriber || scope_relay {
                                 let mut opts = upstream_register_shape_options(
                                     opts.tier,
                                     opts.read_view.clone(),
@@ -4038,11 +4039,11 @@ where
                             // receive a live authority result.  A serving
                             // authority, by contrast, evaluates the incoming
                             // downstream usage itself and therefore owns D.
-                            let scope_relay = self.node.borrow().client_relay_scope().is_some();
-                            let waits_for_selected_authority = opts.propagate_upstream
-                                && opts.tier > DurabilityTier::Local
+                            let propagates_to_selected_authority = opts.propagate_upstream
                                 && (local_subscriber || scope_relay);
-                            let authority_result_subscription = if waits_for_selected_authority {
+                            let waits_for_selected_authority = propagates_to_selected_authority
+                                && opts.tier > DurabilityTier::Local;
+                            let authority_result_subscription = if propagates_to_selected_authority {
                                 upstream_subscription
                             } else {
                                 subscription
@@ -4102,7 +4103,7 @@ where
                                 read_view: upstream_opts.read_view_key(),
                             };
                             let selected_authority_result_key =
-                                (scope_relay && waits_for_selected_authority).then(|| {
+                                (scope_relay && propagates_to_selected_authority).then(|| {
                                 crate::protocol::AuthorityResultKey::policy_scoped(
                                     upstream_binding_view,
                                     crate::protocol::PolicyBindingKey::from_canonical_parts(
@@ -4120,7 +4121,7 @@ where
                             // boundary preserve opening provenance instead of
                             // accidentally publishing D's empty local overlay
                             // as a final strict result.
-                            if scope_relay && waits_for_selected_authority {
+                            if scope_relay && propagates_to_selected_authority {
                                 let selected_authority_result_key = selected_authority_result_key
                                     .clone()
                                     .expect("scope relay selects an exact authority result");
@@ -4136,7 +4137,7 @@ where
                                 );
                                 peer.set_subscription_awaiting_selected_authority_source(
                                     group_subscription,
-                                    true,
+                                    waits_for_selected_authority,
                                 );
                                 peer.set_subscription_authority_result_source(
                                     subscription,
@@ -4743,19 +4744,17 @@ where
                         // subscription here: that can collapse a scoped U
                         // into a sibling/unscoped cache entry between
                         // registration and first publication.
-                        let upstream_authority_result_key =
-                            group.awaiting_upstream_settlement.then(|| {
-                                peer.subscription_authority_result_source(group_subscription)
-                                    .cloned()
-                                    .or_else(|| {
-                                        self.node
-                                            .borrow()
-                                            .authority_result_key_for_subscription(
-                                                group.authority_result_subscription,
-                                            )
-                                            .ok()
-                                    })
-                            }).flatten();
+                        let upstream_authority_result_key = peer
+                            .subscription_authority_result_source(group_subscription)
+                            .cloned()
+                            .or_else(|| {
+                                self.node
+                                    .borrow()
+                                    .authority_result_key_for_subscription(
+                                        group.authority_result_subscription,
+                                    )
+                                    .ok()
+                            });
                         let upstream_authority_is_settled = {
                             let node = self.node.borrow();
                             upstream_authority_result_key

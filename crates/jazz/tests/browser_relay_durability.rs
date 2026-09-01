@@ -1547,6 +1547,98 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
     );
 }
 
+/// Local and propagation are independent axes at a browser relay. A Local
+/// foreground read returns the worker's resident knowledge immediately, while
+/// the default Full propagation still registers the exact upstream usage and
+/// later reconciles the authority membership into that same subscription.
+#[test]
+fn browser_client_local_full_returns_immediately_then_reconciles_upstream() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let worker = open_db(0x25, alice, &schema);
+    let core = open_core(0x35, &schema);
+    let server_writer = open_db(0x45, alice, &schema);
+    worker.set_relay_authority_session_owner_for_test();
+    worker
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("worker-local".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed worker-local todo");
+    let (writer_transport, core_writer_transport) = duplex();
+    let _writer_upstream = block_on(server_writer.connect_upstream(writer_transport));
+    let _core_writer = core.accept_subscriber(core_writer_transport, alice);
+    server_writer
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("server-only".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed server-only todo");
+
+    let main_thread = open_db(0x15, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (_worker_upstream, _core_subscriber) =
+        connect_scope_isolated_worker_to_core!(worker, core, alice);
+    for _ in 0..8 {
+        server_writer.tick().expect("upload server-only seed");
+        worker.tick().expect("upload worker-local seed");
+        core.tick().expect("accept worker-local seed");
+        server_writer.tick().expect("settle server-only seed");
+        worker.tick().expect("settle worker-local seed");
+    }
+
+    let todos = main_thread
+        .prepare_query(&main_thread.table("todos"))
+        .expect("prepare Local+Full todos query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe Local+Full through worker");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    main_thread.tick().expect("register Local+Full coverage");
+    worker
+        .tick()
+        .expect("serve local knowledge and queue upstream Subscribe");
+    main_thread.tick().expect("apply immediate Local result");
+    assert_eq!(
+        main_thread
+            .read(&todos)
+            .expect("read immediate Local view")
+            .len(),
+        1,
+        "Local must not wait for the queued upstream authority result",
+    );
+
+    for _ in 0..8 {
+        core.tick().expect("serve propagated Local usage");
+        worker.tick().expect("reconcile exact upstream membership");
+        main_thread.tick().expect("apply reconciled Local result");
+    }
+    assert_eq!(
+        main_thread
+            .read(&todos)
+            .expect("read reconciled Local view")
+            .len(),
+        2,
+        "Full propagation must eventually add the server-only row",
+    );
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubscriptionEvent::Delta { added, .. } if added.len() == 1
+    )));
+}
+
 /// A browser local-only subscription crosses the private main/worker boundary
 /// so the fresh in-memory main Db can hydrate from durable worker state, but it
 /// must not cross the worker/server boundary.
