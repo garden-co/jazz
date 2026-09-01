@@ -4651,6 +4651,28 @@ async fn direct_record_store_rejects_record_containing_durable_keys_at_schema_ad
 }
 
 #[futures_test::test]
+async fn ownerless_commits_advance_tick_metrics() {
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+
+    let mut first = database.open_batch();
+    first.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(first).await.unwrap();
+    assert_eq!(database.last_commit_metrics().unwrap().tick.tick, 1);
+
+    let mut second = database.open_batch();
+    second.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(second).await.unwrap();
+    assert_eq!(database.last_commit_metrics().unwrap().tick.tick, 2);
+}
+
+#[futures_test::test]
 async fn commit_metrics_split_storage_and_tick_work() {
     let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
