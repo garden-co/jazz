@@ -170,6 +170,19 @@ fn edge_pairs() -> GraphBuilder {
     GraphBuilder::table("edges").project(["src", "dst"])
 }
 
+fn edge_counts_by_src() -> GraphBuilder {
+    GraphBuilder::aggregate(
+        GraphBuilder::table("edges"),
+        ["src"],
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("dst".to_owned()),
+        }],
+    )
+}
+
 fn reachability_graph() -> GraphBuilder {
     let descriptor = RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]);
     let frontier = GraphBuilder::frontier_source("frontier", descriptor);
@@ -1234,6 +1247,191 @@ fn resumed_recursive_slice_preserves_later_publications_and_live_retainers() {
     let persistence = block_on(latest.persist());
     assert_eq!(
         database.finish_persistence(persistence).unwrap(),
+        latest_publication
+    );
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(latest_publication)
+    );
+}
+
+#[test]
+fn overlapping_stateful_hydration_waits_for_uninstalled_resident_predecessor() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let frontier_before_predecessor = database.durable_publication_frontier();
+
+    let publication_driver =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(
+        block_on(database.next_subscription(&publication_driver))
+            .unwrap()
+            .is_empty()
+    );
+
+    let resident = block_on(database.subscribe_one_sink(GraphBuilder::union([
+        edge_counts_by_src(),
+        reachability_graph(),
+    ])))
+    .unwrap();
+    assert!(
+        !block_on(database.next_subscription(&resident))
+            .unwrap()
+            .is_empty()
+    );
+
+    storage.evict_scans("edges");
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut predecessor = database.open_batch();
+    predecessor.delete("edges", PrimaryKeyValue::U64(2));
+    predecessor.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    let mut predecessor_future = Box::pin(database.apply_batch(predecessor));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let predecessor = match predecessor_future.as_mut().poll(&mut context) {
+        Poll::Ready(Ok(applied)) => applied,
+        _ => panic!("resident publication must return while its graph state is suspended"),
+    };
+    drop(predecessor_future);
+    let predecessor_publication = predecessor.publication();
+    let published_driver_update = next_subscription_with_publication_bounded(
+        &mut database,
+        &publication_driver,
+        "resident publication driver",
+    );
+    assert_eq!(
+        published_driver_update.publication,
+        Some(predecessor_publication)
+    );
+    assert_eq!(published_driver_update.deltas.deltas.len(), 1);
+    assert!(resident.try_recv().is_err());
+    assert_eq!(
+        control
+            .observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::ScanOpen)
+            .count(),
+        1,
+        "the predecessor must remain suspended on its retained storage request"
+    );
+
+    let hydrated = block_on(database.subscribe_one_sink(edge_counts_by_src())).unwrap();
+    assert!(hydrated.try_recv().is_err());
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    let predecessor_update = next_subscription_with_publication_bounded(
+        &mut database,
+        &resident,
+        "resumed overlapping predecessor",
+    );
+    assert_eq!(
+        predecessor_update.publication,
+        Some(predecessor_publication)
+    );
+    assert_eq!(predecessor_update.deltas.deltas.len(), 3);
+
+    let hydration = next_subscription_with_publication_bounded(
+        &mut database,
+        &hydrated,
+        "overlapping stateful hydration",
+    );
+    assert_eq!(hydration.publication, None);
+    assert_eq!(
+        hydration.deltas.to_values().unwrap(),
+        vec![(vec![Value::U64(1), Value::U64(1)], 1)],
+        "hydration must snapshot the predecessor's installed aggregate state"
+    );
+    assert_eq!(
+        database.durable_publication_frontier(),
+        frontier_before_predecessor
+    );
+
+    let predecessor_persistence = block_on(predecessor.persist());
+    assert_eq!(
+        database
+            .finish_persistence(predecessor_persistence)
+            .unwrap(),
+        predecessor_publication
+    );
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(predecessor_publication)
+    );
+
+    let mut latest = database.open_batch();
+    latest.insert("edges", vec![Value::U64(3), Value::U64(2), Value::U64(4)]);
+    let latest = block_on(database.apply_batch(latest)).unwrap();
+    let latest_publication = latest.publication();
+
+    let resident_update = next_subscription_with_publication_bounded(
+        &mut database,
+        &resident,
+        "resident state after overlapping hydration",
+    );
+    assert_eq!(resident_update.publication, Some(latest_publication));
+    let resident_values = resident_update.deltas.to_values().unwrap();
+    assert_eq!(
+        resident_values.len(),
+        3,
+        "the stale hydration must not roll back the predecessor's aggregate state"
+    );
+    for expected in [
+        vec![Value::U64(2), Value::U64(1)],
+        vec![Value::U64(2), Value::U64(4)],
+        vec![Value::U64(1), Value::U64(4)],
+    ] {
+        assert!(
+            resident_values
+                .iter()
+                .any(|(row, weight)| *weight == 1 && row == &expected),
+            "the resident update must contain {expected:?}"
+        );
+    }
+
+    let hydrated_update = next_subscription_with_publication_bounded(
+        &mut database,
+        &hydrated,
+        "hydrated state after overlapping hydration",
+    );
+    assert_eq!(hydrated_update.publication, Some(latest_publication));
+    assert_eq!(
+        hydrated_update.deltas.to_values().unwrap(),
+        vec![(vec![Value::U64(2), Value::U64(1)], 1)],
+        "the hydrated subscription must advance from the predecessor's installed state"
+    );
+
+    let aggregate_rows = block_on(database.query_graph(edge_counts_by_src()))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(aggregate_rows.len(), 2);
+    for expected in [
+        vec![Value::U64(1), Value::U64(1)],
+        vec![Value::U64(2), Value::U64(1)],
+    ] {
+        assert!(
+            aggregate_rows
+                .iter()
+                .any(|(row, weight)| *weight == 1 && row == &expected),
+            "latest aggregate state must contain {expected:?}"
+        );
+    }
+    assert_eq!(
+        database.durable_publication_frontier(),
+        Some(predecessor_publication)
+    );
+
+    let latest_persistence = block_on(latest.persist());
+    assert_eq!(
+        database.finish_persistence(latest_persistence).unwrap(),
         latest_publication
     );
     assert_eq!(
