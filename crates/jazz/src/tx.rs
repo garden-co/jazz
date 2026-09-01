@@ -242,6 +242,25 @@ impl ContributionMergeProvenance {
         {
             return Err("branch write intents must be canonical v1 coordinates");
         }
+        // The storage representation de-duplicates copy payloads and has
+        // ViewUpdateCopy intents refer to them by index. Make the side-list
+        // the exact ordered projection of already-canonical intents. This
+        // binds the indirection by full value (not merely table/row/head),
+        // makes every copy used exactly once, and gives the on-disk indices a
+        // single canonical order independent of public write order.
+        let mut expected_copies = Vec::new();
+        for intent in &self.branch_write_intents {
+            let BranchWriteOperation::ViewUpdateCopy(evidence) = &intent.operation else {
+                continue;
+            };
+            if evidence.row_uuid != intent.row_uuid || evidence.head != intent.head {
+                return Err("branch write copy evidence is not bound to its intent");
+            }
+            expected_copies.push(evidence.clone());
+        }
+        if self.branch_view_copies != expected_copies {
+            return Err("branch write copy evidence must be the canonical intent projection");
+        }
         Ok(())
     }
 }
@@ -1133,6 +1152,20 @@ mod contribution_tests {
         }
     }
 
+    fn view_copy_intent(row: u8) -> (BranchViewCopyEvidence, BranchWriteIntent) {
+        let mut intent = branch_intent(row);
+        let evidence = BranchViewCopyEvidence {
+            version: 1,
+            head: intent.head.clone(),
+            base: BranchViewCopyBase::Current(BranchKey::default()),
+            table: "todos".to_owned(),
+            row_uuid: intent.row_uuid,
+            source_version: tx(u64::from(row)),
+        };
+        intent.operation = BranchWriteOperation::ViewUpdateCopy(evidence.clone());
+        (evidence, intent)
+    }
+
     #[test]
     fn branch_write_intents_reject_noncanonical_order_and_duplicates() {
         let mut provenance = ContributionMergeProvenance {
@@ -1149,6 +1182,51 @@ mod contribution_tests {
         assert!(provenance.validate().is_ok());
         provenance.branch_write_intents.push(branch_intent(1));
         assert!(provenance.validate().is_err());
+    }
+
+    #[test]
+    fn branch_write_copy_evidence_is_exact_canonical_intent_projection() {
+        let (stored, intent) = view_copy_intent(7);
+        let mut provenance = ContributionMergeProvenance {
+            source: BranchKey::default(),
+            target: BranchKey::default(),
+            substitutions: Vec::new(),
+            branch_view_copies: vec![stored.clone()],
+            branch_write_intents: vec![intent.clone()],
+        };
+        assert!(provenance.validate().is_ok());
+
+        // Same coordinate, different source: accepting the intent but storing
+        // this side-list entry would alter authority-admitted meaning on reopen.
+        let mut different_source = stored.clone();
+        different_source.source_version = tx(99);
+        provenance.branch_write_intents[0].operation =
+            BranchWriteOperation::ViewUpdateCopy(different_source);
+        assert!(provenance.validate().is_err());
+
+        let mut different_base = stored.clone();
+        different_base.base = BranchViewCopyBase::Snapshot {
+            branch: BranchKey::default(),
+            snapshot: SnapshotRef {
+                owner: NodeUuid::from_bytes([8; 16]),
+                global_base: GlobalTime(0),
+                local_base: TxTime::from(8),
+                dots: Vec::new(),
+            },
+        };
+        provenance.branch_write_intents[0].operation =
+            BranchWriteOperation::ViewUpdateCopy(different_base);
+        assert!(provenance.validate().is_err());
+
+        let mut different_version = stored.clone();
+        different_version.version = 2;
+        provenance.branch_write_intents[0].operation =
+            BranchWriteOperation::ViewUpdateCopy(different_version);
+        assert!(provenance.validate().is_err());
+
+        provenance.branch_write_intents[0] = intent;
+        provenance.branch_view_copies.push(stored);
+        assert!(provenance.validate().is_err(), "orphan copy must reject");
     }
 
     #[test]

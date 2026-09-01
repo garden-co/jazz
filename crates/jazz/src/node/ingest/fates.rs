@@ -464,11 +464,32 @@ where
             let Some(provenance) = &tx.contribution_merge else {
                 return Ok(false);
             };
-            if provenance.branch_write_intents.len() != branch_versions.len() {
+            // Content and deletion registers may emit separate final versions
+            // for one physical branch row (for example a move's destination
+            // content write plus restore). They share one operation identity;
+            // require exactly one canonical intent per physical row/head.
+            let mut branch_coordinates = BTreeSet::new();
+            for version in &branch_versions {
+                let Ok(table_id) = self
+                    .physical_table_id_for_schema(version.schema_version(), version.table())
+                else {
+                    return Ok(false);
+                };
+                branch_coordinates.insert((
+                    table_id,
+                    version.schema_version(),
+                    version.row_uuid(),
+                    version.branch_key().clone(),
+                ));
+            }
+            if provenance.branch_write_intents.len() != branch_coordinates.len() {
                 return Ok(false);
             }
             for intent in &provenance.branch_write_intents {
-                let Some(version) = branch_versions.iter().copied().find(|version| {
+                let matching_versions = branch_versions
+                    .iter()
+                    .copied()
+                    .filter(|version| {
                     version.schema_version() == intent.authored_schema
                         && version.row_uuid() == intent.row_uuid
                         && version.branch_key() == &intent.head
@@ -476,13 +497,17 @@ where
                             .physical_table_id_for_schema(version.schema_version(), version.table())
                             .ok()
                             == Some(intent.physical_table_id)
-                }) else {
+                    })
+                    .collect::<Vec<_>>();
+                let Some(version) = matching_versions.first().copied() else {
                     return Ok(false);
                 };
                 match &intent.operation {
                     crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) => {
-                        if !version.parents().is_empty()
-                            || version.deletion() == Some(DeletionEvent::Deleted)
+                        if matching_versions.iter().any(|version| {
+                            !version.parents().is_empty()
+                                || version.deletion() == Some(DeletionEvent::Deleted)
+                        })
                             || !self
                                 .branch_view_copy_satisfies_read_for_write_visibility(
                                     evidence,
@@ -496,7 +521,10 @@ where
                         }
                     }
                     crate::tx::BranchWriteOperation::ExactHeadInsert => {
-                        if !version.parents().is_empty() {
+                        if matching_versions
+                            .iter()
+                            .any(|version| !version.parents().is_empty())
+                        {
                             return Ok(false);
                         }
                         let (content, deletions) = self
@@ -519,7 +547,10 @@ where
                         }
                     }
                     crate::tx::BranchWriteOperation::ExactHeadUpdate => {
-                        if version.parents().is_empty() {
+                        if matching_versions
+                            .iter()
+                            .any(|version| version.parents().is_empty())
+                        {
                             return Ok(false);
                         }
                     }

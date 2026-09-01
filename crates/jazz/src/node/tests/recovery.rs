@@ -298,6 +298,20 @@ fn branch_view_copy_evidence_uses_versioned_groove_records_and_round_trips() {
     let decoded = core.contribution_merge_from_storage_record(record).unwrap();
     assert_eq!(decoded, provenance);
     assert!(decoded.substitutions.is_empty());
+
+    // The enum's index may only point at the exact evidence admitted by the
+    // intent. A same-coordinate payload with a different source must fail
+    // before storage, rather than being silently substituted on reopen.
+    let mut mismatched = provenance.clone();
+    let BranchWriteOperation::ViewUpdateCopy(intent_evidence) =
+        &mut mismatched.branch_write_intents[0].operation
+    else {
+        unreachable!("fixture has a view-copy operation");
+    };
+    intent_evidence.source_version = TxId::new(TxTime::from(99), node(0x32));
+    assert!(core
+        .contribution_merge_storage_value(Some(&mismatched))
+        .is_err());
 }
 
 #[test]

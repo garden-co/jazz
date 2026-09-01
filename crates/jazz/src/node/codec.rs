@@ -3139,11 +3139,7 @@ pub(super) fn contribution_merge_storage_value(
                             BranchWriteOperation::ViewUpdateCopy(evidence) => provenance
                                 .branch_view_copies
                                 .iter()
-                                .position(|candidate| {
-                                    candidate.table == evidence.table
-                                        && candidate.row_uuid == evidence.row_uuid
-                                        && candidate.head == evidence.head
-                                })
+                                .position(|candidate| candidate == evidence)
                                 .map(|index| index as u32),
                             _ => None,
                         };

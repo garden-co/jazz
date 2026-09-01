@@ -339,8 +339,14 @@ where
                 .ok_or(Error::InvalidStoredValue("write schema is missing"))?
                 .schema;
             let table = self.table_in_schema(&commit.table, *schema_version)?;
+            // Project only through the target table. The schema-wide
+            // branch-view projection would incorrectly demand unrelated
+            // branch dimensions from another table in a heterogeneous schema.
             let (head, _) = schema
-                .project_branch_view_selector(&table, &commit.branch)
+                .project_branch_selector(&table, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?;
+            schema
+                .validate_authored_branch_key(&table, &head)
                 .map_err(Error::InvalidBranchKey)?;
             let table_id = self.physical_table_id_for_schema(*schema_version, &commit.table)?;
             if contribution_merge.branch_write_intents.iter().any(|intent| {

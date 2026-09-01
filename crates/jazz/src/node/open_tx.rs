@@ -1201,11 +1201,6 @@ where
                 "open transaction is not mergeable",
             ));
         };
-        let branch_view_copies = open_tx
-            .writes
-            .iter()
-            .filter_map(|write| write.branch_view_copy.clone())
-            .collect::<Vec<_>>();
         // A non-root branch version must never arrive at authority as an
         // unclassified insert-shaped overlay.  Capture a sorted exact-version
         // intent before lowering pending writes; this is non-causal metadata
@@ -1257,6 +1252,37 @@ where
                     &right.head,
                 ))
         });
+        for pair in branch_write_intents.windows(2) {
+            if pair[0].physical_table_id == pair[1].physical_table_id
+                && pair[0].authored_schema == pair[1].authored_schema
+                && pair[0].row_uuid == pair[1].row_uuid
+                && pair[0].head == pair[1].head
+                && pair[0].operation != pair[1].operation
+            {
+                return Err(Error::InvalidMergeableCommit(
+                    "branch writes for one physical row must have one operation identity",
+                ));
+            }
+        }
+        branch_write_intents.dedup_by(|left, right| {
+            left.physical_table_id == right.physical_table_id
+                && left.authored_schema == right.authored_schema
+                && left.row_uuid == right.row_uuid
+                && left.head == right.head
+        });
+        // Copy evidence is stored by index inside the intent operation enum.
+        // Keep that side-list as the exact canonical projection of sorted
+        // intents rather than public write order, so a durable round trip
+        // cannot relabel equivalent coordinates with another source proof.
+        let branch_view_copies = branch_write_intents
+            .iter()
+            .filter_map(|intent| match &intent.operation {
+                BranchWriteOperation::ViewUpdateCopy(evidence) => Some(evidence.clone()),
+                BranchWriteOperation::ExactHeadInsert | BranchWriteOperation::ExactHeadUpdate => {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
             let parents = if write.refresh_parents_at_commit {
