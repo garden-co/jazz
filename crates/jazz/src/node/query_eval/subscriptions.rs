@@ -558,7 +558,8 @@ where
                         .query
                         .local_materialized_window_binding_views
                         .contains(&key.binding_view)
-                        && (state.settled_through.is_some()
+                        && (state.live_settled
+                            || state.settled_through.is_some()
                             || !state.settled_result_set.is_empty()
                             || !state.settled_program_facts.is_empty())
                 })
@@ -663,7 +664,7 @@ where
         self.query
             .authority_results
             .get(authority_result_key)
-            .is_some_and(|state| state.settled_through.is_some())
+            .is_some_and(|state| state.live_settled)
             && !self
                 .query
                 .local_materialized_window_binding_views
@@ -1075,12 +1076,9 @@ where
                 },
             }));
         }
-        if let Some(position) = self.load_known_state_fact(binding_view_key).await? {
-            return Ok(Some(KnownStateDeclaration::Fast {
-                completeness: KnownStateCompleteness::FastCurrentMembership,
-                position,
-            }));
-        }
+        // A live exact receipt without a fast watermark still proves which
+        // membership this process received, but cannot claim currentness at a
+        // global cursor. Fall through to the bounded exact version set.
         let mut refs = Vec::new();
         for row in self
             .query_rows_for_link(shape, binding, DurabilityTier::Local, identity)

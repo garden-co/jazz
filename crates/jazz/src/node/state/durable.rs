@@ -622,7 +622,7 @@ where
             .authority_results
             .entry(authority_result_key)
             .or_default()
-            .settled_through = Some(settled_through);
+            .settled_through = (settled_through.0 != 0).then_some(settled_through);
         if let Value::U64(progress) = record.get_idx(1)?
             && progress != u64::MAX
         {
@@ -919,7 +919,10 @@ where
                 }
             };
             let state = authority_results.entry(authority_result_key).or_default();
-            state.settled_through = Some(settled_through);
+            // Recovery restores durable cache material and, when present, a
+            // fast cursor. It must not restore `live_settled`: a reopened
+            // process has no current exact authority handoff yet.
+            state.settled_through = (settled_through.0 != 0).then_some(settled_through);
             match entry.value.get_idx(1)? {
                 Value::U64(progress) if progress != u64::MAX => {
                     state.authorization_progress = Some(progress);

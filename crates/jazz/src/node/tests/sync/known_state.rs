@@ -879,19 +879,49 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             DurabilityTier::Global,
         )
         .unwrap();
-    let binding_view_key = BindingViewKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: RegisterShapeOptions::default().read_view_key(),
-    };
-    reader.query.settled_result_sets.insert(
-        binding_view_key,
-        BTreeSet::from([crate::protocol::ResultMemberEntry::row((
+    // Establish the reader's exact unscoped authority receipt through the
+    // normal ViewUpdate path. A deferred update carries membership but has
+    // not completed its live authority handoff, so it cannot declare even an
+    // exact known state yet.
+    let authority_update = |defer_settlement| crate::node::ViewUpdateParts {
+        subscription,
+        settled_through: GlobalTime::default(),
+        defer_settlement,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        opening_pending: false,
+        result_member_adds: vec![crate::protocol::ResultMemberEntry::row((
             groove::Intern::from("todos".to_owned()),
             row_a,
             tx_a,
-        ))]),
+        ))],
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    reader
+        .apply_view_update(authority_update(true))
+        .unwrap();
+    assert_eq!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &values,
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        None,
+        "a deferred exact receipt must not overclaim known state"
     );
+    reader
+        .apply_view_update(authority_update(false))
+        .unwrap();
 
     let (tx_b, unit_b) = writer
         .commit_mergeable_unit_settled(
@@ -982,6 +1012,21 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             (row_b, title_cells("remote")),
         ])
     );
+    reader.apply_unsubscribe(subscription);
+    assert_eq!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &values,
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        None,
+        "detaching the exact receipt must retire its live settlement evidence"
+    );
 }
 
 #[test]
@@ -1040,7 +1085,7 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
 }
 
 #[test]
-fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
+fn fast_known_state_requires_a_live_receipt_after_reopen_and_eviction() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, reader) = open_node_with_uuid(node(3));
@@ -1066,6 +1111,20 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
         .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
 
+    assert!(matches!(
+        reader
+            .known_state_declaration_for_subscription(
+                &shape,
+                &binding,
+                subscription,
+                &[],
+                AuthorSubject::SYSTEM,
+                None,
+            )
+            .unwrap(),
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
+
     let mut reopened = reader.reopen_in_place().unwrap();
     let declaration = reopened
         .known_state_declaration_for_subscription(
@@ -1078,11 +1137,8 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
         )
         .unwrap();
     assert_eq!(
-        declaration,
-        Some(crate::protocol::KnownStateDeclaration::Fast {
-            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalTime::new(13, 0).unwrap(),
-        })
+        declaration, None,
+        "durably recovered membership is cache material, not a live authority handoff"
     );
 
     let report = reopened.evict_cold(&PeerEvictionPins::default()).unwrap();
@@ -1097,14 +1153,11 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
             None,
         )
         .unwrap();
-    assert!(matches!(
-        declaration,
-        None | Some(crate::protocol::KnownStateDeclaration::ExactVersionSet { .. })
-    ));
+    assert_eq!(declaration, None);
 }
 
 #[test]
-fn fast_known_state_fact_survives_storage_reopen() {
+fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -1141,13 +1194,7 @@ fn fast_known_state_fact_survives_storage_reopen() {
             None,
         )
         .unwrap();
-    assert_eq!(
-        declaration,
-        Some(crate::protocol::KnownStateDeclaration::Fast {
-            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalTime::new(14, 0).unwrap(),
-        })
-    );
+    assert_eq!(declaration, None);
 }
 
 #[test]
